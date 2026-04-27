@@ -102,10 +102,39 @@ pub struct OpenExampleInWorkspace {
 /// [`ModelicaCommand::Compile`] to the worker.
 ///
 /// Unknown / foreign ids are no-ops.
-#[derive(Event, Clone, Debug)]
+/// API readiness probe. Returns immediately with `{"command_id": N}`
+/// — touches no state, side-effect-free, safe to fire from a
+/// readiness-poll loop. Use this instead of `FitCanvas` (which
+/// touches the canvas) or any other state-mutating command when all
+/// you want to know is "is the API up yet?".
+#[derive(Event, Reflect, Clone, Debug, Default)]
+#[reflect(Event, Default)]
+pub struct Ping;
+
+fn on_ping(_trigger: On<Ping>) {
+    // Intentional no-op. The dispatcher's normal flow already returns
+    // `{"command_id": N}` to the caller before this observer fires;
+    // emitting nothing further keeps the response cheap.
+}
+
+// `#[reflect(Event, Default)]` is what makes this command HTTP-API-
+// accessible — the API dispatcher walks the type registry, expects
+// `Event` reflection for triggering, and `Default` for filling in
+// fields the caller omitted. Missing either silently rejects the
+// request with "Command 'CompileModel' not found or not API-accessible".
+//
+// `doc` is a raw `u64` (not [`DocumentId`]) for the same reason
+// every other API-facing command uses raw integers: `DocumentId`
+// doesn't implement `Reflect`, and threading reflection through
+// `lunco-doc` would ripple into every dependent crate. Internal
+// callers that already hold a `DocumentId` pass `.raw()`; the
+// observer wraps with `DocumentId::new(...)`.
+#[derive(Event, Reflect, Clone, Debug, Default)]
+#[reflect(Event, Default)]
 pub struct CompileModel {
-    /// The document to compile.
-    pub doc: DocumentId,
+    /// The document to compile, as the underlying `u64` (use
+    /// `DocumentId::raw()` from internal callers).
+    pub doc: u64,
     /// Optional explicit target class. When `Some`, bypass both the
     /// drilled-in pin and the picker — compile this exact class.
     /// Used by API callers that need deterministic behaviour without
@@ -293,7 +322,7 @@ pub(crate) fn render_compile_class_picker(
         let doc = entry.doc;
         drilled_in.set(doc, qualified);
         picker.0 = None;
-        commands.trigger(CompileModel { doc, class: None });
+        commands.trigger(CompileModel { doc: doc.raw(), class: None });
     } else if cancelled {
         picker.0 = None;
     }
@@ -333,6 +362,16 @@ impl Plugin for ModelicaCommandsPlugin {
             // fire it via `ExecuteCommand { command: "AutoArrangeDiagram" }`.
             .register_type::<AutoArrangeDiagram>()
             .add_observer(crate::ui::panels::canvas_diagram::on_auto_arrange_diagram)
+            // Compile: reflect-registered so the HTTP API can drive
+            // headless / scripted / CI compilation. Without this the
+            // dispatcher rejects with "Command 'CompileModel' not
+            // found or not API-accessible" and only UI clicks work.
+            .register_type::<CompileModel>()
+            // Ping: side-effect-free readiness probe, the proper
+            // alternative to using FitCanvas (or any other state-
+            // mutating command) for "is the API up?" polling.
+            .register_type::<Ping>()
+            .add_observer(on_ping)
             // Navigation commands — same reflect-registered pattern so
             // the HTTP API can drive the UI (focus a tab, switch view
             // mode, zoom / fit, drill into an MSL example).
@@ -1044,7 +1083,9 @@ fn on_compile_model(
     mut q_models: Query<&mut ModelicaModel>,
     drilled_in_classes: Option<Res<crate::ui::panels::canvas_diagram::DrilledInClassNames>>,
 ) {
-    let doc = trigger.event().doc;
+    // CompileModel.doc is `u64` (Reflect-friendly for the HTTP API);
+    // wrap into the typed `DocumentId` the registry/host APIs use.
+    let doc = lunco_doc::DocumentId::new(trigger.event().doc);
     let explicit_class = trigger.event().class.clone();
 
     // Ownership check. Read-only docs are fair game to compile —
@@ -2828,7 +2869,7 @@ fn on_compile_active_model(trigger: On<CompileActiveModel>, mut commands: Comman
             return;
         };
         let target_class = if class.is_empty() { None } else { Some(class) };
-        world.commands().trigger(CompileModel { doc, class: target_class });
+        world.commands().trigger(CompileModel { doc: doc.raw(), class: target_class });
     });
 }
 

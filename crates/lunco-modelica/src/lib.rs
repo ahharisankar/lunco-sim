@@ -277,12 +277,18 @@ impl ModelicaCompiler {
         let still_compiling = std::sync::Arc::new(AtomicBool::new(true));
         let stopper = std::sync::Arc::clone(&still_compiling);
         let model_for_thread = model_name.to_string();
-        let heartbeat = std::thread::spawn(move || {
+        // Spawn detached — we deliberately do NOT join after compile
+        // returns. The heartbeat sleeps in 5-second chunks; joining
+        // would block the worker for up to a full tick (5 s) on EVERY
+        // compile, even fast cache-hit ones. The workbench's
+        // is_compiling flag would then stay set for that whole window,
+        // and the Step dispatcher would idle visibly. Letting the
+        // JoinHandle drop detaches the thread; it self-exits within
+        // 5 s of `stopper=false` with at most one stray "still
+        // compiling +N s" log line if the timing aligns badly.
+        let _ = std::thread::spawn(move || {
             let started = web_time::Instant::now();
             let tick = std::time::Duration::from_secs(5);
-            // Sleep then check — avoids printing at +0s when the
-            // compile is fast. The check after sleep also catches the
-            // common "compile finished while we were sleeping" case.
             loop {
                 std::thread::sleep(tick);
                 if !stopper.load(Ordering::Relaxed) {
@@ -301,10 +307,8 @@ impl ModelicaCompiler {
             .compile_model_dae_strict_reachable_uncached_with_recovery(model_name);
 
         still_compiling.store(false, Ordering::Relaxed);
-        // `join` waits up to one tick (~5s worst case) for the
-        // heartbeat thread to notice the stop signal and exit. Cheap
-        // — almost always returns immediately.
-        let _ = heartbeat.join();
+        // No `join` — see spawn comment above. The thread is detached
+        // and will exit on its own within one tick.
 
         log::info!(
             "[ModelicaCompiler] compile `{}` finished in {:.2}s ({})",
@@ -438,23 +442,28 @@ fn build_modelica_core(app: &mut App) {
         }
     }
 
-    // Do NOT override `RUMOCA_CACHE_DIR`. Leaving it unset lets
-    // rumoca-session use its XDG default (`~/.cache/rumoca/...`),
-    // which is the same location the standalone `modelica_tester`
-    // CLI and any other rumoca-using tool share. That share is
-    // what keeps startup-to-first-compile fast: a cache populated
-    // by one tool is hit by the next.
+    // Point rumoca at the workspace's shared `.cache/rumoca/`, the
+    // same one `modelica_run` and `msl_indexer` use. Without this
+    // alignment, the workbench reads XDG default (`~/.cache/rumoca`)
+    // while the CLI tools warm `<workspace>/.cache/rumoca` —
+    // `msl_indexer --warm` then does NOTHING for first workbench
+    // compile, which stretches from ~12 s (warm) to 13+ minutes (cold,
+    // observed). Honor an externally-set `RUMOCA_CACHE_DIR` if the
+    // caller wants a sandboxed location (CI, tests).
     //
-    // Earlier versions of this code pinned the cache to the
-    // workspace `.cache/rumoca/` to keep CI/test runs deterministic.
-    // In practice that guaranteed *cold* caches for interactive
-    // use: every rumoca source change bumps the artifact-cache key
-    // schema, which invalidates the workspace cache while the XDG
-    // cache — populated by the CLI — still matches. Result: CLI
-    // compiles in ~5 s, workbench in minutes. Sharing the XDG
-    // cache with the CLI is the obvious fix; callers that want a
-    // sandboxed cache can still set `RUMOCA_CACHE_DIR` explicitly
-    // before launching the binary.
+    // Historical note: earlier versions deliberately left this
+    // unset to share with `modelica_tester` (which used XDG too).
+    // The new `modelica_run` / `msl_indexer` CLI tools standardised
+    // on workspace, and the workbench needs to follow suit so a
+    // single `--warm` pass benefits every tool.
+    if std::env::var_os("RUMOCA_CACHE_DIR").is_none() {
+        let target = lunco_assets::cache_dir().join("rumoca");
+        std::env::set_var("RUMOCA_CACHE_DIR", &target);
+        log::info!(
+            "[ModelicaPlugin] using rumoca cache at {} (set RUMOCA_CACHE_DIR to override)",
+            target.display(),
+        );
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -955,8 +964,40 @@ fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>) {
                         // Strip input defaults so they become real runtime slots
                         let (stripped_source, input_defaults) = strip_input_defaults(&source);
 
+                        // Loud breadcrumbs around the two opaque-and-slow
+                        // steps (MSL preload + rumoca compile). Without
+                        // these, the worker silently disappears for the
+                        // duration — the rumoca log macros may or may
+                        // not route through the workbench's tracing sink
+                        // depending on Bevy's tracing-subscriber config.
+                        // `bevy::log::info!` always reaches stdout.
+                        let was_first_compile = compiler.is_none();
+                        if was_first_compile {
+                            bevy::log::info!(
+                                "[worker] first-time compiler init — loading MSL into rumoca session (this can take ~10s on warm cache, minutes on cold `.cache/rumoca`)"
+                            );
+                        }
+                        let t_init = web_time::Instant::now();
                         let compiler = compiler.get_or_insert_with(ModelicaCompiler::new);
-                        match compiler.compile_str(&model_name, &stripped_source, "model.mo") {
+                        if was_first_compile {
+                            bevy::log::info!(
+                                "[worker] compiler init done in {:.2}s",
+                                t_init.elapsed().as_secs_f64(),
+                            );
+                        }
+                        bevy::log::info!(
+                            "[worker] calling compile_str for `{}` ({} bytes)",
+                            model_name, stripped_source.len(),
+                        );
+                        let t_compile = web_time::Instant::now();
+                        let _compile_outcome = compiler.compile_str(&model_name, &stripped_source, "model.mo");
+                        bevy::log::info!(
+                            "[worker] compile_str returned for `{}` in {:.2}s ({})",
+                            model_name,
+                            t_compile.elapsed().as_secs_f64(),
+                            if _compile_outcome.is_ok() { "OK" } else { "ERR" },
+                        );
+                        match _compile_outcome {
                             Ok(comp_res) => {
                                 let mut opts = StepperOptions::default();
                                 opts.atol = 1e-1; opts.rtol = 1e-1;
@@ -1667,7 +1708,7 @@ fn spawn_modelica_requests(
             let doc = model.document;
             if doc != lunco_doc::DocumentId::default() {
                 commands.trigger(crate::ui::commands::CompileModel {
-                    doc,
+                    doc: doc.raw(),
                     class: if model.model_name.is_empty() {
                         None
                     } else {

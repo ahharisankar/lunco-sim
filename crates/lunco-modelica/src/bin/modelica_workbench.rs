@@ -5,26 +5,36 @@ use bevy_egui::EguiPlugin;
 use lunco_modelica::ModelicaPlugin;
 
 fn main() {
-    // ROOT-CAUSE FIX for "every Add/Move freezes UI ~1.5s" — rumoca's
-    // `parse_files_parallel` (called from FileCache load + MSL extends
-    // prewarm) initializes rayon's *global* pool with `num_cpus - 1`
-    // threads (see `rumoca-session/src/parse.rs::init_rayon_pool`).
-    // Each parse then saturates every CPU core except one, leaving
-    // bevy_render's pipelined extract fighting for that single core
-    // → main app's `Last` schedule blocks waiting for the previous
-    // frame's render → the user sees a 1.4-2.5 s freeze on every
-    // edit. Pre-empt rayon's init by configuring the global pool to
-    // 2 threads BEFORE any rumoca call. Single-file MSL parses don't
-    // benefit from massive parallelism (rayon overhead > work for one
-    // 2 KB file), and bevy keeps every other core for rendering /
-    // simulation / async tasks. `build_global` errors silently if
-    // rayon's pool is somehow already initialised — harmless.
+    // Cap rayon's global pool to leave headroom for Bevy's renderer.
+    //
+    // History: when projection + ast_refresh still ran on rayon, the
+    // unconfigured pool grabbed `num_cpus - 1` threads and starved
+    // the renderer's pipelined extract — every Add/Move edit froze
+    // the UI for 1.5–2.5 s. Hard cap at 2 fixed it.
+    //
+    // After the SyntaxCache refactor (commits TBD), projection +
+    // ast_refresh both run on Bevy's `AsyncComputeTaskPool`, NOT on
+    // rayon. The only remaining rayon caller is rumoca's
+    // `parse_files_parallel`, which fires once at compile-time MSL
+    // preload and again per file load — short bursts, not background
+    // work that races the renderer. A cap of 2 there made first-
+    // compile MSL preload 8× slower than CLI (~64 s vs 8 s wall;
+    // worse under contention).
+    //
+    // New policy: leave 2 cores for Bevy (renderer + main), give the
+    // rest to rumoca. On a 16-core machine that's 14 threads — close
+    // to CLI parity. On low-core machines (≤4) we still cap at 2
+    // because the original starvation problem dominates there.
+    let n_cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let rayon_threads = if n_cpus <= 4 { 2 } else { n_cpus.saturating_sub(2) };
     let rayon_init = rayon::ThreadPoolBuilder::new()
-        .num_threads(2)
+        .num_threads(rayon_threads)
         .build_global();
     match rayon_init {
         Ok(()) => eprintln!(
-            "[modelica_workbench] rayon global pool capped at 2 threads"
+            "[modelica_workbench] rayon global pool capped at {rayon_threads} threads (of {n_cpus} CPUs)"
         ),
         Err(e) => eprintln!(
             "[modelica_workbench] WARN: rayon already initialised, our cap LOST: {e}"
