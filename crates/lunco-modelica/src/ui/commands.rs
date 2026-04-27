@@ -513,16 +513,21 @@ fn drain_pending_tab_closes(
             continue; // Another domain's tab.
         }
         let doc = DocumentId::new(instance);
-        let is_dirty = registry
+        let (is_dirty, is_read_only) = registry
             .host(doc)
-            .map(|h| h.document().is_dirty())
-            .unwrap_or(false);
-        if is_dirty {
+            .map(|h| {
+                let d = h.document();
+                (d.is_dirty(), d.is_read_only())
+            })
+            .unwrap_or((false, false));
+        // Read-only docs (MSL library classes the user drilled into)
+        // have nothing to save — the dialog's Save button is disabled
+        // for them anyway. Skip the prompt entirely and close.
+        if is_dirty && !is_read_only {
             if !dialogs.pending.contains(&doc) {
                 dialogs.pending.push(doc);
             }
         } else {
-            // Clean — go straight through.
             commands.trigger(lunco_workbench::CloseTab { kind, instance });
             commands.trigger(CloseDocument { doc });
         }
@@ -1383,6 +1388,7 @@ fn on_duplicate_model_from_read_only(
     >,
     mut console: ResMut<crate::ui::panels::console::ConsoleLog>,
     mut commands: Commands,
+    mut egui_q: Query<&mut bevy_egui::EguiContext>,
 ) {
     let source_doc = trigger.event().source_doc;
 
@@ -1525,6 +1531,17 @@ fn on_duplicate_model_from_read_only(
     console.info(format!(
         "📄 Duplicating `{origin_class_short}` → `{name}` (building…)"
     ));
+    // Kick the first repaint so egui actually paints the loading
+    // overlay. Without this, when this command arrives via the API
+    // (no keyboard/mouse input), Bevy's reactive update mode stays
+    // asleep until something else pokes it — the tab opens, the bg
+    // task runs invisibly, then the install lands and the user sees
+    // the canvas pop straight to "done" with no loading feedback.
+    // `drive_duplicate_loads` keeps the cycle alive each tick after
+    // this initial kick.
+    for mut ctx in egui_q.iter_mut() {
+        ctx.get_mut().request_repaint();
+    }
 }
 
 #[on_command(OpenExampleInWorkspace)]

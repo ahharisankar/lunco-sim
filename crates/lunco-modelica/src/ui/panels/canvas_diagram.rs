@@ -2912,6 +2912,15 @@ impl Panel for CanvasDiagramPanel {
             let (source, ast_arc) = {
                 let registry = world.resource::<ModelicaDocumentRegistry>();
                 let Some(host) = registry.host(doc_id) else {
+                    // Doc reserved but not yet installed (duplicate /
+                    // drill-in still parsing). Skip projection but
+                    // STILL paint the canvas so the loading overlay
+                    // shows. The earlier early-returns at the top of
+                    // Panel::render are careful to do this; this one
+                    // forgot — without the call below the entire
+                    // bg-parse window paints nothing.
+                    drop(registry);
+                    self.render_canvas(ui, world);
                     return;
                 };
                 let doc = host.document();
@@ -3811,6 +3820,31 @@ impl CanvasDiagramPanel {
                     .map(|(q, secs)| (q.to_string(), secs))
             });
             let has_content = docstate.canvas.scene.node_count() > 0;
+            // Diagnostic: log the overlay state once per (doc, state)
+            // combination so we can tell whether the loading branch is
+            // ever entered. Throw-away — gated behind LUNCO_OVERLAY_TRACE
+            // so it doesn't ship in default runs.
+            if std::env::var_os("LUNCO_OVERLAY_TRACE").is_some() {
+                use std::sync::{Mutex, OnceLock};
+                static SEEN: OnceLock<Mutex<std::collections::HashMap<u64, (bool, bool, bool, bool)>>> = OnceLock::new();
+                let seen = SEEN.get_or_init(|| Mutex::new(Default::default()));
+                let key = active_doc.map(|d| d.raw()).unwrap_or(0);
+                let snap = (
+                    info.is_some(),
+                    has_content,
+                    docstate.projection_task.is_some(),
+                    loads.is_loading(active_doc.unwrap_or(lunco_doc::DocumentId::new(0))) || dup_loads.is_loading(active_doc.unwrap_or(lunco_doc::DocumentId::new(0))),
+                );
+                if let Ok(mut m) = seen.lock() {
+                    if m.get(&key) != Some(&snap) {
+                        m.insert(key, snap);
+                        bevy::log::info!(
+                            "[Overlay] doc={} info={} has_content={} projecting={} pending_load={}",
+                            key, snap.0, snap.1, snap.2, snap.3,
+                        );
+                    }
+                }
+            }
             (
                 info,
                 docstate.projection_task.is_some(),
@@ -5298,8 +5332,21 @@ pub fn drive_duplicate_loads(
     mut loads: bevy::prelude::ResMut<DuplicateLoads>,
     mut registry: bevy::prelude::ResMut<ModelicaDocumentRegistry>,
     mut probe: Option<bevy::prelude::ResMut<crate::FrameTimeProbe>>,
+    mut egui_q: bevy::prelude::Query<&mut bevy_egui::EguiContext>,
 ) {
     use bevy::prelude::*;
+    // While any duplicate is in-flight, ping egui every tick so the
+    // canvas keeps repainting and the loading overlay actually
+    // animates. Without this the canvas paints once at tab-open then
+    // sleeps until something else requests a repaint — the overlay
+    // is unreachable for the entire bg-parse window and the user sees
+    // a blank canvas (verified via [Overlay] trace: no entries between
+    // "ModelView rendering tab" and "duplicate: installed").
+    if !loads.pending.is_empty() {
+        for mut ctx in egui_q.iter_mut() {
+            ctx.get_mut().request_repaint();
+        }
+    }
     let doc_ids: Vec<lunco_doc::DocumentId> = loads.pending.keys().copied().collect();
     let mut had_install = false;
     for doc_id in doc_ids {
