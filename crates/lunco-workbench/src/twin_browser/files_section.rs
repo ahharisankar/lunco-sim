@@ -13,7 +13,7 @@
 
 use bevy_egui::egui;
 
-use super::{BrowserAction, BrowserCtx, BrowserSection};
+use super::{BrowserAction, BrowserCtx, BrowserScope, BrowserSection};
 
 /// The built-in Files section impl.
 #[derive(Default)]
@@ -28,10 +28,18 @@ impl BrowserSection for FilesSection {
         "Files"
     }
 
+    fn scope(&self) -> BrowserScope {
+        // The Files section IS the Files tab — domain-agnostic raw FS
+        // view. The Models tab is reserved for typed-content sections
+        // contributed by domain crates.
+        BrowserScope::Files
+    }
+
     fn default_open(&self) -> bool {
-        // Domain sections (Modelica, USD) carry the primary navigation
-        // story. Files is the escape hatch — let the user opt into it.
-        false
+        // Inside the Files tab the section is the only one and should
+        // be expanded by default — there's no domain section above to
+        // anchor the user's eye.
+        true
     }
 
     fn render(&mut self, ui: &mut egui::Ui, ctx: &mut BrowserCtx) {

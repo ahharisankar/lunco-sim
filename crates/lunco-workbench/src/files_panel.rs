@@ -1,0 +1,102 @@
+//! Files Panel — raw on-disk view of the active Twin / open Folder.
+//!
+//! Sibling of [`TwinBrowserPanel`](crate::TwinBrowserPanel) (which
+//! shows typed Twin content like Modelica classes and drafts) and
+//! [`LibraryPanel`](crate::LibraryPanel) (which shows app-level
+//! reference content like MSL). The three panels tab together in the
+//! side dock by default — separate tabs rather than sub-tabs of one
+//! browser, matching peer tools that keep "what's in this project",
+//! "what's on disk", and "what's available globally" as distinct
+//! navigation surfaces (Unity Project window vs Packages, Unreal
+//! Content vs Engine Content, Simulink Current Folder vs Library
+//! Browser).
+//!
+//! Renders every section with
+//! [`scope`](crate::twin_browser::BrowserSection::scope) equal to
+//! [`BrowserScope::Files`]. The workbench's built-in
+//! [`FilesSection`](crate::FilesSection) is the default content;
+//! domain crates may add more (e.g. a future
+//! `WorkspaceDocumentsSection` surfacing a categorised list of
+//! every open document, saved + unsaved).
+
+use bevy::prelude::*;
+use bevy_egui::egui;
+
+use crate::panel::{Panel, PanelId, PanelSlot};
+use crate::twin_browser::{
+    BrowserActions, BrowserCtx, BrowserScope, BrowserSectionRegistry,
+};
+
+/// Stable id of the Files panel.
+pub const FILES_PANEL_ID: PanelId = PanelId("lunco.workbench.files");
+
+/// The Files panel singleton.
+#[derive(Default)]
+pub struct FilesPanel;
+
+impl Panel for FilesPanel {
+    fn id(&self) -> PanelId {
+        FILES_PANEL_ID
+    }
+
+    fn title(&self) -> String {
+        "Files".to_string()
+    }
+
+    fn default_slot(&self) -> PanelSlot {
+        PanelSlot::SideBrowser
+    }
+
+    fn render(&mut self, ui: &mut egui::Ui, world: &mut World) {
+        let Some(mut registry) = world.remove_resource::<BrowserSectionRegistry>() else {
+            ui.colored_label(
+                egui::Color32::LIGHT_RED,
+                "BrowserSectionRegistry resource missing",
+            );
+            return;
+        };
+        let mut actions = world
+            .remove_resource::<BrowserActions>()
+            .unwrap_or_default();
+        let workspace = world.remove_resource::<crate::WorkspaceResource>();
+
+        let visible: Vec<usize> = registry
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.scope() == BrowserScope::Files)
+            .map(|(i, _)| i)
+            .collect();
+
+        if visible.is_empty() {
+            ui.label(
+                egui::RichText::new("No file sections registered.")
+                    .weak()
+                    .italics(),
+            );
+        } else {
+            for &i in &visible {
+                let section = registry.section_mut(i);
+                let header = egui::CollapsingHeader::new(section.title())
+                    .id_salt(("files_panel_section", section.id()))
+                    .default_open(section.default_open());
+                header.show(ui, |ui| {
+                    let twin_ref = workspace
+                        .as_ref()
+                        .and_then(|ws| ws.active_twin.and_then(|id| ws.twin(id)));
+                    let mut ctx = BrowserCtx {
+                        twin: twin_ref,
+                        actions: &mut actions,
+                        world,
+                    };
+                    section.render(ui, &mut ctx);
+                });
+            }
+        }
+
+        if let Some(w) = workspace {
+            world.insert_resource(w);
+        }
+        world.insert_resource(actions);
+        world.insert_resource(registry);
+    }
+}

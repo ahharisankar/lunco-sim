@@ -78,6 +78,35 @@ impl BrowserSection for ModelicaSection {
     }
 
     fn render(&mut self, ui: &mut egui::Ui, ctx: &mut BrowserCtx<'_>) {
+        // Domain panel layout, Dymola/OMEdit style: standard library
+        // at the top (foundation), bundled examples next, user
+        // workspace at the bottom — three nested groups inside one
+        // `Modelica` section. Future domain crates (USD, SysML,
+        // Mission, Julia) follow the same shape — one outer
+        // BrowserSection per domain with internally-grouped
+        // sub-headers — keeping the Twin panel scalable as domains
+        // accumulate rather than fragmenting into N flat sections.
+        egui::CollapsingHeader::new("Modelica Standard Library")
+            .id_salt(("modelica_section", "msl"))
+            .default_open(false)
+            .show(ui, |ui| render_msl_group(ui, ctx));
+        egui::CollapsingHeader::new("Bundled Examples")
+            .id_salt(("modelica_section", "bundled"))
+            .default_open(true)
+            .show(ui, |ui| render_bundled_group(ui, ctx));
+        egui::CollapsingHeader::new("Workspace")
+            .id_salt(("modelica_section", "workspace"))
+            .default_open(true)
+            .show(ui, |ui| render_workspace_group(ui, ctx));
+    }
+}
+
+/// Render the **Workspace** sub-group — writable + Untitled Modelica
+/// documents the user is actively editing. Source-of-truth read of
+/// [`ModelicaDocumentRegistry`] derived through each doc's
+/// [`SyntaxCache`]. Stateless on every call; the registry itself
+/// drives change detection.
+fn render_workspace_group(ui: &mut egui::Ui, ctx: &mut BrowserCtx<'_>) {
         // Snapshot what the registry knows so we can release the
         // borrow before emitting actions (the dispatcher will mutate
         // the registry when opening tabs). Each entry carries an
@@ -216,7 +245,48 @@ impl BrowserSection for ModelicaSection {
                     }
                 }
             });
+}
+
+/// Render the **Modelica Standard Library** sub-group. Today renders
+/// a placeholder count read off the existing `PackageTreeCache` from
+/// the standalone Package Browser; the full hierarchical MSL tree
+/// migrates here from `package_browser.rs` in a follow-up commit
+/// that retires the standalone panel.
+fn render_msl_group(ui: &mut egui::Ui, ctx: &mut BrowserCtx<'_>) {
+    let cache = ctx
+        .world
+        .get_resource::<crate::ui::panels::package_browser::PackageTreeCache>();
+    match cache {
+        Some(c) if !c.roots.is_empty() => {
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} top-level packages indexed (placeholder — full tree porting \
+                     from PackageBrowser in next commit).",
+                    c.roots.len()
+                ))
+                .weak()
+                .small(),
+            );
+        }
+        _ => {
+            ui.label(
+                egui::RichText::new("MSL not yet loaded.")
+                    .weak()
+                    .italics(),
+            );
+        }
     }
+}
+
+/// Render the **Bundled Examples** sub-group — small Modelica models
+/// shipped with the workbench for learning. Placeholder text today;
+/// real list lands when the MSL port migrates `package_browser.rs`.
+fn render_bundled_group(ui: &mut egui::Ui, _ctx: &mut BrowserCtx<'_>) {
+    ui.label(
+        egui::RichText::new("Examples list will move here from PackageBrowser in next commit.")
+            .weak()
+            .small(),
+    );
 }
 
 /// Derive the class tree + error flag from a [`SyntaxCache`]. Pure
@@ -549,3 +619,4 @@ function F end F;
             .any(|c| c.qualified_path == "AnnotatedRocketStage.Engine"));
     }
 }
+

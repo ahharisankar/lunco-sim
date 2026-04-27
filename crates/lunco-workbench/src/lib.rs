@@ -54,12 +54,14 @@ mod session;
 mod viewport;
 
 pub mod file_ops;
+pub mod files_panel;
 pub mod picker;
 pub mod status_bus;
 pub mod twin_browser;
 pub mod uri;
 
 pub use panel::{InstancePanel, Panel, PanelId, PanelSlot, TabId};
+pub use files_panel::{FilesPanel, FILES_PANEL_ID};
 pub use uri::{UriClicked, UriHandler, UriRegistry, UriResolution};
 pub use twin_browser::{
     BrowserAction, BrowserActions, BrowserCtx, BrowserSection, BrowserSectionRegistry,

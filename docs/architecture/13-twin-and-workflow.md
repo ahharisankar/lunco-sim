@@ -130,6 +130,41 @@ We name the category now so we know not to stretch "Document" to
 cover it; the abstraction is deferred until FMI and Nucleus land and
 we can ground it in two concrete examples.
 
+### `DocumentKindRegistry` — plugin-driven kind classification
+
+The set of registered Document kinds is **open**, not a closed enum.
+Each domain crate registers its own kind on plugin `build()` —
+matches the same plugin-driven pattern used by `UriRegistry` (URIs)
+and `BackendRegistry` (cosim backends). The registry lives in
+`lunco-twin` behind an optional `bevy` feature so headless callers
+(CLI tools, batch pipelines) keep zero-Bevy footprint.
+
+```rust
+// In a domain plugin's build()
+let mut registry = app
+    .world_mut()
+    .resource_mut::<DocumentKindRegistry>();
+registry.register(
+    DocumentKindId::new("modelica"),
+    DocumentKindMeta {
+        display_name: "Modelica Model".into(),
+        extensions: vec!["mo"],
+        can_create_new: true,
+        default_filename: Some("NewModel.mo"),
+        uri_scheme: Some("modelica"),
+        manifest_section: Some("modelica"),
+    },
+);
+```
+
+Consumers iterate the registry (File → New menu, `OpenFile`
+classification, Twin panel's per-domain `BrowserSection`s,
+`twin.toml` section dispatch) rather than matching a fixed enum. Adding a new
+domain (USD, SysML, Julia, ...) is one new crate registering itself
+— **no central edits** to `lunco-twin`, `lunco-workbench`, or any
+other domain crate. Matches AGENTS.md §4 "Hotswappable Plugins"
+mandate.
+
 ## 2. Structure inside a Twin — flexible
 
 There is **no required folder structure** inside a Twin. Documents can

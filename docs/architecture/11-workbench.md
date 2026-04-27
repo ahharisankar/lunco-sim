@@ -149,9 +149,9 @@ Purpose: study and tune an individual subsystem model. This is the
 | Slot | Default content |
 |------|-----------------|
 | Activity | Subsystems (active) |
-| Side browser | Library Browser (MSL + project models) |
-| Right | Modelica Inspector (params, variables) |
-| Bottom | Plots (time series) |
+| Side browser | Twin panel (Modelica section: MSL + Bundled Examples + Workspace), Files panel |
+| Right | Modelica Inspector (params, variables), Component Palette |
+| Bottom | Plots (time series), Console, Diagnostics |
 | Center overlay (optional) | Diagram / Code editor (when a model is open) |
 
 Selecting a Space System with a `ModelicaModel` automatically focuses the
@@ -209,13 +209,54 @@ Panel categories map to default slot rules:
 
 | Category | Default slot | Examples |
 |----------|--------------|----------|
-| Navigation | Left side | Scene Tree, Library Browser, Mission Outline |
-| Inspector | Right side | Properties, Modelica Inspector, Attribute Editor |
-| Tool | Bottom | Spawn Palette, Timeline, Diagram Editor |
-| Output | Bottom | Console, Plots, Telemetry |
+| Navigation | Left side | Twin panel, Files panel |
+| Inspector | Right side | Properties, Modelica Inspector, Component Palette |
+| Tool | Bottom | Diagram Editor |
+| Output | Bottom | Console, Plots, Telemetry, Diagnostics |
 
 Users can drag panels between slots, tab them together, collapse them,
 or detach them (see § 8).
+
+### 5a. Side-browser architecture — Twin panel + Files panel
+
+The two Navigation-slot panels follow a Dymola/OMEdit-style split:
+
+- **Twin panel** — what you browse "by name." One section per
+  domain (`ModelicaSection`, future `UsdSection`, `SysmlSection`,
+  `JuliaSection`), each section owning its own internal sub-grouping
+  (e.g. Modelica's section nests Modelica Standard Library + Bundled
+  Examples + Workspace as collapsing headers). Single tree per
+  domain matches Dymola/OMEdit's Package Browser; nesting under a
+  per-domain root scales as more domains land.
+- **Files panel** — raw filesystem view of the active Twin / open
+  Folder. Domain-agnostic.
+
+Sections are pluggable via the `BrowserSection` trait + a registry
+resource:
+
+```rust
+pub trait BrowserSection: Send + Sync + 'static {
+    fn id(&self) -> &str;
+    fn title(&self) -> &str;
+    fn scope(&self) -> BrowserScope { BrowserScope::Models }
+    fn default_open(&self) -> bool { true }
+    fn render(&mut self, ui: &mut egui::Ui, ctx: &mut BrowserCtx);
+}
+
+pub enum BrowserScope { Models, Files }
+```
+
+Domain plugins push their section impls into
+`BrowserSectionRegistry` at `build()` time; the panel iterates the
+registry per render, filtered by its `BrowserScope`. Sections emit
+user actions (clicks, drags, context-menu choices) into a frame-
+scoped `BrowserActions` outbox; a host system drains it and
+dispatches.
+
+This keeps the workbench crate domain-agnostic — `lunco-workbench`
+ships `FilesPanel`, `TwinBrowserPanel`, and `FilesSection`, but
+nothing Modelica-specific. Adding USD/SysML/Julia is one new
+section per domain, no central edits.
 
 ### Panels as Document Views
 
@@ -288,13 +329,26 @@ Multi-monitor workflows this enables:
 Each workspace has a stored layout. When a user drags a panel, saves, or
 switches workspaces:
 
-- Per-user layouts persist to `$XDG_CONFIG_HOME/lunco-workbench/layouts.toml`
-  (or platform equivalent)
+- Per-user layouts persist to `~/.lunco/layouts.toml` via
+  `lunco_assets::user_config_dir()` (cross-platform: Linux/macOS
+  `~/.lunco`, Windows `C:\Users\<user>\.lunco`; overridable via
+  `LUNCOSIM_CONFIG` env var)
 - Per-project layouts can live in `project.toml` (overriding user defaults)
 - Default ship layouts are hardcoded in each workspace module
 
 Layout is a tree of slot occupancies + panel IDs + sizes. Not a TOML
 abstraction leak — just what's needed to rebuild the layout.
+
+### 9a. Recents
+
+Bounded recents lists (10 Twin folders, 20 loose files; most-recent-first,
+dedupe-on-push) persist to `~/.lunco/recents.json` via the same
+`user_config_dir()` helper. Loaded on startup by `WorkspacePlugin`,
+saved when the in-memory list changes (JSON-fingerprint gated to
+avoid disk writes on unrelated `WorkspaceResource` mutations). Atomic
+write via temp-file + rename — a kill mid-write can't corrupt the
+file. A corrupt file silently falls back to empty recents on next
+boot.
 
 ## 10. Theming and keybinds
 

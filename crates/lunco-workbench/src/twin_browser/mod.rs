@@ -52,6 +52,62 @@ pub use files_section::FilesSection;
 pub const TWIN_BROWSER_PANEL_ID: PanelId = PanelId("lunco.workbench.twin_browser");
 
 // ─────────────────────────────────────────────────────────────────────
+// Browser scope (Models / Files tab toggle)
+// ─────────────────────────────────────────────────────────────────────
+
+/// One of the top-level lenses the Twin Browser presents.
+///
+/// A Twin is composed of multiple modeling modalities (Modelica
+/// dynamics, USD scenes, SysML architecture, future Julia, …) plus
+/// raw on-disk content. The user wants quick toggle between
+/// *"what's modeled in this Twin"* and *"what's on disk"* — this enum
+/// names the two lenses.
+///
+/// Each [`BrowserSection`] declares which scope it belongs to via
+/// [`BrowserSection::scope`]. The panel renders only the sections
+/// matching the active scope (see [`ActiveBrowserScope`]).
+///
+/// More scopes may join later (a Subsystems / Usages tab once the
+/// cosim graph view exists, surfacing a Twin's `[scenarios.*]`
+/// instance graph). The enum is `#[non_exhaustive]` so the matching
+/// dispatch in the panel doesn't lock us out of additions.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum BrowserScope {
+    /// Sections rendered inside the Twin panel. Today: Modelica
+    /// workspace, MSL standard library, bundled examples. Future:
+    /// USD scenes, SysML packages, Julia modules, pinned externals.
+    /// One panel hosts everything you'd browse "by name" — matches
+    /// Dymola/OMEdit's single-Package-Browser pattern where MSL and
+    /// user packages share one tree.
+    Models,
+    /// Sections rendered inside the Files panel. Raw on-disk content
+    /// of the active Twin (or open Folder) — folder layout, file
+    /// references, anything regardless of typed-Document status.
+    Files,
+}
+
+impl BrowserScope {
+    /// Stable kebab-case label used as the egui id salt for sections
+    /// (so collapsed/expanded state survives across recompiles).
+    pub const fn id(self) -> &'static str {
+        match self {
+            BrowserScope::Models => "models",
+            BrowserScope::Files => "files",
+        }
+    }
+
+    /// Human label — used in empty-state hints and developer logs.
+    pub const fn label(self) -> &'static str {
+        match self {
+            BrowserScope::Models => "Twin",
+            BrowserScope::Files => "Files",
+        }
+    }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
 // Resources: section registry + action outbox
 // ─────────────────────────────────────────────────────────────────────
 //
@@ -114,6 +170,23 @@ impl BrowserSectionRegistry {
     #[doc(hidden)]
     pub fn is_empty(&self) -> bool {
         self.sections.is_empty()
+    }
+
+    /// Read-only iterator over registered sections. Used by the
+    /// scope-filter step before render (panels build a Vec of indices,
+    /// then dispatch via [`section_mut`](Self::section_mut)).
+    pub fn iter(&self) -> impl Iterator<Item = &dyn BrowserSection> {
+        self.sections.iter().map(|b| &**b)
+    }
+
+    /// Mutable access to the section at `index`. Panels use this
+    /// during render to call `section.render(ui, &mut ctx)` on the
+    /// scope-matching subset they collected via [`iter`](Self::iter).
+    /// Indices change only when a section is registered (append-only
+    /// during plugin build), so caching them within one render frame
+    /// is safe.
+    pub fn section_mut(&mut self, index: usize) -> &mut dyn BrowserSection {
+        &mut *self.sections[index]
     }
 }
 
@@ -219,6 +292,17 @@ pub trait BrowserSection: Send + Sync + 'static {
     /// Title shown on the section's header bar.
     fn title(&self) -> &str;
 
+    /// Which top-level scope this section belongs to. Determines
+    /// whether the section appears in the Models tab or the Files
+    /// tab (or both — sections may belong to one only by default).
+    ///
+    /// Default is [`BrowserScope::Models`] because new domain
+    /// sections are virtually always type-catalog views; built-in
+    /// `FilesSection` overrides this to [`BrowserScope::Files`].
+    fn scope(&self) -> BrowserScope {
+        BrowserScope::Models
+    }
+
     /// Whether the section is open by default the first time it's
     /// rendered. egui persists the open/closed state per session
     /// after that.
@@ -245,7 +329,7 @@ impl Panel for TwinBrowserPanel {
     }
 
     fn title(&self) -> String {
-        "Twin Browser".to_string()
+        "Twin".to_string()
     }
 
     fn default_slot(&self) -> PanelSlot {
@@ -253,9 +337,10 @@ impl Panel for TwinBrowserPanel {
     }
 
     fn render(&mut self, ui: &mut egui::Ui, world: &mut World) {
-        // Take registry + actions + WorkspaceResource out of the world
-        // so sections can borrow `world` mutably during render without
-        // conflicting with the active-Twin read. Restored after.
+        // Take registry + actions + WorkspaceResource out of the
+        // world so sections can borrow `world` mutably during render
+        // without conflicting with the active-Twin read. Restored
+        // after.
         let Some(mut registry) = world.remove_resource::<BrowserSectionRegistry>() else {
             ui.colored_label(
                 egui::Color32::LIGHT_RED,
@@ -268,16 +353,30 @@ impl Panel for TwinBrowserPanel {
             .unwrap_or_default();
         let workspace = world.remove_resource::<crate::WorkspaceResource>();
 
-        if registry.sections.is_empty() {
+        // Twin panel renders only `Models`-scoped sections — typed
+        // domain content (Modelica classes, drafts, future USD/SysML
+        // sections). Files- and Library-scoped sections are rendered
+        // by [`crate::FilesPanel`] and [`crate::LibraryPanel`]
+        // respectively; they're sibling tabs in the side dock, not
+        // sub-tabs of this one.
+        let visible: Vec<usize> = registry
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.scope() == BrowserScope::Models)
+            .map(|(i, _)| i)
+            .collect();
+
+        if visible.is_empty() {
             ui.label(
-                egui::RichText::new("No browser sections registered")
+                egui::RichText::new("No Twin sections registered.")
                     .weak()
                     .italics(),
             );
         } else {
-            for section in &mut registry.sections {
+            for &i in &visible {
+                let section = registry.section_mut(i);
                 let header = egui::CollapsingHeader::new(section.title())
-                    .id_salt(("twin_browser_section", section.id()))
+                    .id_salt(("twin_panel_section", section.id()))
                     .default_open(section.default_open());
                 header.show(ui, |ui| {
                     let twin_ref = workspace

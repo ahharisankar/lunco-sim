@@ -301,7 +301,15 @@ impl Perspective for AnalyzePerspective {
         // migrate into the Twin Browser as a future `MslSection`.
         // Side-by-side dock would just present users with two
         // browsers solving the same job.
-        layout.set_side_browser(Some(lunco_workbench::TWIN_BROWSER_PANEL_ID));
+        // Two sibling tabs in the side dock — Twin (everything you
+        // browse by name: workspace classes, MSL, bundled, future
+        // USD/SysML — matches Dymola/OMEdit's single-Package-Browser
+        // pattern) and Files (raw FS). Twin is leftmost so it's the
+        // default active tab on first launch.
+        layout.set_side_browser_tabs(vec![
+            lunco_workbench::TWIN_BROWSER_PANEL_ID,
+            lunco_workbench::FILES_PANEL_ID,
+        ]);
         // Center is seeded with no singleton tab — model views are
         // multi-instance tabs opened dynamically by the Package Browser
         // (one tab per open document). An app that boots with a
@@ -448,6 +456,7 @@ impl Plugin for ModelicaUiPlugin {
             )
             .register_panel(panels::package_browser::PackageBrowserPanel)
             .register_panel(lunco_workbench::TwinBrowserPanel)
+            .register_panel(lunco_workbench::FilesPanel)
             .register_panel(panels::welcome::WelcomePanel)
             .register_panel(panels::telemetry::TelemetryPanel)
             .register_panel(panels::graphs::GraphsPanel)
@@ -477,6 +486,14 @@ impl Plugin for ModelicaUiPlugin {
         // section; we just append. ensure it exists first to avoid
         // panics during mixed-mode or deferred plugin builds.
         app.init_resource::<lunco_workbench::BrowserSectionRegistry>();
+        // One section per domain — `ModelicaSection` internally
+        // groups MSL / Bundled Examples / Workspace as nested
+        // collapsing headers (Dymola/OMEdit Package-Browser shape).
+        // Future domain crates (`UsdSection`, `SysmlSection`,
+        // `JuliaSection`) follow the same outer pattern: one
+        // BrowserSection per domain, internal sub-grouping owned by
+        // that domain. Keeps the Twin panel scalable as the number
+        // of supported domains grows.
         app.world_mut()
             .resource_mut::<lunco_workbench::BrowserSectionRegistry>()
             .register(browser_section::ModelicaSection::default());
