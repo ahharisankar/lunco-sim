@@ -52,7 +52,11 @@ pub struct AttributeRegistry {
 }
 
 /// An event representing a request to mutate a simulation attribute.
-#[derive(Event, Debug, Clone)]
+///
+/// Qualified `#[lunco_core::Command(default)]` because `bevy::prelude`
+/// also exports a `Command` trait — the qualified path disambiguates
+/// without forcing a `use` rename.
+#[lunco_core::Command(default)]
 pub struct SetAttribute {
     /// The canonical path to the attribute in the [AttributeRegistry].
     pub path: String,

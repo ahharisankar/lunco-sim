@@ -7,6 +7,8 @@ description = "Bevy integration for the LunCoSim Document System — generic doc
 [dependencies]
 bevy = { workspace = true }
 bevy_egui = { workspace = true }
+# `Command`, `on_command`, `register_commands` macro re-exports.
+lunco-core = { path = "../lunco-core" }
 lunco-doc = { path = "../lunco-doc" }
 # `std::time::Instant::now()` panics on wasm32-unknown-unknown.
 web-time = { workspace = true }

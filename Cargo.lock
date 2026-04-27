@@ -6277,6 +6277,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "bevy_egui",
+ "lunco-core",
  "lunco-doc",
  "web-time",
 ]
