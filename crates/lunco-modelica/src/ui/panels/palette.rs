@@ -27,6 +27,15 @@ use crate::visual_diagram::{msl_component_library, MSLComponentDef};
 /// Panel id — registered as a singleton panel, slotted RightInspector.
 pub const PALETTE_PANEL_ID: PanelId = PanelId("modelica_component_palette");
 
+/// Drag-and-drop payload for palette → canvas. Set by the palette
+/// when a row's drag begins; consumed by the canvas drop handler on
+/// pointer release. Cleared on miss (release outside any canvas) so
+/// stale payloads don't leak between gestures.
+#[derive(Resource, Default)]
+pub struct ComponentDragPayload {
+    pub def: Option<MSLComponentDef>,
+}
+
 /// Per-frame UI state for the palette. Holds the search query + the
 /// active category filter chip.
 ///
@@ -89,6 +98,27 @@ fn category_color(name: &str, theme: &lunco_theme::Theme) -> egui::Color32 {
         "StateGraph" => s.wire_boolean,
         _ => s.wire_unknown,
     }
+}
+
+/// Should this entry be shown in the instantiable palette?
+///
+/// `msl_index.json` includes connectors (`class_kind == "connector"`),
+/// partial classes, and other non-instantiable interface types — they
+/// were leaking into the search results, so users dragging "resistor"
+/// could hit `ACpin` instead of `Resistor`. This filter mirrors what
+/// OMEdit/Dymola's component browsers exclude:
+///
+///   - any `connector` class (ports/interfaces, not standalone parts)
+///   - anything under a `.Interfaces.` package (partial-models, ICs)
+///   - anything under `.Internal.` (library-private helpers)
+fn is_instantiable(c: &MSLComponentDef) -> bool {
+    if c.class_kind.eq_ignore_ascii_case("connector") {
+        return false;
+    }
+    if c.msl_path.contains(".Interfaces.") || c.msl_path.contains(".Internal.") {
+        return false;
+    }
+    true
 }
 
 /// Match a component's MSL path to one of our display categories.
@@ -174,12 +204,16 @@ impl Panel for ComponentPalettePanel {
         // Precompute per-category counts for the chip labels (filtered
         // by the current search, so a chip says "Electrical (7)" = 7
         // matches in this category given the current query).
-        let lib = msl_component_library();
+        // Pre-filter: drop connectors / Interfaces / Internal entries
+        // before any scoring or counting so they don't pollute totals,
+        // chip counts, or the search results.
+        let lib_all = msl_component_library();
+        let lib: Vec<&MSLComponentDef> = lib_all.iter().filter(|c| is_instantiable(c)).collect();
         let mut cat_counts: std::collections::HashMap<&'static str, usize> =
             std::collections::HashMap::new();
         let pre_filter_total = lib.len();
         let mut pre_filter_matches = 0usize;
-        for c in lib {
+        for c in &lib {
             let matches = if query_lc.is_empty() {
                 true
             } else {
@@ -277,6 +311,7 @@ impl Panel for ComponentPalettePanel {
         let mut scored: Vec<(&MSLComponentDef, f32)> = lib
             .iter()
             .filter_map(|c| {
+                let c: &MSLComponentDef = *c;
                 if let Some(cat) = selected_category {
                     if category_of(&c.msl_path) != cat {
                         return None;
@@ -312,6 +347,12 @@ impl Panel for ComponentPalettePanel {
         // component-tree style). Each section is closed by default
         // except the first, keeping long category chains scannable.
         let mut clicked: Option<MSLComponentDef> = None;
+        let mut drag_started_def: Option<MSLComponentDef> = None;
+        // Snapshot the currently-dragged def name so render_component_row
+        // can dim the source row.
+        let dragging_path: Option<String> = world
+            .get_resource::<ComponentDragPayload>()
+            .and_then(|p| p.def.as_ref().map(|d| d.msl_path.clone()));
         let is_searching = !query_lc.is_empty() || selected_category.is_some();
 
         egui::ScrollArea::vertical()
@@ -320,8 +361,16 @@ impl Panel for ComponentPalettePanel {
                 if is_searching {
                     // Flat list (top-100 matches, score-ordered).
                     for (comp, _score) in scored.iter().take(shown) {
-                        if render_component_row(ui, comp, &theme) {
+                        let being_dragged = dragging_path
+                            .as_deref()
+                            .map(|p| p == comp.msl_path.as_str())
+                            .unwrap_or(false);
+                        let action = render_component_row(ui, comp, &theme, being_dragged);
+                        if action.clicked {
                             clicked = Some((*comp).clone());
+                        }
+                        if action.drag_started {
+                            drag_started_def = Some((*comp).clone());
                         }
                     }
                     if scored.len() > shown_cap {
@@ -364,8 +413,17 @@ impl Panel for ComponentPalettePanel {
                         .id_salt(("palette_cat", cat));
                         header.show(ui, |ui| {
                             for comp in list {
-                                if render_component_row(ui, comp, &theme) {
+                                let being_dragged = dragging_path
+                                    .as_deref()
+                                    .map(|p| p == comp.msl_path.as_str())
+                                    .unwrap_or(false);
+                                let action =
+                                    render_component_row(ui, comp, &theme, being_dragged);
+                                if action.clicked {
                                     clicked = Some((*comp).clone());
+                                }
+                                if action.drag_started {
+                                    drag_started_def = Some((*comp).clone());
                                 }
                             }
                         });
@@ -387,7 +445,16 @@ impl Panel for ComponentPalettePanel {
         // successive clicks don't all land on top of each other. The
         // canvas's auto-arrange button lets users tidy after.
         if let Some(def) = clicked {
-            place_via_add_component(world, def);
+            place_component(world, &def, None, None);
+        }
+
+        // Stash drag payload for the canvas drop handler. Overwrites
+        // any previous payload — only one drag can be active at a
+        // time. The canvas clears it on drop (hit or miss).
+        if let Some(def) = drag_started_def {
+            world
+                .get_resource_or_insert_with::<ComponentDragPayload>(Default::default)
+                .def = Some(def);
         }
     }
 }
@@ -397,16 +464,29 @@ impl Panel for ComponentPalettePanel {
 #[derive(Resource, Default)]
 struct PalettePlacementCounter(u32);
 
-fn place_via_add_component(world: &mut World, def: MSLComponentDef) {
-    // Resolve target doc — the active editor tab. No active doc → no
-    // class to add into; we silently no-op (the user clicked into a
-    // workspace with no open Modelica tab).
-    let active_doc = world
-        .get_resource::<lunco_workbench::WorkspaceResource>()
-        .and_then(|ws| ws.active_document);
+/// Shared insertion path. `target_doc = None` resolves to the active
+/// document (palette click). `placement = None` uses the persistent
+/// 3×N grid counter; `Some((mx, my))` drops at explicit Modelica
+/// coords (drag-and-drop drop point). Both call sites converge here
+/// so naming + class resolution + the actual `AddModelicaComponent`
+/// trigger live in one place.
+pub(crate) fn place_component(
+    world: &mut World,
+    def: &MSLComponentDef,
+    target_doc: Option<lunco_doc::DocumentId>,
+    placement: Option<(f32, f32)>,
+) {
+    // Resolve target doc — explicit override (drop site) wins,
+    // otherwise fall back to the active editor tab. No active doc →
+    // no class to add into; we silently no-op.
+    let active_doc = target_doc.or_else(|| {
+        world
+            .get_resource::<lunco_workbench::WorkspaceResource>()
+            .and_then(|ws| ws.active_document)
+    });
     let Some(doc_id) = active_doc else {
         bevy::log::info!(
-            "[Palette] click on `{}` ignored — no active document",
+            "[Palette] insert of `{}` ignored — no active document",
             def.msl_path
         );
         return;
@@ -438,15 +518,21 @@ fn place_via_add_component(world: &mut World, def: MSLComponentDef) {
         return;
     }
 
-    // Increment grid counter + compute placement in Modelica coords.
-    let (x, y) = {
+    // Increment grid counter (always — also used as the name suffix
+    // so dropped components get distinct names too) and resolve
+    // placement: explicit drop-site wins, else step the grid.
+    let counter_val = {
         let mut counter = world
             .get_resource_or_insert_with::<PalettePlacementCounter>(Default::default);
         counter.0 = counter.0.saturating_add(1);
-        let n = counter.0;
-        let x = -50.0 + ((n % 3) as f32) * 30.0;
-        let y = 50.0 - ((n / 3) as f32) * 30.0;
-        (x, y)
+        counter.0
+    };
+    let (x, y) = match placement {
+        Some(xy) => xy,
+        None => {
+            let n = counter_val;
+            (-50.0 + ((n % 3) as f32) * 30.0, 50.0 - ((n / 3) as f32) * 30.0)
+        }
     };
 
     // Synthesise a unique-ish instance name. Modelica allows letters,
@@ -464,7 +550,6 @@ fn place_via_add_component(world: &mut World, def: MSLComponentDef) {
     if base.is_empty() {
         base.push_str("inst");
     }
-    let counter_val = world.resource::<PalettePlacementCounter>().0;
     let name = format!("{base}{counter_val}");
 
     world
@@ -481,17 +566,38 @@ fn place_via_add_component(world: &mut World, def: MSLComponentDef) {
         });
 }
 
-/// Draw one component row (category dot + name + subtitle). Returns
-/// `true` if the user just clicked it (instantiate target).
-/// Used by both the flat-search list and the grouped-by-category list.
+/// Per-row interaction outcome from [`render_component_row`].
+#[derive(Default, Clone, Copy)]
+struct RowAction {
+    /// User completed a click (press + release without drag motion).
+    /// Triggers grid-placement insertion via [`place_component`].
+    clicked: bool,
+    /// User just started dragging this row this frame. The caller
+    /// stashes a [`ComponentDragPayload`] so the canvas can preview
+    /// + drop.
+    drag_started: bool,
+}
+
+/// Draw one component row (category dot + name + subtitle). Reacts
+/// to both click (immediate grid-placement) and drag (stash payload
+/// for canvas drop). Used by both the flat-search list and the
+/// grouped-by-category list.
 fn render_component_row(
     ui: &mut egui::Ui,
     comp: &MSLComponentDef,
     theme: &lunco_theme::Theme,
-) -> bool {
+    is_being_dragged: bool,
+) -> RowAction {
     let cat_name = category_of(&comp.msl_path);
     let cat_color = category_color(cat_name, theme);
     let muted = theme.tokens.text_subdued;
+
+    // Dim the row while it's the active drag source so the user has
+    // a clear "this is the thing I'm dragging" signal alongside the
+    // canvas ghost preview.
+    if is_being_dragged {
+        ui.set_opacity(0.4);
+    }
 
     let resp = ui
         .horizontal(|ui| {
@@ -502,28 +608,47 @@ fn render_component_row(
             ui.painter().circle_filled(rect.center(), 4.0, cat_color);
 
             ui.vertical(|ui| {
-                ui.add(egui::Label::new(
-                    egui::RichText::new(&comp.display_name).size(12.0),
-                ));
-                ui.add(egui::Label::new(
-                    egui::RichText::new(&comp.category)
-                        .size(9.0)
-                        .color(muted),
-                ));
+                // `selectable(false)` is critical: by default egui
+                // Labels react to click+drag with text-selection,
+                // which steals the row's drag gesture and the user
+                // ends up highlighting characters instead of starting
+                // a palette → canvas drag.
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&comp.display_name).size(12.0),
+                    )
+                    .selectable(false),
+                );
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&comp.category)
+                            .size(9.0)
+                            .color(muted),
+                    )
+                    .selectable(false),
+                );
             });
         })
         .response
-        .interact(egui::Sense::click());
+        .interact(egui::Sense::click_and_drag());
+
+    if is_being_dragged {
+        ui.set_opacity(1.0);
+    }
 
     let tooltip = comp
         .description
         .as_deref()
         .unwrap_or(comp.msl_path.as_str());
-    resp.on_hover_text(format!(
-        "{}\n\n{}\n\nClick to add to the active diagram.",
+    let resp = resp.on_hover_text(format!(
+        "{}\n\n{}\n\nClick to add at grid · drag onto canvas to place at cursor.",
         comp.msl_path, tooltip
-    ))
-    .clicked()
+    ));
+
+    RowAction {
+        clicked: resp.clicked(),
+        drag_started: resp.drag_started(),
+    }
 }
 
 /// Draw one category chip. Returns `true` if the user just clicked

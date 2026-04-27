@@ -579,7 +579,15 @@ fn frame_time_probe_end(mut probe: ResMut<FrameTimeProbe>) {
         .last_edit
         .map(|t| t.elapsed().as_secs_f64() < 5.0)
         .unwrap_or(false);
-    if dt_ms > 30.0 || in_window {
+    // Default off — the probe's purpose is diagnosing UI hitches, but
+    // egui idles at ~30 fps (33 ms/frame) which fires the >30 ms
+    // threshold on every frame and floods the console. Enable with
+    // `LUNCO_FRAME_PROBE=1` (any non-empty value) when investigating
+    // a specific freeze. Hard hitches (>250 ms) always log so genuine
+    // stalls aren't silently swallowed.
+    let probe_enabled = std::env::var_os("LUNCO_FRAME_PROBE").is_some();
+    let hard_hitch = dt_ms > 250.0;
+    if hard_hitch || (probe_enabled && (dt_ms > 30.0 || in_window)) {
         bevy::log::info!(
             "[FrameTimeProbe] total={dt_ms:.0}ms pre={:.0} update={:.0} post={:.0} last={last_ms:.0}{}",
             probe.pre_update_ms,

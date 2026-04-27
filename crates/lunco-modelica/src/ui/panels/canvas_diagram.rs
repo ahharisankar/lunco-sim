@@ -3591,6 +3591,159 @@ impl CanvasDiagramPanel {
         };
         mark("canvas.ui (scene render)", &mut phase_t, &mut phase_log);
 
+        // ── Palette drag-and-drop drop handler ──
+        //
+        // Source side (palette row) sets a `ComponentDragPayload` on
+        // drag-start. Here we (a) draw a ghost preview at the cursor
+        // while the payload is live and the cursor is over our canvas
+        // rect, and (b) on pointer release commit the drop: if over
+        // the canvas, fire `AddModelicaComponent` at cursor coords
+        // (Modelica convention, +Y up); if not over the canvas, just
+        // clear the payload so a missed drop doesn't leave stale
+        // state. Read-only tabs ignore the drop entirely (consistent
+        // with the right-click-menu gating).
+        let drag_payload_def = world
+            .get_resource::<crate::ui::panels::palette::ComponentDragPayload>()
+            .and_then(|p| p.def.clone());
+        if let Some(def) = drag_payload_def {
+            let hover_pos = response.hover_pos();
+            // Ghost preview: a translucent rectangle at the cursor,
+            // sized to match the default 20-unit Modelica icon as
+            // rendered by the current viewport zoom. Falls back to
+            // a fixed pixel size if zoom is unreadable.
+            if let Some(p) = hover_pos {
+                let painter = ui.painter_at(response.rect);
+                // Translate ICON_W/H (modelica units) to screen px
+                // via the canvas viewport zoom for size accuracy.
+                let zoom = world
+                    .resource::<CanvasDiagramState>()
+                    .get(active_doc)
+                    .canvas
+                    .viewport
+                    .zoom;
+                let half = (ICON_W * zoom * 0.5).max(12.0);
+                let ghost_rect = egui::Rect::from_center_size(
+                    p,
+                    egui::vec2(half * 2.0, half * 2.0),
+                );
+                let accent = egui::Color32::from_rgb(120, 180, 255);
+                painter.rect_filled(
+                    ghost_rect,
+                    4.0,
+                    egui::Color32::from_rgba_unmultiplied(120, 180, 255, 50),
+                );
+                painter.rect_stroke(
+                    ghost_rect,
+                    4.0,
+                    egui::Stroke::new(1.5, accent),
+                    egui::StrokeKind::Outside,
+                );
+                painter.text(
+                    egui::pos2(ghost_rect.center().x, ghost_rect.max.y + 4.0),
+                    egui::Align2::CENTER_TOP,
+                    &def.display_name,
+                    egui::FontId::proportional(11.0),
+                    accent,
+                );
+                ui.ctx().request_repaint();
+            }
+
+            // Commit on pointer release. Global input — fires whether
+            // the release happened over us or elsewhere; we discriminate
+            // by `hover_pos` being set + within our rect.
+            let released = ui.input(|i| i.pointer.any_released());
+            if released {
+                let drop_target = hover_pos.filter(|p| response.rect.contains(*p));
+                if let (Some(p), Some(doc_id)) = (drop_target, active_doc) {
+                    if !tab_read_only {
+                        // Match the right-click "Add component" path
+                        // exactly: optimistic `synthesize_msl_node` for
+                        // instant visual response + `apply_ops_public`
+                        // to rewrite the source and bump
+                        // `canvas_acked_gen` so the eventual reproject
+                        // is suppressed (which is why the existing
+                        // scene survives — the API-observer path went
+                        // through `AddModelicaComponent`, which had no
+                        // such ack, so the canvas kept clearing itself
+                        // and stalled on the 2.5 s reparse debounce).
+                        let screen_rect_drop = lunco_canvas::Rect::from_min_max(
+                            lunco_canvas::Pos::new(response.rect.min.x, response.rect.min.y),
+                            lunco_canvas::Pos::new(response.rect.max.x, response.rect.max.y),
+                        );
+                        let click_world = world
+                            .resource::<CanvasDiagramState>()
+                            .get(active_doc)
+                            .canvas
+                            .viewport
+                            .screen_to_world(
+                                lunco_canvas::Pos::new(p.x, p.y),
+                                screen_rect_drop,
+                            );
+                        // Resolve target class — drilled-in if present,
+                        // else extracted from the doc's first non-package
+                        // class. Same fallback the palette click uses.
+                        let class = editing_class.clone().unwrap_or_else(|| {
+                            world
+                                .get_resource::<DrilledInClassNames>()
+                                .and_then(|m| m.get(doc_id).map(str::to_string))
+                                .or_else(|| {
+                                    let registry =
+                                        world.resource::<crate::ui::state::ModelicaDocumentRegistry>();
+                                    let host = registry.host(doc_id)?;
+                                    let ast = host.document().ast().result.as_ref().ok().cloned()?;
+                                    crate::ast_extract::extract_model_name_from_ast(&ast)
+                                })
+                                .unwrap_or_default()
+                        });
+                        if class.is_empty() {
+                            bevy::log::info!(
+                                "[CanvasDiagram] drop of `{}` ignored — no editable class",
+                                def.msl_path
+                            );
+                        } else {
+                            let instance_name = {
+                                let state = world.resource::<CanvasDiagramState>();
+                                pick_add_instance_name(&def, &state.get(Some(doc_id)).canvas.scene)
+                            };
+                            // 1. Optimistic synth — node appears immediately.
+                            {
+                                let mut state =
+                                    world.resource_mut::<CanvasDiagramState>();
+                                let docstate = state.get_mut(Some(doc_id));
+                                synthesize_msl_node(
+                                    &mut docstate.canvas.scene,
+                                    &def,
+                                    &instance_name,
+                                    click_world,
+                                );
+                            }
+                            // 2. Source rewrite + canvas_acked_gen bump
+                            //    (suppresses the redundant reproject).
+                            let op = op_add_component_with_name(
+                                &def,
+                                &instance_name,
+                                click_world,
+                                &class,
+                            );
+                            apply_ops_public(world, doc_id, vec![op]);
+                            ui.ctx().request_repaint();
+                        }
+                    } else {
+                        bevy::log::info!(
+                            "[CanvasDiagram] drop of `{}` ignored — tab is read-only",
+                            def.msl_path
+                        );
+                    }
+                }
+                // Always clear the payload on release, hit or miss.
+                if let Some(mut payload) = world
+                    .get_resource_mut::<crate::ui::panels::palette::ComponentDragPayload>()
+                {
+                    payload.def = None;
+                }
+            }
+        }
+
         // Drain in-canvas input control writes from the per-frame
         // queue and apply them to the matching `ModelicaModel.inputs`.
         // The worker forwards the change to `SimStepper::set_input`
