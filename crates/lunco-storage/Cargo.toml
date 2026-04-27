@@ -5,16 +5,13 @@ edition = "2021"
 description = "I/O abstraction for LunCoSim — Storage trait + backends (FileStorage today; IndexedDB/OPFS/HTTP tomorrow). Keeps the document and workspace layers free of filesystem assumptions so the same save/load flow works on native, web, and remote twins."
 
 [dependencies]
-# `rfd` = native/web file-dialog crate. Used only on native; the wasm
-# backend will provide its own pickers via File System Access / OPFS.
+# `rfd` = native/web file-dialog crate. Used by the workbench-side
+# picker (`lunco-workbench::picker`); kept here too because
+# `FileStorage::pick_open` / `pick_save` / `pick_folder` retain a
+# blocking native fallback for non-Bevy callers (CLI tools, tests).
 rfd = "0.15"
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
-# Optional Bevy integration — enabled by the `picker` feature. The trait
-# + handle types stay usable headless (CLI tools, tests, the rumoca
-# pipeline) without paying the ECS cost. Bevy apps that want the
-# event-driven file picker turn the feature on.
-bevy = { workspace = true, optional = true }
 
 [features]
 # Empty stubs that unlock the corresponding `StorageHandle` variants.
@@ -26,7 +23,3 @@ fsa_stub = []
 idb_stub = []
 opfs_stub = []
 http_stub = []
-# Pulls in Bevy ECS and exposes `PickHandle` + friends. Workbench-side
-# crates (`lunco-workbench`, app binaries) flip this on; headless tools
-# leave it off.
-picker = ["dep:bevy"]

@@ -9,9 +9,25 @@ bevy = { workspace = true }
 bevy_egui = { workspace = true }
 lunco-theme = { path = "../lunco-theme" }
 egui_dock = "0.18"
+# `Command` / `on_command` / `register_commands!` macros (re-exports
+# from `lunco-command-macro`). Brings file-workflow verbs (`OpenFile`,
+# `OpenFolder`, `OpenTwin`, ...) onto the same typed-command bus that
+# domain crates already use.
+lunco-core = { path = "../lunco-core" }
 lunco-doc = { path = "../lunco-doc" }
+# `SaveDocument` / `SaveAsDocument` / `CloseDocument` Command structs +
+# `EditorIntent` rebindable verbs.
+lunco-doc-bevy = { path = "../lunco-doc-bevy" }
 lunco-twin = { path = "../lunco-twin" }
 lunco-workspace = { path = "../lunco-workspace" }
+# `OpenFilter` / `SaveHint` / `StorageHandle` for the file-picker
+# event API. Storage stays bevy-free; the workbench's picker fires
+# rfd dialogs on native and (eventually) File-System-Access on wasm.
+lunco-storage = { path = "../lunco-storage" }
+# Native file dialogs. The web backend will use `wasm-bindgen`
+# directly against the File-System-Access API behind a `cfg`-gated
+# branch — no separate crate needed.
+rfd = "0.15"
 # `Instant::now()` panics on wasm32-unknown-unknown. The status bus
 # stamps every event with a wall-clock instant, so we use the wasm-safe
 # replacement on every target.

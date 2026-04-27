@@ -6227,7 +6227,6 @@ dependencies = [
 name = "lunco-storage"
 version = "0.1.0"
 dependencies = [
- "bevy",
  "rfd",
  "serde",
  "thiserror 1.0.69",
@@ -6400,10 +6399,14 @@ dependencies = [
  "bevy",
  "bevy_egui",
  "egui_dock",
+ "lunco-core",
  "lunco-doc",
+ "lunco-doc-bevy",
+ "lunco-storage",
  "lunco-theme",
  "lunco-twin",
  "lunco-workspace",
+ "rfd",
  "web-time",
 ]
 

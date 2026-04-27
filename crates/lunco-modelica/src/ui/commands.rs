@@ -26,6 +26,7 @@ use lunco_doc_bevy::{
     CloseDocument, DocumentSaved, EditorIntent, RedoDocument, SaveAsDocument, SaveDocument,
     UndoDocument,
 };
+use lunco_workbench::file_ops::OpenFile;
 use std::collections::HashMap;
 
 use lunco_core::{Command, on_command, register_commands};
@@ -2934,15 +2935,13 @@ fn on_inspect_active_doc(_trigger: On<InspectActiveDoc>, mut commands: Commands)
     });
 }
 
-/// Open an arbitrary `.mo` file from disk into a new workspace
-/// tab as an Untitled document seeded from the file's contents.
-/// Used by API automation to load bundled examples or external
-/// files without a Twin folder being open.
-#[Command(default)]
-pub struct OpenFile {
-    pub path: String,
-}
-
+// `OpenFile` itself now lives in `lunco-workbench` (shell-level verb,
+// shared across all three apps). The Modelica-specific observer below
+// reads `.mo` content into the document registry; future domains add
+// their own observers and gate on file extension. The `register_commands!()`
+// list in this crate keeps `on_open_file` so the type+observer pairing
+// gets registered when `ModelicaCommandsPlugin` is added — `register_type`
+// is idempotent so the workbench's own registration of the type is fine.
 #[on_command(OpenFile)]
 fn on_open_file(trigger: On<OpenFile>, mut commands: Commands) {
     let path = trigger.event().path.clone();

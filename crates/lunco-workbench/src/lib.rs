@@ -53,6 +53,8 @@ mod perspective;
 mod session;
 mod viewport;
 
+pub mod file_ops;
+pub mod picker;
 pub mod status_bus;
 pub mod twin_browser;
 pub mod uri;
@@ -142,6 +144,20 @@ impl Plugin for WorkbenchPlugin {
         // are added separately by their owning plugins.
         if !app.is_plugin_added::<status_bus::StatusBusPlugin>() {
             app.add_plugins(status_bus::StatusBusPlugin);
+        }
+        // Native (rfd) / web (FSA, future) file-picker plumbing.
+        // Domain code fires `picker::PickHandle` and observes
+        // `picker::PickResolved` without caring which backend is live.
+        if !app.is_plugin_added::<picker::PickerPlugin>() {
+            app.add_plugins(picker::PickerPlugin);
+        }
+        // Shell-level file-workflow commands (`OpenFile`, `OpenFolder`,
+        // `OpenTwin`, `SaveAll`, `SaveAsTwin`) + the picker→command
+        // routing observer. Domain crates contribute their own
+        // observers for verbs that need domain-specific handling
+        // (e.g. modelica's `on_open_file` reads `.mo` content).
+        if !app.is_plugin_added::<file_ops::FileOpsPlugin>() {
+            app.add_plugins(file_ops::FileOpsPlugin);
         }
         app.init_resource::<WorkbenchLayout>()
             .init_resource::<PendingTabCloses>()
