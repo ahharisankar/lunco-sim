@@ -165,19 +165,16 @@ pub struct MSLComponentDef {
     pub description: Option<String>,
     /// Schematic text (e.g. "cosh").
     pub icon_text: Option<String>,
-    /// Path to SVG icon asset, relative to assets root.
-    pub icon_asset: Option<String>,
     /// Ports defined by this component.
     pub ports: Vec<PortDef>,
     /// Parameters that can be configured.
     pub parameters: Vec<ParamDef>,
-    /// Decoded `Icon(graphics={...})` annotation for the class. When
-    /// `Some`, the canvas renders these primitives via
-    /// [`crate::icon_paint::paint_graphics`] instead of falling back to
-    /// the SVG icon path. Populated by the diagram projector for
-    /// user-defined classes parsed from the open document; MSL
-    /// palette entries leave it `None` and continue to use their
-    /// pre-rasterised SVG icons.
+    /// Decoded `Icon(graphics={...})` annotation for the class,
+    /// merged across the `extends` chain. Populated for every class
+    /// (MSL palette entries via `msl_indexer`, user-defined via the
+    /// projector). `None` only for classes with literally no `Icon`
+    /// in their inheritance chain — the canvas then falls back to a
+    /// type-label box.
     #[serde(default)]
     pub icon_graphics: Option<crate::annotations::Icon>,
     /// `expandable connector` class type (MLS §9.1.3). Rendered with

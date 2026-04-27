@@ -913,7 +913,6 @@ fn register_local_class(
             display_name: short_name.to_string(),
             description: None,
             icon_text: None,
-            icon_asset: None,
             ports,
             parameters: Vec::new(),
             icon_graphics: icon,

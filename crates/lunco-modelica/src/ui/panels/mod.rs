@@ -6,7 +6,6 @@ pub mod telemetry;
 pub mod graphs;
 pub mod canvas_projection;
 pub mod canvas_diagram;
-pub mod svg_renderer;
 pub mod console;
 pub mod diagnostics;
 pub mod log;

@@ -21,9 +21,33 @@
 use bevy_egui::egui;
 
 use crate::annotations::{
-    Arrow, Bitmap, Color, CoordinateSystem, Ellipse, Extent, FillPattern, GraphicItem,
-    Line, LinePattern, Point, Polygon, Rectangle, Text,
+    Arrow, Bitmap, Color, CoordinateSystem, Ellipse, EllipseClosure, Extent, FillPattern,
+    GraphicItem, Line, LinePattern, Point, Polygon, Rectangle, Text,
 };
+
+/// Resolve a `FillPattern` + `fillColor` into the colour used for the
+/// fill polygon. Modelica defines several variants (Solid, gradients
+/// like HorizontalCylinder/VerticalCylinder/Sphere, hatching like
+/// Horizontal/Vertical/Cross/Forward/Backward/CrossDiag); only `None`
+/// means "no fill". Treating anything else as transparent (previous
+/// behaviour) hid most MSL Mechanical/Electrical icons because they
+/// author shafts and discs as `fillPattern=HorizontalCylinder` —
+/// invisible at runtime.
+///
+/// For now we collapse all gradient/hatch variants to flat-colour
+/// fill. The visual difference from a true cylinder gradient is
+/// minor at typical icon sizes; rendering nothing is much worse.
+/// Future polish: emit `egui::Mesh` with per-vertex colour
+/// interpolation for cylinder/sphere patterns.
+fn effective_fill_color(
+    pattern: FillPattern,
+    color: Option<Color>,
+) -> egui::Color32 {
+    match pattern {
+        FillPattern::None => egui::Color32::TRANSPARENT,
+        _ => color_or_default(color, egui::Color32::TRANSPARENT),
+    }
+}
 
 /// Paint the full graphics list into `screen_rect`.
 ///
@@ -141,15 +165,63 @@ pub struct TextSubstitution<'a> {
 }
 
 impl<'a> TextSubstitution<'a> {
-    /// Apply the substitutions to `s`, returning an owned `String` when
-    /// any replacement happened and a borrowed-equivalent otherwise.
+    /// Apply the substitutions to `s`. Modelica's substitution syntax
+    /// is `%name`, `%class`, `%<paramName>`, and `%%` (literal `%`).
+    /// We resolve `%name` and `%class` from the fields above; any
+    /// other `%<ident>` is stripped (replaced with empty) so MSL
+    /// icons don't display their literal placeholder text (`%R`,
+    /// `%controllerType`, …) when the parameter resolver isn't wired.
+    /// Plumbing parameter values through `paint_graphics` is a
+    /// follow-up — until then "show nothing" beats "show
+    /// `%controllerType` as a label".
     fn apply(&self, s: &str) -> String {
-        let mut out = s.to_string();
-        if let Some(n) = self.name {
-            out = out.replace("%name", n);
-        }
-        if let Some(c) = self.class_name {
-            out = out.replace("%class", c);
+        // Walk the string, eat any `%ident`, look up known names.
+        // Cheap manual scan — avoids a regex dep for one production
+        // site. Treats `%%` as literal `%` per MLS Annex D.
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '%' {
+                out.push(c);
+                continue;
+            }
+            if let Some(&'%') = chars.peek() {
+                chars.next();
+                out.push('%');
+                continue;
+            }
+            // Collect an identifier following the `%`. Modelica
+            // identifiers are letter/`_` start, alnum/`_` continue.
+            let mut ident = String::new();
+            while let Some(&nc) = chars.peek() {
+                if nc.is_alphanumeric() || nc == '_' {
+                    ident.push(nc);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if ident.is_empty() {
+                // Lone `%` followed by punctuation — keep the `%`.
+                out.push('%');
+                continue;
+            }
+            match ident.as_str() {
+                "name" => {
+                    if let Some(n) = self.name {
+                        out.push_str(n);
+                    }
+                }
+                "class" => {
+                    if let Some(c) = self.class_name {
+                        out.push_str(c);
+                    }
+                }
+                // Unknown `%<ident>`: drop. The literal placeholder
+                // is misleading; an empty slot reads cleanly until
+                // we wire the parameter resolver.
+                _ => {}
+            }
         }
         out
     }
@@ -309,20 +381,17 @@ fn paint_rectangle(
         .map(|p| xf.to_screen_rotated(*p, r.origin, r.rotation))
         .collect();
 
-    // Fast path: axis-aligned, no rotation, fill pattern is solid →
-    // use the rounded-rect helper so corner radius works.
-    if r.rotation == 0.0
-        && r.radius > 0.0
-        && matches!(r.shape.fill_pattern, FillPattern::Solid | FillPattern::None)
-    {
+    // Fast path: axis-aligned, no rotation, has rounded corners →
+    // use the rounded-rect helper so corner radius works. Any
+    // non-`None` fill pattern collapses to a flat colour via
+    // `effective_fill_color`; the rounded helper doesn't paint
+    // gradients, but since we don't synthesise them anywhere yet
+    // that's fine.
+    if r.rotation == 0.0 && r.radius > 0.0 {
         let min = pts[0].min(pts[2]);
         let max = pts[0].max(pts[2]);
         let rect = egui::Rect::from_min_max(min, max);
-        let fill = if matches!(r.shape.fill_pattern, FillPattern::Solid) {
-            color_or_default(r.shape.fill_color, egui::Color32::TRANSPARENT)
-        } else {
-            egui::Color32::TRANSPARENT
-        };
+        let fill = effective_fill_color(r.shape.fill_pattern, r.shape.fill_color);
         let radius_px = (r.radius as f32 * xf.scale).max(0.0);
         painter.rect_filled(rect, radius_px, fill);
         let stroke = stroke_for(r.shape.line_color, r.shape.line_pattern, r.shape.line_thickness, xf.scale);
@@ -332,12 +401,9 @@ fn paint_rectangle(
         return;
     }
 
-    // General path: rotated / patterned → polygon.
-    let fill = if matches!(r.shape.fill_pattern, FillPattern::Solid) {
-        color_or_default(r.shape.fill_color, egui::Color32::TRANSPARENT)
-    } else {
-        egui::Color32::TRANSPARENT
-    };
+    // General path: rotated → polygon. `effective_fill_color`
+    // collapses gradient/hatch variants to flat colour.
+    let fill = effective_fill_color(r.shape.fill_pattern, r.shape.fill_color);
     let stroke = stroke_for(
         r.shape.line_color,
         r.shape.line_pattern,
@@ -356,23 +422,106 @@ fn paint_polygon(painter: &egui::Painter, xf: &CoordXform, p: &Polygon) {
         .iter()
         .map(|pt| xf.to_screen_rotated(*pt, p.origin, p.rotation))
         .collect();
-    let fill = if matches!(p.shape.fill_pattern, FillPattern::Solid) {
-        color_or_default(p.shape.fill_color, egui::Color32::TRANSPARENT)
-    } else {
-        egui::Color32::TRANSPARENT
-    };
     let stroke = stroke_for(
         p.shape.line_color,
         p.shape.line_pattern,
         p.shape.line_thickness,
         xf.scale,
     );
-    // `convex_polygon` is fine for the slice-1 menagerie (rect bells,
-    // tank domes, gimbal tile) — concave polygons would render their
-    // fill incorrectly, but stroke is always right. A future slice can
-    // tessellate via `egui::epaint::Shape::Path` with a `PathShape`
-    // when a real concave case appears.
-    painter.add(egui::Shape::convex_polygon(pts, fill, stroke));
+
+    // Fill: tessellate with lyon using EvenOdd winding so concave and
+    // self-intersecting polygons (bowties, X-shapes, sensor markers)
+    // render correctly — same rule Qt's `QPainterPath` uses by
+    // default, which is what OMEdit/Dymola rely on. egui's built-in
+    // `Shape::convex_polygon` fans from vertex 0 and gets the wrong
+    // halves filled on anything non-convex.
+    let fill_color = effective_fill_color(p.shape.fill_pattern, p.shape.fill_color);
+    if fill_color != egui::Color32::TRANSPARENT {
+        if let Some(mesh) = tessellate_polygon_evenodd(&pts, fill_color) {
+            painter.add(egui::Shape::mesh(mesh));
+        }
+    }
+
+    // Stroke: trace the authored path verbatim — for self-intersecting
+    // polygons this draws the visible "X" of the crossing, even though
+    // the X-quadrants aren't filled. Matches OMEdit's stroke behaviour.
+    if stroke.width > 0.0 {
+        let mut closed = pts.clone();
+        if closed.first() != closed.last() {
+            closed.push(closed[0]);
+        }
+        painter.add(egui::Shape::line(closed, stroke));
+    }
+}
+
+/// Triangulate a (possibly concave / self-intersecting) polygon using
+/// the EvenOdd fill rule, returning an `egui::Mesh` ready to draw.
+/// Returns `None` for degenerate inputs (fewer than 3 unique points
+/// or tessellator failure — both render as "no fill").
+fn tessellate_polygon_evenodd(
+    pts: &[egui::Pos2],
+    color: egui::Color32,
+) -> Option<egui::Mesh> {
+    use lyon_path::Path;
+    use lyon_tessellation::geometry_builder::BuffersBuilder;
+    use lyon_tessellation::{
+        FillOptions, FillRule, FillTessellator, FillVertex, VertexBuffers,
+    };
+
+    if pts.len() < 3 {
+        return None;
+    }
+
+    // Strip any explicit closing-vertex duplicate — lyon closes the
+    // path itself via `end(true)` and a duplicated point creates a
+    // zero-length edge that some configurations treat as a degenerate
+    // self-intersection.
+    let trimmed: &[egui::Pos2] = if pts.len() >= 2 && pts.first() == pts.last() {
+        &pts[..pts.len() - 1]
+    } else {
+        pts
+    };
+    if trimmed.len() < 3 {
+        return None;
+    }
+
+    let mut builder = Path::builder();
+    builder.begin(lyon_geom::point(trimmed[0].x, trimmed[0].y));
+    for p in &trimmed[1..] {
+        builder.line_to(lyon_geom::point(p.x, p.y));
+    }
+    builder.end(true);
+    let path = builder.build();
+
+    let mut buffers: VertexBuffers<lyon_geom::Point<f32>, u32> = VertexBuffers::new();
+    let mut tessellator = FillTessellator::new();
+    let mut buffer_builder = BuffersBuilder::new(&mut buffers, |v: FillVertex| v.position());
+    let opts = FillOptions::default()
+        .with_fill_rule(FillRule::EvenOdd)
+        .with_tolerance(0.5);
+    if tessellator
+        .tessellate_path(&path, &opts, &mut buffer_builder)
+        .is_err()
+    {
+        return None;
+    }
+
+    if buffers.vertices.is_empty() || buffers.indices.is_empty() {
+        return None;
+    }
+
+    let mut mesh = egui::Mesh::default();
+    mesh.vertices = buffers
+        .vertices
+        .iter()
+        .map(|v| egui::epaint::Vertex {
+            pos: egui::pos2(v.x, v.y),
+            uv: egui::epaint::WHITE_UV,
+            color,
+        })
+        .collect();
+    mesh.indices = buffers.indices.clone();
+    Some(mesh)
 }
 
 fn paint_line(painter: &egui::Painter, xf: &CoordXform, l: &Line) {
@@ -526,14 +675,16 @@ fn paint_text(
     );
 }
 
-/// Paint an Ellipse fitted to `e.extent`. Arc bounds (`start_angle`,
-/// `end_angle`, `closure`) are parsed but currently ignored — the
-/// renderer draws the full ellipse. Arcs are a follow-up.
+/// Paint an Ellipse fitted to `e.extent`. Honours partial-arc
+/// `startAngle` / `endAngle` (degrees, MLS convention: 0° = +x,
+/// CCW), and `closure`:
+/// - `None`  → open arc, stroke only, no fill
+/// - `Chord` → close end→start with a chord, fill the bow region
+/// - `Radial`→ close with two radii, fill the pie slice
 ///
-/// The ellipse is built as a 64-vertex polygon in icon-local space so
-/// it inherits both the primitive's rotation and the instance-level
-/// orientation (mirror + rotate) through `to_screen_rotated`. A native
-/// `circle_filled` call would skip rotation.
+/// The arc is built as a polyline in icon-local space so it inherits
+/// both the primitive's own rotation and the instance-level
+/// orientation (mirror + rotate) through `to_screen_rotated`.
 fn paint_ellipse(painter: &egui::Painter, xf: &CoordXform, e: &Ellipse) {
     const SEGMENTS: usize = 64;
     let Extent { p1, p2 } = e.extent;
@@ -544,40 +695,120 @@ fn paint_ellipse(painter: &egui::Painter, xf: &CoordXform, e: &Ellipse) {
     if rx <= 0.0 || ry <= 0.0 {
         return;
     }
-    let pts: Vec<egui::Pos2> = (0..SEGMENTS)
-        .map(|i| {
-            let theta = (i as f64) * (std::f64::consts::TAU / SEGMENTS as f64);
-            let x = cx + rx * theta.cos();
-            let y = cy + ry * theta.sin();
-            xf.to_screen_rotated(Point { x, y }, e.origin, e.rotation)
-        })
-        .collect();
-    let fill = if matches!(e.shape.fill_pattern, FillPattern::Solid) {
-        color_or_default(e.shape.fill_color, egui::Color32::TRANSPARENT)
+
+    let start_rad = (e.start_angle as f64).to_radians();
+    let end_rad = (e.end_angle as f64).to_radians();
+    let span_deg = (e.end_angle - e.start_angle).abs();
+    let is_full = span_deg >= 359.999 || span_deg <= 0.001;
+
+    // Sample density proportional to the arc fraction so a thin arc
+    // doesn't get over-tessellated and a full circle keeps its 64
+    // segments. Minimum 8 keeps small arcs smooth.
+    let arc_fraction = if is_full {
+        1.0
     } else {
-        egui::Color32::TRANSPARENT
+        ((end_rad - start_rad).abs() / std::f64::consts::TAU).min(1.0)
     };
+    let steps = ((SEGMENTS as f64) * arc_fraction).ceil() as usize;
+    let steps = steps.max(8);
+
+    let pts: Vec<egui::Pos2> = if is_full {
+        (0..SEGMENTS)
+            .map(|i| {
+                let theta = (i as f64) * (std::f64::consts::TAU / SEGMENTS as f64);
+                let x = cx + rx * theta.cos();
+                let y = cy + ry * theta.sin();
+                xf.to_screen_rotated(Point { x, y }, e.origin, e.rotation)
+            })
+            .collect()
+    } else {
+        (0..=steps)
+            .map(|i| {
+                let t = (i as f64) / (steps as f64);
+                let theta = start_rad + (end_rad - start_rad) * t;
+                let x = cx + rx * theta.cos();
+                let y = cy + ry * theta.sin();
+                xf.to_screen_rotated(Point { x, y }, e.origin, e.rotation)
+            })
+            .collect()
+    };
+
+    let fill = effective_fill_color(e.shape.fill_pattern, e.shape.fill_color);
     let stroke = stroke_for(
         e.shape.line_color,
         e.shape.line_pattern,
         e.shape.line_thickness,
         xf.scale,
     );
-    // Fill via a 64-vertex "convex" polygon — true for axis-aligned
-    // ellipses and for any ellipse under rigid rotation, which covers
-    // every MSL / user case. Stroke is closed-path so the ring is
-    // visible even when the primitive is unfilled.
-    painter.add(egui::Shape::convex_polygon(
-        pts.clone(),
-        fill,
-        egui::Stroke::NONE,
-    ));
-    if stroke.width > 0.0 {
-        let mut ring = pts;
-        if let Some(first) = ring.first().copied() {
-            ring.push(first);
+
+    if is_full {
+        // Full ellipse: fill as a convex 64-vertex polygon, stroke as
+        // a closed ring.
+        if fill != egui::Color32::TRANSPARENT {
+            painter.add(egui::Shape::convex_polygon(
+                pts.clone(),
+                fill,
+                egui::Stroke::NONE,
+            ));
         }
-        painter.add(egui::Shape::line(ring, stroke));
+        if stroke.width > 0.0 {
+            let mut ring = pts;
+            if let Some(first) = ring.first().copied() {
+                ring.push(first);
+            }
+            painter.add(egui::Shape::line(ring, stroke));
+        }
+        return;
+    }
+
+    // Partial arc — closure rule decides shape.
+    match e.closure {
+        EllipseClosure::None => {
+            // Stroke-only open polyline. No fill (an open path
+            // doesn't enclose a region — Modelica spec is clear
+            // that `closure=None` means "don't close").
+            if stroke.width > 0.0 {
+                painter.add(egui::Shape::line(pts, stroke));
+            }
+        }
+        EllipseClosure::Chord => {
+            // Close end→start with a chord. Fill the enclosed bow.
+            if fill != egui::Color32::TRANSPARENT {
+                if let Some(mesh) = tessellate_polygon_evenodd(&pts, fill) {
+                    painter.add(egui::Shape::mesh(mesh));
+                }
+            }
+            if stroke.width > 0.0 {
+                let mut ring = pts;
+                if let Some(first) = ring.first().copied() {
+                    ring.push(first);
+                }
+                painter.add(egui::Shape::line(ring, stroke));
+            }
+        }
+        EllipseClosure::Radial => {
+            // Pie slice — close with two radii to the centre.
+            let centre = xf.to_screen_rotated(
+                Point { x: cx, y: cy },
+                e.origin,
+                e.rotation,
+            );
+            let mut pie = Vec::with_capacity(pts.len() + 1);
+            pie.extend_from_slice(&pts);
+            pie.push(centre);
+            if fill != egui::Color32::TRANSPARENT {
+                if let Some(mesh) = tessellate_polygon_evenodd(&pie, fill) {
+                    painter.add(egui::Shape::mesh(mesh));
+                }
+            }
+            if stroke.width > 0.0 {
+                let mut ring = pie;
+                if let Some(first) = ring.first().copied() {
+                    ring.push(first);
+                }
+                painter.add(egui::Shape::line(ring, stroke));
+            }
+        }
     }
 }
 

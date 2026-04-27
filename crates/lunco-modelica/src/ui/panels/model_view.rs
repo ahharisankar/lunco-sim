@@ -1365,22 +1365,6 @@ fn render_icon_view(ui: &mut egui::Ui, world: &mut World) {
         )
     };
 
-    // Look up MSL entry. Qualified match first (exact), then any
-    // entry whose msl_path ends in `.<short>` for best-effort
-    // resolution of local models that reference an MSL class.
-    let icon_asset = {
-        let lib = crate::visual_diagram::msl_component_library();
-        lib.iter()
-            .find(|c| c.msl_path == qualified)
-            .or_else(|| {
-                // Try short-name tail match.
-                let short = qualified.rsplit('.').next().unwrap_or(&qualified);
-                lib.iter()
-                    .find(|c| c.msl_path.rsplit('.').next() == Some(short))
-            })
-            .and_then(|c| c.icon_asset.clone())
-    };
-
     let painter = ui.painter();
     let rect = ui.available_rect_before_wrap();
 
@@ -1400,10 +1384,9 @@ fn render_icon_view(ui: &mut egui::Ui, world: &mut World) {
         egui::StrokeKind::Outside,
     );
 
-    // Priority 1: authored `Icon(graphics={...})` from the class's
-    // own AST. This is what user-defined classes with inline
-    // annotations (or any MSL class whose rasterised SVG isn't in
-    // the asset bundle) rely on.
+    // Decoded `Icon(graphics={...})` from the class's own AST,
+    // merged across the `extends` chain. The single source of truth
+    // for the Icon view since the SVG fallback was retired.
     let authored_icon = {
         let registry = world.resource::<ModelicaDocumentRegistry>();
         let ast = world
@@ -1506,32 +1489,6 @@ fn render_icon_view(ui: &mut egui::Ui, world: &mut World) {
         return;
     }
 
-    // Priority 2: pre-rasterised SVG from the MSL asset bundle.
-    if let Some(path) = icon_asset {
-        if let Some(bytes) = svg_bytes_for_icon(&path) {
-            // Render into a centred square that's at most ~60 % of
-            // the smaller rect dimension — leaves breathing room
-            // and matches Dymola's Icon tab sizing.
-            let side = (rect.width().min(rect.height()) * 0.6).max(100.0);
-            let icon_rect = egui::Rect::from_center_size(
-                rect.center(),
-                egui::vec2(side, side),
-            );
-            crate::ui::panels::svg_renderer::draw_svg_to_egui(
-                painter, icon_rect, &bytes,
-            );
-            // Class name under the icon.
-            painter.text(
-                egui::pos2(icon_rect.center().x, icon_rect.max.y + 16.0),
-                egui::Align2::CENTER_TOP,
-                &qualified,
-                egui::FontId::proportional(13.0),
-                theme.tokens.text,
-            );
-            return;
-        }
-    }
-
     // Fallback placeholder — the class has no known icon. Same
     // centered-card pattern the empty-diagram overlay uses.
     use crate::ui::theme::ModelicaThemeExt;
@@ -1567,22 +1524,3 @@ fn render_icon_view(ui: &mut egui::Ui, world: &mut World) {
     );
 }
 
-/// SVG byte cache shared with the canvas panel — same lookup path
-/// as `canvas_diagram::svg_bytes_for`. Duplicated here rather than
-/// exposed as `pub` because the panel module graph is a flat
-/// `src/ui/panels/` listing and I'd prefer not to expose a cache
-/// function just for this.
-fn svg_bytes_for_icon(asset_path: &str) -> Option<std::sync::Arc<Vec<u8>>> {
-    use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<String, Option<std::sync::Arc<Vec<u8>>>>>> =
-        OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut map = cache.lock().expect("svg icon cache poisoned");
-    if let Some(cached) = map.get(asset_path) {
-        return cached.clone();
-    }
-    let full = lunco_assets::msl_dir().join(asset_path);
-    let loaded = std::fs::read(&full).ok().map(std::sync::Arc::new);
-    map.insert(asset_path.to_string(), loaded.clone());
-    loaded
-}

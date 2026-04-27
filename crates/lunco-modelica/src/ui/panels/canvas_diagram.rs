@@ -58,101 +58,6 @@ pub const CANVAS_DIAGRAM_PANEL_ID: PanelId = PanelId("modelica_canvas_diagram");
 
 // ─── Visuals ────────────────────────────────────────────────────────
 
-/// Process-wide cache of SVG icon bytes keyed by relative asset
-/// path. Loaded lazily on first request for a path; later requests
-/// return the shared buffer. Entries live forever — icon asset
-/// files don't change at runtime, and the total size is small.
-fn svg_bytes_cache() -> &'static std::sync::Mutex<
-    std::collections::HashMap<String, Option<std::sync::Arc<Vec<u8>>>>,
-> {
-    use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, Option<std::sync::Arc<Vec<u8>>>>>> =
-        OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-}
-
-fn svg_bytes_for(asset_path: &str) -> Option<std::sync::Arc<Vec<u8>>> {
-    let cache = svg_bytes_cache();
-    let mut map = cache.lock().expect("svg cache poisoned");
-    if let Some(cached) = map.get(asset_path) {
-        return cached.clone();
-    }
-    // SVG assets ship inside the MSL cache dir (see snarl panel's
-    // `draw_symbol_v2` for the reference resolution). Icon paths
-    // come from `msl_index.json` and are relative to that dir.
-    //
-    // This is the on-demand fallback: a sync `std::fs::read` on the
-    // main render thread. Cold-cache icons cost 5-50ms each here,
-    // which adds up on first paint of an MSL component the user
-    // just optimistically synthesised. The pre-warm path below
-    // populates this same cache off-thread at app startup so the
-    // sync read never fires for MSL palette icons.
-    let full = lunco_assets::msl_dir().join(asset_path);
-    let loaded = std::fs::read(&full).ok().map(std::sync::Arc::new);
-    map.insert(asset_path.to_string(), loaded.clone());
-    loaded
-}
-
-/// Pre-populate the SVG-bytes cache off-thread for every supplied
-/// asset path. Called once at app startup with the full MSL palette
-/// so the canvas's render-time `svg_bytes_for` lookup hits the cache
-/// instead of doing a sync `std::fs::read` for each new icon.
-///
-/// Spawned on `IoTaskPool` so the read storm runs on the I/O pool
-/// rather than the compute pool — file reads are I/O-bound and
-/// shouldn't compete with the off-thread AST parse for compute
-/// threads.
-pub fn prewarm_svg_bytes(asset_paths: Vec<String>) {
-    bevy::tasks::IoTaskPool::get()
-        .spawn(async move {
-            let t0 = web_time::Instant::now();
-            let mut loaded = 0usize;
-            let mut failed = 0usize;
-            let mut total_bytes = 0usize;
-            let cache = svg_bytes_cache();
-            for asset in asset_paths.iter() {
-                // Skip anything already cached (don't re-read on
-                // subsequent prewarm calls).
-                if cache.lock().ok()
-                    .and_then(|m| m.get(asset).map(|_| ()))
-                    .is_some()
-                {
-                    continue;
-                }
-                let full = lunco_assets::msl_dir().join(asset);
-                match std::fs::read(&full) {
-                    Ok(bytes) => {
-                        total_bytes += bytes.len();
-                        loaded += 1;
-                        let arc = std::sync::Arc::new(bytes);
-                        if let Ok(mut map) = cache.lock() {
-                            map.insert(asset.clone(), Some(arc.clone()));
-                        }
-                        // Pre-parse the usvg Tree so the first paint
-                        // doesn't pay the XML+path parse cost.
-                        // Without this, even with bytes cached, the
-                        // first canvas frame after Add still hit
-                        // 50-500ms decoding new icons. Same Arc data
-                        // pointer → cache hit at render time.
-                        super::svg_renderer::prewarm_parse(&arc);
-                    }
-                    Err(_) => {
-                        failed += 1;
-                        if let Ok(mut map) = cache.lock() {
-                            map.insert(asset.clone(), None);
-                        }
-                    }
-                }
-            }
-            bevy::log::info!(
-                "[svg_bytes] prewarm: {loaded} loaded ({} KB) + parsed, {failed} failed, in {:.1}s",
-                total_bytes / 1024,
-                t0.elapsed().as_secs_f64(),
-            );
-        })
-        .detach();
-}
-
 /// Theme-derived colour snapshot consumed by every layer inside the
 /// canvas this frame. Stashed in the egui context's data cache (by
 /// type) at the entry of [`CanvasDiagramPanel::render`] so the
@@ -260,23 +165,20 @@ fn store_canvas_theme(ctx: &egui::Context, snap: CanvasThemeSnapshot) {
 
 /// Per-component icon visual. Renders, in priority order:
 ///
-/// 1. The class's decoded `Icon(graphics={...})` annotation, if the
-///    projector extracted one (user-defined classes from the open
-///    document). Painted via [`crate::icon_paint::paint_graphics`].
-/// 2. The pre-rasterised SVG icon if `icon_asset` resolved (MSL
-///    components that ship with the palette).
-/// 3. A stylised rounded-rectangle fallback with the type label.
+/// 1. The class's decoded `Icon(graphics={...})` annotation merged
+///    across the `extends` chain — the only icon source. Painted via
+///    [`crate::icon_paint::paint_graphics`] with lyon-tessellated
+///    fills (EvenOdd, matching OMEdit/Dymola).
+/// 2. A stylised rounded-rectangle fallback with the type label, used
+///    only when the class has no `Icon` annotation anywhere in its
+///    inheritance chain.
 ///
 /// Ports render as filled dots on the icon boundary in all cases.
 #[derive(Default)]
 struct IconNodeVisual {
     /// Type name ("Resistor", "Capacitor"…) shown under the instance
-    /// label when no SVG is available.
+    /// label when the class has no Icon at all.
     type_label: String,
-    /// Relative asset path of the icon SVG, or empty when the
-    /// component has no icon. Looked up in the shared cache each
-    /// draw.
-    icon_asset: String,
     /// Pure-icon class (zero connectors, `.Icons.*` subpackage).
     /// Rendered with a dashed border so users can tell at a glance
     /// the component is decorative. Set by the projector via the
@@ -345,7 +247,7 @@ impl NodeVisual for IconNodeVisual {
             mirror_x: self.mirror_x,
             mirror_y: self.mirror_y,
         };
-        let mut drew_svg = false;
+        let mut drew_icon = false;
         if let Some(icon) = &self.icon_graphics {
             let sub = crate::icon_paint::TextSubstitution {
                 name: (!self.instance_name.is_empty()).then_some(self.instance_name.as_str()),
@@ -382,29 +284,14 @@ impl NodeVisual for IconNodeVisual {
                 Some(resolver_ref),
                 &icon.graphics,
             );
-            drew_svg = true;
-        }
-        if !drew_svg && !self.icon_asset.is_empty() {
-            if let Some(bytes) = svg_bytes_for(&self.icon_asset) {
-                let svg_orient = super::svg_renderer::SvgOrientation {
-                    rotation_deg: self.rotation_deg,
-                    mirror_x: self.mirror_x,
-                    mirror_y: self.mirror_y,
-                };
-                super::svg_renderer::draw_svg_to_egui_oriented(
-                    painter,
-                    rect,
-                    &bytes,
-                    svg_orient,
-                );
-                drew_svg = true;
-            }
+            drew_icon = true;
         }
 
-        if !drew_svg {
-            // SVG missing / failed to load: the card is already
-            // painted; just add a type label so the user still sees
-            // something meaningful instead of a blank box.
+        if !drew_icon {
+            // No `Icon` annotation in the class or its extends chain.
+            // Card is already painted; just add a type label so the
+            // user still sees something meaningful instead of a blank
+            // box.
             if !self.type_label.is_empty() && rect.height() > 30.0 {
                 painter.text(
                     egui::pos2(rect.center().x, rect.center().y),
@@ -1685,11 +1572,6 @@ fn build_registry() -> VisualRegistry {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let type_label = qualified.rsplit('.').next().unwrap_or(qualified).to_string();
-        let icon_asset = data
-            .get("icon_asset")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
         let icon_only = data
             .get("icon_only")
             .and_then(|v| v.as_bool())
@@ -1698,8 +1580,10 @@ fn build_registry() -> VisualRegistry {
             .get("expandable_connector")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        // `icon_graphics` is the decoded Icon annotation. Missing /
-        // null on MSL components — they keep using the SVG path.
+        // `icon_graphics` is the decoded Icon annotation, merged
+        // across the `extends` chain by `extract_icon_inherited` at
+        // index time. Missing only when the class has no Icon
+        // anywhere in inheritance — falls back to the type-label box.
         let icon_graphics = data
             .get("icon_graphics")
             .and_then(|v| {
@@ -1730,7 +1614,6 @@ fn build_registry() -> VisualRegistry {
         IconNodeVisual {
             type_label: type_label.clone(),
             class_name: type_label,
-            icon_asset,
             icon_only,
             expandable_connector,
             icon_graphics,
@@ -2103,7 +1986,6 @@ fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramNodeId, Canv
                 // drill-in (which needs the path) and the type
                 // hint shown under the label.
                 "type": node.component_def.msl_path,
-                "icon_asset": node.component_def.icon_asset.clone().unwrap_or_default(),
                 // Flag pure-icon classes so the renderer can draw
                 // them with a dashed border — users see at a
                 // glance that these are decorative and have no
@@ -2912,6 +2794,15 @@ impl Panel for CanvasDiagramPanel {
             let (source, ast_arc) = {
                 let registry = world.resource::<ModelicaDocumentRegistry>();
                 let Some(host) = registry.host(doc_id) else {
+                    // Doc reserved but not yet installed (duplicate /
+                    // drill-in still parsing). Skip projection but
+                    // STILL paint the canvas so the loading overlay
+                    // shows. The earlier early-returns at the top of
+                    // Panel::render are careful to do this; this one
+                    // forgot — without the call below the entire
+                    // bg-parse window paints nothing.
+                    drop(registry);
+                    self.render_canvas(ui, world);
                     return;
                 };
                 let doc = host.document();
@@ -3591,6 +3482,159 @@ impl CanvasDiagramPanel {
         };
         mark("canvas.ui (scene render)", &mut phase_t, &mut phase_log);
 
+        // ── Palette drag-and-drop drop handler ──
+        //
+        // Source side (palette row) sets a `ComponentDragPayload` on
+        // drag-start. Here we (a) draw a ghost preview at the cursor
+        // while the payload is live and the cursor is over our canvas
+        // rect, and (b) on pointer release commit the drop: if over
+        // the canvas, fire `AddModelicaComponent` at cursor coords
+        // (Modelica convention, +Y up); if not over the canvas, just
+        // clear the payload so a missed drop doesn't leave stale
+        // state. Read-only tabs ignore the drop entirely (consistent
+        // with the right-click-menu gating).
+        let drag_payload_def = world
+            .get_resource::<crate::ui::panels::palette::ComponentDragPayload>()
+            .and_then(|p| p.def.clone());
+        if let Some(def) = drag_payload_def {
+            let hover_pos = response.hover_pos();
+            // Ghost preview: a translucent rectangle at the cursor,
+            // sized to match the default 20-unit Modelica icon as
+            // rendered by the current viewport zoom. Falls back to
+            // a fixed pixel size if zoom is unreadable.
+            if let Some(p) = hover_pos {
+                let painter = ui.painter_at(response.rect);
+                // Translate ICON_W/H (modelica units) to screen px
+                // via the canvas viewport zoom for size accuracy.
+                let zoom = world
+                    .resource::<CanvasDiagramState>()
+                    .get(active_doc)
+                    .canvas
+                    .viewport
+                    .zoom;
+                let half = (ICON_W * zoom * 0.5).max(12.0);
+                let ghost_rect = egui::Rect::from_center_size(
+                    p,
+                    egui::vec2(half * 2.0, half * 2.0),
+                );
+                let accent = egui::Color32::from_rgb(120, 180, 255);
+                painter.rect_filled(
+                    ghost_rect,
+                    4.0,
+                    egui::Color32::from_rgba_unmultiplied(120, 180, 255, 50),
+                );
+                painter.rect_stroke(
+                    ghost_rect,
+                    4.0,
+                    egui::Stroke::new(1.5, accent),
+                    egui::StrokeKind::Outside,
+                );
+                painter.text(
+                    egui::pos2(ghost_rect.center().x, ghost_rect.max.y + 4.0),
+                    egui::Align2::CENTER_TOP,
+                    &def.display_name,
+                    egui::FontId::proportional(11.0),
+                    accent,
+                );
+                ui.ctx().request_repaint();
+            }
+
+            // Commit on pointer release. Global input — fires whether
+            // the release happened over us or elsewhere; we discriminate
+            // by `hover_pos` being set + within our rect.
+            let released = ui.input(|i| i.pointer.any_released());
+            if released {
+                let drop_target = hover_pos.filter(|p| response.rect.contains(*p));
+                if let (Some(p), Some(doc_id)) = (drop_target, active_doc) {
+                    if !tab_read_only {
+                        // Match the right-click "Add component" path
+                        // exactly: optimistic `synthesize_msl_node` for
+                        // instant visual response + `apply_ops_public`
+                        // to rewrite the source and bump
+                        // `canvas_acked_gen` so the eventual reproject
+                        // is suppressed (which is why the existing
+                        // scene survives — the API-observer path went
+                        // through `AddModelicaComponent`, which had no
+                        // such ack, so the canvas kept clearing itself
+                        // and stalled on the 2.5 s reparse debounce).
+                        let screen_rect_drop = lunco_canvas::Rect::from_min_max(
+                            lunco_canvas::Pos::new(response.rect.min.x, response.rect.min.y),
+                            lunco_canvas::Pos::new(response.rect.max.x, response.rect.max.y),
+                        );
+                        let click_world = world
+                            .resource::<CanvasDiagramState>()
+                            .get(active_doc)
+                            .canvas
+                            .viewport
+                            .screen_to_world(
+                                lunco_canvas::Pos::new(p.x, p.y),
+                                screen_rect_drop,
+                            );
+                        // Resolve target class — drilled-in if present,
+                        // else extracted from the doc's first non-package
+                        // class. Same fallback the palette click uses.
+                        let class = editing_class.clone().unwrap_or_else(|| {
+                            world
+                                .get_resource::<DrilledInClassNames>()
+                                .and_then(|m| m.get(doc_id).map(str::to_string))
+                                .or_else(|| {
+                                    let registry =
+                                        world.resource::<crate::ui::state::ModelicaDocumentRegistry>();
+                                    let host = registry.host(doc_id)?;
+                                    let ast = host.document().ast().result.as_ref().ok().cloned()?;
+                                    crate::ast_extract::extract_model_name_from_ast(&ast)
+                                })
+                                .unwrap_or_default()
+                        });
+                        if class.is_empty() {
+                            bevy::log::info!(
+                                "[CanvasDiagram] drop of `{}` ignored — no editable class",
+                                def.msl_path
+                            );
+                        } else {
+                            let instance_name = {
+                                let state = world.resource::<CanvasDiagramState>();
+                                pick_add_instance_name(&def, &state.get(Some(doc_id)).canvas.scene)
+                            };
+                            // 1. Optimistic synth — node appears immediately.
+                            {
+                                let mut state =
+                                    world.resource_mut::<CanvasDiagramState>();
+                                let docstate = state.get_mut(Some(doc_id));
+                                synthesize_msl_node(
+                                    &mut docstate.canvas.scene,
+                                    &def,
+                                    &instance_name,
+                                    click_world,
+                                );
+                            }
+                            // 2. Source rewrite + canvas_acked_gen bump
+                            //    (suppresses the redundant reproject).
+                            let op = op_add_component_with_name(
+                                &def,
+                                &instance_name,
+                                click_world,
+                                &class,
+                            );
+                            apply_ops_public(world, doc_id, vec![op]);
+                            ui.ctx().request_repaint();
+                        }
+                    } else {
+                        bevy::log::info!(
+                            "[CanvasDiagram] drop of `{}` ignored — tab is read-only",
+                            def.msl_path
+                        );
+                    }
+                }
+                // Always clear the payload on release, hit or miss.
+                if let Some(mut payload) = world
+                    .get_resource_mut::<crate::ui::panels::palette::ComponentDragPayload>()
+                {
+                    payload.def = None;
+                }
+            }
+        }
+
         // Drain in-canvas input control writes from the per-frame
         // queue and apply them to the matching `ModelicaModel.inputs`.
         // The worker forwards the change to `SimStepper::set_input`
@@ -3658,6 +3702,31 @@ impl CanvasDiagramPanel {
                     .map(|(q, secs)| (q.to_string(), secs))
             });
             let has_content = docstate.canvas.scene.node_count() > 0;
+            // Diagnostic: log the overlay state once per (doc, state)
+            // combination so we can tell whether the loading branch is
+            // ever entered. Throw-away — gated behind LUNCO_OVERLAY_TRACE
+            // so it doesn't ship in default runs.
+            if std::env::var_os("LUNCO_OVERLAY_TRACE").is_some() {
+                use std::sync::{Mutex, OnceLock};
+                static SEEN: OnceLock<Mutex<std::collections::HashMap<u64, (bool, bool, bool, bool)>>> = OnceLock::new();
+                let seen = SEEN.get_or_init(|| Mutex::new(Default::default()));
+                let key = active_doc.map(|d| d.raw()).unwrap_or(0);
+                let snap = (
+                    info.is_some(),
+                    has_content,
+                    docstate.projection_task.is_some(),
+                    loads.is_loading(active_doc.unwrap_or(lunco_doc::DocumentId::new(0))) || dup_loads.is_loading(active_doc.unwrap_or(lunco_doc::DocumentId::new(0))),
+                );
+                if let Ok(mut m) = seen.lock() {
+                    if m.get(&key) != Some(&snap) {
+                        m.insert(key, snap);
+                        bevy::log::info!(
+                            "[Overlay] doc={} info={} has_content={} projecting={} pending_load={}",
+                            key, snap.0, snap.1, snap.2, snap.3,
+                        );
+                    }
+                }
+            }
             (
                 info,
                 docstate.projection_task.is_some(),
@@ -4725,7 +4794,57 @@ fn empty_overlay_class_info(
     use rumoca_session::parsing::ast::Causality;
     use rumoca_session::parsing::ClassType;
 
-    let icon = crate::annotations::extract_icon(&class.annotation);
+    // Walk the `extends` chain so classes that inherit their Icon
+    // (e.g. `Modelica.Fluid.Valves.ValveCompressible` → `PartialValve`)
+    // still render with the parent's glyph. Mirrors the resolver
+    // pattern in `canvas_projection::register_local_class` —
+    // local-AST first, then non-blocking MSL cache peek.
+    let icon = {
+        use std::sync::Arc;
+        let ast_for_resolver = ast_arc.clone();
+        let mut resolver =
+            |name: &str| -> Option<Arc<rumoca_session::parsing::ast::ClassDef>> {
+                let leaf = name.rsplit('.').next().unwrap_or(name);
+                if let Some(c) = ast_for_resolver
+                    .classes
+                    .get(name)
+                    .or_else(|| ast_for_resolver.classes.get(leaf))
+                    .or_else(|| {
+                        ast_for_resolver
+                            .classes
+                            .values()
+                            .flat_map(|c| c.classes.values())
+                            .find(|c| c.name.text.as_ref() == leaf)
+                    })
+                {
+                    return Some(Arc::new(c.clone()));
+                }
+                crate::class_cache::peek_msl_class_cached(name)
+            };
+        let mut visited = std::collections::HashSet::new();
+        let class_context = match ast_arc.within.as_ref() {
+            Some(within) => {
+                let pkg = within
+                    .name
+                    .iter()
+                    .map(|t| t.text.as_ref())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                if pkg.is_empty() {
+                    class_name.to_string()
+                } else {
+                    format!("{pkg}.{class_name}")
+                }
+            }
+            None => class_name.to_string(),
+        };
+        crate::annotations::extract_icon_inherited(
+            &class_context,
+            class,
+            &mut resolver,
+            &mut visited,
+        )
+    };
     let class_type = match class.class_type {
         ClassType::Model => Some("model"),
         ClassType::Block => Some("block"),
@@ -5145,8 +5264,21 @@ pub fn drive_duplicate_loads(
     mut loads: bevy::prelude::ResMut<DuplicateLoads>,
     mut registry: bevy::prelude::ResMut<ModelicaDocumentRegistry>,
     mut probe: Option<bevy::prelude::ResMut<crate::FrameTimeProbe>>,
+    mut egui_q: bevy::prelude::Query<&mut bevy_egui::EguiContext>,
 ) {
     use bevy::prelude::*;
+    // While any duplicate is in-flight, ping egui every tick so the
+    // canvas keeps repainting and the loading overlay actually
+    // animates. Without this the canvas paints once at tab-open then
+    // sleeps until something else requests a repaint — the overlay
+    // is unreachable for the entire bg-parse window and the user sees
+    // a blank canvas (verified via [Overlay] trace: no entries between
+    // "ModelView rendering tab" and "duplicate: installed").
+    if !loads.pending.is_empty() {
+        for mut ctx in egui_q.iter_mut() {
+            ctx.get_mut().request_repaint();
+        }
+    }
     let doc_ids: Vec<lunco_doc::DocumentId> = loads.pending.keys().copied().collect();
     let mut had_install = false;
     for doc_id in doc_ids {
@@ -5764,7 +5896,6 @@ fn synthesize_msl_node(
         kind: "modelica.icon".into(),
         data: serde_json::json!({
             "type": comp.msl_path,
-            "icon_asset": comp.icon_asset.clone().unwrap_or_default(),
             "icon_only": crate::class_cache::is_icon_only_class(&comp.msl_path),
             "expandable_connector": comp.is_expandable_connector,
             "icon_graphics": comp.icon_graphics,

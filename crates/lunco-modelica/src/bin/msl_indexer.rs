@@ -269,7 +269,14 @@ struct MSLComponentDef {
     #[serde(default)]
     class_kind: String,
     icon_text: Option<String>,
-    icon_asset: Option<String>,
+    /// Parsed `Icon(graphics={...})` annotation — already merged
+    /// across the `extends` chain via `extract_icon_inherited`. This
+    /// is the only icon source the runtime uses; the regex-on-Debug
+    /// SVG generator that used to live here was retired (it produced
+    /// spurious primitives because Debug-string regexing can't tell
+    /// graphics primitives apart reliably).
+    #[serde(default)]
+    icon_graphics: Option<lunco_modelica::annotations::Icon>,
     ports: Vec<PortDef>,
     parameters: Vec<ParamDef>,
 }
@@ -821,112 +828,10 @@ impl MSLIndexer {
         }
     }
 
-    fn generate_svg(&self, annotation: &str) -> Option<String> {
-        // 1. Pre-process the messy AST debug string into a cleaner format
-        let mut clean = annotation.to_string();
-        
-        // Handle negative numbers: Minus("-") { rhs: UnsignedInteger("100") } -> -100
-        let neg_re = regex::Regex::new(r#"Minus\("-"\) \{ rhs: UnsignedInteger\("(\d+)"\) \}"#).unwrap();
-        clean = neg_re.replace_all(&clean, "-$1").to_string();
-        
-        // Handle positive numbers: UnsignedInteger("100") -> 100
-        let pos_re = regex::Regex::new(r#"UnsignedInteger\("(\d+)"\)"#).unwrap();
-        clean = pos_re.replace_all(&clean, "$1").to_string();
-
-        // Handle strings: String("...") -> "..."
-        let str_re = regex::Regex::new(r#"String\("([^"]*)"\)"#).unwrap();
-        clean = str_re.replace_all(&clean, "\"$1\"").to_string();
-
-        let mut body = String::new();
-        let map_x = |x: f32| x + 100.0;
-        let map_y = |y: f32| 100.0 - y;
-
-        // 2. Extract Graphics block (heuristic)
-        if !clean.contains("target: Icon") { return None; }
-
-        // 3. Lines
-        // format: FunctionCall { comp: Line, args: [NamedArgument { name: "points", value: [[-90, 0], [-70, 0]] }, ...] }
-        let line_re = regex::Regex::new(r#"comp: Line, args: \[.*?name: "points", value: (\[\[.*?\]\])"#).unwrap();
-        for caps in line_re.captures_iter(&clean) {
-            let pts_str = caps.get(1).unwrap().as_str();
-            let mut points = Vec::new();
-            let pair_re = regex::Regex::new(r#"\[\s*(-?[\d\.]+)\s*,\s*(-?[\d\.]+)\s*\]"#).unwrap();
-            for p_caps in pair_re.captures_iter(pts_str) {
-                let x: f32 = p_caps.get(1).unwrap().as_str().parse().unwrap_or(0.0);
-                let y: f32 = p_caps.get(2).unwrap().as_str().parse().unwrap_or(0.0);
-                points.push(format!("{},{}", map_x(x), map_y(y)));
-            }
-
-            if points.len() >= 2 {
-                body.push_str(&format!("<polyline points=\"{}\" fill=\"none\" stroke=\"rgb(0,0,255)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" />\n", points.join(" ")));
-            }
-        }
-
-        // 4. Rectangles
-        // format: FunctionCall { comp: Rectangle, args: [NamedArgument { name: "extent", value: [[-70, 30], [70, -30]] }, ...] }
-        let rect_re = regex::Regex::new(r#"comp: Rectangle, args: \[.*?name: "extent", value: (\[\[.*?\]\])"#).unwrap();
-        for caps in rect_re.captures_iter(&clean) {
-            let pts_str = caps.get(1).unwrap().as_str();
-            let pair_re = regex::Regex::new(r#"\[\s*(-?[\d\.]+)\s*,\s*(-?[\d\.]+)\s*\]"#).unwrap();
-            let coords: Vec<f32> = pair_re.captures_iter(pts_str)
-                .flat_map(|c| [c.get(1).unwrap().as_str().parse::<f32>().unwrap_or(0.0), c.get(2).unwrap().as_str().parse::<f32>().unwrap_or(0.0)])
-                .collect();
-
-            if coords.len() == 4 {
-                let x1 = map_x(coords[0].min(coords[2]));
-                let y1 = map_y(coords[1].max(coords[3]));
-                let w = (coords[2] - coords[0]).abs();
-                let h = (coords[3] - coords[1]).abs();
-                body.push_str(&format!("<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"white\" stroke=\"rgb(0,0,255)\" stroke-width=\"2\" />\n", x1, y1, w, h));
-            }
-        }
-
-        // 5. Polygons
-        let poly_re = regex::Regex::new(r#"comp: Polygon, args: \[.*?name: "points", value: (\[\[.*?\]\])"#).unwrap();
-        for caps in poly_re.captures_iter(&clean) {
-            let pts_str = caps.get(1).unwrap().as_str();
-            let mut points = Vec::new();
-            let pair_re = regex::Regex::new(r#"\[\s*(-?[\d\.]+)\s*,\s*(-?[\d\.]+)\s*\]"#).unwrap();
-            for p_caps in pair_re.captures_iter(pts_str) {
-                let x: f32 = p_caps.get(1).unwrap().as_str().parse().unwrap_or(0.0);
-                let y: f32 = p_caps.get(2).unwrap().as_str().parse().unwrap_or(0.0);
-                points.push(format!("{},{}", map_x(x), map_y(y)));
-            }
-            if !points.is_empty() {
-                body.push_str(&format!("<polygon points=\"{}\" fill=\"white\" stroke=\"rgb(0,0,255)\" stroke-width=\"1\" />\n", points.join(" ")));
-            }
-        }
-
-        // 5. Text
-        // format: FunctionCall { comp: Text, args: [..., NamedArgument { name: "textString", value: "R=%R" }] }
-        let text_re = regex::Regex::new(r#"comp: Text, args: \[.*?name: "textString", value: "([^"]+)""#).unwrap();
-        for caps in text_re.captures_iter(&clean) {
-            let text = caps.get(1).unwrap().as_str();
-            // Try to find extent for text
-            let ext_re = regex::Regex::new(r#"name: "extent", value: \[\[\s*(-?[\d\.]+)\s*,\s*(-?[\d\.]+)\s*\]\s*,\s*\[\s*(-?[\d\.]+)\s*,\s*(-?[\d\.]+)\s*\]\]"#).unwrap();
-            let (tx, ty) = if let Some(e_caps) = ext_re.captures(caps.get(0).unwrap().as_str()) {
-                 let x1: f32 = e_caps.get(1).unwrap().as_str().parse().unwrap_or(0.0);
-                 let y1: f32 = e_caps.get(2).unwrap().as_str().parse().unwrap_or(0.0);
-                 let x2: f32 = e_caps.get(3).unwrap().as_str().parse().unwrap_or(0.0);
-                 let y2: f32 = e_caps.get(4).unwrap().as_str().parse().unwrap_or(0.0);
-                 (map_x((x1+x2)/2.0), map_y((y1+y2)/2.0))
-            } else { (100.0, 100.0) };
-
-            body.push_str(&format!("<text x=\"{}\" y=\"{}\" fill=\"rgb(0,0,255)\" font-size=\"20\" text-anchor=\"middle\" dominant-baseline=\"middle\" font-family=\"sans-serif\">{}</text>\n", tx, ty, text));
-        }
-
-        if body.is_empty() { return None; }
-
-        Some(format!(
-            "<svg width=\"200\" height=\"200\" viewBox=\"0 0 200 200\" xmlns=\"http://www.w3.org/2000/svg\" background=\"white\">\n{}</svg>",
-            body
-        ))
-    }
 
     fn index_all(&self) -> Vec<MSLComponentDef> {
+        use std::sync::Arc;
         let mut all_comps = Vec::new();
-        let icons_dir = lunco_assets::msl_dir().join("icons");
-        let _ = fs::create_dir_all(&icons_dir);
 
         for (full_name, class) in &self.classes {
             if matches!(
@@ -942,19 +847,38 @@ impl MSLIndexer {
                 let short_name = full_name.rsplit('.').next().unwrap_or(full_name).to_string();
                 let category = full_name.rsplitn(2, '.').nth(1).unwrap_or("").replace('.', "/");
 
-                let ann_str = format!("{:?}", class.annotation);
-
-                // GENERIC SVG GENERATION
-                let mut icon_asset = None;
-                if let Some(svg_content) = self.generate_svg(&ann_str) {
-                    let svg_name = format!("{}.svg", full_name);
-                    let svg_path = icons_dir.join(&svg_name);
-                    if fs::write(&svg_path, svg_content).is_ok() {
-                        icon_asset = Some(format!("icons/{}", svg_name));
+                // Walk the `extends` chain via the typed extractor so
+                // inherited icons (PartialValve → ValveCompressible)
+                // are merged into one `Icon` graphics list. Resolver
+                // searches the indexer's full-qualified-name map first,
+                // then falls back to a leaf-name suffix scan to handle
+                // bare `extends Foo` where `Foo` lives in the same
+                // package (MLS §5 scope-chain — `extract_icon_inherited`
+                // builds the candidate list, we just resolve names).
+                let resolver_classes = &self.classes;
+                let mut resolver = |name: &str| -> Option<Arc<ClassDef>> {
+                    if let Some(c) = resolver_classes.get(name) {
+                        return Some(Arc::new(c.clone()));
                     }
-                }
+                    let leaf = name.rsplit('.').next().unwrap_or(name);
+                    let suffix = format!(".{leaf}");
+                    resolver_classes
+                        .iter()
+                        .find(|(k, _)| k.ends_with(&suffix) || k.as_str() == leaf)
+                        .map(|(_, v)| Arc::new(v.clone()))
+                };
+                let mut icon_visited = HashSet::new();
+                let icon_graphics = lunco_modelica::annotations::extract_icon_inherited(
+                    full_name,
+                    class,
+                    &mut resolver,
+                    &mut icon_visited,
+                );
 
-                // Extract Icon Text heuristic for blocks without dedicated SVGs
+                // Tiny `%name` / `textString="..."` extraction kept
+                // for the palette text fallback when a class has no
+                // graphics primitives at all.
+                let ann_str = format!("{:?}", class.annotation);
                 let mut icon_text = None;
                 if let Some(caps) = regex::Regex::new("textString=\"([^\"]+)\"").unwrap().captures(&ann_str) {
                     icon_text = Some(caps.get(1).unwrap().as_str().to_string());
@@ -982,7 +906,7 @@ impl MSLIndexer {
                     domain,
                     class_kind,
                     icon_text,
-                    icon_asset,
+                    icon_graphics,
                     ports,
                     parameters,
                 });
