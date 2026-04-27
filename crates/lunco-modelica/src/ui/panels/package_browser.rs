@@ -1271,7 +1271,7 @@ fn instantiate_on_active_canvas(
     world
         .commands()
         .trigger(crate::api_edits::AddModelicaComponent {
-            doc: doc_id.raw(),
+            doc: doc_id,
             class,
             type_name: msl_path.to_string(),
             name,

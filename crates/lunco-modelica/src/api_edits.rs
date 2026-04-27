@@ -39,6 +39,7 @@
 //!   the entire buffer. A future iteration can add range-based edits.
 
 use bevy::prelude::*;
+use lunco_core::{Command, on_command, register_commands};
 use lunco_doc::DocumentId;
 
 use crate::document::ModelicaOp;
@@ -48,23 +49,28 @@ use crate::ui::state::ModelicaDocumentRegistry;
 /// Plugin that registers the Modelica edit events + observers.
 pub struct ModelicaApiEditPlugin;
 
+// Single source-of-truth for which observers belong to this plugin.
+// `register_commands!()` collapses the per-observer
+// `__register_on_X(app)` boilerplate into one `register_all_commands(app)`
+// call inside `Plugin::build` — adding a new observer is a one-line
+// change in this list, not a separate registration site.
+register_commands!(
+    on_set_document_source,
+    on_add_modelica_component,
+    on_remove_modelica_component,
+    on_connect_components,
+    on_disconnect_components,
+    on_apply_modelica_ops,
+);
+
 impl Plugin for ModelicaApiEditPlugin {
     fn build(&self, app: &mut App) {
-        app.register_type::<SetDocumentSource>()
-            .register_type::<AddModelicaComponent>()
-            .register_type::<RemoveModelicaComponent>()
-            .register_type::<ConnectComponents>()
-            .register_type::<DisconnectComponents>()
-            .register_type::<ApplyModelicaOps>()
-            .register_type::<ApiOp>()
+        // Inner data types still need explicit reflection registration
+        // (the macro registers the outer command, not nested fields).
+        app.register_type::<ApiOp>()
             .register_type::<ApiPlacement>()
-            .register_type::<ApiModification>()
-            .add_observer(on_set_document_source)
-            .add_observer(on_add_modelica_component)
-            .add_observer(on_remove_modelica_component)
-            .add_observer(on_connect_components)
-            .add_observer(on_disconnect_components)
-            .add_observer(on_apply_modelica_ops);
+            .register_type::<ApiModification>();
+        register_all_commands(app);
     }
 }
 
@@ -79,13 +85,13 @@ impl Plugin for ModelicaApiEditPlugin {
 /// Useful for agents doing whole-file rewrites, applying lints, or
 /// importing source from an external tool. Range-based edits are out
 /// of scope for v1.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct SetDocumentSource {
-    pub doc: u64,
+    pub doc: DocumentId,
     pub source: String,
 }
 
+#[on_command(SetDocumentSource)]
 fn on_set_document_source(
     trigger: On<SetDocumentSource>,
     mut commands: Commands,
@@ -112,10 +118,9 @@ fn on_set_document_source(
 /// (e.g. `"Modelica.Electrical.Analog.Basic.Resistor"` or `"Tank"`).
 /// `name` is the instance name (e.g. `"r1"`). Optional `x`, `y`, `w`,
 /// `h` set the diagram placement; `(0, 0, 20, 20)` is the default.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct AddModelicaComponent {
-    pub doc: u64,
+    pub doc: DocumentId,
     pub class: String,
     pub type_name: String,
     pub name: String,
@@ -125,6 +130,7 @@ pub struct AddModelicaComponent {
     pub height: f32,
 }
 
+#[on_command(AddModelicaComponent)]
 fn on_add_modelica_component(
     trigger: On<AddModelicaComponent>,
     mut commands: Commands,
@@ -184,14 +190,14 @@ fn on_add_modelica_component(
 
 // ─── RemoveModelicaComponent ───────────────────────────────────────────
 
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct RemoveModelicaComponent {
-    pub doc: u64,
+    pub doc: DocumentId,
     pub class: String,
     pub name: String,
 }
 
+#[on_command(RemoveModelicaComponent)]
 fn on_remove_modelica_component(
     trigger: On<RemoveModelicaComponent>,
     mut commands: Commands,
@@ -238,15 +244,15 @@ fn on_remove_modelica_component(
 /// name. Existing connections are not deduplicated — Modelica permits
 /// multiple connect equations on the same pair, and dedup is a
 /// caller-side concern.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct ConnectComponents {
-    pub doc: u64,
+    pub doc: DocumentId,
     pub class: String,
     pub from: String,
     pub to: String,
 }
 
+#[on_command(ConnectComponents)]
 fn on_connect_components(
     trigger: On<ConnectComponents>,
     mut commands: Commands,
@@ -301,15 +307,15 @@ fn on_connect_components(
 
 // ─── DisconnectComponents ──────────────────────────────────────────────
 
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct DisconnectComponents {
-    pub doc: u64,
+    pub doc: DocumentId,
     pub class: String,
     pub from: String,
     pub to: String,
 }
 
+#[on_command(DisconnectComponents)]
 fn on_disconnect_components(
     trigger: On<DisconnectComponents>,
     mut commands: Commands,
@@ -352,13 +358,13 @@ fn on_disconnect_components(
 
 // ─── helpers ───────────────────────────────────────────────────────────
 
-fn resolve_doc(world: &mut World, raw: u64) -> Option<DocumentId> {
-    if raw == 0 {
+fn resolve_doc(world: &mut World, raw: DocumentId) -> Option<DocumentId> {
+    if raw.is_unassigned() {
         world
             .get_resource::<lunco_workbench::WorkspaceResource>()
             .and_then(|ws| ws.active_document)
     } else {
-        Some(DocumentId::new(raw))
+        Some(raw)
     }
 }
 
@@ -475,13 +481,13 @@ pub enum ApiOp {
 /// individual per-op events use. Today every applied op is a separate
 /// undo entry (matches pre-migration behaviour); transactional grouping
 /// — applying N ops as one undo step — is a follow-up.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct ApplyModelicaOps {
-    pub doc: u64,
+    pub doc: DocumentId,
     pub ops: Vec<ApiOp>,
 }
 
+#[on_command(ApplyModelicaOps)]
 fn on_apply_modelica_ops(
     trigger: On<ApplyModelicaOps>,
     mut commands: Commands,
@@ -740,7 +746,7 @@ pub fn trigger_apply_ops(
         return;
     }
     world.commands().trigger(ApplyModelicaOps {
-        doc: doc.raw(),
+        doc,
         ops: api_ops,
     });
 }

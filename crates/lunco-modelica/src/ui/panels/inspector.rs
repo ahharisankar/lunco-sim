@@ -234,7 +234,7 @@ impl Panel for InspectorPanel {
                 })
                 .collect();
             world.commands().trigger(ApplyModelicaOps {
-                doc: doc_id.raw(),
+                doc: doc_id,
                 ops,
             });
         }

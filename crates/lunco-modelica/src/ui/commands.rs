@@ -28,7 +28,7 @@ use lunco_doc_bevy::{
 };
 use std::collections::HashMap;
 
-use lunco_core::Command;
+use lunco_core::{Command, on_command, register_commands};
 
 use crate::ast_extract::{
     extract_input_names, extract_inputs_with_defaults, extract_model_name,
@@ -112,7 +112,8 @@ pub struct OpenExampleInWorkspace {
 #[Command(default)]
 pub struct Ping {}
 
-fn on_ping(_trigger: On<Ping>) {
+#[on_command(Ping)]
+fn on_ping(_cmd: Ping) {
     // Intentional no-op. The dispatcher's normal flow already returns
     // `{"command_id": N}` to the caller before this observer fires;
     // emitting nothing further keeps the response cheap.
@@ -146,7 +147,7 @@ pub struct AutoArrangeDiagram {
     /// Raw `DocumentId::raw()` value, or `0` for "the currently-active
     /// Model tab" (useful from API / tests / scripts that don't track
     /// document ids).
-    pub doc: u64,
+    pub doc: DocumentId,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -174,7 +175,7 @@ pub struct FocusDocumentByName {
 #[Command(default)]
 pub struct SetViewMode {
     /// Doc id, or `0` for the active tab.
-    pub doc: u64,
+    pub doc: DocumentId,
     /// `"text"` | `"diagram"` | `"icon"` | `"docs"`.
     pub mode: String,
 }
@@ -184,7 +185,7 @@ pub struct SetViewMode {
 #[Command(default)]
 pub struct SetZoom {
     /// Doc id, or `0` for the active tab.
-    pub doc: u64,
+    pub doc: DocumentId,
     /// Absolute zoom. Clamped to the canvas's configured min/max.
     pub zoom: f32,
 }
@@ -194,7 +195,7 @@ pub struct SetZoom {
 #[Command(default)]
 pub struct FitCanvas {
     /// Doc id, or `0` for the active tab.
-    pub doc: u64,
+    pub doc: DocumentId,
 }
 
 /// Open (or focus, if already open) an MSL class as a fresh editable
@@ -329,10 +330,6 @@ impl Plugin for ModelicaCommandsPlugin {
             .add_observer(finish_close_after_save)
             .add_observer(on_close_document)
             .add_observer(on_document_closed_cleanup)
-            .add_observer(on_compile_model)
-            .add_observer(on_create_new_scratch_model)
-            .add_observer(on_duplicate_model_from_read_only)
-            .add_observer(on_open_example_in_workspace)
             // Register the `modelica://` scheme with the workbench's
             // cross-domain URI registry so clickable links in
             // Documentation HTML (and any future contexts) route
@@ -347,69 +344,14 @@ impl Plugin for ModelicaCommandsPlugin {
             // headless / scripted / CI compilation. Without this the
             // dispatcher rejects with "Command 'CompileModel' not
             // found or not API-accessible" and only UI clicks work.
-            .register_type::<CompileModel>()
             // Ping: side-effect-free readiness probe, the proper
             // alternative to using FitCanvas (or any other state-
             // mutating command) for "is the API up?" polling.
-            .register_type::<Ping>()
-            .add_observer(on_ping)
+            // Registered separately via the macro-generated helper
+            // (see `__register_on_ping(app)` call below the chain).
             // Navigation commands — same reflect-registered pattern so
             // the HTTP API can drive the UI (focus a tab, switch view
             // mode, zoom / fit, drill into an MSL example).
-            .register_type::<FocusDocumentByName>()
-            .register_type::<SetViewMode>()
-            .register_type::<SetZoom>()
-            .register_type::<FitCanvas>()
-            .register_type::<OpenExample>()
-            .register_type::<OpenClass>()
-            .register_type::<MoveComponent>()
-            .register_type::<PanCanvas>()
-            .register_type::<Undo>()
-            .register_type::<Redo>()
-            .register_type::<Exit>()
-            .register_type::<GetFile>()
-            .register_type::<FormatDocument>()
-            .register_type::<OpenFile>()
-            .register_type::<Open>()
-            .register_type::<SetModelInput>()
-            .register_type::<InspectActiveDoc>()
-            .register_type::<CompileActiveModel>()
-            .register_type::<SaveActiveDocument>()
-            .register_type::<SaveActiveDocumentAs>()
-            .register_type::<NewPlotPanel>()
-            .register_type::<AddSignalToPlot>()
-            .register_type::<AddCanvasPlot>()
-            .register_type::<DuplicateActiveDoc>()
-            .register_type::<PauseActiveModel>()
-            .register_type::<ResumeActiveModel>()
-            .register_type::<ResetActiveModel>()
-            .add_observer(on_pause_active_model)
-            .add_observer(on_resume_active_model)
-            .add_observer(on_reset_active_model)
-            .add_observer(on_focus_document_by_name)
-            .add_observer(on_set_view_mode)
-            .add_observer(on_set_zoom)
-            .add_observer(on_fit_canvas)
-            .add_observer(on_open_example)
-            .add_observer(on_open_class)
-            .add_observer(on_move_component)
-            .add_observer(on_pan_canvas)
-            .add_observer(on_undo)
-            .add_observer(on_redo)
-            .add_observer(on_exit)
-            .add_observer(on_get_file)
-            .add_observer(on_format_document)
-            .add_observer(on_open_file)
-            .add_observer(on_open)
-            .add_observer(on_set_model_input)
-            .add_observer(on_inspect_active_doc)
-            .add_observer(on_compile_active_model)
-            .add_observer(on_save_active_document)
-            .add_observer(on_save_active_document_as)
-            .add_observer(on_new_plot_panel)
-            .add_observer(on_add_signal_to_plot)
-            .add_observer(on_add_canvas_plot)
-            .add_observer(on_duplicate_active_doc)
             .add_observer(resolve_editor_intent)
             .add_observer(resolve_new_document_intent)
             // Install our scheme handler into the workbench's
@@ -432,8 +374,55 @@ impl Plugin for ModelicaCommandsPlugin {
                 bevy_egui::EguiPrimaryContextPass,
                 (render_close_dialogs, render_compile_class_picker),
             );
+
+        // All observers marked with `#[on_command(X)]` are registered
+        // in one shot via the `register_commands!()`-generated helper
+        // (see the macro invocation just below this `impl`). Adding a
+        // new typed command is now: write the struct + observer with
+        // their attributes, then add one identifier to the list.
+        register_all_commands(app);
     }
 }
+
+// Single source-of-truth for which typed commands this plugin owns.
+// `register_commands!()` expands to a `pub fn register_all_commands(app)`
+// that calls the per-observer `__register_on_X(app)` helpers
+// (themselves generated by `#[on_command(X)]`). Keep alphabetical so
+// diffs stay tidy.
+register_commands!(
+    on_add_canvas_plot,
+    on_add_signal_to_plot,
+    on_compile_active_model,
+    on_compile_model,
+    on_create_new_scratch_model,
+    on_duplicate_active_doc,
+    on_duplicate_model_from_read_only,
+    on_exit,
+    on_fit_canvas,
+    on_focus_document_by_name,
+    on_format_document,
+    on_get_file,
+    on_inspect_active_doc,
+    on_move_component,
+    on_new_plot_panel,
+    on_open,
+    on_open_class,
+    on_open_example,
+    on_open_example_in_workspace,
+    on_open_file,
+    on_pan_canvas,
+    on_pause_active_model,
+    on_ping,
+    on_redo,
+    on_reset_active_model,
+    on_resume_active_model,
+    on_save_active_document,
+    on_save_active_document_as,
+    on_set_model_input,
+    on_set_view_mode,
+    on_set_zoom,
+    on_undo,
+);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Unsaved-changes close prompt
@@ -751,7 +740,7 @@ fn resolve_editor_intent(
         // matching the pre-migration semantics for keyboard Compile.
         EditorIntent::Compile => {
             commands.trigger(CompileActiveModel {
-                doc: doc.raw(),
+                doc,
                 class: String::new(),
             });
         }
@@ -1050,6 +1039,7 @@ fn on_close_document(
     registry.remove_document(doc);
 }
 
+#[on_command(CompileModel)]
 fn on_compile_model(
     trigger: On<CompileModel>,
     mut commands: Commands,
@@ -1313,6 +1303,7 @@ fn on_compile_model(
     }
 }
 
+#[on_command(CreateNewScratchModel)]
 fn on_create_new_scratch_model(
     _trigger: On<CreateNewScratchModel>,
     mut registry: ResMut<ModelicaDocumentRegistry>,
@@ -1380,6 +1371,7 @@ fn on_create_new_scratch_model(
     });
 }
 
+#[on_command(DuplicateModelFromReadOnly)]
 fn on_duplicate_model_from_read_only(
     trigger: On<DuplicateModelFromReadOnly>,
     mut registry: ResMut<ModelicaDocumentRegistry>,
@@ -1535,6 +1527,7 @@ fn on_duplicate_model_from_read_only(
     ));
 }
 
+#[on_command(OpenExampleInWorkspace)]
 fn on_open_example_in_workspace(
     trigger: On<OpenExampleInWorkspace>,
     mut cache: ResMut<crate::ui::panels::package_browser::PackageTreeCache>,
@@ -1979,6 +1972,7 @@ fn resolve_active_doc(world: &World) -> Option<DocumentId> {
         .and_then(|ws| ws.active_document)
 }
 
+#[on_command(FocusDocumentByName)]
 fn on_focus_document_by_name(
     trigger: On<FocusDocumentByName>,
     mut commands: Commands,
@@ -2012,14 +2006,15 @@ fn on_focus_document_by_name(
     });
 }
 
+#[on_command(SetViewMode)]
 fn on_set_view_mode(trigger: On<SetViewMode>, mut commands: Commands) {
     let raw = trigger.event().doc;
     let mode_str = trigger.event().mode.clone();
     commands.queue(move |world: &mut World| {
-        let Some(doc) = (if raw == 0 {
+        let Some(doc) = (if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         }) else {
             return;
         };
@@ -2055,14 +2050,15 @@ fn approx_screen_rect() -> lunco_canvas::Rect {
     )
 }
 
+#[on_command(SetZoom)]
 fn on_set_zoom(trigger: On<SetZoom>, mut commands: Commands) {
     let raw = trigger.event().doc;
     let zoom = trigger.event().zoom;
     commands.queue(move |world: &mut World| {
-        let doc = if raw == 0 {
+        let doc = if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         };
         use crate::ui::panels::canvas_diagram::CanvasDiagramState;
         let Some(mut state) = world.get_resource_mut::<CanvasDiagramState>() else {
@@ -2085,13 +2081,14 @@ fn on_set_zoom(trigger: On<SetZoom>, mut commands: Commands) {
     });
 }
 
+#[on_command(FitCanvas)]
 fn on_fit_canvas(trigger: On<FitCanvas>, mut commands: Commands) {
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
-        let doc = if raw == 0 {
+        let doc = if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         };
         use crate::ui::panels::canvas_diagram::CanvasDiagramState;
         let Some(mut state) = world.get_resource_mut::<CanvasDiagramState>() else {
@@ -2106,6 +2103,7 @@ fn on_fit_canvas(trigger: On<FitCanvas>, mut commands: Commands) {
     });
 }
 
+#[on_command(OpenExample)]
 fn on_open_example(
     trigger: On<OpenExample>,
     mut commands: Commands,
@@ -2164,6 +2162,7 @@ fn prewarm_msl_library() {
         .detach();
 }
 
+#[on_command(OpenClass)]
 fn on_open_class(trigger: On<OpenClass>, mut commands: Commands) {
     let qualified = trigger.event().qualified.clone();
     commands.queue(move |world: &mut World| {
@@ -2194,22 +2193,23 @@ pub struct MoveComponent {
 /// Ctrl+Z keybinding / toolbar arrow uses. `doc=0` ⇒ active tab.
 #[Command(default)]
 pub struct Undo {
-    pub doc: u64,
+    pub doc: DocumentId,
 }
 
 /// Redo the most recently undone edit. Mirror of [`Undo`].
 #[Command(default)]
 pub struct Redo {
-    pub doc: u64,
+    pub doc: DocumentId,
 }
 
+#[on_command(Undo)]
 fn on_undo(trigger: On<Undo>, mut commands: Commands) {
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
-        let Some(doc) = (if raw == 0 {
+        let Some(doc) = (if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         }) else {
             bevy::log::warn!("[Undo] no active document");
             return;
@@ -2218,13 +2218,14 @@ fn on_undo(trigger: On<Undo>, mut commands: Commands) {
     });
 }
 
+#[on_command(Redo)]
 fn on_redo(trigger: On<Redo>, mut commands: Commands) {
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
-        let Some(doc) = (if raw == 0 {
+        let Some(doc) = (if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         }) else {
             bevy::log::warn!("[Redo] no active document");
             return;
@@ -2240,7 +2241,7 @@ fn on_redo(trigger: On<Redo>, mut commands: Commands) {
 #[Command(default)]
 pub struct PanCanvas {
     /// 0 ⇒ active document.
-    pub doc: u64,
+    pub doc: DocumentId,
     pub x: f32,
     pub y: f32,
 }
@@ -2257,17 +2258,18 @@ pub struct Exit {}
 #[Command(default)]
 pub struct FormatDocument {
     /// 0 ⇒ active document.
-    pub doc: u64,
+    pub doc: DocumentId,
 }
 
+#[on_command(FormatDocument)]
 fn on_format_document(trigger: On<FormatDocument>, mut commands: Commands) {
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
         use crate::document::ModelicaOp;
-        let doc = if raw == 0 {
+        let doc = if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         };
         let Some(doc) = doc else {
             bevy::log::warn!("[FormatDocument] no active document");
@@ -2410,25 +2412,26 @@ fn update_status_bar(
 #[Command(default)]
 pub struct SaveActiveDocument {
     /// 0 ⇒ active document.
-    pub doc: u64,
+    pub doc: DocumentId,
 }
 
 #[Command(default)]
 pub struct SaveActiveDocumentAs {
     /// 0 ⇒ active document.
-    pub doc: u64,
+    pub doc: DocumentId,
     /// Target filesystem path. Bypasses the native picker so
     /// automation can save without GUI interaction.
     pub path: String,
 }
 
+#[on_command(SaveActiveDocument)]
 fn on_save_active_document(trigger: On<SaveActiveDocument>, mut commands: Commands) {
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
-        let doc = if raw == 0 {
+        let doc = if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         };
         let Some(doc) = doc else {
             bevy::log::warn!("[SaveActiveDocument] no active document");
@@ -2438,16 +2441,17 @@ fn on_save_active_document(trigger: On<SaveActiveDocument>, mut commands: Comman
     });
 }
 
+#[on_command(SaveActiveDocumentAs)]
 fn on_save_active_document_as(
     trigger: On<SaveActiveDocumentAs>,
     mut commands: Commands,
 ) {
     let ev = trigger.event().clone();
     commands.queue(move |world: &mut World| {
-        let doc = if ev.doc == 0 {
+        let doc = if ev.doc.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(ev.doc))
+            Some(ev.doc)
         };
         let Some(doc) = doc else {
             bevy::log::warn!("[SaveActiveDocumentAs] no active document");
@@ -2488,16 +2492,17 @@ fn on_save_active_document_as(
 /// `DuplicateModelFromReadOnly` event with `doc=0` ⇒ active.
 #[Command(default)]
 pub struct DuplicateActiveDoc {
-    pub doc: u64,
+    pub doc: DocumentId,
 }
 
+#[on_command(DuplicateActiveDoc)]
 fn on_duplicate_active_doc(trigger: On<DuplicateActiveDoc>, mut commands: Commands) {
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
-        let doc = if raw == 0 {
+        let doc = if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         };
         let Some(doc) = doc else {
             bevy::log::warn!("[DuplicateActiveDoc] no active document");
@@ -2527,28 +2532,29 @@ fn on_duplicate_active_doc(trigger: On<DuplicateActiveDoc>, mut commands: Comman
 /// for a "force one step" flag is better designed alongside that.
 #[Command(default)]
 pub struct PauseActiveModel {
-    pub doc: u64,
+    pub doc: DocumentId,
 }
 
 /// See [`PauseActiveModel`].
 #[Command(default)]
 pub struct ResumeActiveModel {
-    pub doc: u64,
+    pub doc: DocumentId,
 }
 
 /// See [`PauseActiveModel`].
 #[Command(default)]
 pub struct ResetActiveModel {
-    pub doc: u64,
+    pub doc: DocumentId,
 }
 
+#[on_command(PauseActiveModel)]
 fn on_pause_active_model(trigger: On<PauseActiveModel>, mut commands: Commands) {
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
-        let Some(doc) = (if raw == 0 {
+        let Some(doc) = (if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         }) else {
             return;
         };
@@ -2560,13 +2566,14 @@ fn on_pause_active_model(trigger: On<PauseActiveModel>, mut commands: Commands) 
     });
 }
 
+#[on_command(ResumeActiveModel)]
 fn on_resume_active_model(trigger: On<ResumeActiveModel>, mut commands: Commands) {
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
-        let Some(doc) = (if raw == 0 {
+        let Some(doc) = (if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         }) else {
             return;
         };
@@ -2578,13 +2585,14 @@ fn on_resume_active_model(trigger: On<ResumeActiveModel>, mut commands: Commands
     });
 }
 
+#[on_command(ResetActiveModel)]
 fn on_reset_active_model(trigger: On<ResetActiveModel>, mut commands: Commands) {
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
-        let Some(doc) = (if raw == 0 {
+        let Some(doc) = (if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         }) else {
             return;
         };
@@ -2633,6 +2641,7 @@ pub struct AddCanvasPlot {
     pub signal: String,
 }
 
+#[on_command(AddCanvasPlot)]
 fn on_add_canvas_plot(trigger: On<AddCanvasPlot>, mut commands: Commands) {
     let ev = trigger.event().clone();
     commands.queue(move |world: &mut World| {
@@ -2699,6 +2708,7 @@ pub struct NewPlotPanel {
     pub signals: Vec<String>,
 }
 
+#[on_command(NewPlotPanel)]
 fn on_new_plot_panel(trigger: On<NewPlotPanel>, mut commands: Commands) {
     let ev = trigger.event().clone();
     commands.queue(move |world: &mut World| {
@@ -2762,6 +2772,7 @@ pub struct AddSignalToPlot {
     pub signal: String,
 }
 
+#[on_command(AddSignalToPlot)]
 fn on_add_signal_to_plot(trigger: On<AddSignalToPlot>, mut commands: Commands) {
     let ev = trigger.event().clone();
     commands.queue(move |world: &mut World| {
@@ -2806,7 +2817,7 @@ fn on_add_signal_to_plot(trigger: On<AddSignalToPlot>, mut commands: Commands) {
 #[Command(default)]
 pub struct CompileActiveModel {
     /// 0 ⇒ active document.
-    pub doc: u64,
+    pub doc: DocumentId,
     /// Optional target class. Empty = inherit picker / drilled-in /
     /// detected-name behaviour. When non-empty, the compile bypasses
     /// the GUI class-picker for documents with multiple non-package
@@ -2817,14 +2828,15 @@ pub struct CompileActiveModel {
     pub class: String,
 }
 
+#[on_command(CompileActiveModel)]
 fn on_compile_active_model(trigger: On<CompileActiveModel>, mut commands: Commands) {
     let raw = trigger.event().doc;
     let class = trigger.event().class.clone();
     commands.queue(move |world: &mut World| {
-        let doc = if raw == 0 {
+        let doc = if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         };
         let Some(doc) = doc else {
             bevy::log::warn!("[CompileActiveModel] no active document");
@@ -2842,6 +2854,7 @@ fn on_compile_active_model(trigger: On<CompileActiveModel>, mut commands: Comman
 #[Command(default)]
 pub struct InspectActiveDoc {}
 
+#[on_command(InspectActiveDoc)]
 fn on_inspect_active_doc(_trigger: On<InspectActiveDoc>, mut commands: Commands) {
     commands.queue(|world: &mut World| {
         let doc = resolve_active_doc(world);
@@ -2913,6 +2926,7 @@ pub struct OpenFile {
     pub path: String,
 }
 
+#[on_command(OpenFile)]
 fn on_open_file(trigger: On<OpenFile>, mut commands: Commands) {
     let path = trigger.event().path.clone();
     commands.queue(move |world: &mut World| {
@@ -3060,6 +3074,7 @@ pub struct Open {
     pub uri: String,
 }
 
+#[on_command(Open)]
 fn on_open(trigger: On<Open>, mut commands: Commands) {
     let uri = trigger.event().uri.clone();
     if uri.is_empty() {
@@ -3110,7 +3125,7 @@ fn on_open(trigger: On<Open>, mut commands: Commands) {
 #[Command(default)]
 pub struct SetModelInput {
     /// Document id whose linked entity holds the running model.
-    pub doc: u64,
+    pub doc: DocumentId,
     /// Input name to set. Must already exist on the model — this
     /// command does not introduce new inputs.
     pub name: String,
@@ -3120,6 +3135,7 @@ pub struct SetModelInput {
     pub value: f64,
 }
 
+#[on_command(SetModelInput)]
 fn on_set_model_input(trigger: On<SetModelInput>, mut commands: Commands) {
     let doc_raw = trigger.event().doc;
     let name = trigger.event().name.clone();
@@ -3175,18 +3191,18 @@ impl SetModelInputError {
 /// `SetModelInputProvider` (in `crate::api_queries`) so the two paths
 /// can never drift.
 ///
-/// `doc_raw == 0` means "active document" — same convention as
+/// `doc_raw.is_unassigned()` means "active document" — same convention as
 /// [`SetModelInput`]'s wire form.
 pub fn apply_set_model_input(
     world: &mut World,
-    doc_raw: u64,
+    doc_raw: DocumentId,
     name: &str,
     value: f64,
 ) -> Result<DocumentId, SetModelInputError> {
-    let doc = if doc_raw == 0 {
+    let doc = if doc_raw.is_unassigned() {
         resolve_active_doc(world).ok_or(SetModelInputError::NoActiveDocument)?
     } else {
-        DocumentId::new(doc_raw)
+        doc_raw
     };
     let registry = world.resource::<crate::ui::state::ModelicaDocumentRegistry>();
     let entities = registry.entities_linked_to(doc);
@@ -3211,6 +3227,7 @@ pub fn apply_set_model_input(
     Ok(doc)
 }
 
+#[on_command(GetFile)]
 fn on_get_file(trigger: On<GetFile>) {
     let path = trigger.event().path.clone();
     match std::fs::read_to_string(&path) {
@@ -3228,6 +3245,7 @@ fn on_get_file(trigger: On<GetFile>) {
     }
 }
 
+#[on_command(Exit)]
 fn on_exit(_trigger: On<Exit>, mut commands: Commands) {
     bevy::log::info!("[Exit] AppExit triggered via API");
     commands.queue(|world: &mut World| {
@@ -3239,13 +3257,14 @@ fn on_exit(_trigger: On<Exit>, mut commands: Commands) {
     });
 }
 
+#[on_command(PanCanvas)]
 fn on_pan_canvas(trigger: On<PanCanvas>, mut commands: Commands) {
     let ev = trigger.event().clone();
     commands.queue(move |world: &mut World| {
-        let doc = if ev.doc == 0 {
+        let doc = if ev.doc.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(ev.doc))
+            Some(ev.doc)
         };
         use crate::ui::panels::canvas_diagram::CanvasDiagramState;
         let Some(mut state) = world.get_resource_mut::<CanvasDiagramState>() else {
@@ -3257,6 +3276,7 @@ fn on_pan_canvas(trigger: On<PanCanvas>, mut commands: Commands) {
     });
 }
 
+#[on_command(MoveComponent)]
 fn on_move_component(trigger: On<MoveComponent>, mut commands: Commands) {
     let ev = trigger.event().clone();
     commands.queue(move |world: &mut World| {

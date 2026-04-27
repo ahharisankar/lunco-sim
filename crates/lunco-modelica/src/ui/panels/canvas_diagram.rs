@@ -6035,7 +6035,7 @@ pub fn on_auto_arrange_diagram(
         // `doc = 0` = API / script default = "the tab the user is
         // looking at right now". Resolve from `WorkbenchState.open_model`
         // so the LunCo API can fire the command without tracking ids.
-        let doc_id = if raw == 0 {
+        let doc_id = if raw.is_unassigned() {
             match active_doc_from_world(world) {
                 Some(d) => d,
                 None => {
@@ -6046,7 +6046,7 @@ pub fn on_auto_arrange_diagram(
                 }
             }
         } else {
-            lunco_doc::DocumentId::new(raw)
+            raw
         };
         auto_arrange_now(world, doc_id);
     });

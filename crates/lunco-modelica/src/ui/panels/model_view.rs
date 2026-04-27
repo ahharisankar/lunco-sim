@@ -876,28 +876,25 @@ fn render_unified_toolbar(
     if run_pause_clicked {
         // sim_state was Some to render the button, so unwrap is safe.
         let paused = sim_state.map(|(p, _)| p).unwrap_or(false);
-        let raw = doc.raw();
         if paused {
             world
                 .commands()
-                .trigger(crate::ui::commands::ResumeActiveModel { doc: raw });
+                .trigger(crate::ui::commands::ResumeActiveModel { doc });
         } else {
             world
                 .commands()
-                .trigger(crate::ui::commands::PauseActiveModel { doc: raw });
+                .trigger(crate::ui::commands::PauseActiveModel { doc });
         }
     }
     if reset_clicked {
         world
             .commands()
-            .trigger(crate::ui::commands::ResetActiveModel { doc: doc.raw() });
+            .trigger(crate::ui::commands::ResetActiveModel { doc });
     }
     if auto_arrange_clicked {
         world
             .commands()
-            .trigger(crate::ui::commands::AutoArrangeDiagram {
-                doc: doc.raw(),
-            });
+            .trigger(crate::ui::commands::AutoArrangeDiagram { doc });
     }
     if compile_clicked {
         match new_view_mode {
@@ -911,7 +908,7 @@ fn render_unified_toolbar(
                 world
                     .commands()
                     .trigger(crate::ui::commands::CompileActiveModel {
-                        doc: doc.raw(),
+                        doc,
                         class: String::new(),
                     });
             }
@@ -923,7 +920,7 @@ fn render_unified_toolbar(
                 world
                     .commands()
                     .trigger(crate::ui::commands::CompileActiveModel {
-                        doc: doc.raw(),
+                        doc,
                         class: String::new(),
                     });
             }
@@ -934,7 +931,7 @@ fn render_unified_toolbar(
                 world
                     .commands()
                     .trigger(crate::ui::commands::CompileActiveModel {
-                        doc: doc.raw(),
+                        doc,
                         class: String::new(),
                     });
             }
@@ -944,7 +941,7 @@ fn render_unified_toolbar(
                 world
                     .commands()
                     .trigger(crate::ui::commands::CompileActiveModel {
-                        doc: doc.raw(),
+                        doc,
                         class: String::new(),
                     });
             }
