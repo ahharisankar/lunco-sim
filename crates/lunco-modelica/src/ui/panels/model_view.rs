@@ -1387,14 +1387,17 @@ fn render_icon_view(ui: &mut egui::Ui, world: &mut World) {
     // Decoded `Icon(graphics={...})` from the class's own AST,
     // merged across the `extends` chain. The single source of truth
     // for the Icon view since the SVG fallback was retired.
-    let authored_icon = {
+    // (Icon, Parameters) — extracted together so duplicated /
+    // user-authored classes that aren't in the MSL palette (e.g.
+    // `InertiaCopy`) still get `%paramName` substitution.
+    let (authored_icon, parameters) = {
         let registry = world.resource::<ModelicaDocumentRegistry>();
         let ast = world
             .get_resource::<lunco_workbench::WorkspaceResource>()
             .and_then(|ws| ws.active_document)
             .and_then(|doc| registry.host(doc))
             .and_then(|host| host.document().ast().result.as_ref().ok().cloned());
-        ast.and_then(|ast| {
+        let extracted: Option<(crate::annotations::Icon, Vec<(String, String)>)> = ast.and_then(|ast| {
             // Find the target class by short name or exact qualified.
             let short = qualified.rsplit('.').next().unwrap_or(&qualified);
             let (name, class) = ast.classes.iter().find(|(n, _)| {
@@ -1444,13 +1447,34 @@ fn render_icon_view(ui: &mut egui::Ui, world: &mut World) {
             } else {
                 name.to_string()
             };
-            crate::annotations::extract_icon_inherited(
+            let icon = crate::annotations::extract_icon_inherited(
                 &class_context,
                 class,
                 &mut resolver,
                 &mut visited,
-            )
-        })
+            )?;
+            // Walk class.components for parameters with their
+            // formatted defaults (literal value or `start=` fallback,
+            // matching the indexer logic). Also recursively pull in
+            // parameters from extends-chain classes via the same
+            // resolver. Empty list when the class has no parameters.
+            let mut params_out: Vec<(String, String)> = Vec::new();
+            let mut params_visited: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let mut resolver_for_params = resolver;
+            collect_parameters_from_class(
+                &class_context,
+                class,
+                &mut resolver_for_params,
+                &mut params_visited,
+                &mut params_out,
+            );
+            Some((icon, params_out))
+        });
+        match extracted {
+            Some((i, p)) => (Some(i), p),
+            None => (None, Vec::new()),
+        }
     };
 
     if let Some(icon) = authored_icon {
@@ -1470,10 +1494,7 @@ fn render_icon_view(ui: &mut egui::Ui, world: &mut World) {
             // class itself. Matches what Dymola puts in the Icon view.
             name: Some(short_name.as_str()),
             class_name: Some(short_name.as_str()),
-            // Class-default parameters: looked up via the MSL
-            // palette entry by short-name suffix. Drives `%R`,
-            // `%controllerType` and similar on the Icon view.
-            parameters: None,
+            parameters: (!parameters.is_empty()).then_some(parameters.as_slice()),
         };
         crate::icon_paint::paint_graphics_full(
             painter,
@@ -1483,13 +1504,12 @@ fn render_icon_view(ui: &mut egui::Ui, world: &mut World) {
             Some(&sub),
             &icon.graphics,
         );
-        painter.text(
-            egui::pos2(icon_rect.center().x, icon_rect.max.y + 16.0),
-            egui::Align2::CENTER_TOP,
-            &qualified,
-            egui::FontId::proportional(13.0),
-            theme.tokens.text,
-        );
+        // No workbench-side class label — the icon's authored
+        // `Text(textString="%name")` already renders the class name
+        // (substituted with the qualified name on the Icon view, per
+        // OMEdit/Dymola behaviour). Drawing a label below duplicates
+        // the title that appears at the top of every authored MSL
+        // icon.
         return;
     }
 
@@ -1526,5 +1546,115 @@ fn render_icon_view(ui: &mut egui::Ui, world: &mut World) {
             );
         },
     );
+}
+
+/// Walk a class's components for parameter declarations and append
+/// `(name, formatted_default)` pairs to `out`. Recurses into the
+/// `extends` chain via the same resolver `extract_icon_inherited`
+/// uses, so parameters declared on partial bases (e.g.
+/// `PartialCompliantWithRelativeStates` for SpringDamper) are
+/// included. Cycle-safe via `visited`.
+fn collect_parameters_from_class<F>(
+    class_name: &str,
+    class: &rumoca_session::parsing::ast::ClassDef,
+    resolver: &mut F,
+    visited: &mut std::collections::HashSet<String>,
+    out: &mut Vec<(String, String)>,
+) where
+    F: FnMut(&str)
+        -> Option<std::sync::Arc<rumoca_session::parsing::ast::ClassDef>>,
+{
+    if !visited.insert(class_name.to_string()) {
+        return;
+    }
+    // Walk this class's components first.
+    for (name, comp) in class.components.iter() {
+        use rumoca_session::parsing::ast::Variability;
+        if !matches!(comp.variability, Variability::Parameter(_)) {
+            continue;
+        }
+        if out.iter().any(|(n, _)| n == name) {
+            continue;
+        }
+        // Mirror the indexer's logic: prefer explicit binding,
+        // fall back to `start=` modification.
+        let default = comp
+            .binding
+            .as_ref()
+            .map(format_param_default)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format_param_default(&comp.start));
+        out.push((name.clone(), default));
+    }
+    // Recurse into extends.
+    for ext in &class.extends {
+        let base_name: String = ext
+            .base_name
+            .name
+            .iter()
+            .map(|t| t.text.as_ref())
+            .collect::<Vec<&str>>()
+            .join(".");
+        // Try as-given first, then a few qualified candidates.
+        let candidates = [
+            base_name.clone(),
+            format!("Modelica.{}", base_name),
+        ];
+        for cand in candidates {
+            if let Some(base) = resolver(&cand) {
+                collect_parameters_from_class(
+                    &cand,
+                    base.as_ref(),
+                    resolver,
+                    visited,
+                    out,
+                );
+                break;
+            }
+        }
+    }
+}
+
+/// Format a parameter's default expression to a short display
+/// string. Mirror of `msl_indexer::format_default_expr` so the Icon
+/// view substitutes `%paramName` the same way the canvas (which
+/// reads pre-formatted defaults from the MSL palette) does.
+fn format_param_default(expr: &rumoca_session::parsing::ast::Expression) -> String {
+    use rumoca_session::parsing::ast::{Expression, OpUnary, TerminalType};
+    match expr {
+        Expression::Terminal { terminal_type, token } => {
+            let raw = token.text.as_ref();
+            match terminal_type {
+                TerminalType::String => raw.trim_matches('"').to_string(),
+                _ => raw.to_string(),
+            }
+        }
+        Expression::ComponentReference(cref) => cref
+            .parts
+            .last()
+            .map(|p| p.ident.text.as_ref().to_string())
+            .unwrap_or_default(),
+        Expression::Unary { op, rhs } => match (op, rhs.as_ref()) {
+            (OpUnary::Minus(_), inner) => {
+                let inner = format_param_default(inner);
+                if inner.is_empty() {
+                    String::new()
+                } else {
+                    format!("-{}", inner)
+                }
+            }
+            _ => String::new(),
+        },
+        Expression::Parenthesized { inner } => format_param_default(inner),
+        Expression::Array { elements, .. } => {
+            let parts: Vec<String> = elements.iter().map(format_param_default).collect();
+            if parts.iter().any(|s| s.is_empty()) {
+                String::new()
+            } else {
+                format!("{{{}}}", parts.join(","))
+            }
+        }
+        _ => String::new(),
+    }
 }
 

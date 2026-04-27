@@ -281,21 +281,18 @@ impl NodeVisual for IconNodeVisual {
         let painter = ctx.ui.painter();
         let theme_snap = canvas_theme_from_ctx(ctx.ui.ctx());
 
-        // Always paint a solid card background *underneath* the SVG.
-        // Why: MSL icons are outlined shapes — the SVG pixels inside
-        // the outline are transparent by design, so without a bg the
-        // connection lines running behind an icon are visible through
-        // its body. That reads as "the diagram is a sheet of glass"
-        // rather than "icons are opaque tiles." Dymola/OMEdit both
-        // paint each icon on its own opaque card for the same reason.
-        painter.rect_filled(rect, 6.0, theme_snap.card_fill);
+        // No always-on card fill. Icons that need a body (Resistor's
+        // white rectangle, Inertia's gray cylinder, …) author it
+        // themselves; classes without an Icon at all get the
+        // placeholder card from the `!drew_icon` branch below.
+        // Matches Dymola/OMEdit — they never paint a "competing"
+        // card behind authored icons.
 
-        // Priority 1: authored graphics from the class's `Icon`
-        // annotation. Beats the SVG path so user-defined classes show
-        // their own primitives even when no pre-rasterised icon
-        // exists for them. Per-instance orientation rotates+mirrors
-        // every primitive at the rect level so placement-rotation
-        // shows visually, not just on the port positions.
+        // Authored graphics from the class's `Icon` annotation,
+        // merged across the `extends` chain at index time.
+        // Per-instance orientation rotates+mirrors every primitive
+        // at the rect level so placement-rotation shows visually,
+        // not just on the port positions.
         let orientation = crate::icon_paint::IconOrientation {
             rotation_deg: self.rotation_deg,
             mirror_x: self.mirror_x,
@@ -343,10 +340,13 @@ impl NodeVisual for IconNodeVisual {
         }
 
         if !drew_icon {
-            // No `Icon` annotation in the class or its extends chain.
-            // Card is already painted; just add a type label so the
-            // user still sees something meaningful instead of a blank
-            // box.
+            // Placeholder for classes with literally no `Icon` in
+            // their extends chain — same shape as OMEdit's "no icon
+            // authored yet" stand-in: rounded card + class name
+            // centred. Once the user (or the indexer) authors an
+            // Icon annotation, the live path above takes over and
+            // we never run this fallback again.
+            painter.rect_filled(rect, 6.0, theme_snap.card_fill);
             if !self.type_label.is_empty() && rect.height() > 30.0 {
                 painter.text(
                     egui::pos2(rect.center().x, rect.center().y),
@@ -358,42 +358,48 @@ impl NodeVisual for IconNodeVisual {
             }
         }
 
-        // Selection outline draws ON TOP of the icon so it's always
-        // visible even over busy SVG content. Icon-only classes
-        // (no connectors, visual-only) get a dashed border instead
-        // of solid — a signal that the component isn't hookable.
+        // Border policy: a *very subtle* inactive border by default
+        // so components have visible bounds against the canvas
+        // grid without competing with the icon's own primitives,
+        // plus stronger strokes on selection / icon-only /
+        // expandable accents. Matches OMEdit's diagram view, which
+        // also draws a hairline frame around every component.
         let stroke = if selected {
             egui::Stroke::new(2.0, theme_snap.select_stroke)
         } else if self.icon_only {
             egui::Stroke::new(1.0, theme_snap.icon_only_stroke)
         } else if self.expandable_connector {
-            // Accent colour (same family as the select stroke) so the
-            // dashed border is visually distinct from icon-only.
             egui::Stroke::new(1.5, theme_snap.select_stroke)
-        } else {
+        } else if !drew_icon {
+            // Placeholder card needs a regular outline.
             egui::Stroke::new(1.0, theme_snap.inactive_stroke)
+        } else {
+            // Authored icon: draw a hairline border at low alpha so
+            // the bounds are visible without obscuring authored
+            // fills. ~30% alpha of the inactive_stroke colour.
+            let c = theme_snap.inactive_stroke;
+            let dim = egui::Color32::from_rgba_unmultiplied(
+                c.r(),
+                c.g(),
+                c.b(),
+                (c.a() / 3).max(40),
+            );
+            egui::Stroke::new(0.75, dim)
         };
         let wants_dashed = (self.icon_only || self.expandable_connector) && !selected;
         if wants_dashed {
-            // Dashed border via four side-segments sampled in
-            // short dash+gap runs. Cheap (12-16 line_segment calls
-            // per node) and looks right at all zoom levels because
-            // we dash in screen pixels here.
             paint_dashed_rect(painter, rect, 6.0, stroke);
         } else {
             painter.rect_stroke(rect, 6.0, stroke, egui::StrokeKind::Outside);
         }
 
-        // Instance name above the icon.
-        if !node.label.is_empty() {
-            painter.text(
-                egui::pos2(rect.center().x, rect.min.y - 4.0),
-                egui::Align2::CENTER_BOTTOM,
-                &node.label,
-                egui::FontId::proportional(11.0),
-                theme_snap.node_label,
-            );
-        }
+        // Instance name: deliberately NOT drawn here. Modelica icons
+        // author their own `Text(textString="%name", extent={...})`
+        // primitive — we substitute via `TextSubstitution` and the
+        // icon decides where the name belongs. Drawing a workbench-
+        // owned label here too produced the duplicate-name visual
+        // noise users hit on the PID example. OMEdit / Dymola don't
+        // draw an external label either.
 
         // Ports — shape per connector causality (OMEdit / Dymola
         // convention):

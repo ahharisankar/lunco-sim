@@ -96,6 +96,21 @@ fn format_default_expr(expr: &rumoca_session::parsing::ast::Expression) -> Strin
             _ => String::new(),
         },
         Expression::Parenthesized { inner } => format_default_expr(inner),
+        // Array literals like `{1}`, `{1, 2, 3}` — render with
+        // braces so the Modelica icon text reads natively (matches
+        // what OMEdit shows for `qd_max=%qd_max` on KinematicPTP).
+        // Multi-dimensional arrays nest the same formatting.
+        Expression::Array { elements, .. } => {
+            let parts: Vec<String> = elements
+                .iter()
+                .map(format_default_expr)
+                .collect();
+            if parts.iter().any(|s| s.is_empty()) {
+                String::new()
+            } else {
+                format!("{{{}}}", parts.join(","))
+            }
+        }
         _ => String::new(),
     }
 }
@@ -780,18 +795,24 @@ impl MSLIndexer {
                 if matches!(comp.variability, Variability::Parameter(_)) {
                     if !params.iter().any(|p| p.name == comp.name) {
                         // Format the default value for `%paramName`
-                        // text substitution at render time. Numeric
-                        // and string literals show as-written; enum
-                        // refs collapse to the leaf name (matches
-                        // OMEdit). Anything we can't lower stays
-                        // empty — the substitutor strips empty
-                        // results so the user sees nothing rather
-                        // than `%controllerType`.
+                        // text substitution at render time. Prefer
+                        // the explicit binding (`= expr`); fall back
+                        // to `start=` modification (`parameter Real
+                        // R(start=1)`) when no binding is present.
+                        // Numeric and string literals show as-written;
+                        // enum refs collapse to the leaf name (matches
+                        // OMEdit); array literals render `{a,b,c}`.
                         let default = comp
                             .binding
                             .as_ref()
                             .map(format_default_expr)
-                            .unwrap_or_default();
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| {
+                                // `comp.start: Expression` — Empty when no
+                                // explicit start was given. format_default_expr
+                                // returns "" for `Empty` so this is safe.
+                                format_default_expr(&comp.start)
+                            });
                         params.push(ParamDef {
                             name: comp.name.clone(),
                             param_type: comp.type_name.to_string(),

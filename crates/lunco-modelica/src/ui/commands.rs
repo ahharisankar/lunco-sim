@@ -1334,7 +1334,24 @@ fn on_create_new_scratch_model(
         n += 1;
     };
 
-    let source = format!("model {name}\n\nend {name};\n");
+    // OMEdit's "secret weapon": auto-insert a default Icon
+    // annotation so a fresh class isn't a blank rectangle on the
+    // canvas. Mirrors what OMEdit's "File → New Modelica Class"
+    // wizard adds — a blue outlined rectangle plus a `%name`
+    // label above. The user can edit the icon graphics later;
+    // until then the class renders through the same path as MSL
+    // components (no special "user class" branch in the renderer).
+    let source = format!(
+        "model {name}\n\
+         \n\
+         annotation(Icon(coordinateSystem(extent={{{{-100,-100}},{{100,100}}}}),\n\
+        \x20   graphics={{\n\
+        \x20       Rectangle(extent={{{{-100,-100}},{{100,100}}}}, lineColor={{0,0,255}}),\n\
+        \x20       Text(extent={{{{-150,150}},{{150,110}}}},\n\
+        \x20            textString=\"%name\",\n\
+        \x20            textColor={{0,0,255}})}}));\n\
+         end {name};\n"
+    );
     let mem_id = format!("mem://{name}");
     let doc_id = registry.allocate_with_origin(
         source.clone(),

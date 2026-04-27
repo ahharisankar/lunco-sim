@@ -29,23 +29,26 @@ use crate::annotations::{
 /// fill polygon. Modelica defines several variants (Solid, gradients
 /// like HorizontalCylinder/VerticalCylinder/Sphere, hatching like
 /// Horizontal/Vertical/Cross/Forward/Backward/CrossDiag); only `None`
-/// means "no fill". Treating anything else as transparent (previous
-/// behaviour) hid most MSL Mechanical/Electrical icons because they
-/// author shafts and discs as `fillPattern=HorizontalCylinder` —
-/// invisible at runtime.
+/// means "no fill".
 ///
-/// For now we collapse all gradient/hatch variants to flat-colour
-/// fill. The visual difference from a true cylinder gradient is
-/// minor at typical icon sizes; rendering nothing is much worse.
-/// Future polish: emit `egui::Mesh` with per-vertex colour
-/// interpolation for cylinder/sphere patterns.
+/// Per MLS Annex D, missing `fillColor` defaults to **black**
+/// (`{0,0,0}`) — *not* transparent. Many MSL icons rely on this:
+/// the canonical PartialTorque arrowhead `Polygon(points={...},
+/// fillPattern=FillPattern.Solid)` omits `fillColor` and expects a
+/// solid black arrow. Defaulting to transparent here renders only
+/// the stroke outline of every such primitive — visually broken.
+///
+/// We collapse all gradient/hatch variants to flat colour for now
+/// (visual difference is minor at icon scale; rendering nothing is
+/// much worse). Future polish: emit `egui::Mesh` with per-vertex
+/// colour interpolation for cylinder/sphere patterns.
 fn effective_fill_color(
     pattern: FillPattern,
     color: Option<Color>,
 ) -> egui::Color32 {
     match pattern {
         FillPattern::None => egui::Color32::TRANSPARENT,
-        _ => color_or_default(color, egui::Color32::TRANSPARENT),
+        _ => color_or_default(color, egui::Color32::BLACK),
     }
 }
 
