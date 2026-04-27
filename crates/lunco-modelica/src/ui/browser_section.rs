@@ -247,46 +247,22 @@ fn render_workspace_group(ui: &mut egui::Ui, ctx: &mut BrowserCtx<'_>) {
             });
 }
 
-/// Render the **Modelica Standard Library** sub-group. Today renders
-/// a placeholder count read off the existing `PackageTreeCache` from
-/// the standalone Package Browser; the full hierarchical MSL tree
-/// migrates here from `package_browser.rs` in a follow-up commit
-/// that retires the standalone panel.
+/// Render the **Modelica Standard Library** sub-group — the real MSL
+/// package tree, lazy-loaded on first expand, with click-to-open and
+/// double-click-to-instantiate. Delegates to
+/// [`crate::ui::panels::package_browser::render_root_subtree`] so
+/// the Twin panel and the standalone Package Browser share one
+/// rendering path during the migration.
 fn render_msl_group(ui: &mut egui::Ui, ctx: &mut BrowserCtx<'_>) {
-    let cache = ctx
-        .world
-        .get_resource::<crate::ui::panels::package_browser::PackageTreeCache>();
-    match cache {
-        Some(c) if !c.roots.is_empty() => {
-            ui.label(
-                egui::RichText::new(format!(
-                    "{} top-level packages indexed (placeholder — full tree porting \
-                     from PackageBrowser in next commit).",
-                    c.roots.len()
-                ))
-                .weak()
-                .small(),
-            );
-        }
-        _ => {
-            ui.label(
-                egui::RichText::new("MSL not yet loaded.")
-                    .weak()
-                    .italics(),
-            );
-        }
-    }
+    crate::ui::panels::package_browser::render_root_subtree(ctx.world, ui, "msl_root");
 }
 
-/// Render the **Bundled Examples** sub-group — small Modelica models
-/// shipped with the workbench for learning. Placeholder text today;
-/// real list lands when the MSL port migrates `package_browser.rs`.
-fn render_bundled_group(ui: &mut egui::Ui, _ctx: &mut BrowserCtx<'_>) {
-    ui.label(
-        egui::RichText::new("Examples list will move here from PackageBrowser in next commit.")
-            .weak()
-            .small(),
-    );
+/// Render the **Bundled Examples** sub-group — read-only models that
+/// ship with the workbench for learning (RC_Circuit, Spring-Mass, …).
+/// Same delegation as MSL; the bundled tree is built eagerly on
+/// `PackageTreeCache::new` so this draws immediately on first frame.
+fn render_bundled_group(ui: &mut egui::Ui, ctx: &mut BrowserCtx<'_>) {
+    crate::ui::panels::package_browser::render_root_subtree(ctx.world, ui, "bundled_root");
 }
 
 /// Derive the class tree + error flag from a [`SyntaxCache`]. Pure

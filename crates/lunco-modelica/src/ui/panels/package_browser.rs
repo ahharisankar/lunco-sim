@@ -739,6 +739,7 @@ impl Panel for PackageBrowserPanel {
                 PackageAction::Instantiate { msl_path, display_name } => {
                     instantiate_on_active_canvas(world, &msl_path, &display_name);
                 }
+                PackageAction::DragStart { msl_path } => stash_drag_payload(world, &msl_path),
             }
         }
 
@@ -761,6 +762,14 @@ enum PackageAction {
     /// Reflect event the palette uses, so origin-level read-only
     /// rejection applies uniformly.
     Instantiate { msl_path: String, display_name: String },
+    /// User started dragging a class row — stash a
+    /// [`ComponentDragPayload`] (same resource the palette uses) so
+    /// the canvas's drop handler picks it up on pointer release.
+    /// `msl_path` resolves to a `MSLComponentDef` via
+    /// [`crate::visual_diagram::msl_component_by_path`]; payload is a
+    /// no-op when the path isn't in the static MSL library (e.g.
+    /// Bundled-only entries — drag falls back to double-click).
+    DragStart { msl_path: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -858,36 +867,52 @@ fn render_node(
 
             let resp = ui.horizontal(|ui| {
                 ui.add_space(indent + 16.0);
-                ui.add(egui::Label::new(
-                    egui::RichText::new(format!("{} {}", lib_icon, name)).size(11.0)
-                ).sense(egui::Sense::click()))
-            }).inner;
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("{} {}", lib_icon, name)).size(11.0),
+                    )
+                    .sense(egui::Sense::click_and_drag()),
+                )
+            })
+            .inner;
 
             if is_active {
                 ui.painter().rect_filled(resp.rect, 2.0, bg);
             }
 
-            // Click semantics:
+            // Interaction semantics, mirroring the Component Palette
+            // so the tree and the palette behave identically:
+            //  - drag → stash a `ComponentDragPayload`; the canvas
+            //    drop handler reads it on pointer release and places
+            //    the class at the cursor.
             //  - single click → open as a (read-only) tab. Drill-in /
             //    inspection use case.
-            //  - double-click → instantiate on the currently-active
-            //    canvas. Adds the MSL class as a sub-component of the
-            //    active doc's drilled-in / detected class. Routes
-            //    through the same `AddModelicaComponent` Reflect event
-            //    the palette uses, so the document layer's read-only
-            //    enforcement applies uniformly. Note: egui fires
-            //    `clicked()` on the first release of a double-click
-            //    too, so we'll also open a tab — accept that as
-            //    "double-click opens the source AND adds the
-            //    instance"; users who only want one behaviour can use
-            //    plain click vs the canvas's right-click menu.
-            if resp.double_clicked() {
+            //  - double-click → instantiate at the canvas grid origin
+            //    (same path as the palette's click-to-add). Routes
+            //    through the same `AddModelicaComponent` Reflect
+            //    event the palette uses, so document-layer read-only
+            //    enforcement applies uniformly.
+            //
+            // Note: egui fires `clicked()` on the first release of a
+            // double-click too, so a double-click also opens a tab —
+            // accepted behaviour ("double-click opens the source AND
+            // adds the instance"); users who want only one can use
+            // single click vs the canvas's right-click menu.
+            if resp.drag_started() {
+                result = Some(PackageAction::DragStart {
+                    msl_path: msl_path_for_id(id, library),
+                });
+            } else if resp.double_clicked() {
                 result = Some(PackageAction::Instantiate {
                     msl_path: msl_path_for_id(id, library),
                     display_name: name.clone(),
                 });
             } else if resp.clicked() {
-                result = Some(PackageAction::Open(id.clone(), name.clone(), library.clone()));
+                result = Some(PackageAction::Open(
+                    id.clone(),
+                    name.clone(),
+                    library.clone(),
+                ));
             }
 
             if resp.hovered() {
@@ -1447,3 +1472,112 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
 // buttons fire `CreateNewScratchModel`, the observer in
 // `ui::commands` picks the next free `UntitledN` name, allocates the
 // doc, and opens a tab. Rename is deferred to Save-As.
+
+/// Render one named root from [`PackageTreeCache::roots`] inline at
+/// the caller's egui cursor. Used by the Twin panel's per-domain
+/// `BrowserSection`s (today: `ModelicaSection`'s MSL and Bundled
+/// sub-groups) to surface the package tree without duplicating the
+/// `render_node` recursion or re-implementing lazy-load + dispatch.
+///
+/// The root's own header is skipped — callers wrap this in their own
+/// `CollapsingHeader`. Children render in the existing PackageBrowser
+/// styling. Lazy-load tasks land in the cache and are drained by
+/// [`handle_package_loading_tasks`] as before.
+///
+/// `root_id` is the stable id assigned by [`PackageTreeCache::new`] —
+/// `"msl_root"` for the Modelica Standard Library and
+/// `"bundled_root"` for bundled examples. Unknown ids are silently
+/// no-op (caller's collapsing header just shows blank).
+pub(crate) fn render_root_subtree(world: &mut World, ui: &mut egui::Ui, root_id: &str) {
+    let active_path = world
+        .get_resource::<WorkbenchState>()
+        .and_then(|s| s.open_model.as_ref().map(|m| m.model_path.clone()));
+    let active_path_ref = active_path.as_deref();
+
+    let mut action: Option<PackageAction> = None;
+    {
+        let mut cache = world.resource_mut::<PackageTreeCache>();
+        let cache = &mut *cache;
+        let Some(root) = cache
+            .roots
+            .iter_mut()
+            .find(|r| matches!(r, PackageNode::Category { id, .. } if id == root_id))
+        else {
+            return;
+        };
+        if let PackageNode::Category {
+            children,
+            fs_path,
+            package_path,
+            is_loading,
+            id,
+            ..
+        } = root
+        {
+            if let Some(kids) = children {
+                // Clamp width and truncate long labels — same defence
+                // against panel-overrun the standalone PackageBrowser
+                // applies. Without it, deep MSL paths would spill past
+                // the side-panel edge and clip behind the right dock.
+                ui.set_max_width(ui.available_width());
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                for child in kids.iter_mut() {
+                    if let Some(a) = render_node(child, ui, active_path_ref, 0, &mut cache.tasks) {
+                        action = Some(a);
+                    }
+                }
+            } else if !*is_loading {
+                // First-time lazy load — same path as the standalone
+                // PackageBrowser. Subsequent renders reuse the cached
+                // children once the task completes.
+                *is_loading = true;
+                let pool = AsyncComputeTaskPool::get();
+                let parent_id = id.clone();
+                let scan_dir = fs_path.clone();
+                let pkg_path = package_path.clone();
+                let task = pool.spawn(async move {
+                    let children = scan_msl_dir(&scan_dir, pkg_path);
+                    ScanResult { parent_id, children }
+                });
+                cache.tasks.push(task);
+            }
+            if *is_loading {
+                ui.horizontal(|ui| {
+                    ui.add_space(20.0);
+                    ui.label(
+                        egui::RichText::new("⌛ Loading...")
+                            .size(10.0)
+                            .italics()
+                            .color(egui::Color32::GRAY),
+                    );
+                });
+            }
+        }
+    }
+    if let Some(a) = action {
+        match a {
+            PackageAction::Open(id, name, lib) => open_model(world, id, name, lib),
+            PackageAction::Instantiate {
+                msl_path,
+                display_name,
+            } => instantiate_on_active_canvas(world, &msl_path, &display_name),
+            PackageAction::DragStart { msl_path } => stash_drag_payload(world, &msl_path),
+        }
+    }
+}
+
+/// Look up the MSL component def by path and stash it as the active
+/// drag payload. Mirrors the Component Palette's drag-start path —
+/// shared `ComponentDragPayload` resource means the canvas drop
+/// handler treats palette and tree drags identically. No-op when the
+/// path isn't in the static MSL library (e.g. Bundled-only entries
+/// or user files); the user can still double-click to add at origin.
+fn stash_drag_payload(world: &mut World, msl_path: &str) {
+    if let Some(def) = crate::visual_diagram::msl_component_by_path(msl_path) {
+        world
+            .get_resource_or_insert_with::<crate::ui::panels::palette::ComponentDragPayload>(
+                Default::default,
+            )
+            .def = Some(def);
+    }
+}
