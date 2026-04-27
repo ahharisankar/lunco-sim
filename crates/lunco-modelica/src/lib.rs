@@ -82,7 +82,11 @@ pub mod annotations;
 /// Renders `Rectangle`, `Line`, `Polygon`, and `Text` directly into a
 /// destination screen rect, mapping Modelica diagram coordinates
 /// (+Y up) to egui screen coordinates (+Y down).
-pub mod icon_paint;
+// `icon_paint` lives under `ui/` — it's a UI/rendering concern, not
+// a model-semantics one. Re-exported here so the previous flat path
+// (`lunco_modelica::icon_paint::*`) keeps compiling for any external
+// consumer that hardcoded it.
+pub use ui::icon_paint;
 
 /// Single 2×3 affine transform per node from Modelica icon-local
 /// coords to canvas world coords. Replaces the scattered

@@ -516,11 +516,29 @@ pub fn extract_placement(annotations: &[Expression]) -> Option<Placement> {
 
 /// Extract the `Icon(...)` annotation from a class's annotation list.
 pub fn extract_icon(annotations: &[Expression]) -> Option<Icon> {
+    extract_icon_with_visibility(annotations, &std::collections::HashSet::new())
+}
+
+/// Same as [`extract_icon`] but skips graphic primitives whose
+/// `visible=` flag resolves to `false`. The `falsy_params` set lists
+/// parameter names whose default value is the literal `false` —
+/// `visible=<paramName>` then evaluates to false and the primitive is
+/// dropped from the returned graphics list. Literal `visible=false`
+/// is dropped regardless of the set.
+///
+/// Without this filter, classes like `Modelica.Fluid.Valves.BaseClasses.PartialValve`
+/// always render their conditional ellipse / lines that should only
+/// appear when `parameter Boolean filteredOpening = true` is set —
+/// producing a spurious circle on top of every valve in the canvas.
+pub fn extract_icon_with_visibility(
+    annotations: &[Expression],
+    falsy_params: &std::collections::HashSet<String>,
+) -> Option<Icon> {
     let icon_call = find_call(annotations, "Icon")?;
     let icon_args = call_args(icon_call)?;
     Some(Icon {
         coordinate_system: extract_coordinate_system(icon_args).unwrap_or_default(),
-        graphics: extract_graphics(icon_args),
+        graphics: extract_graphics_with_visibility(icon_args, falsy_params),
     })
 }
 
@@ -751,7 +769,17 @@ where
     }
 
     // Append this class's own graphics on top.
-    let local = extract_icon(&class.annotation);
+    //
+    // Build a "falsy parameters" set so `visible=<paramName>` can be
+    // evaluated against parameter defaults — collected from THIS class
+    // *and* every ancestor in the chain. This covers the canonical
+    // PartialValve case (`parameter Boolean filteredOpening = false;`
+    // → the inherited Ellipse / lines guarded by `visible=filteredOpening`
+    // disappear from `ValveCompressible`'s rendered icon).
+    let mut falsy_params: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    collect_falsy_bool_params(class, &mut falsy_params);
+    let local = extract_icon_with_visibility(&class.annotation, &falsy_params);
     let local_cs = local.as_ref().map(|i| i.coordinate_system);
     if let Some(icon) = local {
         merged_graphics.extend(icon.graphics);
@@ -804,18 +832,34 @@ fn extract_coordinate_system(args: &[Expression]) -> Option<CoordinateSystem> {
 }
 
 fn extract_graphics(args: &[Expression]) -> Vec<GraphicItem> {
+    extract_graphics_with_visibility(args, &std::collections::HashSet::new())
+}
+
+fn extract_graphics_with_visibility(
+    args: &[Expression],
+    falsy_params: &std::collections::HashSet<String>,
+) -> Vec<GraphicItem> {
     let Some(graphics_array) = named_arg(args, "graphics") else {
         return Vec::new();
     };
     let Some(elements) = array_elements(graphics_array) else {
         return Vec::new();
     };
-    elements.iter().filter_map(extract_graphic_item).collect()
+    elements
+        .iter()
+        .filter_map(|e| extract_graphic_item_filtered(e, falsy_params))
+        .collect()
 }
 
-fn extract_graphic_item(expr: &Expression) -> Option<GraphicItem> {
+fn extract_graphic_item_filtered(
+    expr: &Expression,
+    falsy_params: &std::collections::HashSet<String>,
+) -> Option<GraphicItem> {
     let name = call_name(expr)?;
     let args = call_args(expr)?;
+    if is_visibility_falsy(args, falsy_params) {
+        return None;
+    }
     match name {
         "Rectangle" => Some(GraphicItem::Rectangle(extract_rectangle(args)?)),
         "Line" => Some(GraphicItem::Line(extract_line(args)?)),
@@ -825,6 +869,57 @@ fn extract_graphic_item(expr: &Expression) -> Option<GraphicItem> {
         "Bitmap" => Some(GraphicItem::Bitmap(extract_bitmap(args)?)),
         _ => None,
     }
+}
+
+/// Walk a class's components and add the names of `parameter Boolean`
+/// declarations whose explicit default is the literal `false` to
+/// `out`. Used to evaluate `visible=<paramName>` flags on graphic
+/// primitives — when the parameter defaults to false, the primitive
+/// is suppressed from the rendered icon.
+fn collect_falsy_bool_params(
+    class: &rumoca_session::parsing::ast::ClassDef,
+    out: &mut std::collections::HashSet<String>,
+) {
+    for (name, comp) in class.components.iter() {
+        if !comp.has_explicit_binding {
+            continue;
+        }
+        let Some(binding) = comp.binding.as_ref() else { continue };
+        if let Expression::Terminal { terminal_type, token } = binding {
+            if matches!(terminal_type, rumoca_session::parsing::ast::TerminalType::Bool)
+                && token.text.as_ref() == "false"
+            {
+                out.insert(name.clone());
+            }
+        }
+    }
+}
+
+/// Resolve a graphic primitive's `visible=` flag against a set of
+/// known-false parameter names. Returns `true` when the primitive
+/// should be hidden (literal `false`, OR an identifier whose default
+/// is `false`). Missing `visible=` defaults to visible.
+fn is_visibility_falsy(
+    args: &[Expression],
+    falsy_params: &std::collections::HashSet<String>,
+) -> bool {
+    let Some(vis) = named_arg(args, "visible") else {
+        return false; // default visible=true
+    };
+    // Literal: `visible=false` / `visible=true`.
+    if let Expression::Terminal { terminal_type, token } = vis {
+        if matches!(terminal_type, rumoca_session::parsing::ast::TerminalType::Bool) {
+            return token.text.as_ref() == "false";
+        }
+    }
+    // Identifier: `visible=filteredOpening`. Drop if the parameter's
+    // default in this class (or an ancestor) is the literal `false`.
+    if let Expression::ComponentReference(cref) = vis {
+        if let Some(part) = cref.parts.first() {
+            return falsy_params.contains(part.ident.text.as_ref());
+        }
+    }
+    false
 }
 
 fn extract_rectangle(args: &[Expression]) -> Option<Rectangle> {

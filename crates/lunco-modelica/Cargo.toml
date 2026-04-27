@@ -58,6 +58,16 @@ htmd = "0.5"
 # updates after every Step. Plots read via `load()` — no mutex, no
 # per-sample work on the main thread. See `sim_stream.rs`.
 arc-swap = "1"
+# Polygon tessellator with EvenOdd fill-rule support — matches the
+# de-facto Modelica standard (Qt's QPainterPath default that OMEdit
+# and Dymola rely on). egui's built-in `Shape::convex_polygon` only
+# triangulates convex shapes; concave or self-intersecting polygons
+# (PartialValve's bowtie, sensor Y-marks, gauge X-shapes) need a real
+# tessellator. lyon does this in pure Rust with vertex/index buffer
+# output that drops straight into `egui::Mesh`. ~150 KB compiled.
+lyon_tessellation = "1"
+lyon_path = "1"
+lyon_geom = "1"
 # Direct rayon dependency so `modelica_workbench` can configure the
 # global rayon pool BEFORE rumoca's `parse_files_parallel` initialises
 # it with `num_cpus - 1` threads. With rumoca's default, every

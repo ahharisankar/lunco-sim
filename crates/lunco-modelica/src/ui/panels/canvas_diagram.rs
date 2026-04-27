@@ -58,101 +58,6 @@ pub const CANVAS_DIAGRAM_PANEL_ID: PanelId = PanelId("modelica_canvas_diagram");
 
 // ─── Visuals ────────────────────────────────────────────────────────
 
-/// Process-wide cache of SVG icon bytes keyed by relative asset
-/// path. Loaded lazily on first request for a path; later requests
-/// return the shared buffer. Entries live forever — icon asset
-/// files don't change at runtime, and the total size is small.
-fn svg_bytes_cache() -> &'static std::sync::Mutex<
-    std::collections::HashMap<String, Option<std::sync::Arc<Vec<u8>>>>,
-> {
-    use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, Option<std::sync::Arc<Vec<u8>>>>>> =
-        OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-}
-
-fn svg_bytes_for(asset_path: &str) -> Option<std::sync::Arc<Vec<u8>>> {
-    let cache = svg_bytes_cache();
-    let mut map = cache.lock().expect("svg cache poisoned");
-    if let Some(cached) = map.get(asset_path) {
-        return cached.clone();
-    }
-    // SVG assets ship inside the MSL cache dir (see snarl panel's
-    // `draw_symbol_v2` for the reference resolution). Icon paths
-    // come from `msl_index.json` and are relative to that dir.
-    //
-    // This is the on-demand fallback: a sync `std::fs::read` on the
-    // main render thread. Cold-cache icons cost 5-50ms each here,
-    // which adds up on first paint of an MSL component the user
-    // just optimistically synthesised. The pre-warm path below
-    // populates this same cache off-thread at app startup so the
-    // sync read never fires for MSL palette icons.
-    let full = lunco_assets::msl_dir().join(asset_path);
-    let loaded = std::fs::read(&full).ok().map(std::sync::Arc::new);
-    map.insert(asset_path.to_string(), loaded.clone());
-    loaded
-}
-
-/// Pre-populate the SVG-bytes cache off-thread for every supplied
-/// asset path. Called once at app startup with the full MSL palette
-/// so the canvas's render-time `svg_bytes_for` lookup hits the cache
-/// instead of doing a sync `std::fs::read` for each new icon.
-///
-/// Spawned on `IoTaskPool` so the read storm runs on the I/O pool
-/// rather than the compute pool — file reads are I/O-bound and
-/// shouldn't compete with the off-thread AST parse for compute
-/// threads.
-pub fn prewarm_svg_bytes(asset_paths: Vec<String>) {
-    bevy::tasks::IoTaskPool::get()
-        .spawn(async move {
-            let t0 = web_time::Instant::now();
-            let mut loaded = 0usize;
-            let mut failed = 0usize;
-            let mut total_bytes = 0usize;
-            let cache = svg_bytes_cache();
-            for asset in asset_paths.iter() {
-                // Skip anything already cached (don't re-read on
-                // subsequent prewarm calls).
-                if cache.lock().ok()
-                    .and_then(|m| m.get(asset).map(|_| ()))
-                    .is_some()
-                {
-                    continue;
-                }
-                let full = lunco_assets::msl_dir().join(asset);
-                match std::fs::read(&full) {
-                    Ok(bytes) => {
-                        total_bytes += bytes.len();
-                        loaded += 1;
-                        let arc = std::sync::Arc::new(bytes);
-                        if let Ok(mut map) = cache.lock() {
-                            map.insert(asset.clone(), Some(arc.clone()));
-                        }
-                        // Pre-parse the usvg Tree so the first paint
-                        // doesn't pay the XML+path parse cost.
-                        // Without this, even with bytes cached, the
-                        // first canvas frame after Add still hit
-                        // 50-500ms decoding new icons. Same Arc data
-                        // pointer → cache hit at render time.
-                        super::svg_renderer::prewarm_parse(&arc);
-                    }
-                    Err(_) => {
-                        failed += 1;
-                        if let Ok(mut map) = cache.lock() {
-                            map.insert(asset.clone(), None);
-                        }
-                    }
-                }
-            }
-            bevy::log::info!(
-                "[svg_bytes] prewarm: {loaded} loaded ({} KB) + parsed, {failed} failed, in {:.1}s",
-                total_bytes / 1024,
-                t0.elapsed().as_secs_f64(),
-            );
-        })
-        .detach();
-}
-
 /// Theme-derived colour snapshot consumed by every layer inside the
 /// canvas this frame. Stashed in the egui context's data cache (by
 /// type) at the entry of [`CanvasDiagramPanel::render`] so the
@@ -260,23 +165,20 @@ fn store_canvas_theme(ctx: &egui::Context, snap: CanvasThemeSnapshot) {
 
 /// Per-component icon visual. Renders, in priority order:
 ///
-/// 1. The class's decoded `Icon(graphics={...})` annotation, if the
-///    projector extracted one (user-defined classes from the open
-///    document). Painted via [`crate::icon_paint::paint_graphics`].
-/// 2. The pre-rasterised SVG icon if `icon_asset` resolved (MSL
-///    components that ship with the palette).
-/// 3. A stylised rounded-rectangle fallback with the type label.
+/// 1. The class's decoded `Icon(graphics={...})` annotation merged
+///    across the `extends` chain — the only icon source. Painted via
+///    [`crate::icon_paint::paint_graphics`] with lyon-tessellated
+///    fills (EvenOdd, matching OMEdit/Dymola).
+/// 2. A stylised rounded-rectangle fallback with the type label, used
+///    only when the class has no `Icon` annotation anywhere in its
+///    inheritance chain.
 ///
 /// Ports render as filled dots on the icon boundary in all cases.
 #[derive(Default)]
 struct IconNodeVisual {
     /// Type name ("Resistor", "Capacitor"…) shown under the instance
-    /// label when no SVG is available.
+    /// label when the class has no Icon at all.
     type_label: String,
-    /// Relative asset path of the icon SVG, or empty when the
-    /// component has no icon. Looked up in the shared cache each
-    /// draw.
-    icon_asset: String,
     /// Pure-icon class (zero connectors, `.Icons.*` subpackage).
     /// Rendered with a dashed border so users can tell at a glance
     /// the component is decorative. Set by the projector via the
@@ -345,7 +247,7 @@ impl NodeVisual for IconNodeVisual {
             mirror_x: self.mirror_x,
             mirror_y: self.mirror_y,
         };
-        let mut drew_svg = false;
+        let mut drew_icon = false;
         if let Some(icon) = &self.icon_graphics {
             let sub = crate::icon_paint::TextSubstitution {
                 name: (!self.instance_name.is_empty()).then_some(self.instance_name.as_str()),
@@ -382,29 +284,14 @@ impl NodeVisual for IconNodeVisual {
                 Some(resolver_ref),
                 &icon.graphics,
             );
-            drew_svg = true;
-        }
-        if !drew_svg && !self.icon_asset.is_empty() {
-            if let Some(bytes) = svg_bytes_for(&self.icon_asset) {
-                let svg_orient = super::svg_renderer::SvgOrientation {
-                    rotation_deg: self.rotation_deg,
-                    mirror_x: self.mirror_x,
-                    mirror_y: self.mirror_y,
-                };
-                super::svg_renderer::draw_svg_to_egui_oriented(
-                    painter,
-                    rect,
-                    &bytes,
-                    svg_orient,
-                );
-                drew_svg = true;
-            }
+            drew_icon = true;
         }
 
-        if !drew_svg {
-            // SVG missing / failed to load: the card is already
-            // painted; just add a type label so the user still sees
-            // something meaningful instead of a blank box.
+        if !drew_icon {
+            // No `Icon` annotation in the class or its extends chain.
+            // Card is already painted; just add a type label so the
+            // user still sees something meaningful instead of a blank
+            // box.
             if !self.type_label.is_empty() && rect.height() > 30.0 {
                 painter.text(
                     egui::pos2(rect.center().x, rect.center().y),
@@ -1685,11 +1572,6 @@ fn build_registry() -> VisualRegistry {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let type_label = qualified.rsplit('.').next().unwrap_or(qualified).to_string();
-        let icon_asset = data
-            .get("icon_asset")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
         let icon_only = data
             .get("icon_only")
             .and_then(|v| v.as_bool())
@@ -1698,8 +1580,10 @@ fn build_registry() -> VisualRegistry {
             .get("expandable_connector")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        // `icon_graphics` is the decoded Icon annotation. Missing /
-        // null on MSL components — they keep using the SVG path.
+        // `icon_graphics` is the decoded Icon annotation, merged
+        // across the `extends` chain by `extract_icon_inherited` at
+        // index time. Missing only when the class has no Icon
+        // anywhere in inheritance — falls back to the type-label box.
         let icon_graphics = data
             .get("icon_graphics")
             .and_then(|v| {
@@ -1730,7 +1614,6 @@ fn build_registry() -> VisualRegistry {
         IconNodeVisual {
             type_label: type_label.clone(),
             class_name: type_label,
-            icon_asset,
             icon_only,
             expandable_connector,
             icon_graphics,
@@ -2103,7 +1986,6 @@ fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramNodeId, Canv
                 // drill-in (which needs the path) and the type
                 // hint shown under the label.
                 "type": node.component_def.msl_path,
-                "icon_asset": node.component_def.icon_asset.clone().unwrap_or_default(),
                 // Flag pure-icon classes so the renderer can draw
                 // them with a dashed border — users see at a
                 // glance that these are decorative and have no
@@ -6014,7 +5896,6 @@ fn synthesize_msl_node(
         kind: "modelica.icon".into(),
         data: serde_json::json!({
             "type": comp.msl_path,
-            "icon_asset": comp.icon_asset.clone().unwrap_or_default(),
             "icon_only": crate::class_cache::is_icon_only_class(&comp.msl_path),
             "expandable_connector": comp.is_expandable_connector,
             "icon_graphics": comp.icon_graphics,

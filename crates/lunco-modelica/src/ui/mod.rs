@@ -66,6 +66,7 @@ pub use state::*;
 pub mod commands;
 pub use commands::{CompileModel, CreateNewScratchModel, ModelicaCommandsPlugin};
 
+pub mod icon_paint;
 pub mod image_loader;
 pub mod panels;
 pub mod viz;
@@ -612,27 +613,6 @@ fn install_image_loaders_once(
     bevy::log::info!(
         "[ModelicaImageLoader] installed egui_extras loaders + modelica:// loader"
     );
-
-    // Pre-warm the canvas's SVG-bytes cache for every MSL component
-    // the right-click Add menu can spawn. The optimistic-synth path
-    // drops a node into the scene immediately on Add; the canvas's
-    // node visual then calls `svg_bytes_for(icon_asset)` which does
-    // a synchronous `std::fs::read` on the render thread for any
-    // cold-cache icon (5-50ms each, multiplied across icons painted
-    // for the first time). Pre-warming reads every MSL palette icon
-    // off the main thread before the user ever Adds — by the time
-    // they do, the cache hit is constant-time and the icon paints in
-    // the same frame as the optimistic synth.
-    let asset_paths: Vec<String> = crate::visual_diagram::msl_component_library()
-        .iter()
-        .filter_map(|comp| comp.icon_asset.clone())
-        .filter(|s| !s.is_empty())
-        .collect();
-    bevy::log::info!(
-        "[svg_bytes] queueing prewarm for {} canvas-icon assets",
-        asset_paths.len()
-    );
-    crate::ui::panels::canvas_diagram::prewarm_svg_bytes(asset_paths);
 
     commands.insert_resource(ImageLoadersInstalled);
 }

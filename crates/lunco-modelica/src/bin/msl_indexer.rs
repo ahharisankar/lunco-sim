@@ -269,13 +269,12 @@ struct MSLComponentDef {
     #[serde(default)]
     class_kind: String,
     icon_text: Option<String>,
-    icon_asset: Option<String>,
     /// Parsed `Icon(graphics={...})` annotation — already merged
-    /// across the `extends` chain via `extract_icon_inherited`. The
-    /// runtime canvas reads this directly to draw the real glyph
-    /// (vs. the regex-derived SVG fallback that lived here previously
-    /// and rendered spurious extra primitives because Debug-string
-    /// regexing can't tell which `Polygon` belongs where).
+    /// across the `extends` chain via `extract_icon_inherited`. This
+    /// is the only icon source the runtime uses; the regex-on-Debug
+    /// SVG generator that used to live here was retired (it produced
+    /// spurious primitives because Debug-string regexing can't tell
+    /// graphics primitives apart reliably).
     #[serde(default)]
     icon_graphics: Option<lunco_modelica::annotations::Icon>,
     ports: Vec<PortDef>,
@@ -907,14 +906,6 @@ impl MSLIndexer {
                     domain,
                     class_kind,
                     icon_text,
-                    // SVG-asset path retired: the prior regex-on-Debug
-                    // SVG generator produced wrong primitives (bonus
-                    // triangles, bad polygon closure) because Debug
-                    // string parsing can't tell graphics primitives
-                    // apart reliably. The runtime now reads
-                    // `icon_graphics` instead and renders via the same
-                    // `paint_graphics` pipeline the live canvas uses.
-                    icon_asset: None,
                     icon_graphics,
                     ports,
                     parameters,
