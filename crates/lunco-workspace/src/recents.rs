@@ -5,7 +5,7 @@
 //! head so re-opening a project doesn't grow the list. Caps keep the
 //! UI tidy and the session file small.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Upper bound on tracked recent Twin folders.
 pub const MAX_RECENT_TWINS: usize = 10;
@@ -44,6 +44,46 @@ impl Recents {
         self.twin_paths.clear();
         self.loose_paths.clear();
     }
+
+    /// Load recents from a JSON file. Returns [`Default`] on any error
+    /// (missing file, parse failure, permission denied) — the recents
+    /// list is convenience metadata, not Twin content; refusing to
+    /// start the app over a corrupt file would be hostile.
+    ///
+    /// Path resolution is the caller's job — the workbench passes the
+    /// platform-appropriate config-dir path (e.g.
+    /// `lunco_assets::user_config_dir().join("recents.json")`).
+    pub fn load(path: &Path) -> Self {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(_) => return Self::default(),
+        };
+        serde_json::from_slice(&bytes).unwrap_or_default()
+    }
+
+    /// Persist recents to a JSON file. Creates parent directories on
+    /// the way out — the caller doesn't have to pre-create
+    /// `~/.lunco/`.
+    ///
+    /// JSON rather than TOML because the document is mostly opaque
+    /// path strings; serde_json round-trips them faster and produces
+    /// a smaller file. TOML's strength (human-edited config) is
+    /// irrelevant here.
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let bytes = serde_json::to_vec_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        // Atomic-ish write: write to a sibling temp file, then rename.
+        // Avoids leaving a half-written `recents.json` if the process
+        // is killed mid-write. The rename is atomic on POSIX and
+        // ReplaceFile-equivalent on Windows.
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &bytes)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
 }
 
 fn push_front_dedupe(list: &mut Vec<PathBuf>, path: PathBuf, cap: usize) {
@@ -77,6 +117,38 @@ mod tests {
         // Most-recent first → the last pushed path is at index 0.
         let expected_head = format!("/t{}", MAX_RECENT_TWINS + 4);
         assert_eq!(r.twin_paths[0], PathBuf::from(expected_head));
+    }
+
+    #[test]
+    fn round_trip_via_load_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/dir/recents.json");
+        let mut r = Recents::default();
+        r.push_twin("/projects/lunar_base".into());
+        r.push_loose("/scratch/balloon.mo".into());
+        r.save(&path).expect("save");
+        assert!(path.exists());
+        let r2 = Recents::load(&path);
+        assert_eq!(r2.twin_paths, r.twin_paths);
+        assert_eq!(r2.loose_paths, r.loose_paths);
+    }
+
+    #[test]
+    fn load_missing_file_returns_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.json");
+        let r = Recents::load(&path);
+        assert!(r.twin_paths.is_empty());
+        assert!(r.loose_paths.is_empty());
+    }
+
+    #[test]
+    fn load_corrupt_file_returns_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corrupt.json");
+        std::fs::write(&path, b"this is not json").unwrap();
+        let r = Recents::load(&path);
+        assert!(r.twin_paths.is_empty());
     }
 
     #[test]

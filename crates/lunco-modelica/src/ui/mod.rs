@@ -194,6 +194,15 @@ fn sync_workspace_on_doc_saved(
             .unwrap_or("(file)")
             .to_string(),
     };
+    // Push to recents on every File-saved event. `push_loose` dedupes
+    // to the front, so re-saving an existing file simply hoists it to
+    // the top — matches VS Code behaviour and is what makes Save-As
+    // of an Untitled draft show up in "Open Recent File" next session
+    // (the rebind from Untitled → File doesn't otherwise re-trigger
+    // `add_document`, which is the only other recents push site).
+    if let Some(p) = new_origin.canonical_path() {
+        ws.recents.push_loose(p.to_path_buf());
+    }
     if let Some(entry) = ws.document_mut(id) {
         entry.origin = new_origin;
         entry.title = new_title;

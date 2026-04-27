@@ -24,6 +24,12 @@ lunco-workspace = { path = "../lunco-workspace" }
 # event API. Storage stays bevy-free; the workbench's picker fires
 # rfd dialogs on native and (eventually) File-System-Access on wasm.
 lunco-storage = { path = "../lunco-storage" }
+# Used for the recents-changed fingerprint in `WorkspacePlugin` —
+# stable serialisation lets us skip writes when nothing changed.
+serde_json = "1.0"
+# `user_config_dir()` for cross-platform `~/.lunco/recents.json`
+# (Windows: `C:\Users\<user>\.lunco\`, etc.).
+lunco-assets = { path = "../lunco-assets" }
 # Native file dialogs. The web backend will use `wasm-bindgen`
 # directly against the File-System-Access API behind a `cfg`-gated
 # branch — no separate crate needed.

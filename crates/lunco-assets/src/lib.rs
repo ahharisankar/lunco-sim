@@ -36,6 +36,74 @@ pub mod msl;
 pub mod process;
 
 // ============================================================================
+// User Config Directory Resolution
+// ============================================================================
+
+/// Resolves the user-level config directory for LunCoSim — for
+/// recents, keybinds, palette history, layouts, and any other
+/// **per-user persistent state** that must survive `cargo clean` and
+/// is independent of any one Twin.
+///
+/// Resolution order:
+///
+/// 1. `LUNCOSIM_CONFIG` environment variable if set (testing, custom
+///    installs, sandboxed CI).
+/// 2. `~/.lunco/` — the project's canonical user-config home.
+///    Cross-platform via [`dirs::home_dir`]:
+///    - Linux: `~/.lunco`
+///    - macOS: `~/.lunco`
+///    - Windows: `C:\Users\<user>\.lunco`
+///
+/// The directory is **not created** by this function — callers that
+/// write into a subdir use [`user_config_subdir`] which `create_dir_all`s.
+/// Read-only callers (existence probes for migrations, etc.) get a
+/// path back regardless of whether the dir exists.
+///
+/// Falls back to `.lunco/` in the current working directory if
+/// [`dirs::home_dir`] returns `None` — vanishingly rare in practice
+/// (pathological env), but keeps the function infallible so callers
+/// don't have to reason about cross-platform home-dir failures.
+///
+/// Distinct from [`cache_dir`]: that returns the workspace-shared
+/// regenerable artifact cache (textures, MSL, ephemeris). Anything
+/// destroyed by `cargo clean` belongs there. User config does not.
+pub fn user_config_dir() -> PathBuf {
+    if let Some(val) = std::env::var_os("LUNCOSIM_CONFIG") {
+        return PathBuf::from(val);
+    }
+    if let Some(home) = dirs::home_dir() {
+        return home.join(".lunco");
+    }
+    // Last resort — keeps the function infallible.
+    PathBuf::from(".lunco")
+}
+
+/// Returns a named subdirectory of [`user_config_dir`], creating it
+/// (and any missing parents) on the way out.
+///
+/// Use this for *write* paths; for *probe* paths (existence checks,
+/// migrations) call `user_config_dir().join(name)` directly so a
+/// missing dir doesn't get materialised on a no-op read.
+///
+/// # Examples
+///
+/// ```no_run
+/// use lunco_assets::user_config_subdir;
+///
+/// let recents = user_config_subdir("").join("recents.json");
+/// // → ~/.lunco/recents.json (Linux/macOS), C:\Users\u\.lunco\recents.json (Windows)
+/// ```
+pub fn user_config_subdir(name: &str) -> PathBuf {
+    let dir = if name.is_empty() {
+        user_config_dir()
+    } else {
+        user_config_dir().join(name)
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+// ============================================================================
 // Cache Directory Resolution
 // ============================================================================
 
@@ -281,6 +349,48 @@ pub fn modelica_entity_dir(entity_name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_config_dir_returns_path() {
+        // Function is infallible — returns *some* path regardless of
+        // platform / env. Don't assert the exact location since CI
+        // may set `LUNCOSIM_CONFIG` or run with HOME unset.
+        let dir = user_config_dir();
+        assert!(!dir.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn user_config_dir_honours_env_override() {
+        let prev = std::env::var_os("LUNCOSIM_CONFIG");
+        // SAFETY: tests in this module run sequentially relative to
+        // each other (they don't, in fact, but the env var is unique
+        // to this single test and we restore it). Fine for a single-
+        // file unit test.
+        std::env::set_var("LUNCOSIM_CONFIG", "/tmp/lunco-test-config");
+        assert_eq!(user_config_dir(), PathBuf::from("/tmp/lunco-test-config"));
+        match prev {
+            Some(v) => std::env::set_var("LUNCOSIM_CONFIG", v),
+            None => std::env::remove_var("LUNCOSIM_CONFIG"),
+        }
+    }
+
+    #[test]
+    fn user_config_subdir_creates_dir() {
+        let prev = std::env::var_os("LUNCOSIM_CONFIG");
+        let tmp = std::env::temp_dir().join(format!(
+            "lunco-test-cfg-{}",
+            std::process::id()
+        ));
+        std::env::set_var("LUNCOSIM_CONFIG", &tmp);
+        let sub = user_config_subdir("recents");
+        assert!(sub.exists());
+        assert!(sub.ends_with("recents"));
+        let _ = std::fs::remove_dir_all(&tmp);
+        match prev {
+            Some(v) => std::env::set_var("LUNCOSIM_CONFIG", v),
+            None => std::env::remove_var("LUNCOSIM_CONFIG"),
+        }
+    }
 
     #[test]
     fn cache_dir_defaults_to_dot_cache() {

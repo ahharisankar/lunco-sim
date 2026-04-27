@@ -9,6 +9,7 @@ lunco-doc     = { path = "../lunco-doc" }
 lunco-twin    = { path = "../lunco-twin" }
 lunco-storage = { path = "../lunco-storage" }
 serde         = { version = "1.0", features = ["derive"] }
+serde_json    = "1.0"
 toml          = "0.8"
 thiserror     = "1.0"
 

@@ -940,6 +940,61 @@ fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut 
                     });
                     ui.close();
                 }
+
+                // -- Recents -----------------------------------------
+                // Twin folders and loose files have separate lists per
+                // VS Code precedent — recently-edited files within a
+                // Twin shouldn't crowd out the much-shorter list of
+                // recently-opened projects. Persisted to
+                // `~/.lunco/recents.json` (cross-platform) by
+                // `WorkspacePlugin`.
+                let (recent_twins, recent_files) = {
+                    let ws = world.resource::<WorkspaceResource>();
+                    (
+                        ws.recents.twin_paths.clone(),
+                        ws.recents.loose_paths.clone(),
+                    )
+                };
+                ui.add_enabled_ui(!recent_twins.is_empty(), |ui| {
+                    ui.menu_button("Open Recent Twin", |ui| {
+                        for path in &recent_twins {
+                            let label = path
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or_else(|| path.to_str().unwrap_or("(invalid)"));
+                            if ui
+                                .button(label)
+                                .on_hover_text(path.display().to_string())
+                                .clicked()
+                            {
+                                world.trigger(file_ops::OpenTwin {
+                                    path: path.display().to_string(),
+                                });
+                                ui.close();
+                            }
+                        }
+                    });
+                });
+                ui.add_enabled_ui(!recent_files.is_empty(), |ui| {
+                    ui.menu_button("Open Recent File", |ui| {
+                        for path in &recent_files {
+                            let label = path
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or_else(|| path.to_str().unwrap_or("(invalid)"));
+                            if ui
+                                .button(label)
+                                .on_hover_text(path.display().to_string())
+                                .clicked()
+                            {
+                                world.trigger(file_ops::OpenFile {
+                                    path: path.display().to_string(),
+                                });
+                                ui.close();
+                            }
+                        }
+                    });
+                });
                 ui.separator();
 
                 // -- Save ---------------------------------------------

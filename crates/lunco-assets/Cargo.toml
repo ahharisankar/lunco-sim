@@ -11,6 +11,10 @@ serde_json = "1.0"
 toml = "0.8"
 thiserror = "2.0"
 image = { workspace = true }
+# Cross-platform user-home / config-dir resolution for `user_config_dir()`.
+# Native-only — the wasm path uses OPFS / IndexedDB instead and skips
+# this helper entirely.
+dirs = "5"
 
 # Native-only helper binary that packs MSL into a versioned, compressed
 # bundle for the web build. Path-gated to keep wasm32 builds away from it.
