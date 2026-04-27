@@ -1363,7 +1363,24 @@ fn on_create_new_scratch_model(
         n += 1;
     };
 
-    let source = format!("model {name}\n\nend {name};\n");
+    // OMEdit's "secret weapon": auto-insert a default Icon
+    // annotation so a fresh class isn't a blank rectangle on the
+    // canvas. Mirrors what OMEdit's "File → New Modelica Class"
+    // wizard adds — a blue outlined rectangle plus a `%name`
+    // label above. The user can edit the icon graphics later;
+    // until then the class renders through the same path as MSL
+    // components (no special "user class" branch in the renderer).
+    let source = format!(
+        "model {name}\n\
+         \n\
+         annotation(Icon(coordinateSystem(extent={{{{-100,-100}},{{100,100}}}}),\n\
+        \x20   graphics={{\n\
+        \x20       Rectangle(extent={{{{-100,-100}},{{100,100}}}}, lineColor={{0,0,255}}),\n\
+        \x20       Text(extent={{{{-150,150}},{{150,110}}}},\n\
+        \x20            textString=\"%name\",\n\
+        \x20            textColor={{0,0,255}})}}));\n\
+         end {name};\n"
+    );
     let mem_id = format!("mem://{name}");
     let doc_id = registry.allocate_with_origin(
         source.clone(),
@@ -1427,7 +1444,7 @@ fn on_duplicate_model_from_read_only(
     // parse in `ModelicaDocument::with_origin` — goes to a bg task
     // below. Per the architectural rule: no O(source_bytes) work
     // on the UI thread.
-    let (source_full, origin_class_short, origin_fqn) = {
+    let (source_full, origin_class_short, origin_fqn, class_byte_range) = {
         let Some(host) = registry.host(source_doc) else {
             console.error("Duplicate failed: source doc not found in registry");
             return;
@@ -1441,7 +1458,17 @@ fn on_duplicate_model_from_read_only(
             .as_ref()
             .and_then(|q| q.rsplit('.').next().map(String::from))
             .unwrap_or_else(|| doc.origin().display_name());
-        (doc.source().to_string(), short, fqn)
+        // Look up the class's exact byte range from the parsed AST.
+        // This is the robust replacement for the regex-based
+        // `extract_class_source` which mis-fires when the source has
+        // earlier docstrings that mention `block <ClassName>` (LimPID
+        // case — a docstring on `PID` mentions `block LimPID.` and
+        // the regex matches that line as the class header).
+        let byte_range: Option<(usize, usize)> = doc
+            .ast()
+            .ast()
+            .and_then(|ast| find_class_byte_range(ast, &short));
+        (doc.source().to_string(), short, fqn, byte_range)
     };
 
     // Pick a new Untitled name. Try `<ClassName>Copy` first; fall
@@ -1497,10 +1524,17 @@ fn on_duplicate_model_from_read_only(
     let origin_fqn_for_task = origin_fqn.clone();
     let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
         // 1. Extract just the target class's source from a
-        //    multi-class package file (falls through to the full
-        //    source for own-file classes).
-        let class_src = extract_class_source(&source_full, &origin_short_for_task)
-            .unwrap_or(source_full);
+        //    multi-class package file. Prefer the AST-derived byte
+        //    range (precise) over the regex fallback, which mis-fires
+        //    when an earlier class's docstring contains `block <Name>`.
+        //    Falls through to the full source if neither path resolved.
+        let class_src = match class_byte_range {
+            Some((s, e)) if e <= source_full.len() && s < e => {
+                source_full[s..e].to_string()
+            }
+            _ => extract_class_source(&source_full, &origin_short_for_task)
+                .unwrap_or(source_full),
+        };
         // 2. Rewrite: rename the class + strip `within` so the
         //    copy is standalone.
         let renamed = rewrite_duplicated_source(
@@ -1649,10 +1683,23 @@ fn on_open_example_in_workspace(
         };
         // 2. Read file. I/O — fine off-thread.
         let source_full = std::fs::read_to_string(&path).unwrap_or_default();
-        // 3. Extract just the target class (same helpers used by
-        //    `DuplicateModelFromReadOnly`).
-        let class_src = extract_class_source(&source_full, &origin_short_for_task)
-            .unwrap_or(source_full);
+        // 3. Extract just the target class. We mask out string
+        //    literals and comments first, then run the line-anchored
+        //    class-header regex on the masked copy. Without masking,
+        //    the regex mis-fires when an earlier class's docstring
+        //    contains a literal `block <Name>` line (LimPID's canonical
+        //    failure: `PID`'s docstring text "block LimPID." matches
+        //    the header pattern). Masking keeps byte offsets stable so
+        //    the slice into `source_full` is exact.
+        let class_src = {
+            let masked = mask_strings_and_comments(&source_full);
+            extract_class_source(&masked, &origin_short_for_task)
+                .and_then(|_| extract_class_byte_range(&masked, &origin_short_for_task))
+                .filter(|(s, e)| *e <= source_full.len() && *s < *e)
+                .map(|(s, e)| source_full[s..e].to_string())
+                .or_else(|| extract_class_source(&source_full, &origin_short_for_task))
+                .unwrap_or(source_full)
+        };
         // 4. Rewrite: rename + strip `within` so the copy is
         //    standalone.
         let renamed = rewrite_duplicated_source(
@@ -1712,6 +1759,151 @@ fn on_open_example_in_workspace(
 /// class inside a package file with no shadowing nested class of
 /// the same name). Returns `None` if the opener or closer can't be
 /// found — caller should fall back to copying the whole source.
+/// Look up a class's `(start, end)` byte range in the source from the
+/// parsed AST. Walks `ast.classes` recursively (top-level packages
+/// often contain the class we're after as a nested entry, e.g.
+/// `Modelica.Blocks.Continuous` → `LimPID`). The match is by short
+/// name — first hit wins, which is fine in practice since MSL keeps
+/// short names unique within a package.
+///
+/// Replaces `extract_class_source`'s regex-on-text approach. The
+/// regex form mis-extracts when the source contains an earlier
+/// docstring that includes a string like `block LimPID.` — the regex
+/// has no notion of string-literal context and treats the docstring
+/// line as the class header.
+fn find_class_byte_range(
+    ast: &rumoca_session::parsing::ast::StoredDefinition,
+    short_name: &str,
+) -> Option<(usize, usize)> {
+    fn walk(
+        classes: &indexmap::IndexMap<String, rumoca_session::parsing::ast::ClassDef>,
+        target: &str,
+    ) -> Option<(usize, usize)> {
+        for (name, class) in classes.iter() {
+            if name == target {
+                return Some((class.location.start as usize, class.location.end as usize));
+            }
+            if let Some(hit) = walk(&class.classes, target) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+    walk(&ast.classes, short_name)
+}
+
+/// Replace bytes inside Modelica string literals and comments with
+/// spaces (preserving newlines and offsets). Returned text has the
+/// same byte length as the input — every match offset on the masked
+/// version is exact on the original. Used to keep the line-anchored
+/// class-header regex from picking up class names that appear inside
+/// docstrings (the canonical LimPID failure: `PID`'s docstring
+/// contains a literal `block LimPID.` line).
+///
+/// Recognised non-code spans:
+///   * `"…"` string literals — Modelica uses `\"` for escapes and
+///     does NOT support raw strings, so this is a simple state machine
+///   * `/* … */` block comments
+///   * `// …` line comments
+///
+/// Annotation HTML inside `info=\"<html>…\"` is just a string literal
+/// to the lexer, so it falls under the first rule.
+fn mask_strings_and_comments(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    enum State { Code, Str, BlockC, LineC }
+    let mut state = State::Code;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match state {
+            State::Code => {
+                if b == b'"' {
+                    out.push(b'"');
+                    state = State::Str;
+                    i += 1;
+                } else if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+                    out.push(b' ');
+                    out.push(b' ');
+                    state = State::BlockC;
+                    i += 2;
+                } else if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                    out.push(b' ');
+                    out.push(b' ');
+                    state = State::LineC;
+                    i += 2;
+                } else {
+                    out.push(b);
+                    i += 1;
+                }
+            }
+            State::Str => {
+                if b == b'\\' && i + 1 < bytes.len() {
+                    // Preserve newlines from the literal so the mask
+                    // matches the original line structure.
+                    let next = bytes[i + 1];
+                    out.push(if b == b'\n' { b'\n' } else { b' ' });
+                    out.push(if next == b'\n' { b'\n' } else { b' ' });
+                    i += 2;
+                } else if b == b'"' {
+                    out.push(b'"');
+                    state = State::Code;
+                    i += 1;
+                } else {
+                    out.push(if b == b'\n' { b'\n' } else { b' ' });
+                    i += 1;
+                }
+            }
+            State::BlockC => {
+                if b == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                    out.push(b' ');
+                    out.push(b' ');
+                    state = State::Code;
+                    i += 2;
+                } else {
+                    out.push(if b == b'\n' { b'\n' } else { b' ' });
+                    i += 1;
+                }
+            }
+            State::LineC => {
+                if b == b'\n' {
+                    out.push(b'\n');
+                    state = State::Code;
+                    i += 1;
+                } else {
+                    out.push(b' ');
+                    i += 1;
+                }
+            }
+        }
+    }
+    // Safety: we only emit ASCII bytes (' ', '\n', '"') for non-code
+    // regions, and pass code bytes through unchanged. The result is
+    // valid UTF-8 because the input was valid UTF-8 and any
+    // multi-byte sequences inside string literals fall to the
+    // catch-all ' ' replacement (each byte becomes a space — still
+    // ASCII, still valid UTF-8).
+    String::from_utf8(out).expect("masking only emits ASCII for non-code spans")
+}
+
+/// Same regex as `extract_class_source` but returns the byte range
+/// `(start, end)` rather than the substring. Caller slices the
+/// ORIGINAL (unmasked) source with the returned offsets.
+fn extract_class_byte_range(source: &str, class_name: &str) -> Option<(usize, usize)> {
+    let safe = regex::escape(class_name);
+    let opener_pat = format!(
+        r"(?m)^\s*(?:partial\s+)?(?:encapsulated\s+)?(?:model|block|class|connector|function|record|package|type)\s+{safe}\b",
+        safe = safe,
+    );
+    let opener = regex::Regex::new(&opener_pat).ok()?;
+    let closer_pat = format!(r"(?m)^\s*end\s+{safe}\s*;", safe = safe);
+    let closer = regex::Regex::new(&closer_pat).ok()?;
+    let raw_start = opener.find(source)?.start();
+    let start = rewind_through_leading_comments(source, raw_start);
+    let rel_end = closer.find(&source[start..])?.end();
+    Some((start, start + rel_end))
+}
+
 fn extract_class_source(source: &str, class_name: &str) -> Option<String> {
     let safe = regex::escape(class_name);
     // Single-line pattern — the earlier multi-line raw-string form
@@ -2715,7 +2907,11 @@ fn on_add_canvas_plot(trigger: On<AddCanvasPlot>, mut commands: Commands) {
             signal_path: ev.signal.clone(),
             title: String::new(),
         };
-        let data = serde_json::to_value(&payload).unwrap_or_default();
+        // Typed payload — boxed straight into the canvas Node.data
+        // (which is `Arc<dyn Any + Send + Sync>` — see
+        // `lunco_canvas::NodeData`). The plot-node factory downcasts
+        // back to `PlotNodeData` at construction.
+        let data: lunco_canvas::NodeData = std::sync::Arc::new(payload);
         let mut state =
             world.resource_mut::<crate::ui::panels::canvas_diagram::CanvasDiagramState>();
         let docstate = state.get_mut(Some(doc));

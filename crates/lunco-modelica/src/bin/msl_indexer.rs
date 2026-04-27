@@ -57,6 +57,64 @@ impl Options {
     }
 }
 
+/// Lower a parameter's default expression to a short display string
+/// suitable for `%paramName` substitution in icon Text primitives.
+/// Returns empty for expressions we can't summarise (function calls,
+/// arithmetic, etc.) — the substitutor then drops the placeholder
+/// rather than printing a confusing partial value.
+///
+/// - `Terminal{Bool, "true"}`              → `"true"`
+/// - `Terminal{UnsignedReal, "100"}`       → `"100"`
+/// - `Terminal{String, "Hello"}`           → `"Hello"` (quotes stripped)
+/// - `ComponentReference{Foo.Bar.Baz}`     → `"Baz"` (enum-style leaf)
+/// - `Unary{op:Minus, rhs:Terminal..}`     → `"-100"`
+/// - anything else                          → `""`
+fn format_default_expr(expr: &rumoca_session::parsing::ast::Expression) -> String {
+    use rumoca_session::parsing::ast::{Expression, OpUnary, TerminalType};
+    match expr {
+        Expression::Terminal { terminal_type, token } => {
+            let raw = token.text.as_ref();
+            match terminal_type {
+                TerminalType::String => raw.trim_matches('"').to_string(),
+                _ => raw.to_string(),
+            }
+        }
+        Expression::ComponentReference(cref) => cref
+            .parts
+            .last()
+            .map(|p| p.ident.text.as_ref().to_string())
+            .unwrap_or_default(),
+        Expression::Unary { op, rhs } => match (op, rhs.as_ref()) {
+            (OpUnary::Minus(_), inner) => {
+                let inner = format_default_expr(inner);
+                if inner.is_empty() {
+                    String::new()
+                } else {
+                    format!("-{}", inner)
+                }
+            }
+            _ => String::new(),
+        },
+        Expression::Parenthesized { inner } => format_default_expr(inner),
+        // Array literals like `{1}`, `{1, 2, 3}` — render with
+        // braces so the Modelica icon text reads natively (matches
+        // what OMEdit shows for `qd_max=%qd_max` on KinematicPTP).
+        // Multi-dimensional arrays nest the same formatting.
+        Expression::Array { elements, .. } => {
+            let parts: Vec<String> = elements
+                .iter()
+                .map(format_default_expr)
+                .collect();
+            if parts.iter().any(|s| s.is_empty()) {
+                String::new()
+            } else {
+                format!("{{{}}}", parts.join(","))
+            }
+        }
+        _ => String::new(),
+    }
+}
+
 fn print_help() {
     println!("msl_indexer — index MSL components and (optionally) warm rumoca compile caches");
     println!();
@@ -736,10 +794,29 @@ impl MSLIndexer {
             for comp in class.components.values() {
                 if matches!(comp.variability, Variability::Parameter(_)) {
                     if !params.iter().any(|p| p.name == comp.name) {
+                        // Format the default value for `%paramName`
+                        // text substitution at render time. Prefer
+                        // the explicit binding (`= expr`); fall back
+                        // to `start=` modification (`parameter Real
+                        // R(start=1)`) when no binding is present.
+                        // Numeric and string literals show as-written;
+                        // enum refs collapse to the leaf name (matches
+                        // OMEdit); array literals render `{a,b,c}`.
+                        let default = comp
+                            .binding
+                            .as_ref()
+                            .map(format_default_expr)
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| {
+                                // `comp.start: Expression` — Empty when no
+                                // explicit start was given. format_default_expr
+                                // returns "" for `Empty` so this is safe.
+                                format_default_expr(&comp.start)
+                            });
                         params.push(ParamDef {
                             name: comp.name.clone(),
                             param_type: comp.type_name.to_string(),
-                            default: "".into(),
+                            default,
                             unit: None,
                         });
                     }

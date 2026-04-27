@@ -64,6 +64,12 @@ pub struct FileEntry {
     pub path: PathBuf,
     pub source: Arc<str>,
     pub ast: Arc<AstCache>,
+    /// Lenient parse cache — same source, salvaged AST. Parsed off-
+    /// thread alongside the strict `ast` so consumers (drill-in
+    /// install path) don't pay the lenient parse on the main thread
+    /// at install time. Continuous.mo is large enough that the
+    /// lenient parse alone froze the workbench for several seconds.
+    pub syntax: Arc<crate::document::SyntaxCache>,
 }
 
 #[derive(Debug)]
@@ -154,6 +160,30 @@ impl ResourceLoader for ModelicaFileLoader {
                 }),
             };
             let parse_done = t0.elapsed();
+            // Build the lenient `SyntaxCache` WITHOUT running a second
+            // parse. The strict pass above already returned the same
+            // `StoredDefinition` rumoca's lenient parser would produce
+            // for an error-free file — and that's the common MSL case.
+            // Re-running `parse_to_syntax` here was catastrophically
+            // slow in debug (192s for Continuous.mo, 184KB) because it
+            // bypasses rumoca's artifact cache. On strict failure we
+            // store an empty `SyntaxCache`; the doc's edit-driven
+            // `ast_refresh` will re-derive both caches from a single
+            // off-thread `parse_to_syntax` once the user pauses.
+            let syntax = Arc::new(match ast.result.as_ref() {
+                Ok(strict) => crate::document::SyntaxCache {
+                    generation: 0,
+                    ast: Arc::clone(strict),
+                    has_errors: false,
+                },
+                Err(_) => crate::document::SyntaxCache {
+                    generation: 0,
+                    ast: Arc::new(
+                        rumoca_session::parsing::ast::StoredDefinition::default(),
+                    ),
+                    has_errors: true,
+                },
+            });
             info!(
                 "[FileCache] bg task done `{}`: read {:.1}ms parse {:.1}ms ({} bytes) {}",
                 path.display(),
@@ -166,6 +196,7 @@ impl ResourceLoader for ModelicaFileLoader {
                 path,
                 source: source.into(),
                 ast,
+                syntax,
             })
         })
     }
@@ -226,6 +257,7 @@ pub struct CachedClass {
     pub qualified: String,
     pub source: Arc<str>,
     pub ast: Arc<AstCache>,
+    pub syntax: Arc<crate::document::SyntaxCache>,
     pub file_path: PathBuf,
 }
 
@@ -315,6 +347,7 @@ impl ClassCache {
                     qualified: qualified.clone(),
                     source: Arc::clone(&entry.source),
                     ast: Arc::clone(&entry.ast),
+                    syntax: Arc::clone(&entry.syntax),
                     file_path: entry.path.clone(),
                 })),
             );
@@ -354,6 +387,7 @@ pub fn drive_class_cache(
                     qualified: qualified.clone(),
                     source: Arc::clone(&entry.source),
                     ast: Arc::clone(&entry.ast),
+                    syntax: Arc::clone(&entry.syntax),
                     file_path: entry.path.clone(),
                 })),
             );

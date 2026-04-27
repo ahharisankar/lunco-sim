@@ -65,7 +65,10 @@ pub use layer::{
 };
 pub use overlay::{Anchor, NavBarOverlay, Overlay, OverlayCtx};
 pub use theme::CanvasLayerTheme;
-pub use scene::{Edge, EdgeId, Node, NodeId, Port, PortId, PortRef, Pos, Rect, Scene};
+pub use scene::{
+    empty_node_data, Edge, EdgeId, Node, NodeData, NodeId, Port, PortId, PortRef, Pos, Rect,
+    Scene,
+};
 pub use selection::{SelectItem, Selection};
 pub use tool::{CanvasOps, DefaultTool, Tool, ToolOutcome};
 pub use viewport::{Viewport, ViewportConfig};

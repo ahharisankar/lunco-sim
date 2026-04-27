@@ -163,6 +163,54 @@ fn store_canvas_theme(ctx: &egui::Context, snap: CanvasThemeSnapshot) {
     ctx.data_mut(|d| d.insert_temp(id, snap));
 }
 
+/// Typed payload carried in `lunco_canvas::Node.data` for every
+/// `"modelica.icon"` node. Replaces the prior `serde_json::Value`
+/// round-trip — projector boxes one of these, the visual factory
+/// downcasts at construction. The Modelica primitive types it
+/// carries (`Icon`, parameters) all derive `Serialize`/`Deserialize`,
+/// so a future Scene snapshot story can serialize this struct
+/// directly via a per-domain registry.
+#[derive(Clone, Debug, Default)]
+pub struct IconNodeData {
+    /// Fully-qualified type name (e.g. `Modelica.Electrical.Analog.Basic.Resistor`).
+    pub qualified_type: String,
+    /// `Icons.*` package class — rendered with a dashed border so
+    /// users see at a glance the component is decorative.
+    pub icon_only: bool,
+    /// `expandable connector` (MLS §9.1.3) — accent dashed border.
+    pub expandable_connector: bool,
+    /// Decoded `Icon(graphics={...})` annotation merged across the
+    /// `extends` chain. `None` only when the class has literally no
+    /// Icon in inheritance — then the visual falls back to a label box.
+    pub icon_graphics: Option<crate::annotations::Icon>,
+    /// Per-instance rotation (degrees CCW, Modelica convention).
+    pub rotation_deg: f32,
+    /// Mirror flags applied before rotation (MLS Annex D order).
+    pub mirror_x: bool,
+    pub mirror_y: bool,
+    /// Instance name — drives `%name` text substitution.
+    pub instance_name: String,
+    /// Pre-formatted `(param_name, value)` for `%paramName` text
+    /// substitution. Class defaults today; instance modifications
+    /// follow.
+    pub parameters: Vec<(String, String)>,
+}
+
+/// Typed payload for `"modelica.connection"` edges. Same purpose as
+/// [`IconNodeData`].
+#[derive(Clone, Debug, Default)]
+pub struct ConnectionEdgeData {
+    pub connector_type: String,
+    pub from_dir: PortDir,
+    pub to_dir: PortDir,
+    pub waypoints_world: Vec<lunco_canvas::Pos>,
+    pub icon_color: Option<egui::Color32>,
+    pub source_path: String,
+    pub target_path: String,
+    pub kind: crate::visual_diagram::PortKind,
+    pub flow_vars: Vec<crate::visual_diagram::FlowVarMeta>,
+}
+
 /// Per-component icon visual. Renders, in priority order:
 ///
 /// 1. The class's decoded `Icon(graphics={...})` annotation merged
@@ -195,6 +243,12 @@ struct IconNodeVisual {
     /// classes show their authored graphics instead of falling back
     /// to a generic placeholder.
     icon_graphics: Option<crate::annotations::Icon>,
+    /// Pre-formatted `(parameter_name, value)` pairs for `%paramName`
+    /// text substitution. Carries class defaults from
+    /// `MSLComponentDef.parameters` (instance-modification overlay
+    /// is a follow-up — most icons display defaults anyway when no
+    /// instance modifications are set).
+    parameters: Vec<(String, String)>,
     /// Per-instance rotation (degrees CCW, Modelica frame) applied to
     /// the icon body itself — rotates both the SVG raster and the
     /// `paint_graphics` primitives uniformly. Without this, mirror /
@@ -227,21 +281,18 @@ impl NodeVisual for IconNodeVisual {
         let painter = ctx.ui.painter();
         let theme_snap = canvas_theme_from_ctx(ctx.ui.ctx());
 
-        // Always paint a solid card background *underneath* the SVG.
-        // Why: MSL icons are outlined shapes — the SVG pixels inside
-        // the outline are transparent by design, so without a bg the
-        // connection lines running behind an icon are visible through
-        // its body. That reads as "the diagram is a sheet of glass"
-        // rather than "icons are opaque tiles." Dymola/OMEdit both
-        // paint each icon on its own opaque card for the same reason.
-        painter.rect_filled(rect, 6.0, theme_snap.card_fill);
+        // No always-on card fill. Icons that need a body (Resistor's
+        // white rectangle, Inertia's gray cylinder, …) author it
+        // themselves; classes without an Icon at all get the
+        // placeholder card from the `!drew_icon` branch below.
+        // Matches Dymola/OMEdit — they never paint a "competing"
+        // card behind authored icons.
 
-        // Priority 1: authored graphics from the class's `Icon`
-        // annotation. Beats the SVG path so user-defined classes show
-        // their own primitives even when no pre-rasterised icon
-        // exists for them. Per-instance orientation rotates+mirrors
-        // every primitive at the rect level so placement-rotation
-        // shows visually, not just on the port positions.
+        // Authored graphics from the class's `Icon` annotation,
+        // merged across the `extends` chain at index time.
+        // Per-instance orientation rotates+mirrors every primitive
+        // at the rect level so placement-rotation shows visually,
+        // not just on the port positions.
         let orientation = crate::icon_paint::IconOrientation {
             rotation_deg: self.rotation_deg,
             mirror_x: self.mirror_x,
@@ -252,6 +303,7 @@ impl NodeVisual for IconNodeVisual {
             let sub = crate::icon_paint::TextSubstitution {
                 name: (!self.instance_name.is_empty()).then_some(self.instance_name.as_str()),
                 class_name: (!self.class_name.is_empty()).then_some(self.class_name.as_str()),
+                parameters: (!self.parameters.is_empty()).then_some(self.parameters.as_slice()),
             };
             // Build a per-instance value resolver for MLS §18
             // `DynamicSelect` text expressions. The icon expression
@@ -288,10 +340,13 @@ impl NodeVisual for IconNodeVisual {
         }
 
         if !drew_icon {
-            // No `Icon` annotation in the class or its extends chain.
-            // Card is already painted; just add a type label so the
-            // user still sees something meaningful instead of a blank
-            // box.
+            // Placeholder for classes with literally no `Icon` in
+            // their extends chain — same shape as OMEdit's "no icon
+            // authored yet" stand-in: rounded card + class name
+            // centred. Once the user (or the indexer) authors an
+            // Icon annotation, the live path above takes over and
+            // we never run this fallback again.
+            painter.rect_filled(rect, 6.0, theme_snap.card_fill);
             if !self.type_label.is_empty() && rect.height() > 30.0 {
                 painter.text(
                     egui::pos2(rect.center().x, rect.center().y),
@@ -303,42 +358,48 @@ impl NodeVisual for IconNodeVisual {
             }
         }
 
-        // Selection outline draws ON TOP of the icon so it's always
-        // visible even over busy SVG content. Icon-only classes
-        // (no connectors, visual-only) get a dashed border instead
-        // of solid — a signal that the component isn't hookable.
+        // Border policy: a *very subtle* inactive border by default
+        // so components have visible bounds against the canvas
+        // grid without competing with the icon's own primitives,
+        // plus stronger strokes on selection / icon-only /
+        // expandable accents. Matches OMEdit's diagram view, which
+        // also draws a hairline frame around every component.
         let stroke = if selected {
             egui::Stroke::new(2.0, theme_snap.select_stroke)
         } else if self.icon_only {
             egui::Stroke::new(1.0, theme_snap.icon_only_stroke)
         } else if self.expandable_connector {
-            // Accent colour (same family as the select stroke) so the
-            // dashed border is visually distinct from icon-only.
             egui::Stroke::new(1.5, theme_snap.select_stroke)
-        } else {
+        } else if !drew_icon {
+            // Placeholder card needs a regular outline.
             egui::Stroke::new(1.0, theme_snap.inactive_stroke)
+        } else {
+            // Authored icon: draw a hairline border at low alpha so
+            // the bounds are visible without obscuring authored
+            // fills. ~30% alpha of the inactive_stroke colour.
+            let c = theme_snap.inactive_stroke;
+            let dim = egui::Color32::from_rgba_unmultiplied(
+                c.r(),
+                c.g(),
+                c.b(),
+                (c.a() / 3).max(40),
+            );
+            egui::Stroke::new(0.75, dim)
         };
         let wants_dashed = (self.icon_only || self.expandable_connector) && !selected;
         if wants_dashed {
-            // Dashed border via four side-segments sampled in
-            // short dash+gap runs. Cheap (12-16 line_segment calls
-            // per node) and looks right at all zoom levels because
-            // we dash in screen pixels here.
             paint_dashed_rect(painter, rect, 6.0, stroke);
         } else {
             painter.rect_stroke(rect, 6.0, stroke, egui::StrokeKind::Outside);
         }
 
-        // Instance name above the icon.
-        if !node.label.is_empty() {
-            painter.text(
-                egui::pos2(rect.center().x, rect.min.y - 4.0),
-                egui::Align2::CENTER_BOTTOM,
-                &node.label,
-                egui::FontId::proportional(11.0),
-                theme_snap.node_label,
-            );
-        }
+        // Instance name: deliberately NOT drawn here. Modelica icons
+        // author their own `Text(textString="%name", extent={...})`
+        // primitive — we substitute via `TextSubstitution` and the
+        // icon decides where the name belongs. Drawing a workbench-
+        // owned label here too produced the duplicate-name visual
+        // noise users hit on the PID example. OMEdit / Dymola don't
+        // draw an external label either.
 
         // Ports — shape per connector causality (OMEdit / Dymola
         // convention):
@@ -593,7 +654,7 @@ fn paint_flow_dots(
 /// wire's first segment ("stub") runs along — Dymola/OMEdit wire
 /// pretty-routing convention. Modelica port placement is in (-100..100)
 /// per axis; we classify by which extreme the port sits closest to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum PortDir {
     Left,
     Right,
@@ -601,6 +662,7 @@ enum PortDir {
     Down,
     /// Port sits in the interior of the icon (or no info). Routing
     /// degrades to plain Z-bend.
+    #[default]
     None,
 }
 
@@ -1563,147 +1625,59 @@ fn build_registry() -> VisualRegistry {
     // domain plugin that wants embedded scopes — Modelica is just the
     // first integrator.
     lunco_viz::kinds::canvas_plot_node::register(&mut reg);
-    reg.register_node_kind("modelica.icon", |data: &JsonValue| {
-        // `type` is the fully-qualified path (used by drill-in);
-        // show only its tail under the icon so the label isn't a
-        // 50-character package path.
-        let qualified = data
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let type_label = qualified.rsplit('.').next().unwrap_or(qualified).to_string();
-        let icon_only = data
-            .get("icon_only")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let expandable_connector = data
-            .get("expandable_connector")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        // `icon_graphics` is the decoded Icon annotation, merged
-        // across the `extends` chain by `extract_icon_inherited` at
-        // index time. Missing only when the class has no Icon
-        // anywhere in inheritance — falls back to the type-label box.
-        let icon_graphics = data
-            .get("icon_graphics")
-            .and_then(|v| {
-                if v.is_null() {
-                    None
-                } else {
-                    serde_json::from_value::<crate::annotations::Icon>(v.clone()).ok()
-                }
-            });
-        let rotation_deg = data
-            .get("icon_rotation_deg")
-            .and_then(|v| v.as_f64())
-            .map(|v| v as f32)
-            .unwrap_or(0.0);
-        let mirror_x = data
-            .get("icon_mirror_x")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let mirror_y = data
-            .get("icon_mirror_y")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let instance_name = data
-            .get("instance_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
+    reg.register_node_kind("modelica.icon", |data: &lunco_canvas::NodeData| {
+        // Downcast to the typed payload the projector boxed (see
+        // `IconNodeData`). Empty payload → render with defaults; the
+        // visual handles a missing icon by showing the type label.
+        let Some(d) = data.downcast_ref::<IconNodeData>() else {
+            return IconNodeVisual::default();
+        };
+        let type_label = d
+            .qualified_type
+            .rsplit('.')
+            .next()
+            .unwrap_or(&d.qualified_type)
             .to_string();
         IconNodeVisual {
             type_label: type_label.clone(),
             class_name: type_label,
-            icon_only,
-            expandable_connector,
-            icon_graphics,
-            rotation_deg,
-            mirror_x,
-            mirror_y,
-            instance_name,
+            icon_only: d.icon_only,
+            expandable_connector: d.expandable_connector,
+            icon_graphics: d.icon_graphics.clone(),
+            parameters: d.parameters.clone(),
+            rotation_deg: d.rotation_deg,
+            mirror_x: d.mirror_x,
+            mirror_y: d.mirror_y,
+            instance_name: d.instance_name.clone(),
         }
     });
-    reg.register_edge_kind("modelica.connection", |data: &JsonValue| {
-        let connector_type = data
-            .get("connector_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let from_dir = PortDir::from_str(
-            data.get("from_dir").and_then(|v| v.as_str()).unwrap_or(""),
-        );
-        let to_dir = PortDir::from_str(
-            data.get("to_dir").and_then(|v| v.as_str()).unwrap_or(""),
-        );
-        // Waypoints come in as Modelica coords (+Y up). Flip Y here
-        // so the renderer can walk them in the same world frame as
-        // the port positions (nodes already live in the flipped
-        // space, see the IconTransform comment).
-        let waypoints_world: Vec<CanvasPos> = data
-            .get("waypoints")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|pt| {
-                        let pt = pt.as_array()?;
-                        let x = pt.first()?.as_f64()? as f32;
-                        let y = pt.get(1)?.as_f64()? as f32;
-                        Some(CanvasPos::new(x, -y))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        // Prefer the connector's Icon-derived color (OMEdit/Dymola
-        // convention) when the projector populated it, fall through
-        // to the leaf-name palette otherwise.
-        let icon_color = data
-            .get("icon_color")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| {
-                let r = arr.first()?.as_u64()? as u8;
-                let g = arr.get(1)?.as_u64()? as u8;
-                let b = arr.get(2)?.as_u64()? as u8;
-                Some(egui::Color32::from_rgb(r, g, b))
-            });
-        let leaf = connector_type.rsplit('.').next().unwrap_or(connector_type);
-        let source_path = data
-            .get("source_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let target_path = data
-            .get("target_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        // AST-derived connector classification (Input/Output/Acausal)
-        // replaces the old "ends_with Input" leaf-name test.
-        let kind = match data.get("kind").and_then(|v| v.as_str()).unwrap_or("") {
-            "input" => crate::visual_diagram::PortKind::Input,
-            "output" => crate::visual_diagram::PortKind::Output,
-            _ => crate::visual_diagram::PortKind::Acausal,
+    reg.register_edge_kind("modelica.connection", |data: &lunco_canvas::NodeData| {
+        let Some(d) = data.downcast_ref::<ConnectionEdgeData>() else {
+            return OrthogonalEdgeVisual::default();
         };
+        let leaf = d
+            .connector_type
+            .rsplit('.')
+            .next()
+            .unwrap_or(&d.connector_type)
+            .to_string();
         let is_causal = matches!(
-            kind,
+            d.kind,
             crate::visual_diagram::PortKind::Input | crate::visual_diagram::PortKind::Output,
         );
-
-        let flow_vars: Vec<crate::visual_diagram::FlowVarMeta> = data
-            .get("flow_vars")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-
         OrthogonalEdgeVisual {
-            color: icon_color.unwrap_or_else(|| wire_color_for(connector_type)),
-            from_dir,
-            to_dir,
-            waypoints_world,
+            color: d
+                .icon_color
+                .unwrap_or_else(|| wire_color_for(&d.connector_type)),
+            from_dir: d.from_dir,
+            to_dir: d.to_dir,
+            waypoints_world: d.waypoints_world.clone(),
             is_causal,
-            source_path,
-            target_path,
-            kind,
-            flow_vars,
-            connector_leaf: leaf.to_string(),
+            source_path: d.source_path.clone(),
+            target_path: d.target_path.clone(),
+            kind: d.kind,
+            flow_vars: d.flow_vars.clone(),
+            connector_leaf: leaf,
         }
     });
     reg
@@ -1979,49 +1953,23 @@ fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramNodeId, Canv
                 icon_h_local,
             ),
             kind: "modelica.icon".into(),
-            data: serde_json::json!({
-                // Full qualified name — what the drill-in resolver
-                // feeds into Modelica's package layout lookup. The
-                // short `name` is fine for labels, but breaks
-                // drill-in (which needs the path) and the type
-                // hint shown under the label.
-                "type": node.component_def.msl_path,
-                // Flag pure-icon classes so the renderer can draw
-                // them with a dashed border — users see at a
-                // glance that these are decorative and have no
-                // connectors to hook up.
-                "icon_only": crate::class_cache::is_icon_only_class(
+            data: std::sync::Arc::new(IconNodeData {
+                qualified_type: node.component_def.msl_path.clone(),
+                icon_only: crate::class_cache::is_icon_only_class(
                     &node.component_def.msl_path,
                 ),
-                // `expandable connector` (MLS §9.1.3) — rendered with
-                // a dashed accent border. Set by the projector from
-                // the class-def's `expandable` flag via
-                // `register_local_class`; MSL palette entries carry
-                // the flag through the MSLComponentDef.
-                "expandable_connector": node.component_def.is_expandable_connector,
-                // Decoded `Icon(graphics={...})` annotation for the
-                // class, if the projector extracted one. Takes
-                // precedence over the SVG fallback in
-                // `IconNodeVisual::draw`. Omitted when `None` so the
-                // common (MSL) path produces the same JSON it always
-                // has.
-                "icon_graphics": node.component_def.icon_graphics,
-                // Orientation parameters (rotation + mirror) preserved
-                // alongside the node's `IconTransform` matrix. The
-                // visual reads these to rotate/mirror the icon body
-                // itself, complementing the port positions handled
-                // above. Only the named primitives travel — the matrix
-                // is rebuilt from `extent` + `position` when needed
-                // (translation/scale are already baked into the
-                // canvas rect).
-                "icon_rotation_deg": node.icon_transform.rotation_deg,
-                "icon_mirror_x": node.icon_transform.mirror_x,
-                "icon_mirror_y": node.icon_transform.mirror_y,
-                // Carried through so the icon renderer can substitute
-                // `%name` in authored `Text(textString="%name")`
-                // primitives — the reason every MSL component shows
-                // "R1" / "C1" on its body instead of the class name.
-                "instance_name": node.instance_name,
+                expandable_connector: node.component_def.is_expandable_connector,
+                icon_graphics: node.component_def.icon_graphics.clone(),
+                rotation_deg: node.icon_transform.rotation_deg,
+                mirror_x: node.icon_transform.mirror_x,
+                mirror_y: node.icon_transform.mirror_y,
+                instance_name: node.instance_name.clone(),
+                parameters: node
+                    .component_def
+                    .parameters
+                    .iter()
+                    .map(|p| (p.name.clone(), p.default.clone()))
+                    .collect(),
             }),
             ports,
             label: node.instance_name.clone(),
@@ -2106,40 +2054,28 @@ fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramNodeId, Canv
                 port: CanvasPortId::new(edge.target_port.clone()),
             },
             kind: "modelica.connection".into(),
-            data: serde_json::json!({
-                "connector_type": connector_type,
-                "from_dir": from_dir.as_str(),
-                "to_dir": to_dir.as_str(),
-                // Authored polyline in Modelica coords (+Y up); Y is
-                // flipped to canvas world coords at render time.
-                // Empty array when the edge uses auto-routing only.
-                "waypoints": edge.waypoints,
-                // Icon-derived color [r,g,b] when available; null
-                // means the edge factory should use wire_color_for(type).
-                "icon_color": icon_color,
-                // Fully-qualified port paths for hover tooltips —
-                // e.g. `"engine.thrust"` or `"tank.fuel_out"`. The
-                // renderer appends each flow variable's name for
-                // acausal ports and looks the resulting path up in
-                // the per-frame NodeStateSnapshot.
-                "source_path": src_node
+            data: std::sync::Arc::new(ConnectionEdgeData {
+                connector_type: connector_type.clone(),
+                from_dir,
+                to_dir,
+                waypoints_world: edge
+                    .waypoints
+                    .iter()
+                    .map(|&(x, y)| CanvasPos::new(x, -y))
+                    .collect(),
+                icon_color: icon_color
+                    .map(|[r, g, b]| egui::Color32::from_rgb(r, g, b)),
+                source_path: src_node
                     .map(|n| format!("{}.{}", n.instance_name, edge.source_port))
                     .unwrap_or_default(),
-                "target_path": tgt_node
+                target_path: tgt_node
                     .map(|n| format!("{}.{}", n.instance_name, edge.target_port))
                     .unwrap_or_default(),
-                // AST-derived connector semantics — replace the old
-                // leaf-name heuristics. `kind` is Input/Output/Acausal
-                // (drives arrowhead + animation eligibility).
-                // `flow_vars` lists every `flow` variable on the
-                // connector class (name + declared unit) so the
-                // tooltip / animation can reference them by their
-                // real names instead of a hardcoded `m_dot`.
-                "kind": src_port_def
+                kind: src_port_def
                     .as_ref()
-                    .map(|p| port_kind_str(p.kind))
-                    .unwrap_or("acausal"),
-                "flow_vars": src_port_def
+                    .map(|p| p.kind)
+                    .unwrap_or(crate::visual_diagram::PortKind::Acausal),
+                flow_vars: src_port_def
                     .as_ref()
                     .map(|p| p.flow_vars.clone())
                     .unwrap_or_default(),
@@ -3948,7 +3884,8 @@ impl CanvasDiagramPanel {
                         .canvas
                         .scene
                         .node(*id)
-                        .and_then(|n| n.data.get("type").and_then(|v| v.as_str()).map(str::to_string))
+                        .and_then(|n| n.data.downcast_ref::<IconNodeData>())
+                        .map(|d| d.qualified_type.clone())
                 };
                 if let Some(qualified) = type_name {
                     drill_into_class(world, &qualified);
@@ -4422,8 +4359,8 @@ fn render_empty_menu(
                                 signal_path: path.clone(),
                                 title: String::new(),
                             };
-                        let data = serde_json::to_value(&payload)
-                            .unwrap_or_default();
+                        let data: lunco_canvas::NodeData =
+                            std::sync::Arc::new(payload);
                         let active_doc = active_doc_from_world(world);
                         let mut state =
                             world.resource_mut::<CanvasDiagramState>();
@@ -5375,20 +5312,15 @@ pub fn drive_drill_in_loads(
                 path: entry.file_path.clone(),
                 writable: false,
             };
-            // Build doc from pre-parsed cache entry — strict AST is
-            // shared from the loader; lenient `SyntaxCache` is built
-            // inline because the loader doesn't carry it (would
-            // double the per-MSL-file parse cost on the projection
-            // critical path; here it's a one-shot per opened class).
-            let syntax = std::sync::Arc::new(
-                crate::document::SyntaxCache::from_source(&entry.source, 0),
-            );
+            // Both the strict and the lenient AST are pre-parsed
+            // off-thread by the FileCache loader; install path is now
+            // O(string clone), no parse on the main thread.
             let doc = crate::document::ModelicaDocument::from_parts(
                 doc_id,
                 entry.source.to_string(),
                 origin,
                 std::sync::Arc::clone(&entry.ast),
-                syntax,
+                std::sync::Arc::clone(&entry.syntax),
             );
             registry.install_prebuilt(doc_id, doc);
             loads.pending.remove(&doc_id);
@@ -5547,17 +5479,19 @@ fn open_drill_in_tab(
     qualified: &str,
     file_path: &std::path::Path,
 ) {
-    // Find or allocate the doc. Reuse an existing one if the same
-    // msl:// path was opened before, so re-drilling into the same
-    // class focuses instead of spawning a duplicate.
+    // Find or allocate the doc. Reuse an existing one only if the
+    // same `(file, drilled-in class)` was opened before — keying on
+    // file alone collapsed sibling MSL classes (e.g. `Integrator`
+    // and `Derivative` both in `Continuous.mo`) onto one tab, so a
+    // second drill silently focused the first tab instead of
+    // showing the requested class.
     let model_path_id = format!("msl://{qualified}");
     let existing_doc = {
         let registry = world.resource::<ModelicaDocumentRegistry>();
-        // ModelicaDocumentRegistry doesn't expose a find-by-path
-        // API, so we look through existing tabs for a match.
         let tabs = world.resource::<crate::ui::panels::model_view::ModelTabs>();
+        let class_names = world.resource::<DrilledInClassNames>();
         tabs.iter_docs().find(|&doc_id| {
-            registry
+            let same_file = registry
                 .host(doc_id)
                 .and_then(|h| match h.document().origin() {
                     lunco_doc::DocumentOrigin::File { path, .. } => {
@@ -5565,7 +5499,12 @@ fn open_drill_in_tab(
                     }
                     _ => None,
                 })
-                .unwrap_or(false)
+                .unwrap_or(false);
+            same_file
+                && class_names
+                    .get(doc_id)
+                    .map(|n| n == qualified)
+                    .unwrap_or(false)
         })
     };
     let (doc_id, needs_load) = if let Some(id) = existing_doc {
@@ -5597,6 +5536,14 @@ fn open_drill_in_tab(
                 started: web_time::Instant::now(),
             },
         );
+    }
+    // Bind the drilled-in class eagerly — without this, a second
+    // drill into a sibling class in the same file would race the
+    // (post-install) `class_names.set` and find no class binding,
+    // letting the file-level dedup re-fire and steal the tab.
+    {
+        let mut class_names = world.resource_mut::<DrilledInClassNames>();
+        class_names.set(doc_id, qualified.to_string());
     }
 
     let _ = model_path_id;
@@ -5777,10 +5724,9 @@ fn component_headers(
     let instance = node.label.clone();
     let type_name = node
         .data
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+        .downcast_ref::<IconNodeData>()
+        .map(|d| d.qualified_type.clone())
+        .unwrap_or_default();
     (instance, type_name)
 }
 
@@ -5894,15 +5840,20 @@ fn synthesize_msl_node(
         id,
         rect: CanvasRect::from_min_size(CanvasPos::new(min_wx, min_wy), icon_w, icon_h),
         kind: "modelica.icon".into(),
-        data: serde_json::json!({
-            "type": comp.msl_path,
-            "icon_only": crate::class_cache::is_icon_only_class(&comp.msl_path),
-            "expandable_connector": comp.is_expandable_connector,
-            "icon_graphics": comp.icon_graphics,
-            "icon_rotation_deg": 0.0_f32,
-            "icon_mirror_x": false,
-            "icon_mirror_y": false,
-            "instance_name": instance_name,
+        data: std::sync::Arc::new(IconNodeData {
+            qualified_type: comp.msl_path.clone(),
+            icon_only: crate::class_cache::is_icon_only_class(&comp.msl_path),
+            expandable_connector: comp.is_expandable_connector,
+            icon_graphics: comp.icon_graphics.clone(),
+            rotation_deg: 0.0,
+            mirror_x: false,
+            mirror_y: false,
+            instance_name: instance_name.to_string(),
+            parameters: comp
+                .parameters
+                .iter()
+                .map(|p| (p.name.clone(), p.default.clone()))
+                .collect(),
         }),
         ports,
         label: instance_name.to_string(),

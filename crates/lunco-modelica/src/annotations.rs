@@ -776,9 +776,24 @@ where
     // PartialValve case (`parameter Boolean filteredOpening = false;`
     // → the inherited Ellipse / lines guarded by `visible=filteredOpening`
     // disappear from `ValveCompressible`'s rendered icon).
+    // Falsy `parameter Boolean` set, gathered from THIS class **and**
+    // every ancestor in the `extends` chain. Without the recursive
+    // walk, `visible=<inheritedParam>` clauses (e.g. SpringDamper's
+    // `Line(visible=useHeatPort, ...)` where `useHeatPort` lives on
+    // `PartialElementaryConditionalHeatPortWithoutT`) draw even when
+    // the inherited default is `false` — visible as a stray red dot
+    // line on every SpringDamper icon.
     let mut falsy_params: std::collections::HashSet<String> =
         std::collections::HashSet::new();
-    collect_falsy_bool_params(class, &mut falsy_params);
+    let mut falsy_visited: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    collect_falsy_bool_params_recursive(
+        class_name,
+        class,
+        resolver,
+        &mut falsy_params,
+        &mut falsy_visited,
+    );
     let local = extract_icon_with_visibility(&class.annotation, &falsy_params);
     let local_cs = local.as_ref().map(|i| i.coordinate_system);
     if let Some(icon) = local {
@@ -873,9 +888,8 @@ fn extract_graphic_item_filtered(
 
 /// Walk a class's components and add the names of `parameter Boolean`
 /// declarations whose explicit default is the literal `false` to
-/// `out`. Used to evaluate `visible=<paramName>` flags on graphic
-/// primitives — when the parameter defaults to false, the primitive
-/// is suppressed from the rendered icon.
+/// `out`. Non-recursive — caller drives extends-chain traversal via
+/// [`collect_falsy_bool_params_recursive`].
 fn collect_falsy_bool_params(
     class: &rumoca_session::parsing::ast::ClassDef,
     out: &mut std::collections::HashSet<String>,
@@ -895,6 +909,53 @@ fn collect_falsy_bool_params(
     }
 }
 
+/// Walk a class **and every ancestor in the `extends` chain** and
+/// add the names of `parameter Boolean` declarations whose default
+/// is the literal `false` to `out`. Required for `visible=<param>`
+/// resolution when the param is inherited from a partial base
+/// (`useHeatPort` on `PartialElementaryConditionalHeatPortWithoutT`,
+/// `useSupport` on `PartialTorque`, …).
+fn collect_falsy_bool_params_recursive<F>(
+    class_name: &str,
+    class: &rumoca_session::parsing::ast::ClassDef,
+    resolver: &mut F,
+    out: &mut std::collections::HashSet<String>,
+    visited: &mut std::collections::HashSet<String>,
+) where
+    F: FnMut(&str)
+        -> Option<std::sync::Arc<rumoca_session::parsing::ast::ClassDef>>,
+{
+    if !visited.insert(class_name.to_string()) {
+        return;
+    }
+    collect_falsy_bool_params(class, out);
+    for ext in &class.extends {
+        let base_name: String = ext
+            .base_name
+            .name
+            .iter()
+            .map(|t| t.text.as_ref())
+            .collect::<Vec<&str>>()
+            .join(".");
+        // Mirror the candidate-resolution `extract_icon_inherited`
+        // uses so we walk the same chain (scope-chain expansion +
+        // import aliases). First hit wins.
+        let candidates = build_extends_candidates(class_name, &base_name, &class.imports);
+        for cand in candidates {
+            if let Some(base) = resolver(&cand) {
+                collect_falsy_bool_params_recursive(
+                    &cand,
+                    base.as_ref(),
+                    resolver,
+                    out,
+                    visited,
+                );
+                break;
+            }
+        }
+    }
+}
+
 /// Resolve a graphic primitive's `visible=` flag against a set of
 /// known-false parameter names. Returns `true` when the primitive
 /// should be hidden (literal `false`, OR an identifier whose default
@@ -906,20 +967,50 @@ fn is_visibility_falsy(
     let Some(vis) = named_arg(args, "visible") else {
         return false; // default visible=true
     };
-    // Literal: `visible=false` / `visible=true`.
-    if let Expression::Terminal { terminal_type, token } = vis {
-        if matches!(terminal_type, rumoca_session::parsing::ast::TerminalType::Bool) {
-            return token.text.as_ref() == "false";
+    eval_visibility_falsy(vis, falsy_params)
+}
+
+/// Recursive evaluator for `visible=` expressions. Handles the four
+/// shapes that show up across MSL:
+///   - `visible=false` / `visible=true` — literal boolean
+///   - `visible=<paramName>` — identifier defaulting to false → falsy
+///   - `visible=not <paramName>` — negated identifier; falsy iff the
+///     bare form would be truthy (i.e. param defaults to `true` —
+///     which we don't track yet, so default to "draw")
+///   - anything else — default `false` (= draw)
+fn eval_visibility_falsy(
+    expr: &Expression,
+    falsy_params: &std::collections::HashSet<String>,
+) -> bool {
+    use rumoca_session::parsing::ast::{OpUnary, TerminalType};
+    match expr {
+        Expression::Terminal { terminal_type, token } => {
+            matches!(terminal_type, TerminalType::Bool)
+                && token.text.as_ref() == "false"
         }
-    }
-    // Identifier: `visible=filteredOpening`. Drop if the parameter's
-    // default in this class (or an ancestor) is the literal `false`.
-    if let Expression::ComponentReference(cref) = vis {
-        if let Some(part) = cref.parts.first() {
-            return falsy_params.contains(part.ident.text.as_ref());
+        Expression::ComponentReference(cref) => cref
+            .parts
+            .first()
+            .map(|p| falsy_params.contains(p.ident.text.as_ref()))
+            .unwrap_or(false),
+        Expression::Unary { op, rhs } => match op {
+            OpUnary::Not(_) => {
+                // `not <expr>`: falsy iff inner is truthy. We can
+                // only confirm "truthy" when the bare ident appears
+                // in a hypothetical `truthy_params` set. Without
+                // that, we conservatively default to "draw" — i.e.
+                // `not useSupport` with `useSupport=false` → draws,
+                // matching what OMEdit shows for the default-false
+                // case (the support hatching IS visible by default).
+                false
+            }
+            _ => false,
+        },
+        Expression::Parenthesized { inner } => {
+            eval_visibility_falsy(inner, falsy_params)
         }
+        _ => false,
     }
-    false
 }
 
 fn extract_rectangle(args: &[Expression]) -> Option<Rectangle> {
