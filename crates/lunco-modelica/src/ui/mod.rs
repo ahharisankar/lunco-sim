@@ -200,6 +200,30 @@ fn sync_workspace_on_doc_saved(
     }
 }
 
+/// React to a Twin being added (Open Folder / Open Twin / promotion)
+/// by spawning a background scan task that builds the package-browser
+/// tree for that Twin's `.mo` content.
+///
+/// The scan was previously inlined into the welcome panel's "Open
+/// Folder" button. Hoisting it onto the canonical `TwinAdded` event
+/// means menu / picker / HTTP / scripts all converge on one path —
+/// the welcome button is now just another fire-and-forget caller.
+fn scan_twin_on_added(
+    trigger: On<lunco_workbench::TwinAdded>,
+    ws: Res<lunco_workbench::WorkspaceResource>,
+    mut cache: ResMut<panels::package_browser::PackageTreeCache>,
+) {
+    let twin_id = trigger.event().twin;
+    let Some(twin) = ws.twin(twin_id) else {
+        return;
+    };
+    let folder = twin.root.clone();
+    let pool = bevy::tasks::AsyncComputeTaskPool::get();
+    let task = pool.spawn(async move { panels::package_browser::scan_twin_folder(folder) });
+    cache.twin = None;
+    cache.twin_scan_task = Some(task);
+}
+
 /// Drop the document linked to a despawned `ModelicaModel` entity, and
 /// any compile-state bookkeeping attached to that document.
 ///
@@ -381,6 +405,13 @@ impl Plugin for ModelicaUiPlugin {
             .add_observer(sync_workspace_on_doc_opened)
             .add_observer(sync_workspace_on_doc_closed)
             .add_observer(sync_workspace_on_doc_saved)
+            // Kick off a background scan whenever the workbench
+            // announces a new Twin (Open Folder / Open Twin / "Save
+            // as Twin" promotion). The scan populates the package
+            // browser's Twin tree; until this lands, opening a Twin
+            // would update WorkspaceResource but the Modelica
+            // sidebar wouldn't reflect it.
+            .add_observer(scan_twin_on_added)
             .add_systems(Update, panels::diagnostics::refresh_diagnostics)
             // Debounced AST reparse — reparses any doc that has
             // stopped receiving keystrokes for AST_DEBOUNCE_MS (250 ms).

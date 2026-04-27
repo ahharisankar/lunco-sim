@@ -978,51 +978,18 @@ impl Panel for WelcomePanel {
                 .trigger(crate::ui::commands::CreateNewScratchModel {});
         }
         if open_folder {
-            #[cfg(not(target_arch = "wasm32"))]
-            if let Some(folder) = rfd::FileDialog::new()
-                .set_title("Open workspace folder")
-                .pick_folder()
-            {
-                use bevy::tasks::AsyncComputeTaskPool;
-                let pool = AsyncComputeTaskPool::get();
-                let task = pool.spawn({
-                    let folder = folder.clone();
-                    async move {
-                        crate::ui::panels::package_browser::scan_twin_folder(
-                            folder,
-                        )
-                    }
+            // Empty-path `OpenFolder` triggers the workbench's native
+            // picker, classifies on resolve (twin.toml → Twin, else
+            // Folder), and fires `TwinAdded`. The Modelica package
+            // browser observes that event and kicks off its scan.
+            // Single source of truth for the open-folder flow —
+            // menus, recents, HTTP, and this welcome button all
+            // route through the same observers.
+            world
+                .commands()
+                .trigger(lunco_workbench::file_ops::OpenFolder {
+                    path: String::new(),
                 });
-                {
-                    let mut cache = world.resource_mut::<
-                        crate::ui::panels::package_browser::PackageTreeCache,
-                    >();
-                    cache.twin = None;
-                    cache.twin_scan_task = Some(task);
-                }
-                match lunco_twin::TwinMode::open(&folder) {
-                    Ok(lunco_twin::TwinMode::Folder(twin))
-                    | Ok(lunco_twin::TwinMode::Twin(twin)) => {
-                        let twin_id = world
-                            .resource_mut::<lunco_workbench::WorkspaceResource>(
-                            )
-                            .add_twin(twin);
-                        world
-                            .commands()
-                            .trigger(lunco_workbench::TwinAdded {
-                                twin: twin_id,
-                            });
-                    }
-                    Ok(lunco_twin::TwinMode::Orphan(_)) => {}
-                    Err(e) => {
-                        log::warn!(
-                            "open folder: failed to index {:?}: {}",
-                            folder,
-                            e
-                        );
-                    }
-                }
-            }
         }
         if let Some(filename) = open_bundled {
             let id = format!("bundled://{}", filename);

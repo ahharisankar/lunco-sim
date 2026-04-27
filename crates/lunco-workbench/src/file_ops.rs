@@ -38,9 +38,10 @@
 use bevy::prelude::*;
 use lunco_core::{on_command, register_commands, Command};
 use lunco_doc_bevy::SaveAsDocument;
-use lunco_twin::{DocumentKindId, DocumentKindRegistry};
+use lunco_twin::{DocumentKindId, DocumentKindRegistry, TwinMode};
 
 use crate::picker::{PickFollowUp, PickResolved};
+use crate::session::{TwinAdded, WorkspaceResource};
 
 /// Create a new untitled document of the given kind.
 ///
@@ -166,7 +167,11 @@ fn on_new_document(
 }
 
 #[on_command(OpenFolder)]
-fn on_open_folder(trigger: On<OpenFolder>, mut commands: Commands) {
+fn on_open_folder(
+    trigger: On<OpenFolder>,
+    mut workspace: ResMut<WorkspaceResource>,
+    mut commands: Commands,
+) {
     use crate::picker::{PickHandle, PickMode};
     let path = trigger.event().path.clone();
     if path.is_empty() {
@@ -177,25 +182,30 @@ fn on_open_folder(trigger: On<OpenFolder>, mut commands: Commands) {
         return;
     }
     // Auto-classify: a folder containing `twin.toml` is a Twin —
-    // re-trigger as `OpenTwin` so its observer handles the manifest
-    // load and spawns the Twin entity. A bare folder (no manifest)
-    // gets the plain Folder workspace; today that's a stub log
-    // because the Folder mode itself isn't wired up yet.
-    let manifest = std::path::Path::new(&path).join(lunco_twin::MANIFEST_FILENAME);
+    // re-trigger as `OpenTwin` so the strict-mode observer handles
+    // the manifest path and downstream code can rely on `TwinMode::Twin`
+    // semantics. A bare folder (no manifest) gets the lenient
+    // `TwinMode::Folder` spawn here.
+    let folder = std::path::Path::new(&path);
+    let manifest = folder.join(lunco_twin::MANIFEST_FILENAME);
     if manifest.is_file() {
         info!(
-            "[OpenFolder] {} contains {} — promoting to Twin",
+            "[OpenFolder] {} contains {} — routing to OpenTwin",
             path,
             lunco_twin::MANIFEST_FILENAME
         );
         commands.trigger(OpenTwin { path });
         return;
     }
-    info!("[OpenFolder] path={} (plain folder mode — handler stubbed)", path);
+    spawn_twin_from_path(folder, &mut workspace, &mut commands, "OpenFolder");
 }
 
 #[on_command(OpenTwin)]
-fn on_open_twin(trigger: On<OpenTwin>, mut commands: Commands) {
+fn on_open_twin(
+    trigger: On<OpenTwin>,
+    mut workspace: ResMut<WorkspaceResource>,
+    mut commands: Commands,
+) {
     use crate::picker::{PickHandle, PickMode};
     let path = trigger.event().path.clone();
     if path.is_empty() {
@@ -208,7 +218,8 @@ fn on_open_twin(trigger: On<OpenTwin>, mut commands: Commands) {
     // Strict-mode validation — the lenient counterpart `OpenFolder`
     // auto-classifies; callers who routed here directly (recents,
     // HTTP, scripts) expect a real Twin and an error otherwise.
-    let manifest = std::path::Path::new(&path).join(lunco_twin::MANIFEST_FILENAME);
+    let folder = std::path::Path::new(&path);
+    let manifest = folder.join(lunco_twin::MANIFEST_FILENAME);
     if !manifest.is_file() {
         warn!(
             "[OpenTwin] {} has no {} — refusing (use OpenFolder for plain folders)",
@@ -217,7 +228,44 @@ fn on_open_twin(trigger: On<OpenTwin>, mut commands: Commands) {
         );
         return;
     }
-    info!("[OpenTwin] path={} (Twin spawn — handler stubbed)", path);
+    spawn_twin_from_path(folder, &mut workspace, &mut commands, "OpenTwin");
+}
+
+/// Shared helper for both Open Folder (no manifest) and Open Twin
+/// (manifest present).
+///
+/// Calls [`TwinMode::open`], which scans the folder and either parses
+/// the manifest or builds a discovered file index. Either way the
+/// resulting [`Twin`](lunco_twin::Twin) is registered with
+/// [`WorkspaceResource`] and broadcast via [`TwinAdded`] — domain
+/// crates observe that event to react (Modelica scans for `.mo`,
+/// future USD will scan for `.usda`, etc.).
+fn spawn_twin_from_path(
+    folder: &std::path::Path,
+    workspace: &mut WorkspaceResource,
+    commands: &mut Commands,
+    log_tag: &str,
+) {
+    match TwinMode::open(folder) {
+        Ok(TwinMode::Twin(twin)) | Ok(TwinMode::Folder(twin)) => {
+            let twin_id = workspace.add_twin(twin);
+            commands.trigger(TwinAdded { twin: twin_id });
+            info!("[{log_tag}] opened {}", folder.display());
+        }
+        Ok(TwinMode::Orphan(_)) => {
+            // `TwinMode::open` only returns Orphan for *files*; we
+            // already validated `folder` is a directory by virtue of
+            // checking for `twin.toml` (Open Twin) or by routing here
+            // through a folder picker. Defensive log + no-op.
+            warn!(
+                "[{log_tag}] {} resolved to Orphan unexpectedly — ignoring",
+                folder.display()
+            );
+        }
+        Err(e) => {
+            warn!("[{log_tag}] failed to index {}: {e}", folder.display());
+        }
+    }
 }
 
 #[on_command(SaveAll)]
