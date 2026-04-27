@@ -1398,11 +1398,16 @@ fn render_icon_view(ui: &mut egui::Ui, world: &mut World) {
             .and_then(|doc| registry.host(doc))
             .and_then(|host| host.document().ast().result.as_ref().ok().cloned());
         let extracted: Option<(crate::annotations::Icon, Vec<(String, String)>)> = ast.and_then(|ast| {
-            // Find the target class by short name or exact qualified.
+            // Walk the package tree by qualified path so drill-ins
+            // into a nested class (e.g. `Modelica.Blocks.Continuous.Integrator`
+            // sitting inside the `Continuous` package) actually find
+            // the class. The short-name fallback covers single-class
+            // workspace files that don't have a `within` prefix.
             let short = qualified.rsplit('.').next().unwrap_or(&qualified);
-            let (name, class) = ast.classes.iter().find(|(n, _)| {
-                n.as_str() == short || n.as_str() == qualified.as_str()
-            })?;
+            let class_ref = crate::diagram::find_class_by_qualified_name(&ast, &qualified)
+                .or_else(|| crate::diagram::find_class_by_qualified_name(&ast, short));
+            let class = class_ref?;
+            let name = short;
             // Use the inheritance-merged extractor so classes with
             // authored icons that extend a partial base (or sibling
             // Icon mixin) render the inherited layer too.

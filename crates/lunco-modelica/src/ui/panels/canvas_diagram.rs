@@ -5312,20 +5312,15 @@ pub fn drive_drill_in_loads(
                 path: entry.file_path.clone(),
                 writable: false,
             };
-            // Build doc from pre-parsed cache entry — strict AST is
-            // shared from the loader; lenient `SyntaxCache` is built
-            // inline because the loader doesn't carry it (would
-            // double the per-MSL-file parse cost on the projection
-            // critical path; here it's a one-shot per opened class).
-            let syntax = std::sync::Arc::new(
-                crate::document::SyntaxCache::from_source(&entry.source, 0),
-            );
+            // Both the strict and the lenient AST are pre-parsed
+            // off-thread by the FileCache loader; install path is now
+            // O(string clone), no parse on the main thread.
             let doc = crate::document::ModelicaDocument::from_parts(
                 doc_id,
                 entry.source.to_string(),
                 origin,
                 std::sync::Arc::clone(&entry.ast),
-                syntax,
+                std::sync::Arc::clone(&entry.syntax),
             );
             registry.install_prebuilt(doc_id, doc);
             loads.pending.remove(&doc_id);
@@ -5484,17 +5479,19 @@ fn open_drill_in_tab(
     qualified: &str,
     file_path: &std::path::Path,
 ) {
-    // Find or allocate the doc. Reuse an existing one if the same
-    // msl:// path was opened before, so re-drilling into the same
-    // class focuses instead of spawning a duplicate.
+    // Find or allocate the doc. Reuse an existing one only if the
+    // same `(file, drilled-in class)` was opened before — keying on
+    // file alone collapsed sibling MSL classes (e.g. `Integrator`
+    // and `Derivative` both in `Continuous.mo`) onto one tab, so a
+    // second drill silently focused the first tab instead of
+    // showing the requested class.
     let model_path_id = format!("msl://{qualified}");
     let existing_doc = {
         let registry = world.resource::<ModelicaDocumentRegistry>();
-        // ModelicaDocumentRegistry doesn't expose a find-by-path
-        // API, so we look through existing tabs for a match.
         let tabs = world.resource::<crate::ui::panels::model_view::ModelTabs>();
+        let class_names = world.resource::<DrilledInClassNames>();
         tabs.iter_docs().find(|&doc_id| {
-            registry
+            let same_file = registry
                 .host(doc_id)
                 .and_then(|h| match h.document().origin() {
                     lunco_doc::DocumentOrigin::File { path, .. } => {
@@ -5502,7 +5499,12 @@ fn open_drill_in_tab(
                     }
                     _ => None,
                 })
-                .unwrap_or(false)
+                .unwrap_or(false);
+            same_file
+                && class_names
+                    .get(doc_id)
+                    .map(|n| n == qualified)
+                    .unwrap_or(false)
         })
     };
     let (doc_id, needs_load) = if let Some(id) = existing_doc {
@@ -5534,6 +5536,14 @@ fn open_drill_in_tab(
                 started: web_time::Instant::now(),
             },
         );
+    }
+    // Bind the drilled-in class eagerly — without this, a second
+    // drill into a sibling class in the same file would race the
+    // (post-install) `class_names.set` and find no class binding,
+    // letting the file-level dedup re-fire and steal the tab.
+    {
+        let mut class_names = world.resource_mut::<DrilledInClassNames>();
+        class_names.set(doc_id, qualified.to_string());
     }
 
     let _ = model_path_id;
