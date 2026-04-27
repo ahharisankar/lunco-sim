@@ -390,8 +390,13 @@ impl NodeVisual for PlotNodeVisual {
 /// Domain crates that wire `lunco-canvas` + `lunco-viz` call this
 /// once at plugin-build time.
 pub fn register(reg: &mut lunco_canvas::VisualRegistry) {
-    reg.register_node_kind(PLOT_NODE_KIND, |data: &serde_json::Value| {
-        let payload: PlotNodeData = serde_json::from_value(data.clone())
+    reg.register_node_kind(PLOT_NODE_KIND, |data: &lunco_canvas::NodeData| {
+        // Downcast to the typed payload boxed by callers (e.g.
+        // lunco-modelica's plot creator). Empty/wrong-type → render
+        // a default plot stub.
+        let payload = data
+            .downcast_ref::<PlotNodeData>()
+            .cloned()
             .unwrap_or_default();
         PlotNodeVisual::from_data(payload)
     });

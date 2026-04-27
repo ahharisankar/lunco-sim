@@ -39,11 +39,32 @@
 //! `VisualRegistry` rebuilds the trait object from the kind. See
 //! [`crate::visual::VisualRegistry`].
 
+use std::any::Any;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
+
+/// Type-erased per-node payload. Domain crates box their own typed
+/// struct (e.g. `IconNodeData` in lunco-modelica) and visuals
+/// downcast at draw time via `data.downcast_ref::<MyType>()`. `Arc`
+/// makes Node/Edge cloneable without forcing payloads to implement
+/// custom clone-boxing.
+///
+/// We deliberately don't carry serde derives here — Scene snapshot
+/// for save/restore would need a per-domain serializer registry,
+/// which is a future concern (no consumer of `Scene::serialize` is
+/// active today). The `data` fields below are `#[serde(skip)]`.
+pub type NodeData = Arc<dyn Any + Send + Sync>;
+
+/// Construct an empty type-erased payload — used when a node/edge
+/// carries no domain-specific data, and when a serde-deserialized
+/// Scene needs a placeholder until the host re-attaches typed data.
+pub fn empty_node_data() -> NodeData {
+    Arc::new(())
+}
 
 /// Hit-test kind returned by [`Scene::hit_node`]. Mirrors
 /// [`crate::visual::NodeHit`] but is defined here so the scene
@@ -222,11 +243,14 @@ pub struct Node {
     /// Kind identifier, e.g. `"modelica.icon"`. Looked up in the
     /// [`crate::visual::VisualRegistry`] to reconstruct the visual.
     pub kind: SmolStr,
-    /// Opaque per-kind payload — the visual's constructor deserialises
-    /// this into its own typed state. Kept `serde_json::Value` (not a
-    /// generic parameter) so `Scene` stays a single type; the cost is
-    /// one downcast per frame at render, which is cheap.
-    pub data: serde_json::Value,
+    /// Type-erased per-kind payload. The visual's factory downcasts
+    /// to its concrete payload struct (e.g.
+    /// `IconNodeData` in lunco-modelica). `#[serde(skip)]` because
+    /// `dyn Any` can't round-trip through serde — Scene save/restore
+    /// is a future feature that will need a per-domain
+    /// serializer registry.
+    #[serde(skip, default = "empty_node_data")]
+    pub data: NodeData,
     pub ports: Vec<Port>,
     /// User-editable display name. Defaults empty; the visual may
     /// choose to render it or ignore it.
@@ -259,7 +283,9 @@ pub struct Edge {
     pub from: PortRef,
     pub to: PortRef,
     pub kind: SmolStr,
-    pub data: serde_json::Value,
+    /// Type-erased payload — see [`Node::data`].
+    #[serde(skip, default = "empty_node_data")]
+    pub data: NodeData,
     /// Back-reference mirroring [`Node::origin`] — opaque string the
     /// caller uses to key against its own store.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -476,7 +502,7 @@ mod tests {
             id,
             rect: Rect::from_min_size(Pos::new(x, y), 40.0, 30.0),
             kind: "test".into(),
-            data: serde_json::Value::Null,
+            data: empty_node_data(),
             ports: vec![Port {
                 id: PortId::new("out"),
                 local_offset: Pos::new(40.0, 15.0),
@@ -501,7 +527,7 @@ mod tests {
                 port: PortId::new("out"),
             },
             kind: "test".into(),
-            data: serde_json::Value::Null,
+            data: empty_node_data(),
             origin: None,
         });
         id

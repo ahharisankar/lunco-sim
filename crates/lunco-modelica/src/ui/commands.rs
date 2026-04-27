@@ -2686,7 +2686,11 @@ fn on_add_canvas_plot(trigger: On<AddCanvasPlot>, mut commands: Commands) {
             signal_path: ev.signal.clone(),
             title: String::new(),
         };
-        let data = serde_json::to_value(&payload).unwrap_or_default();
+        // Typed payload — boxed straight into the canvas Node.data
+        // (which is `Arc<dyn Any + Send + Sync>` — see
+        // `lunco_canvas::NodeData`). The plot-node factory downcasts
+        // back to `PlotNodeData` at construction.
+        let data: lunco_canvas::NodeData = std::sync::Arc::new(payload);
         let mut state =
             world.resource_mut::<crate::ui::panels::canvas_diagram::CanvasDiagramState>();
         let docstate = state.get_mut(Some(doc));

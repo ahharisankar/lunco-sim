@@ -162,6 +162,13 @@ pub struct TextSubstitution<'a> {
     pub name: Option<&'a str>,
     /// Class name to substitute for `%class` (e.g. `"Resistor"`).
     pub class_name: Option<&'a str>,
+    /// Pre-formatted parameter (name, value) pairs for `%paramName`
+    /// substitution. Values come from instance modifications when
+    /// available, falling back to class defaults; both are formatted
+    /// to short display strings (numbers as-written, enum refs as
+    /// leaf, strings unquoted) by the indexer / projector before
+    /// reaching this struct.
+    pub parameters: Option<&'a [(String, String)]>,
 }
 
 impl<'a> TextSubstitution<'a> {
@@ -217,10 +224,20 @@ impl<'a> TextSubstitution<'a> {
                         out.push_str(c);
                     }
                 }
-                // Unknown `%<ident>`: drop. The literal placeholder
-                // is misleading; an empty slot reads cleanly until
-                // we wire the parameter resolver.
-                _ => {}
+                other => {
+                    // `%paramName` — look up the parameter's
+                    // formatted value. Missing parameter (or class
+                    // didn't expose one) drops to empty so we don't
+                    // print the literal placeholder.
+                    if let Some(params) = self.parameters {
+                        if let Some((_, value)) = params
+                            .iter()
+                            .find(|(name, _)| name == other)
+                        {
+                            out.push_str(value);
+                        }
+                    }
+                }
             }
         }
         out
@@ -946,15 +963,19 @@ fn color_or_default(c: Option<Color>, default: egui::Color32) -> egui::Color32 {
 }
 
 /// Build a stroke from Modelica `lineColor` + `pattern` + `thickness`.
-/// Returns a zero-width stroke if the pattern is `None` or no colour
-/// resolved — the per-primitive painters short-circuit on that.
+/// Returns a zero-width stroke only when the pattern is explicitly
+/// `None`. Missing `lineColor` defaults to **black** per MLS Annex D
+/// — the previous "no colour → no stroke" check was a regression
+/// hiding every primitive without an explicit `color=` (e.g.
+/// `SpringDamper`'s zigzag `Line`, generic frame lines, default
+/// outlines on shapes that only set fillColor).
 fn stroke_for(
     color: Option<Color>,
     pattern: LinePattern,
     thickness_mm: f64,
     scale_px_per_unit: f32,
 ) -> egui::Stroke {
-    if matches!(pattern, LinePattern::None) || color.is_none() {
+    if matches!(pattern, LinePattern::None) {
         return egui::Stroke::NONE;
     }
     // Modelica thickness is in mm at the diagram's coordinate scale;

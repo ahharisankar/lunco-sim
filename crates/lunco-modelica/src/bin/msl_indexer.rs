@@ -57,6 +57,49 @@ impl Options {
     }
 }
 
+/// Lower a parameter's default expression to a short display string
+/// suitable for `%paramName` substitution in icon Text primitives.
+/// Returns empty for expressions we can't summarise (function calls,
+/// arithmetic, etc.) — the substitutor then drops the placeholder
+/// rather than printing a confusing partial value.
+///
+/// - `Terminal{Bool, "true"}`              → `"true"`
+/// - `Terminal{UnsignedReal, "100"}`       → `"100"`
+/// - `Terminal{String, "Hello"}`           → `"Hello"` (quotes stripped)
+/// - `ComponentReference{Foo.Bar.Baz}`     → `"Baz"` (enum-style leaf)
+/// - `Unary{op:Minus, rhs:Terminal..}`     → `"-100"`
+/// - anything else                          → `""`
+fn format_default_expr(expr: &rumoca_session::parsing::ast::Expression) -> String {
+    use rumoca_session::parsing::ast::{Expression, OpUnary, TerminalType};
+    match expr {
+        Expression::Terminal { terminal_type, token } => {
+            let raw = token.text.as_ref();
+            match terminal_type {
+                TerminalType::String => raw.trim_matches('"').to_string(),
+                _ => raw.to_string(),
+            }
+        }
+        Expression::ComponentReference(cref) => cref
+            .parts
+            .last()
+            .map(|p| p.ident.text.as_ref().to_string())
+            .unwrap_or_default(),
+        Expression::Unary { op, rhs } => match (op, rhs.as_ref()) {
+            (OpUnary::Minus(_), inner) => {
+                let inner = format_default_expr(inner);
+                if inner.is_empty() {
+                    String::new()
+                } else {
+                    format!("-{}", inner)
+                }
+            }
+            _ => String::new(),
+        },
+        Expression::Parenthesized { inner } => format_default_expr(inner),
+        _ => String::new(),
+    }
+}
+
 fn print_help() {
     println!("msl_indexer — index MSL components and (optionally) warm rumoca compile caches");
     println!();
@@ -736,10 +779,23 @@ impl MSLIndexer {
             for comp in class.components.values() {
                 if matches!(comp.variability, Variability::Parameter(_)) {
                     if !params.iter().any(|p| p.name == comp.name) {
+                        // Format the default value for `%paramName`
+                        // text substitution at render time. Numeric
+                        // and string literals show as-written; enum
+                        // refs collapse to the leaf name (matches
+                        // OMEdit). Anything we can't lower stays
+                        // empty — the substitutor strips empty
+                        // results so the user sees nothing rather
+                        // than `%controllerType`.
+                        let default = comp
+                            .binding
+                            .as_ref()
+                            .map(format_default_expr)
+                            .unwrap_or_default();
                         params.push(ParamDef {
                             name: comp.name.clone(),
                             param_type: comp.type_name.to_string(),
-                            default: "".into(),
+                            default,
                             unit: None,
                         });
                     }

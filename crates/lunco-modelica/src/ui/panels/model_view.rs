@@ -1470,6 +1470,10 @@ fn render_icon_view(ui: &mut egui::Ui, world: &mut World) {
             // class itself. Matches what Dymola puts in the Icon view.
             name: Some(short_name.as_str()),
             class_name: Some(short_name.as_str()),
+            // Class-default parameters: looked up via the MSL
+            // palette entry by short-name suffix. Drives `%R`,
+            // `%controllerType` and similar on the Icon view.
+            parameters: None,
         };
         crate::icon_paint::paint_graphics_full(
             painter,

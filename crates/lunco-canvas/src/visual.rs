@@ -31,13 +31,13 @@
 
 use std::any::Any;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use bevy_egui::egui;
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
 use smol_str::SmolStr;
 
-use crate::scene::{Node, PortId, Pos, Rect};
+use crate::scene::{Node, NodeData, PortId, Pos, Rect};
 use crate::viewport::Viewport;
 
 /// Everything a visual's `draw` method sees.
@@ -168,8 +168,8 @@ fn perpendicular_dist_sq(p: Pos, a: Pos, b: Pos) -> f32 {
 
 /// Factory closure that builds a trait object from a node's
 /// `(data, kind)` pair. Stored in the registry keyed by kind.
-pub type NodeVisualFactory = Box<dyn Fn(&JsonValue) -> Box<dyn NodeVisual> + Send + Sync>;
-pub type EdgeVisualFactory = Box<dyn Fn(&JsonValue) -> Box<dyn EdgeVisual> + Send + Sync>;
+pub type NodeVisualFactory = Box<dyn Fn(&NodeData) -> Box<dyn NodeVisual> + Send + Sync>;
+pub type EdgeVisualFactory = Box<dyn Fn(&NodeData) -> Box<dyn EdgeVisual> + Send + Sync>;
 
 /// Per-app registry of visual kinds. Domain crates call
 /// [`VisualRegistry::register_node_kind`] at plugin-build time; the
@@ -193,7 +193,7 @@ impl VisualRegistry {
 
     pub fn register_node_kind<F, V>(&mut self, kind: impl Into<SmolStr>, factory: F)
     where
-        F: Fn(&JsonValue) -> V + Send + Sync + 'static,
+        F: Fn(&NodeData) -> V + Send + Sync + 'static,
         V: NodeVisual + 'static,
     {
         self.nodes.insert(
@@ -204,7 +204,7 @@ impl VisualRegistry {
 
     pub fn register_edge_kind<F, V>(&mut self, kind: impl Into<SmolStr>, factory: F)
     where
-        F: Fn(&JsonValue) -> V + Send + Sync + 'static,
+        F: Fn(&NodeData) -> V + Send + Sync + 'static,
         V: EdgeVisual + 'static,
     {
         self.edges.insert(
@@ -213,10 +213,10 @@ impl VisualRegistry {
         );
     }
 
-    pub fn build_node(&self, kind: &str, data: &JsonValue) -> Option<Box<dyn NodeVisual>> {
+    pub fn build_node(&self, kind: &str, data: &NodeData) -> Option<Box<dyn NodeVisual>> {
         self.nodes.get(kind).map(|f| f(data))
     }
-    pub fn build_edge(&self, kind: &str, data: &JsonValue) -> Option<Box<dyn EdgeVisual>> {
+    pub fn build_edge(&self, kind: &str, data: &NodeData) -> Option<Box<dyn EdgeVisual>> {
         self.edges.get(kind).map(|f| f(data))
     }
 
@@ -316,7 +316,7 @@ mod tests {
             id: crate::scene::NodeId(0),
             rect: Rect::from_min_size(Pos::new(0.0, 0.0), 100.0, 50.0),
             kind: "test".into(),
-            data: JsonValue::Null,
+            data: empty_node_data(),
             ports: vec![
                 Port {
                     id: PortId::new("in"),

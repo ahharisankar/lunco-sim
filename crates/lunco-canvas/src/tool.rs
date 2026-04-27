@@ -952,7 +952,7 @@ mod tests {
             id: NodeId(0),
             rect: Rect::from_min_size(Pos::new(0.0, 0.0), 40.0, 30.0),
             kind: "t".into(),
-            data: serde_json::Value::Null,
+            data: empty_node_data(),
             ports: vec![Port {
                 id: PortId::new("out"),
                 local_offset: Pos::new(40.0, 15.0),
@@ -966,7 +966,7 @@ mod tests {
             id: NodeId(1),
             rect: Rect::from_min_size(Pos::new(100.0, 0.0), 40.0, 30.0),
             kind: "t".into(),
-            data: serde_json::Value::Null,
+            data: empty_node_data(),
             ports: vec![Port {
                 id: PortId::new("in"),
                 local_offset: Pos::new(0.0, 15.0),
@@ -1217,7 +1217,7 @@ mod tests {
                 port: PortId::new("in"),
             },
             kind: "t".into(),
-            data: serde_json::Value::Null,
+            data: empty_node_data(),
             origin: None,
         });
         sel.set(SelectItem::Node(NodeId(0)));
