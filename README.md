@@ -60,6 +60,26 @@ The USD-based rover sandbox loads the entire scene — rovers, terrain, and came
 cargo run --release -p lunco-client --bin rover_sandbox_usd
 ```
 
+### Headless Modelica simulation
+
+For automated runs, regression sweeps, and CI: `modelica_run` compiles a
+Modelica model and steps it from the command line, optionally dumping
+per-step telemetry to CSV. Same compile path as the workbench.
+
+```bash
+# (one-time) warm rumoca's compile cache for bundled models + common MSL examples
+LUNCOSIM_WARM_DIRS="$(pwd)/crates/lunco-modelica/assets/models" \
+  cargo run --release --bin msl_indexer -- --warm
+
+# Run AnnotatedRocketStage for 10 s with the throttle valve open, record CSV
+cargo run --release --bin modelica_run -- \
+    crates/lunco-modelica/assets/models/AnnotatedRocketStage.mo \
+    AnnotatedRocketStage.RocketStage \
+    --duration 10 --input valve.opening=1.0 --output /tmp/rocket.csv
+```
+
+Full flag reference: [`crates/lunco-modelica/README.md`](crates/lunco-modelica/README.md#cli-workflow--warm-cache-then-run-headless).
+
 **Editing Tools:**
 - **Spawn Palette** — Click or drag rovers, balls, ramps, and walls into the scene
 - **Transform Gizmo** — Select objects and use **G** (translate) / **R** (rotate) to manipulate them
