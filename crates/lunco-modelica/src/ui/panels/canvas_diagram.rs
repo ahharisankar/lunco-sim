@@ -4912,7 +4912,57 @@ fn empty_overlay_class_info(
     use rumoca_session::parsing::ast::Causality;
     use rumoca_session::parsing::ClassType;
 
-    let icon = crate::annotations::extract_icon(&class.annotation);
+    // Walk the `extends` chain so classes that inherit their Icon
+    // (e.g. `Modelica.Fluid.Valves.ValveCompressible` → `PartialValve`)
+    // still render with the parent's glyph. Mirrors the resolver
+    // pattern in `canvas_projection::register_local_class` —
+    // local-AST first, then non-blocking MSL cache peek.
+    let icon = {
+        use std::sync::Arc;
+        let ast_for_resolver = ast_arc.clone();
+        let mut resolver =
+            |name: &str| -> Option<Arc<rumoca_session::parsing::ast::ClassDef>> {
+                let leaf = name.rsplit('.').next().unwrap_or(name);
+                if let Some(c) = ast_for_resolver
+                    .classes
+                    .get(name)
+                    .or_else(|| ast_for_resolver.classes.get(leaf))
+                    .or_else(|| {
+                        ast_for_resolver
+                            .classes
+                            .values()
+                            .flat_map(|c| c.classes.values())
+                            .find(|c| c.name.text.as_ref() == leaf)
+                    })
+                {
+                    return Some(Arc::new(c.clone()));
+                }
+                crate::class_cache::peek_msl_class_cached(name)
+            };
+        let mut visited = std::collections::HashSet::new();
+        let class_context = match ast_arc.within.as_ref() {
+            Some(within) => {
+                let pkg = within
+                    .name
+                    .iter()
+                    .map(|t| t.text.as_ref())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                if pkg.is_empty() {
+                    class_name.to_string()
+                } else {
+                    format!("{pkg}.{class_name}")
+                }
+            }
+            None => class_name.to_string(),
+        };
+        crate::annotations::extract_icon_inherited(
+            &class_context,
+            class,
+            &mut resolver,
+            &mut visited,
+        )
+    };
     let class_type = match class.class_type {
         ClassType::Model => Some("model"),
         ClassType::Block => Some("block"),
