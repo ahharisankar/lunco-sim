@@ -239,11 +239,73 @@ impl ModelicaCompiler {
         source: &str,
         filename: &str,
     ) -> Result<Box<rumoca_session::compile::DaeCompilationResult>, String> {
-        let t_total = web_time::Instant::now();
         self.session.update_document(filename, source);
+        self.compile_loaded(model_name)
+    }
+
+    /// Compile an MSL class that is already loaded into the session
+    /// (no `update_document` call). Used by the `msl_indexer --warm`
+    /// pass to populate rumoca's semantic-summary cache for common
+    /// examples — the workbench's first compile of those classes is
+    /// then a cache hit instead of paying the full multi-minute walk.
+    pub fn compile_msl_class(
+        &mut self,
+        qualified: &str,
+    ) -> Result<Box<rumoca_session::compile::DaeCompilationResult>, String> {
+        self.compile_loaded(qualified)
+    }
+
+    /// Inner helper: heartbeat + session.compile + final timing log.
+    /// Both [`Self::compile_str`] (user-edited source) and
+    /// [`Self::compile_msl_class`] (already-loaded MSL class) flow
+    /// through here so the heartbeat behaviour is identical.
+    fn compile_loaded(
+        &mut self,
+        model_name: &str,
+    ) -> Result<Box<rumoca_session::compile::DaeCompilationResult>, String> {
+        let t_total = web_time::Instant::now();
+
+        // Heartbeat: rumoca's compile pipeline is opaque from outside
+        // and can take minutes on cold caches with MSL-heavy models
+        // (parol Debug::fmt overhead — see ../rumoca/docs/design-notes/
+        // perf-parol-trace-overhead.md). Without a periodic log line,
+        // the user sees nothing for the entire duration and reasonably
+        // assumes the worker hung. Spawn a tiny thread that emits an
+        // INFO log every 5s while the synchronous compile is in
+        // flight; signal it to stop on return.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let still_compiling = std::sync::Arc::new(AtomicBool::new(true));
+        let stopper = std::sync::Arc::clone(&still_compiling);
+        let model_for_thread = model_name.to_string();
+        let heartbeat = std::thread::spawn(move || {
+            let started = web_time::Instant::now();
+            let tick = std::time::Duration::from_secs(5);
+            // Sleep then check — avoids printing at +0s when the
+            // compile is fast. The check after sleep also catches the
+            // common "compile finished while we were sleeping" case.
+            loop {
+                std::thread::sleep(tick);
+                if !stopper.load(Ordering::Relaxed) {
+                    return;
+                }
+                log::info!(
+                    "[ModelicaCompiler] still compiling `{}` (+{:.0}s)",
+                    model_for_thread,
+                    started.elapsed().as_secs_f64()
+                );
+            }
+        });
+
         let result = self
             .session
             .compile_model_dae_strict_reachable_uncached_with_recovery(model_name);
+
+        still_compiling.store(false, Ordering::Relaxed);
+        // `join` waits up to one tick (~5s worst case) for the
+        // heartbeat thread to notice the stop signal and exit. Cheap
+        // — almost always returns immediately.
+        let _ = heartbeat.join();
+
         log::info!(
             "[ModelicaCompiler] compile `{}` finished in {:.2}s ({})",
             model_name,
