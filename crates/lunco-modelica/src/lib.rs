@@ -1532,8 +1532,23 @@ pub struct ModelicaModel {
     /// scene-serializable.
     #[reflect(ignore)]
     pub document: lunco_doc::DocumentId,
+    /// `true` while a `Step` request is in flight to the worker.
+    /// Cleared when the response arrives in
+    /// [`handle_modelica_responses`]. Distinct from
+    /// [`Self::is_compiling`] — a long-running compile must NOT count
+    /// as a hung step (that conflation is what made the dispatcher's
+    /// "worker hung?" warning spam every frame for the duration of a
+    /// slow Modelica compile).
     #[reflect(ignore)]
     pub is_stepping: bool,
+    /// `true` while a `Compile` request is in flight to the worker.
+    /// Set by the `CompileModel` observer, cleared when a compile-
+    /// shaped result (`is_new_model` / `is_parameter_update`) lands.
+    /// Compiles can take seconds (occasionally minutes for MSL-heavy
+    /// examples); the dispatcher uses this to suppress its
+    /// step-hang warning while a compile is legitimately running.
+    #[reflect(ignore)]
+    pub is_compiling: bool,
     /// `true` after a successful Compile has installed a stepper for
     /// this entity in the Modelica worker. `spawn_modelica_requests`
     /// uses this to dispatch a Compile (instead of a doomed Step) when
@@ -1558,11 +1573,20 @@ fn spawn_modelica_requests(
     let total_models = q_models.iter().count();
     let mut sent = 0u32;
     let mut blocked_stepping = 0u32;
+    let mut blocked_compiling = 0u32;
     let mut blocked_paused = 0u32;
     let t0 = web_time::Instant::now();
     for (entity, mut model) in q_models.iter_mut() {
         if model.is_stepping {
-            blocked_stepping += 1;
+            // Distinguish "Step request hasn't returned" from "Compile
+            // is legitimately running". The latter can take seconds
+            // (parol Debug::fmt overhead on MSL-heavy examples); we
+            // mustn't treat it as a hung worker.
+            if model.is_compiling {
+                blocked_compiling += 1;
+            } else {
+                blocked_stepping += 1;
+            }
             continue;
         }
         if model.paused {
@@ -1613,9 +1637,12 @@ fn spawn_modelica_requests(
     // always that every model has `is_stepping=true` and Step results
     // never came back to clear it. Logging the per-tick reason makes
     // a stalled sim debuggable from the runtime log.
+    //
+    // Only warn when the block is GENUINELY a stepping hang —
+    // `blocked_compiling` is a legitimate slow compile (no warning).
     if total_models > 0 && sent == 0 && blocked_stepping > 0 {
         bevy::log::warn!(
-            "[spawn_modelica_requests] no Step dispatched: {blocked_stepping} blocked on is_stepping (worker hung?), {blocked_paused} paused, took {:.2}ms",
+            "[spawn_modelica_requests] no Step dispatched: {blocked_stepping} blocked on is_stepping (worker hung?), {blocked_compiling} compiling, {blocked_paused} paused, took {:.2}ms",
             t0.elapsed().as_secs_f64() * 1000.0,
         );
     }
@@ -1661,6 +1688,13 @@ fn handle_modelica_responses(
             if result.session_id < model.session_id { continue; }
 
             model.is_stepping = false;
+            // Compile-shaped results (new model / parameter update /
+            // reset) close out the corresponding `is_compiling` window
+            // the `CompileModel` observer opened. Step results don't
+            // touch this flag — they were never compile-flagged.
+            if result.is_new_model || result.is_parameter_update || result.is_reset {
+                model.is_compiling = false;
+            }
 
             // Forward log messages to console via bevy_workbench's console system
             if let Some(msg) = &result.log_message {

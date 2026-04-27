@@ -52,6 +52,13 @@ use lunco_cache::{ResourceCache, ResourceLoader};
 /// One parsed `.mo` file. `source` and `ast` are `Arc` so every
 /// class referencing this file shares them — many `CachedClass`
 /// entries point at the same two `Arc`s.
+///
+/// The lenient `SyntaxCache` is *not* populated here — it would
+/// double the loader's parse time for every MSL file load, which
+/// is on the projection's critical path. `ModelicaDocument::from_parts`
+/// builds the `SyntaxCache` inline from `source` (one extra parse
+/// per opened class — paid once at open time, not on every cache
+/// load).
 #[derive(Debug, Clone)]
 pub struct FileEntry {
     pub path: PathBuf,

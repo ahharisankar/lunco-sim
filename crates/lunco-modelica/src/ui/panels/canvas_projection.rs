@@ -298,28 +298,16 @@ fn build_visual_diagram_from_scan(
 /// blank canvas.
 pub const DEFAULT_MAX_DIAGRAM_NODES: usize = 1000;
 
-/// Returns `None` if the model has no component instantiations
-/// (e.g., equation-based models like Battery.mo, SpringMass.mo).
-pub fn import_model_to_diagram(source: &str) -> Option<VisualDiagram> {
-    // Delegate to the AST-taking variant after parsing once. Keeps
-    // existing callers working while letting hot paths (Canvas
-    // projection) reuse an already-parsed AST from `ModelicaDocument`.
-    let syntax = rumoca_phase_parse::parse_to_syntax(source, "model.mo");
-    let ast: rumoca_session::parsing::ast::StoredDefinition = syntax.best_effort().clone();
-    import_model_to_diagram_from_ast(
-        std::sync::Arc::new(ast),
-        source,
-        DEFAULT_MAX_DIAGRAM_NODES,
-        None,
-        &DiagramAutoLayoutSettings::default(),
-    )
-}
-
-/// Same as [`import_model_to_diagram`] but reuses an already-
-/// parsed AST. Saves two full rumoca passes (one in the component-
-/// builder, one in the imports-resolution path). Used by the
-/// canvas's async projection task where
-/// `ModelicaDocument::ast()` already holds the parsed tree.
+/// Build a [`VisualDiagram`] from an already-parsed AST. Returns
+/// `None` if the model has no component instantiations (e.g.
+/// equation-based models like Battery.mo, SpringMass.mo).
+///
+/// All callers must source the AST from
+/// [`ModelicaDocument::ast`](crate::document::ModelicaDocument::ast)
+/// or [`ModelicaDocument::syntax`](crate::document::ModelicaDocument::syntax)
+/// — this function never parses. The Document's off-thread refresh
+/// in [`crate::ui::ast_refresh`] is the single source of truth for
+/// parsed Modelica trees in the workbench.
 ///
 /// `max_nodes` is a guard against accidentally projecting a huge
 /// package (e.g. `Modelica.Units`) into a diagram — returns `None`

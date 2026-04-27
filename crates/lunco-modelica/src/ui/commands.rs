@@ -1177,7 +1177,14 @@ fn on_compile_model(
         if let Ok(mut model) = q_models.get_mut(entity) {
             let old_inputs = std::mem::take(&mut model.inputs);
             model.session_id += 1;
+            // `is_stepping` fences out any in-flight Step results
+            // bearing the old session_id; `is_compiling` tells
+            // `spawn_modelica_requests` that the wait is a normal
+            // long compile (not a hung worker) — suppresses the
+            // per-frame "worker hung?" warning spam during multi-
+            // second Modelica compiles.
             model.is_stepping = true;
+            model.is_compiling = true;
             model.model_name = model_name.clone();
             model.parameters = params.clone();
             model.parameter_bounds = param_bounds.clone();
@@ -1232,6 +1239,7 @@ fn on_compile_model(
                     descriptions: HashMap::new(),
                     document: doc,
                     is_stepping: true,
+                    is_compiling: true,
                     is_compiled: false,
                 },
             ))

@@ -36,7 +36,7 @@ use bevy::tasks::AsyncComputeTaskPool;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::document::AstCache;
+use crate::document::{AstCache, SyntaxCache};
 use crate::ui::state::ModelicaDocumentRegistry;
 
 /// Shared slot the worker thread fills when its parse completes.
@@ -46,7 +46,11 @@ use crate::ui::state::ModelicaDocumentRegistry;
 /// touched at most twice (worker writes once at parse completion,
 /// main thread reads via `try_lock` once per Update tick), so
 /// contention is negligible.
-type ParseSlot = Arc<Mutex<Option<AstCache>>>;
+///
+/// Carries **both** the strict and the lenient parse caches so they
+/// always advance together — UI panels reading either via
+/// `doc.ast()` / `doc.syntax()` see consistent generations.
+type ParseSlot = Arc<Mutex<Option<(AstCache, SyntaxCache)>>>;
 
 /// Quiet window before a debounced reparse fires.
 ///
@@ -120,17 +124,17 @@ pub fn refresh_stale_asts(
     // slot when its parse finishes. We never block the Update tick
     // on the parse — if a slot is contended (worker mid-write) we
     // skip and check again next tick.
-    let ready: Vec<(lunco_doc::DocumentId, AstCache)> = pending
+    let ready: Vec<(lunco_doc::DocumentId, AstCache, SyntaxCache)> = pending
         .by_doc
         .iter()
         .filter_map(|(id, slot)| {
             let mut guard = slot.try_lock().ok()?;
-            guard.take().map(|ast| (*id, ast))
+            guard.take().map(|(ast, syntax)| (*id, ast, syntax))
         })
         .collect();
-    for (id, ast) in ready {
+    for (id, ast, syntax) in ready {
         if let Some(host) = registry.host_mut(id) {
-            host.document_mut().install_ast(ast);
+            host.document_mut().install_parse_results(ast, syntax);
         }
         pending.by_doc.remove(&id);
     }
@@ -153,7 +157,7 @@ pub fn refresh_stale_asts(
                 return None; // already parsing
             }
             let doc = host.document();
-            if !doc.ast_is_stale() {
+            if !doc.ast_is_stale() && !doc.syntax_is_stale() {
                 return None;
             }
             let last = doc.last_source_edit_at()?;
@@ -193,15 +197,46 @@ pub fn refresh_stale_asts(
             // (cross-platform incl. wasm32 cooperative scheduling).
             pool.spawn(async move {
                 let t = web_time::Instant::now();
-                let ast = AstCache::from_source(&source, gen);
+                // Derive BOTH caches from a single `parse_to_syntax`
+                // pass in the common case. `parse_to_ast` is, in
+                // effect, "parse_to_syntax + reject if has_errors";
+                // doing them as two independent calls (as the prior
+                // version did) doubled the worker pool's CPU pressure
+                // and starved the projection task's `peek_or_load_msl_class`
+                // loads, sending diagram projection past its 60s deadline
+                // for any non-trivial example.
+                let syntax_obj = rumoca_phase_parse::parse_to_syntax(
+                    &source,
+                    "model.mo",
+                );
+                let has_errors = syntax_obj.has_errors();
+                let lenient_ast = std::sync::Arc::new(syntax_obj.best_effort().clone());
+                let ast = if has_errors {
+                    AstCache {
+                        generation: gen,
+                        result: Err(format!(
+                            "lenient parser reported errors (best-effort tree available via syntax())"
+                        )),
+                    }
+                } else {
+                    AstCache {
+                        generation: gen,
+                        result: Ok(std::sync::Arc::clone(&lenient_ast)),
+                    }
+                };
+                let syntax = SyntaxCache {
+                    generation: gen,
+                    ast: lenient_ast,
+                    has_errors,
+                };
                 let elapsed_ms = t.elapsed().as_secs_f64() * 1000.0;
                 if elapsed_ms > 50.0 {
                     bevy::log::info!(
-                        "[ast_refresh] off-thread parse: {bytes} bytes in {elapsed_ms:.1}ms (gen={gen})"
+                        "[ast_refresh] off-thread parse: {bytes} bytes in {elapsed_ms:.1}ms (gen={gen}, single-pass ast+syntax)"
                     );
                 }
                 if let Ok(mut guard) = slot_for_worker.lock() {
-                    *guard = Some(ast);
+                    *guard = Some((ast, syntax));
                 }
             })
             .detach();

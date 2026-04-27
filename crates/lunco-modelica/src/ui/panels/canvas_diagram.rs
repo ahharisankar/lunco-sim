@@ -2915,7 +2915,19 @@ impl Panel for CanvasDiagramPanel {
                     return;
                 };
                 let doc = host.document();
-                let ast = doc.ast().result.as_ref().ok().cloned();
+                // Prefer the strict AST (`doc.ast()`) when it parsed
+                // cleanly — `parse_to_ast` and `parse_to_syntax`
+                // produce subtly different trees that the diagram
+                // builder isn't fully tolerant of (observed: 0-node
+                // canvas after duplicating a working example when the
+                // lenient tree was used). Fall through to the lenient
+                // `SyntaxCache` only when strict parse failed — that
+                // way partial-parse states still draw something
+                // instead of going blank.
+                let ast = match doc.ast().result.as_ref().ok() {
+                    Some(strict) => std::sync::Arc::clone(strict),
+                    None => std::sync::Arc::clone(&doc.syntax_arc().ast),
+                };
                 (doc.source().to_string(), ast)
             };
             // Snapshot the configurable projection caps so the bg
@@ -2969,16 +2981,12 @@ impl Panel for CanvasDiagramPanel {
             // consumes). Runs on main thread; `paint_graphics` is
             // idle until the layer's next draw.
             let bg_handle = docstate.background_diagram.clone();
-            if let Some(ast) = ast_arc.as_ref() {
-                let diag = diagram_annotation_for_target(
-                    ast.as_ref(),
-                    target_class_snapshot.as_deref(),
-                );
-                if let Ok(mut guard) = bg_handle.write() {
-                    *guard = diag.map(|d| (d.coordinate_system, d.graphics));
-                }
-            } else if let Ok(mut guard) = bg_handle.write() {
-                *guard = None;
+            let diag = diagram_annotation_for_target(
+                ast_arc.as_ref(),
+                target_class_snapshot.as_deref(),
+            );
+            if let Ok(mut guard) = bg_handle.write() {
+                *guard = diag.map(|d| (d.coordinate_system, d.graphics));
             }
             // Drop any in-flight projection whose input is now
             // stale (older generation of this doc). We can't cancel
@@ -3048,19 +3056,15 @@ impl Panel for CanvasDiagramPanel {
                             return Scene::new();
                         }
                         let t0 = web_time::Instant::now();
-                        let mut diagram = if let Some(ast) = ast_arc {
+                        let mut diagram =
                             crate::ui::panels::canvas_projection::import_model_to_diagram_from_ast(
-                                ast,
+                                ast_arc,
                                 &source,
                                 max_nodes_snapshot,
                                 target_for_log.as_deref(),
                                 &layout_snapshot,
                             )
-                            .unwrap_or_default()
-                        } else {
-                            crate::ui::panels::canvas_projection::import_model_to_diagram(&source)
-                                .unwrap_or_default()
-                        };
+                            .unwrap_or_default();
                         bevy::log::info!(
                             "[Projection] import done in {:.0}ms: {} nodes {} edges",
                             t0.elapsed().as_secs_f64() * 1000.0,
@@ -5239,12 +5243,20 @@ pub fn drive_drill_in_loads(
                 path: entry.file_path.clone(),
                 writable: false,
             };
-            // Build doc from pre-parsed cache entry — zero rumoca work.
+            // Build doc from pre-parsed cache entry — strict AST is
+            // shared from the loader; lenient `SyntaxCache` is built
+            // inline because the loader doesn't carry it (would
+            // double the per-MSL-file parse cost on the projection
+            // critical path; here it's a one-shot per opened class).
+            let syntax = std::sync::Arc::new(
+                crate::document::SyntaxCache::from_source(&entry.source, 0),
+            );
             let doc = crate::document::ModelicaDocument::from_parts(
                 doc_id,
                 entry.source.to_string(),
                 origin,
                 std::sync::Arc::clone(&entry.ast),
+                syntax,
             );
             registry.install_prebuilt(doc_id, doc);
             loads.pending.remove(&doc_id);

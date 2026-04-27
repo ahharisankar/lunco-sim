@@ -16,30 +16,28 @@
 //! into the existing drill-in machinery so the canvas tab opens
 //! directly on the requested class.
 //!
-//! ## Caching
+//! ## Single source of truth
 //!
-//! Per-document parse cache keyed by source content hash. The parse runs
-//! off-thread on `AsyncComputeTaskPool` (same `Arc<Mutex<Option<_>>>`
-//! slot pattern as `ui::ast_refresh`). `refresh_doc` drains any
-//! completed slot first, then spawns a fresh parse if the source hash
-//! moved past the cached entry. While a parse is in flight, render
-//! shows the previous (stale) cache — never blocks the main thread.
-//! Rationale: rumoca's `parse_to_syntax` is a few-hundred-millisecond
-//! call on non-trivial files; running it inline at render time was the
-//! 200–400 ms freeze surfaced by the samply profile (15.4 % of the
-//! main thread, 100 % of the freezes captured by `FrameTimeProbe`).
+//! This panel **does not parse**. It reads
+//! [`ModelicaDocument::syntax`](crate::document::ModelicaDocument::syntax)
+//! — the lenient parse cache that the off-thread refresh in
+//! [`crate::ui::ast_refresh`] keeps up to date — and derives the
+//! class tree from it on each render. The browser sees exactly the
+//! same parse the rest of the workbench sees; no panel-local cache
+//! and no panel-local rumoca call.
+//!
+//! Building the [`ClassEntry`] tree from a `SyntaxCache` is sub-
+//! millisecond on typical Modelica files (just walks the AST and
+//! clones short strings), so we re-derive on every render rather
+//! than maintain another cache layer.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-
-use bevy::tasks::AsyncComputeTaskPool;
 use bevy_egui::egui;
 use lunco_doc::DocumentId;
 use lunco_workbench::{BrowserAction, BrowserCtx, BrowserSection};
-use rumoca_phase_parse::parse_to_syntax;
 use rumoca_session::parsing::ast::ClassDef;
 use rumoca_session::parsing::ClassType;
+
+use crate::document::SyntaxCache;
 
 use crate::ui::panels::canvas_diagram::DrilledInClassNames;
 use crate::ui::state::ModelicaDocumentRegistry;
@@ -59,47 +57,12 @@ struct ClassEntry {
     children: Vec<ClassEntry>,
 }
 
-/// Per-document parse cache entry — keyed by source-content hash so
-/// edits invalidate naturally.
-struct DocCache {
-    source_hash: u64,
-    classes: Vec<ClassEntry>,
-    /// Whether the last parse reported errors. When `classes` is
-    /// non-empty despite this being true, rumoca's recovery salvaged
-    /// part of the file; we still show those classes so a broken
-    /// sibling never makes working classes vanish from the browser.
-    has_parse_errors: bool,
-}
-
-/// Shared slot the worker thread fills when the off-thread parse
-/// completes. `Arc<Mutex<Option<_>>>` mirrors `ui::ast_refresh` and
-/// `ui::image_loader`: the worker writes once, the main thread reads
-/// once per render via `try_lock`, contention is negligible.
-type ParseSlot = Arc<Mutex<Option<(u64, Vec<ClassEntry>, bool)>>>;
-
-/// One in-flight parse, tagged with the source-hash it's parsing
-/// against so we can discard results that were superseded by a
-/// later edit while the worker was running.
-struct PendingParse {
-    /// Hash of the source the worker is parsing. The worker writes
-    /// `(hash, classes, has_errors)` into `slot` when done; the next
-    /// `refresh_doc` call drains it.
-    source_hash: u64,
-    slot: ParseSlot,
-}
-
-/// The Modelica Twin-Browser section.
+/// The Modelica Twin-Browser section. Stateless — every render
+/// derives the class tree from
+/// [`ModelicaDocument::syntax`](crate::document::ModelicaDocument::syntax),
+/// which is kept up to date off-thread by [`crate::ui::ast_refresh`].
 #[derive(Default)]
-pub struct ModelicaSection {
-    /// `DocumentId → parsed cache`. Stale entries (for closed
-    /// documents) are GC'd whenever a render finds them missing from
-    /// the registry.
-    cache: HashMap<DocumentId, DocCache>,
-    /// In-flight off-thread parses, one per doc. Drained on each
-    /// render before deciding whether to spawn a new one — see
-    /// [`Self::refresh_doc`].
-    pending: HashMap<DocumentId, PendingParse>,
-}
+pub struct ModelicaSection;
 
 impl BrowserSection for ModelicaSection {
     fn id(&self) -> &str {
@@ -115,10 +78,13 @@ impl BrowserSection for ModelicaSection {
     }
 
     fn render(&mut self, ui: &mut egui::Ui, ctx: &mut BrowserCtx<'_>) {
-        // Snapshot the registry so we can release the borrow before
-        // emitting actions (the dispatcher will mutate the registry
-        // when opening tabs). Tuple shape: (id, display_name, source).
-        let docs: Vec<(DocumentId, String, String)> = {
+        // Snapshot what the registry knows so we can release the
+        // borrow before emitting actions (the dispatcher will mutate
+        // the registry when opening tabs). Each entry carries an
+        // `Arc<SyntaxCache>` cloned out of the document — cheap (Arc
+        // bump) and lets the render loop walk the AST without holding
+        // any borrow on the registry.
+        let docs: Vec<(DocumentId, String, std::sync::Arc<SyntaxCache>)> = {
             let Some(registry) = ctx.world.get_resource::<ModelicaDocumentRegistry>()
             else {
                 ui.label(
@@ -128,7 +94,7 @@ impl BrowserSection for ModelicaSection {
                 );
                 return;
             };
-            let mut entries: Vec<(DocumentId, String, String)> = registry
+            let mut entries: Vec<(DocumentId, String, std::sync::Arc<SyntaxCache>)> = registry
                 .iter()
                 // Workspace = user content. Read-only library docs
                 // (bundled examples opened via "Open as read-only",
@@ -143,22 +109,16 @@ impl BrowserSection for ModelicaSection {
                 .map(|(id, host)| {
                     let doc = host.document();
                     let display = doc.origin().display_name();
-                    let source = doc.source().to_string();
-                    (id, display, source)
+                    // `Arc::clone` of the SyntaxCache — no parse, no
+                    // source clone. The doc's off-thread refresh
+                    // keeps this current.
+                    let syntax = std::sync::Arc::clone(&doc.syntax_arc());
+                    (id, display, syntax)
                 })
                 .collect();
             entries.sort_by(|a, b| a.1.cmp(&b.1));
             entries
         };
-
-        // GC cache entries whose docs are gone. Pending parses for
-        // closed docs get dropped too — when their slot completes
-        // there'll be nothing to install into and we'd just leak the
-        // Arc otherwise.
-        let live_ids: std::collections::HashSet<DocumentId> =
-            docs.iter().map(|(id, _, _)| *id).collect();
-        self.cache.retain(|id, _| live_ids.contains(id));
-        self.pending.retain(|id, _| live_ids.contains(id));
 
         if docs.is_empty() {
             ui.label(
@@ -216,18 +176,15 @@ impl BrowserSection for ModelicaSection {
             .id_salt("twin_browser_modelica_scroll")
             .auto_shrink([false; 2])
             .show(ui, |ui| {
-                for (doc_id, display_name, source) in &docs {
-                    self.refresh_doc(*doc_id, source);
-                    let Some(entry) = self.cache.get(doc_id) else {
-                        continue;
-                    };
-                    if entry.classes.is_empty() {
+                for (doc_id, display_name, syntax) in &docs {
+                    let (classes, has_parse_errors) = classes_from_syntax(syntax);
+                    if classes.is_empty() {
                         // Distinguish empty-draft from broken-file. A
                         // blank "(no classes yet)" row on a file the
                         // user just broke looks identical to a healthy
                         // empty draft — the user thinks their classes
                         // were deleted. Label the error case explicitly.
-                        let (text, color) = if entry.has_parse_errors {
+                        let (text, color) = if has_parse_errors {
                             (
                                 format!("{}  ⚠ parse error", display_name),
                                 egui::Color32::from_rgb(220, 160, 60),
@@ -246,7 +203,7 @@ impl BrowserSection for ModelicaSection {
                         );
                         continue;
                     }
-                    for class in &entry.classes {
+                    for class in &classes {
                         render_class_row(
                             ui,
                             class,
@@ -262,124 +219,26 @@ impl BrowserSection for ModelicaSection {
     }
 }
 
-impl ModelicaSection {
-    /// Bring the parse cache for `doc_id` up to date with `source`,
-    /// **without ever blocking the main thread on rumoca**.
-    ///
-    /// Three-step protocol, identical in shape to `ui::ast_refresh`:
-    ///   1. Drain any completed pending slot. If its hash matches
-    ///      current source, install into the cache and clear the
-    ///      pending entry; if it's stale, just clear it.
-    ///   2. If the cache already matches the current source hash, done.
-    ///   3. If a pending parse for the current source hash is already
-    ///      in flight, wait for it (next render will see it ready).
-    ///   4. Otherwise spawn a fresh parse on `AsyncComputeTaskPool`
-    ///      and return — the render shows the previous (stale) cache
-    ///      until step 1 picks up the result on a future render.
-    fn refresh_doc(&mut self, doc_id: DocumentId, source: &str) {
-        let hash = hash_source(source);
-
-        // 1. Drain any completed pending slot. Take the entry out
-        //    first so we don't hold a borrow on `self.pending` while
-        //    poking the mutex (the borrow checker rejects an
-        //    immutable `get` overlapping a later `remove`/`insert`).
-        //    Re-insert if the worker hasn't filled the slot yet.
-        if let Some(p) = self.pending.remove(&doc_id) {
-            // `try_lock` so a worker mid-write doesn't stall the
-            // render — if the slot is contended we just put `p` back
-            // and try again next frame.
-            let drained = p
-                .slot
-                .try_lock()
-                .ok()
-                .and_then(|mut guard| guard.take());
-            match drained {
-                Some((parsed_hash, classes, has_parse_errors)) if parsed_hash == hash => {
-                    // Worker finished and result matches current
-                    // source — install. `p` is dropped (pending
-                    // cleared).
-                    self.cache.insert(
-                        doc_id,
-                        DocCache {
-                            source_hash: parsed_hash,
-                            classes,
-                            has_parse_errors,
-                        },
-                    );
-                }
-                Some(_) => {
-                    // Stale result (user typed past it) — discard.
-                    // Step 4 will schedule a fresh parse below.
-                }
-                None => {
-                    // Worker still running (or slot contended). Keep
-                    // the pending entry alive.
-                    self.pending.insert(doc_id, p);
-                }
-            }
-        }
-
-        // 2. Cache up to date for current source — done.
-        if self.cache.get(&doc_id).map(|c| c.source_hash) == Some(hash) {
-            return;
-        }
-
-        // 3. Already parsing this exact hash — wait for it.
-        if self.pending.get(&doc_id).map(|p| p.source_hash) == Some(hash) {
-            return;
-        }
-
-        // 4. Spawn a new off-thread parse. The previous cache (if any)
-        //    keeps rendering until this one lands. Edit bursts that
-        //    arrive while a parse is in flight will (on the next
-        //    render that sees the worker finish) be detected as a
-        //    hash mismatch and trigger a fresh parse — see step 1.
-        let owned = source.to_string();
-        let slot: ParseSlot = Arc::new(Mutex::new(None));
-        let slot_for_worker = slot.clone();
-        AsyncComputeTaskPool::get()
-            .spawn(async move {
-                let (classes, has_parse_errors) = parse_classes(&owned);
-                if let Ok(mut guard) = slot_for_worker.lock() {
-                    *guard = Some((hash, classes, has_parse_errors));
-                }
-            })
-            .detach();
-        self.pending.insert(
-            doc_id,
-            PendingParse {
-                source_hash: hash,
-                slot,
-            },
-        );
-    }
-}
-
-fn hash_source(s: &str) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    s.hash(&mut h);
-    h.finish()
+/// Derive the class tree + error flag from a [`SyntaxCache`]. Pure
+/// function — sub-millisecond on typical Modelica files. No parse,
+/// no allocation beyond the per-class string clones inside the tree.
+fn classes_from_syntax(syntax: &SyntaxCache) -> (Vec<ClassEntry>, bool) {
+    (collect_classes(&syntax.ast.classes, ""), syntax.has_errors)
 }
 
 // ---------------------------------------------------------------------------
-// Parsing
+// Test helpers
 // ---------------------------------------------------------------------------
 
-/// Parse a `.mo` source into a tree of [`ClassEntry`] keyed by
-/// qualified path. Recursive — packages with nested classes produce
-/// nested children.
-///
-/// Uses rumoca's error-recovering `parse_to_syntax` so that a syntax
-/// error in one class doesn't wipe every class out of the browser.
-/// Returns the best-effort class tree plus whether the parse reported
-/// errors, so the caller can distinguish "empty draft" from "broken
-/// file" in the UI.
+/// Test-only convenience: build a [`SyntaxCache`] from `source` and
+/// derive the class tree + error flag through the same path as the
+/// production renderer. Mirrors what `render` does, but starting
+/// from raw source (production gets the cache from
+/// [`ModelicaDocument`] via the off-thread refresh).
+#[cfg(test)]
 fn parse_classes(source: &str) -> (Vec<ClassEntry>, bool) {
-    let syntax = parse_to_syntax(source, "twin.mo");
-    let ast = syntax.best_effort();
-    (collect_classes(&ast.classes, ""), syntax.has_errors())
+    let syntax = SyntaxCache::from_source(source, 0);
+    classes_from_syntax(&syntax)
 }
 
 /// Walk an `IndexMap<String, ClassDef>` building [`ClassEntry`]
