@@ -18,14 +18,22 @@
 //!
 //! ## Caching
 //!
-//! Per-document parse cache keyed by source content hash. Cheap (typical
-//! Modelica files are <10 KB) so we re-parse on every miss; rumoca runs
-//! synchronously here. The MSL case will need a task-pool bounce — out
-//! of scope for slice 3.
+//! Per-document parse cache keyed by source content hash. The parse runs
+//! off-thread on `AsyncComputeTaskPool` (same `Arc<Mutex<Option<_>>>`
+//! slot pattern as `ui::ast_refresh`). `refresh_doc` drains any
+//! completed slot first, then spawns a fresh parse if the source hash
+//! moved past the cached entry. While a parse is in flight, render
+//! shows the previous (stale) cache — never blocks the main thread.
+//! Rationale: rumoca's `parse_to_syntax` is a few-hundred-millisecond
+//! call on non-trivial files; running it inline at render time was the
+//! 200–400 ms freeze surfaced by the samply profile (15.4 % of the
+//! main thread, 100 % of the freezes captured by `FrameTimeProbe`).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
+use bevy::tasks::AsyncComputeTaskPool;
 use bevy_egui::egui;
 use lunco_doc::DocumentId;
 use lunco_workbench::{BrowserAction, BrowserCtx, BrowserSection};
@@ -63,6 +71,23 @@ struct DocCache {
     has_parse_errors: bool,
 }
 
+/// Shared slot the worker thread fills when the off-thread parse
+/// completes. `Arc<Mutex<Option<_>>>` mirrors `ui::ast_refresh` and
+/// `ui::image_loader`: the worker writes once, the main thread reads
+/// once per render via `try_lock`, contention is negligible.
+type ParseSlot = Arc<Mutex<Option<(u64, Vec<ClassEntry>, bool)>>>;
+
+/// One in-flight parse, tagged with the source-hash it's parsing
+/// against so we can discard results that were superseded by a
+/// later edit while the worker was running.
+struct PendingParse {
+    /// Hash of the source the worker is parsing. The worker writes
+    /// `(hash, classes, has_errors)` into `slot` when done; the next
+    /// `refresh_doc` call drains it.
+    source_hash: u64,
+    slot: ParseSlot,
+}
+
 /// The Modelica Twin-Browser section.
 #[derive(Default)]
 pub struct ModelicaSection {
@@ -70,6 +95,10 @@ pub struct ModelicaSection {
     /// documents) are GC'd whenever a render finds them missing from
     /// the registry.
     cache: HashMap<DocumentId, DocCache>,
+    /// In-flight off-thread parses, one per doc. Drained on each
+    /// render before deciding whether to spawn a new one — see
+    /// [`Self::refresh_doc`].
+    pending: HashMap<DocumentId, PendingParse>,
 }
 
 impl BrowserSection for ModelicaSection {
@@ -122,10 +151,14 @@ impl BrowserSection for ModelicaSection {
             entries
         };
 
-        // GC cache entries whose docs are gone.
+        // GC cache entries whose docs are gone. Pending parses for
+        // closed docs get dropped too — when their slot completes
+        // there'll be nothing to install into and we'd just leak the
+        // Arc otherwise.
         let live_ids: std::collections::HashSet<DocumentId> =
             docs.iter().map(|(id, _, _)| *id).collect();
         self.cache.retain(|id, _| live_ids.contains(id));
+        self.pending.retain(|id, _| live_ids.contains(id));
 
         if docs.is_empty() {
             ui.label(
@@ -230,20 +263,93 @@ impl BrowserSection for ModelicaSection {
 }
 
 impl ModelicaSection {
-    /// Refresh the parse for `doc_id` if `source`'s hash differs from
-    /// the cached one.
+    /// Bring the parse cache for `doc_id` up to date with `source`,
+    /// **without ever blocking the main thread on rumoca**.
+    ///
+    /// Three-step protocol, identical in shape to `ui::ast_refresh`:
+    ///   1. Drain any completed pending slot. If its hash matches
+    ///      current source, install into the cache and clear the
+    ///      pending entry; if it's stale, just clear it.
+    ///   2. If the cache already matches the current source hash, done.
+    ///   3. If a pending parse for the current source hash is already
+    ///      in flight, wait for it (next render will see it ready).
+    ///   4. Otherwise spawn a fresh parse on `AsyncComputeTaskPool`
+    ///      and return — the render shows the previous (stale) cache
+    ///      until step 1 picks up the result on a future render.
     fn refresh_doc(&mut self, doc_id: DocumentId, source: &str) {
         let hash = hash_source(source);
+
+        // 1. Drain any completed pending slot. Take the entry out
+        //    first so we don't hold a borrow on `self.pending` while
+        //    poking the mutex (the borrow checker rejects an
+        //    immutable `get` overlapping a later `remove`/`insert`).
+        //    Re-insert if the worker hasn't filled the slot yet.
+        if let Some(p) = self.pending.remove(&doc_id) {
+            // `try_lock` so a worker mid-write doesn't stall the
+            // render — if the slot is contended we just put `p` back
+            // and try again next frame.
+            let drained = p
+                .slot
+                .try_lock()
+                .ok()
+                .and_then(|mut guard| guard.take());
+            match drained {
+                Some((parsed_hash, classes, has_parse_errors)) if parsed_hash == hash => {
+                    // Worker finished and result matches current
+                    // source — install. `p` is dropped (pending
+                    // cleared).
+                    self.cache.insert(
+                        doc_id,
+                        DocCache {
+                            source_hash: parsed_hash,
+                            classes,
+                            has_parse_errors,
+                        },
+                    );
+                }
+                Some(_) => {
+                    // Stale result (user typed past it) — discard.
+                    // Step 4 will schedule a fresh parse below.
+                }
+                None => {
+                    // Worker still running (or slot contended). Keep
+                    // the pending entry alive.
+                    self.pending.insert(doc_id, p);
+                }
+            }
+        }
+
+        // 2. Cache up to date for current source — done.
         if self.cache.get(&doc_id).map(|c| c.source_hash) == Some(hash) {
             return;
         }
-        let (classes, has_parse_errors) = parse_classes(source);
-        self.cache.insert(
+
+        // 3. Already parsing this exact hash — wait for it.
+        if self.pending.get(&doc_id).map(|p| p.source_hash) == Some(hash) {
+            return;
+        }
+
+        // 4. Spawn a new off-thread parse. The previous cache (if any)
+        //    keeps rendering until this one lands. Edit bursts that
+        //    arrive while a parse is in flight will (on the next
+        //    render that sees the worker finish) be detected as a
+        //    hash mismatch and trigger a fresh parse — see step 1.
+        let owned = source.to_string();
+        let slot: ParseSlot = Arc::new(Mutex::new(None));
+        let slot_for_worker = slot.clone();
+        AsyncComputeTaskPool::get()
+            .spawn(async move {
+                let (classes, has_parse_errors) = parse_classes(&owned);
+                if let Ok(mut guard) = slot_for_worker.lock() {
+                    *guard = Some((hash, classes, has_parse_errors));
+                }
+            })
+            .detach();
+        self.pending.insert(
             doc_id,
-            DocCache {
+            PendingParse {
                 source_hash: hash,
-                classes,
-                has_parse_errors,
+                slot,
             },
         );
     }
