@@ -2,7 +2,7 @@
 name = "lunco-twin"
 version = "0.1.0"
 edition = "2021"
-description = "Twin — LunCoSim's top-level persistent artifact. Folder + twin.toml manifest. Headless, UI-free, ECS-free."
+description = "Twin — LunCoSim's top-level persistent artifact. Folder + twin.toml manifest. Headless, UI-free; the optional `bevy` feature exposes the DocumentKindRegistry as a Resource for ECS-side consumers."
 
 [dependencies]
 lunco-doc = { path = "../lunco-doc" }
@@ -11,6 +11,21 @@ serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 walkdir = "2.5"
 thiserror = "1.0"
+# DocumentKindId is a SmolStr newtype — opaque, cheap to clone, plays
+# well with HashMap keys; same crate the rest of the workspace uses
+# for stable string identifiers.
+smol_str = { version = "0.2", features = ["serde"] }
+# Optional — enables the `Resource` derive on DocumentKindRegistry +
+# the registry plugin. Off by default so headless callers (CLI tools,
+# the rumoca pipeline) keep zero-Bevy footprint; workbench-side
+# consumers turn it on.
+bevy = { workspace = true, optional = true }
+
+[features]
+default = []
+# Exposes `DocumentKindRegistry` as a Bevy `Resource` and ships
+# `DocumentKindRegistryPlugin` for app-level wiring.
+bevy = ["dep:bevy"]
 
 [dev-dependencies]
 tempfile = "3.10"

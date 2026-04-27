@@ -6268,9 +6268,11 @@ dependencies = [
 name = "lunco-twin"
 version = "0.1.0"
 dependencies = [
+ "bevy",
  "lunco-doc",
  "lunco-storage",
  "serde",
+ "smol_str",
  "tempfile",
  "thiserror 1.0.69",
  "toml",

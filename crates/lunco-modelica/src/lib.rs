@@ -437,6 +437,26 @@ impl Plugin for ModelicaPlugin {
     fn build(&self, app: &mut App) {
         build_modelica_core(app);
         app.add_plugins(ui::ModelicaUiPlugin);
+        // Self-register with the workbench's plugin-driven document-
+        // kind registry so File→New, the file picker, the library
+        // browser, and `twin.toml` parsers all see Modelica without
+        // any central edit. Init the resource defensively in case
+        // the workbench plugin hasn't been added yet.
+        app.init_resource::<lunco_twin::DocumentKindRegistry>();
+        let mut registry = app
+            .world_mut()
+            .resource_mut::<lunco_twin::DocumentKindRegistry>();
+        registry.register(
+            lunco_twin::DocumentKindId::new("modelica"),
+            lunco_twin::DocumentKindMeta {
+                display_name: "Modelica Model".into(),
+                extensions: vec!["mo"],
+                can_create_new: true,
+                default_filename: Some("NewModel.mo"),
+                uri_scheme: Some("modelica"),
+                manifest_section: Some("modelica"),
+            },
+        );
         // Install the user-facing indentation default for the
         // pretty-printer. The library-level default is two-space so
         // pure-Rust tests have predictable output; the workbench UI

@@ -35,7 +35,7 @@ lunco-doc-bevy = { path = "../lunco-doc-bevy" }
 lunco-workbench = { path = "../lunco-workbench" }
 lunco-viz = { path = "../lunco-viz" }
 lunco-canvas = { path = "../lunco-canvas" }
-lunco-twin = { path = "../lunco-twin" }
+lunco-twin = { path = "../lunco-twin", features = ["bevy"] }
 lunco-workspace = { path = "../lunco-workspace" }
 lunco-storage = { path = "../lunco-storage" }
 lunco-cache = { path = "../lunco-cache" }

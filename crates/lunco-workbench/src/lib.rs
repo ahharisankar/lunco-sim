@@ -145,6 +145,16 @@ impl Plugin for WorkbenchPlugin {
         if !app.is_plugin_added::<status_bus::StatusBusPlugin>() {
             app.add_plugins(status_bus::StatusBusPlugin);
         }
+        // Plugin-driven registry of `DocumentKind`s. Domain crates
+        // (modelica, future julia/usd/sysml/...) register their kinds
+        // here; consumers iterate the registry rather than matching
+        // a fixed enum. Idempotent — domain plugins can also call
+        // `init_resource::<DocumentKindRegistry>()` themselves.
+        if !app
+            .is_plugin_added::<lunco_twin::DocumentKindRegistryPlugin>()
+        {
+            app.add_plugins(lunco_twin::DocumentKindRegistryPlugin);
+        }
         // Native (rfd) / web (FSA, future) file-picker plumbing.
         // Domain code fires `picker::PickHandle` and observes
         // `picker::PickResolved` without caring which backend is live.
@@ -877,14 +887,38 @@ fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut 
                 let has_active = active_doc.is_some();
 
                 // -- New ----------------------------------------------
-                // Domain-agnostic — fires `EditorIntent::NewDocument`
-                // and each domain's resolver decides what kind of
-                // doc to create. No `DocumentKindRegistry` yet, so
-                // currently only Modelica responds.
-                if ui.button("New\tCtrl+N").clicked() {
-                    world.trigger(lunco_doc_bevy::EditorIntent::NewDocument);
-                    ui.close();
-                }
+                // Submenu populated from `DocumentKindRegistry`. Each
+                // entry fires `NewDocument { kind }`; the matching
+                // domain observer creates the doc. Ctrl+N fires the
+                // default-resolution path through `EditorIntent`.
+                ui.menu_button("New", |ui| {
+                    let registry = world
+                        .resource::<lunco_twin::DocumentKindRegistry>();
+                    let mut entries: Vec<(String, String)> = registry
+                        .iter()
+                        .filter(|(_, m)| m.can_create_new)
+                        .map(|(id, m)| (id.as_str().to_string(), m.display_name.clone()))
+                        .collect();
+                    entries.sort_by(|a, b| a.1.cmp(&b.1));
+                    if entries.is_empty() {
+                        ui.label(
+                            egui::RichText::new("(no document kinds registered)")
+                                .weak()
+                                .italics(),
+                        );
+                    } else {
+                        for (kind, display) in entries {
+                            // Ctrl+N hint shown only on the first
+                            // entry — that's the keybind's default
+                            // target. egui menus right-align after \t.
+                            let label = format!("{display}\tCtrl+N");
+                            if ui.button(label).clicked() {
+                                world.trigger(file_ops::NewDocument { kind });
+                                ui.close();
+                            }
+                        }
+                    }
+                });
                 ui.separator();
 
                 // -- Open ---------------------------------------------

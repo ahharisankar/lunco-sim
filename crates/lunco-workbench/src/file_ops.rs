@@ -38,8 +38,29 @@
 use bevy::prelude::*;
 use lunco_core::{on_command, register_commands, Command};
 use lunco_doc_bevy::SaveAsDocument;
+use lunco_twin::{DocumentKindId, DocumentKindRegistry};
 
 use crate::picker::{PickFollowUp, PickResolved};
+
+/// Create a new untitled document of the given kind.
+///
+/// `kind` is the registered [`DocumentKindId`] string (`"modelica"`,
+/// `"julia"`, `"usd"`, …). An **empty** `kind` is the "use the
+/// default" signal — the workbench-side observer looks up the
+/// registry, picks the first kind whose
+/// [`can_create_new`](DocumentKindMeta::can_create_new) is true, and
+/// re-fires this command with the resolved kind. That's how Ctrl+N
+/// reaches a sensible default without the keybind owner having to
+/// know which domain crates are loaded.
+///
+/// Domain crates add observers that gate on `cmd.kind == "<their_id>"`
+/// and create the actual document. The workbench's default observer
+/// only handles the empty-kind resolution.
+#[Command(default)]
+pub struct NewDocument {
+    /// Registered document kind id, or empty for "default".
+    pub kind: String,
+}
 
 /// Open a file at `path` into a new tab.
 ///
@@ -112,6 +133,37 @@ pub struct SaveAsTwin {
 // ─────────────────────────────────────────────────────────────────────────────
 // Stub observers — flesh out in follow-up commits
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[on_command(NewDocument)]
+fn on_new_document(
+    trigger: On<NewDocument>,
+    registry: Res<DocumentKindRegistry>,
+    mut commands: Commands,
+) {
+    // Domain-specific creation is handled by domain crates' own
+    // observers, gated on `cmd.kind == "<their_id>"`. This observer
+    // exists only to resolve the "default" sentinel (empty `kind`)
+    // into a real registered id and re-fire — which is what Ctrl+N
+    // dispatches when no specific kind was chosen.
+    let kind = trigger.event().kind.clone();
+    if !kind.is_empty() {
+        return;
+    }
+    // Pick the first registered kind that opts into File→New. UI may
+    // surface a "last used" preference later; for now first-found is
+    // fine — only Modelica registers today.
+    let default_kind: Option<DocumentKindId> = registry
+        .iter()
+        .find(|(_, m)| m.can_create_new)
+        .map(|(id, _)| id.clone());
+    let Some(id) = default_kind else {
+        warn!("[NewDocument] no document kinds registered with can_create_new=true");
+        return;
+    };
+    commands.trigger(NewDocument {
+        kind: id.as_str().to_string(),
+    });
+}
 
 #[on_command(OpenFolder)]
 fn on_open_folder(trigger: On<OpenFolder>, mut commands: Commands) {
@@ -230,7 +282,13 @@ fn on_pick_resolved(trigger: On<PickResolved>, mut commands: Commands) {
 // plugin's `build`. `OpenFile` is also absent: the observer that
 // loads `.mo` content lives in `lunco-modelica` and registers itself
 // there; the workbench owns only the typed struct.
-register_commands!(on_open_folder, on_open_twin, on_save_all, on_save_as_twin);
+register_commands!(
+    on_new_document,
+    on_open_folder,
+    on_open_twin,
+    on_save_all,
+    on_save_as_twin
+);
 
 /// Plugin that registers shell-level file-workflow commands.
 ///

@@ -62,10 +62,14 @@
 
 use std::path::{Path, PathBuf};
 
+mod document_kind_registry;
 mod error;
 mod file_kind;
 mod manifest;
 
+pub use document_kind_registry::{DocumentKindId, DocumentKindMeta, DocumentKindRegistry};
+#[cfg(feature = "bevy")]
+pub use document_kind_registry::DocumentKindRegistryPlugin;
 pub use error::TwinError;
 pub use file_kind::{DocumentKind, FileEntry, FileKind};
 pub use manifest::{TwinChildRef, TwinManifest, MANIFEST_FILENAME};

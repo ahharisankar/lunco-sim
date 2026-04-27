@@ -18,7 +18,7 @@ lunco-doc = { path = "../lunco-doc" }
 # `SaveDocument` / `SaveAsDocument` / `CloseDocument` Command structs +
 # `EditorIntent` rebindable verbs.
 lunco-doc-bevy = { path = "../lunco-doc-bevy" }
-lunco-twin = { path = "../lunco-twin" }
+lunco-twin = { path = "../lunco-twin", features = ["bevy"] }
 lunco-workspace = { path = "../lunco-workspace" }
 # `OpenFilter` / `SaveHint` / `StorageHandle` for the file-picker
 # event API. Storage stays bevy-free; the workbench's picker fires

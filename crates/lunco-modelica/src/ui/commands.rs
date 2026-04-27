@@ -26,7 +26,7 @@ use lunco_doc_bevy::{
     CloseDocument, DocumentSaved, EditorIntent, RedoDocument, SaveAsDocument, SaveDocument,
     UndoDocument,
 };
-use lunco_workbench::file_ops::OpenFile;
+use lunco_workbench::file_ops::{NewDocument, OpenFile};
 use std::collections::HashMap;
 
 use lunco_core::{Command, on_command, register_commands};
@@ -405,6 +405,7 @@ register_commands!(
     on_get_file,
     on_inspect_active_doc,
     on_move_component,
+    on_new_modelica_document,
     on_new_plot_panel,
     on_open,
     on_open_class,
@@ -766,8 +767,31 @@ fn resolve_editor_intent(
 /// intent variants.
 fn resolve_new_document_intent(trigger: On<EditorIntent>, mut commands: Commands) {
     if matches!(*trigger.event(), EditorIntent::NewDocument) {
-        commands.trigger(CreateNewScratchModel {});
+        // Empty `kind` is the workbench's "use the default" sentinel —
+        // it looks up `DocumentKindRegistry`, picks the first kind
+        // with `can_create_new=true`, and re-fires. That lets Ctrl+N
+        // pick a sensible default in any app composition (Modelica
+        // alone, Modelica+USD+Julia, …) without this resolver knowing
+        // who's loaded.
+        commands.trigger(NewDocument {
+            kind: String::new(),
+        });
     }
+}
+
+/// Modelica's branch of the kind-typed [`NewDocument`] command.
+///
+/// Gates on `kind == "modelica"` and forwards to
+/// [`CreateNewScratchModel`] — which already owns the
+/// "find next free Untitled<N>" + scratch-buffer + tab-spawn flow.
+/// Other domains' observers gate on their own kinds and ignore this
+/// one's payload.
+#[on_command(NewDocument)]
+fn on_new_modelica_document(trigger: On<NewDocument>, mut commands: Commands) {
+    if trigger.event().kind != "modelica" {
+        return;
+    }
+    commands.trigger(CreateNewScratchModel {});
 }
 
 fn on_undo_document(
