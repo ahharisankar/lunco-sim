@@ -468,6 +468,7 @@ fn build_modelica_core(app: &mut App) {
     // The new `modelica_run` / `msl_indexer` CLI tools standardised
     // on workspace, and the workbench needs to follow suit so a
     // single `--warm` pass benefits every tool.
+    #[cfg(not(target_arch = "wasm32"))]
     if std::env::var_os("RUMOCA_CACHE_DIR").is_none() {
         let target = lunco_assets::cache_dir().join("rumoca");
         std::env::set_var("RUMOCA_CACHE_DIR", &target);
