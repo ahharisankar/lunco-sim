@@ -147,8 +147,16 @@ pub trait Resolver {
 /// an incrementing counter, a hash of a file path, a Bevy entity bits, etc.
 /// `lunco-doc` treats ids as opaque and only requires them to be unique within
 /// the app's Document population.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct DocumentId(u64);
+///
+/// Derives `Reflect` so commands and other reflect-aware structs can carry
+/// `DocumentId` directly without hand-rolling `u64` shims at every API
+/// boundary. `bevy_reflect` is already in our dep tree via `lunco-core`,
+/// so this adds no new dependency cost.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord,
+    bevy_reflect::Reflect,
+)]
+pub struct DocumentId(pub u64);
 
 impl DocumentId {
     /// Construct a [`DocumentId`] from a raw `u64`.

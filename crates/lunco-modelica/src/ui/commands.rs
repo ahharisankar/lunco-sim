@@ -28,6 +28,8 @@ use lunco_doc_bevy::{
 };
 use std::collections::HashMap;
 
+use lunco_core::Command;
+
 use crate::ast_extract::{
     extract_input_names, extract_inputs_with_defaults, extract_model_name,
     extract_parameters, hash_content,
@@ -48,8 +50,8 @@ use crate::{ModelicaChannels, ModelicaCommand, ModelicaModel};
 /// with a `mem://Untitled<N>` marker path, records it in the Package
 /// Browser's in-memory list, and triggers an [`OpenTab`](lunco_workbench::OpenTab)
 /// so the user lands on the editable tab immediately.
-#[derive(Event, Clone, Debug)]
-pub struct CreateNewScratchModel;
+#[Command(default)]
+pub struct CreateNewScratchModel {}
 
 /// Request to duplicate a read-only (library) model into a new
 /// editable Untitled document.
@@ -66,7 +68,7 @@ pub struct CreateNewScratchModel;
 /// `Blocks/package.mo`), only the target class's source is
 /// extracted — otherwise users would get a 150 KB copy of the
 /// whole Blocks package as their "Untitled" starting point.
-#[derive(Event, Clone, Debug)]
+#[Command(default)]
 pub struct DuplicateModelFromReadOnly {
     pub source_doc: DocumentId,
 }
@@ -85,7 +87,7 @@ pub struct DuplicateModelFromReadOnly {
 /// The duplicated copy lands in Canvas view by default (examples
 /// are composed models — users want to see the diagram, not the
 /// source).
-#[derive(Event, Clone, Debug)]
+#[Command(default)]
 pub struct OpenExampleInWorkspace {
     pub qualified: String,
 }
@@ -107,9 +109,8 @@ pub struct OpenExampleInWorkspace {
 /// readiness-poll loop. Use this instead of `FitCanvas` (which
 /// touches the canvas) or any other state-mutating command when all
 /// you want to know is "is the API up yet?".
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
-pub struct Ping;
+#[Command(default)]
+pub struct Ping {}
 
 fn on_ping(_trigger: On<Ping>) {
     // Intentional no-op. The dispatcher's normal flow already returns
@@ -117,24 +118,10 @@ fn on_ping(_trigger: On<Ping>) {
     // emitting nothing further keeps the response cheap.
 }
 
-// `#[reflect(Event, Default)]` is what makes this command HTTP-API-
-// accessible — the API dispatcher walks the type registry, expects
-// `Event` reflection for triggering, and `Default` for filling in
-// fields the caller omitted. Missing either silently rejects the
-// request with "Command 'CompileModel' not found or not API-accessible".
-//
-// `doc` is a raw `u64` (not [`DocumentId`]) for the same reason
-// every other API-facing command uses raw integers: `DocumentId`
-// doesn't implement `Reflect`, and threading reflection through
-// `lunco-doc` would ripple into every dependent crate. Internal
-// callers that already hold a `DocumentId` pass `.raw()`; the
-// observer wraps with `DocumentId::new(...)`.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct CompileModel {
-    /// The document to compile, as the underlying `u64` (use
-    /// `DocumentId::raw()` from internal callers).
-    pub doc: u64,
+    /// The document to compile.
+    pub doc: DocumentId,
     /// Optional explicit target class. When `Some`, bypass both the
     /// drilled-in pin and the picker — compile this exact class.
     /// Used by API callers that need deterministic behaviour without
@@ -154,8 +141,7 @@ pub struct CompileModel {
 /// `doc = 0` targets the currently-active tab. Kept as a raw `u64`
 /// (not `DocumentId`) so the generic `lunco-doc` crate stays free of
 /// the bevy-reflect dependency required to cross the API boundary.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct AutoArrangeDiagram {
     /// Raw `DocumentId::raw()` value, or `0` for "the currently-active
     /// Model tab" (useful from API / tests / scripts that don't track
@@ -177,8 +163,7 @@ pub struct AutoArrangeDiagram {
 /// and not discoverable from outside; the tab title is. A future
 /// `ListDocuments` query will return the ids directly for exact
 /// targeting.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct FocusDocumentByName {
     pub pattern: String,
 }
@@ -186,8 +171,7 @@ pub struct FocusDocumentByName {
 /// Switch the active tab's view mode. `mode` is one of
 /// `"text"`, `"diagram"`, `"icon"`, `"docs"` (case-insensitive).
 /// Unknown modes are ignored.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct SetViewMode {
     /// Doc id, or `0` for the active tab.
     pub doc: u64,
@@ -197,8 +181,7 @@ pub struct SetViewMode {
 
 /// Set the canvas zoom level for a specific diagram. `1.0` = 100 %.
 /// `0.0` = fit-all (same as [`FitCanvas`]).
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct SetZoom {
     /// Doc id, or `0` for the active tab.
     pub doc: u64,
@@ -208,8 +191,7 @@ pub struct SetZoom {
 
 /// Frame the scene so the whole diagram fits in the viewport.
 /// Equivalent to the `F` keyboard shortcut.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct FitCanvas {
     /// Doc id, or `0` for the active tab.
     pub doc: u64,
@@ -221,8 +203,7 @@ pub struct FitCanvas {
 /// Reflect-registered shim over the existing `OpenExampleInWorkspace`
 /// event so scripts can open examples without knowing the internal
 /// event name.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct OpenExample {
     pub qualified: String,
 }
@@ -322,7 +303,7 @@ pub(crate) fn render_compile_class_picker(
         let doc = entry.doc;
         drilled_in.set(doc, qualified);
         picker.0 = None;
-        commands.trigger(CompileModel { doc: doc.raw(), class: None });
+        commands.trigger(CompileModel { doc, class: None });
     } else if cancelled {
         picker.0 = None;
     }
@@ -790,7 +771,7 @@ fn resolve_editor_intent(
 /// intent variants.
 fn resolve_new_document_intent(trigger: On<EditorIntent>, mut commands: Commands) {
     if matches!(*trigger.event(), EditorIntent::NewDocument) {
-        commands.trigger(CreateNewScratchModel);
+        commands.trigger(CreateNewScratchModel {});
     }
 }
 
@@ -1083,9 +1064,7 @@ fn on_compile_model(
     mut q_models: Query<&mut ModelicaModel>,
     drilled_in_classes: Option<Res<crate::ui::panels::canvas_diagram::DrilledInClassNames>>,
 ) {
-    // CompileModel.doc is `u64` (Reflect-friendly for the HTTP API);
-    // wrap into the typed `DocumentId` the registry/host APIs use.
-    let doc = lunco_doc::DocumentId::new(trigger.event().doc);
+    let doc = trigger.event().doc;
     let explicit_class = trigger.event().class.clone();
 
     // Ownership check. Read-only docs are fair game to compile —
@@ -2143,8 +2122,7 @@ fn on_open_example(
 /// duplicates into an editable Untitled doc), this opens the class
 /// directly as an `msl://` tab for exploration. Reuses an existing
 /// tab if the same class is already open.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct OpenClass {
     pub qualified: String,
 }
@@ -2198,8 +2176,7 @@ fn on_open_class(trigger: On<OpenClass>, mut commands: Commands) {
 /// drag uses — emits a `SetPlacement` op so undo/redo + source
 /// rewrite work uniformly. `class` empty ⇒ active editing class on
 /// the active tab.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct MoveComponent {
     pub class: String,
     pub name: String,
@@ -2215,15 +2192,13 @@ pub struct MoveComponent {
 /// Undo the most recent edit on the active document. Reflect-
 /// registered so automation can drive the same undo path the
 /// Ctrl+Z keybinding / toolbar arrow uses. `doc=0` ⇒ active tab.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct Undo {
     pub doc: u64,
 }
 
 /// Redo the most recently undone edit. Mirror of [`Undo`].
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct Redo {
     pub doc: u64,
 }
@@ -2262,8 +2237,7 @@ fn on_redo(trigger: On<Redo>, mut commands: Commands) {
 /// coords (+Y down — same frame the projector emits node positions
 /// in). Use it from API tests / automation to position the
 /// viewport before screenshotting.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct PanCanvas {
     /// 0 ⇒ active document.
     pub doc: u64,
@@ -2274,15 +2248,13 @@ pub struct PanCanvas {
 /// Gracefully shut down the application. Exposed so automation can
 /// stop the workbench without the operator having to confirm a kill
 /// signal each time.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct Exit {}
 
 /// Run rumoca-tool-fmt on the active document and replace its
 /// source with the formatted text. Single undo step. No-op on
 /// read-only tabs or when formatting fails (parse errors etc.).
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct FormatDocument {
     /// 0 ⇒ active document.
     pub doc: u64,
@@ -2435,15 +2407,13 @@ fn update_status_bar(
 /// pipeline (no path picker — fails if the doc is Untitled). Use
 /// `SaveActiveDocumentAs` to bind a path explicitly without the
 /// modal picker; this is the form scripts and tests should use.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct SaveActiveDocument {
     /// 0 ⇒ active document.
     pub doc: u64,
 }
 
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct SaveActiveDocumentAs {
     /// 0 ⇒ active document.
     pub doc: u64,
@@ -2516,8 +2486,7 @@ fn on_save_active_document_as(
 /// API shim: duplicate the active read-only document into a fresh
 /// editable workspace tab. Fires the existing
 /// `DuplicateModelFromReadOnly` event with `doc=0` ⇒ active.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct DuplicateActiveDoc {
     pub doc: u64,
 }
@@ -2556,22 +2525,19 @@ fn on_duplicate_active_doc(trigger: On<DuplicateActiveDoc>, mut commands: Comman
 /// A separate Step-one-frame command is intentionally deferred until
 /// #59 (named experiments / Runs panel) lands — the infrastructure
 /// for a "force one step" flag is better designed alongside that.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct PauseActiveModel {
     pub doc: u64,
 }
 
 /// See [`PauseActiveModel`].
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct ResumeActiveModel {
     pub doc: u64,
 }
 
 /// See [`PauseActiveModel`].
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct ResetActiveModel {
     pub doc: u64,
 }
@@ -2656,8 +2622,7 @@ fn entity_for_doc(world: &World, doc: DocumentId) -> Option<Entity> {
 /// scalar signal. Pure UI overlay — does not emit Modelica source.
 /// Uses the active document's coordinate frame (same as
 /// `MoveComponent`: -100..100 typical, +Y down).
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct AddCanvasPlot {
     pub x: f32,
     pub y: f32,
@@ -2725,8 +2690,7 @@ fn on_add_canvas_plot(trigger: On<AddCanvasPlot>, mut commands: Commands) {
 /// `VisualizationConfig`. The initial `signals` list (Modelica
 /// dotted variable paths) is bound on creation; more can be added
 /// later via [`AddSignalToPlot`].
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct NewPlotPanel {
     /// Tab title. Empty ⇒ auto-named "Plot #N".
     pub title: String,
@@ -2792,8 +2756,7 @@ fn on_new_plot_panel(trigger: On<NewPlotPanel>, mut commands: Commands) {
 
 /// Add one signal to an existing plot panel. `plot=0` ⇒ the
 /// singleton default Modelica graph.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct AddSignalToPlot {
     pub plot: u64,
     pub signal: String,
@@ -2840,8 +2803,7 @@ fn on_add_signal_to_plot(trigger: On<AddSignalToPlot>, mut commands: Commands) {
 /// it to curl / scripts. Type-check / parse / DAE errors land in
 /// `WorkbenchState.compilation_error` which the Diagnostics panel
 /// already surfaces.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct CompileActiveModel {
     /// 0 ⇒ active document.
     pub doc: u64,
@@ -2869,7 +2831,7 @@ fn on_compile_active_model(trigger: On<CompileActiveModel>, mut commands: Comman
             return;
         };
         let target_class = if class.is_empty() { None } else { Some(class) };
-        world.commands().trigger(CompileModel { doc: doc.raw(), class: target_class });
+        world.commands().trigger(CompileModel { doc, class: target_class });
     });
 }
 
@@ -2877,8 +2839,7 @@ fn on_compile_active_model(trigger: On<CompileActiveModel>, mut commands: Comman
 /// (top-level class names, parse error if any). API automation
 /// uses this to diagnose why a drill-in or projection produced
 /// zero nodes — if the AST is empty, the file failed strict parse.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct InspectActiveDoc {}
 
 fn on_inspect_active_doc(_trigger: On<InspectActiveDoc>, mut commands: Commands) {
@@ -2947,8 +2908,7 @@ fn on_inspect_active_doc(_trigger: On<InspectActiveDoc>, mut commands: Commands)
 /// tab as an Untitled document seeded from the file's contents.
 /// Used by API automation to load bundled examples or external
 /// files without a Twin folder being open.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct OpenFile {
     pub path: String,
 }
@@ -3074,8 +3034,7 @@ fn focus_in_memory_doc(world: &mut World, name: &str) {
 /// fetch a file's content via the API without spawning a separate
 /// shell. Resolves `path` relative to the workbench's current
 /// working directory.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct GetFile {
     pub path: String,
 }
@@ -3096,8 +3055,7 @@ pub struct GetFile {
 /// The legacy `OpenFile` / `OpenClass` / `OpenExample` commands stay
 /// available for callers that already use them; this is purely the
 /// scheme-aware front door.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct Open {
     pub uri: String,
 }
@@ -3149,8 +3107,7 @@ fn on_open(trigger: On<Open>, mut commands: Commands) {
 /// to the runtime-relevant subset.
 ///
 /// See spec 033 P2 for the design rationale.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct SetModelInput {
     /// Document id whose linked entity holds the running model.
     pub doc: u64,

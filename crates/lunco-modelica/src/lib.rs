@@ -1708,7 +1708,7 @@ fn spawn_modelica_requests(
             let doc = model.document;
             if doc != lunco_doc::DocumentId::default() {
                 commands.trigger(crate::ui::commands::CompileModel {
-                    doc: doc.raw(),
+                    doc,
                     class: if model.model_name.is_empty() {
                         None
                     } else {

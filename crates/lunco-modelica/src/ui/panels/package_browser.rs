@@ -640,7 +640,7 @@ impl Panel for PackageBrowserPanel {
             // VS Code-style: one click → new Untitled tab immediately.
             // The observer in `ui::commands` picks a unique
             // `Untitled<N>` name, allocates the doc, and opens a tab.
-            world.commands().trigger(crate::ui::commands::CreateNewScratchModel);
+            world.commands().trigger(crate::ui::commands::CreateNewScratchModel {});
         }
 
         // ── Twin lifecycle ──────────────────────────────────────
