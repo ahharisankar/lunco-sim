@@ -870,7 +870,85 @@ fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut 
         ui.style_mut().visuals = theme.to_visuals();
         ui.horizontal(|ui| {
             ui.menu_button("File", |ui| {
-                ui.label("(File menu — todo)");
+                // Active doc gates Save / Save As / Close — there's
+                // nothing to save when no document is focused.
+                let active_doc =
+                    world.resource::<WorkspaceResource>().active_document;
+                let has_active = active_doc.is_some();
+
+                // -- New ----------------------------------------------
+                // Domain-agnostic — fires `EditorIntent::NewDocument`
+                // and each domain's resolver decides what kind of
+                // doc to create. No `DocumentKindRegistry` yet, so
+                // currently only Modelica responds.
+                if ui.button("New\tCtrl+N").clicked() {
+                    world.trigger(lunco_doc_bevy::EditorIntent::NewDocument);
+                    ui.close();
+                }
+                ui.separator();
+
+                // -- Open ---------------------------------------------
+                if ui.button("Open File…\tCtrl+O").clicked() {
+                    world.trigger(file_ops::OpenFile {
+                        path: String::new(),
+                    });
+                    ui.close();
+                }
+                // Open Folder auto-classifies on the resolved path —
+                // `twin.toml` present routes to Twin mode, absence
+                // gives a plain folder workspace. The strict-mode
+                // `OpenTwin` typed command remains available to
+                // recents/HTTP/scripts that want explicit Twin
+                // semantics, but isn't worth a separate menu entry.
+                if ui.button("Open Folder…").clicked() {
+                    world.trigger(file_ops::OpenFolder {
+                        path: String::new(),
+                    });
+                    ui.close();
+                }
+                ui.separator();
+
+                // -- Save ---------------------------------------------
+                // Save / Save As route through `EditorIntent` so the
+                // menu, Ctrl+S, and HTTP API funnel through the same
+                // domain resolver.
+                if ui
+                    .add_enabled(has_active, egui::Button::new("Save\tCtrl+S"))
+                    .clicked()
+                {
+                    world.trigger(lunco_doc_bevy::EditorIntent::Save);
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(
+                        has_active,
+                        egui::Button::new("Save As…\tCtrl+Shift+S"),
+                    )
+                    .clicked()
+                {
+                    world.trigger(lunco_doc_bevy::EditorIntent::SaveAs);
+                    ui.close();
+                }
+                if ui.button("Save All").clicked() {
+                    world.trigger(file_ops::SaveAll {});
+                    ui.close();
+                }
+                if ui.button("Save as Twin…").clicked() {
+                    world.trigger(file_ops::SaveAsTwin {
+                        folder: String::new(),
+                    });
+                    ui.close();
+                }
+                ui.separator();
+
+                // -- Close --------------------------------------------
+                if ui
+                    .add_enabled(has_active, egui::Button::new("Close\tCtrl+W"))
+                    .clicked()
+                {
+                    world.trigger(lunco_doc_bevy::EditorIntent::Close);
+                    ui.close();
+                }
             });
             ui.menu_button("Edit", |ui| {
                 ui.label("(Edit menu — todo)");

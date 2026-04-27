@@ -33,13 +33,11 @@
 //! - **[`OpenFile`] observer** lives in `lunco-modelica` today; will
 //!   become a generic classifier-and-dispatch when a second domain
 //!   contributes.
-//! - **`SaveAsDocument` path threading** — `lunco-doc-bevy::SaveAsDocument`
-//!   doesn't yet carry a `path`. Until it does, the [`PickFollowUp::SaveAs`]
-//!   branch of [`on_pick_resolved`] only logs.
 //! - **[`SaveAll`] / [`SaveAsTwin`]** observers are stubs.
 
 use bevy::prelude::*;
 use lunco_core::{on_command, register_commands, Command};
+use lunco_doc_bevy::SaveAsDocument;
 
 use crate::picker::{PickFollowUp, PickResolved};
 
@@ -126,9 +124,22 @@ fn on_open_folder(trigger: On<OpenFolder>, mut commands: Commands) {
         });
         return;
     }
-    // Classification (`twin.toml` presence → Twin vs plain Folder)
-    // and Twin spawning land in a follow-up. Today: log the request.
-    info!("[OpenFolder] path={} (handler stubbed)", path);
+    // Auto-classify: a folder containing `twin.toml` is a Twin —
+    // re-trigger as `OpenTwin` so its observer handles the manifest
+    // load and spawns the Twin entity. A bare folder (no manifest)
+    // gets the plain Folder workspace; today that's a stub log
+    // because the Folder mode itself isn't wired up yet.
+    let manifest = std::path::Path::new(&path).join(lunco_twin::MANIFEST_FILENAME);
+    if manifest.is_file() {
+        info!(
+            "[OpenFolder] {} contains {} — promoting to Twin",
+            path,
+            lunco_twin::MANIFEST_FILENAME
+        );
+        commands.trigger(OpenTwin { path });
+        return;
+    }
+    info!("[OpenFolder] path={} (plain folder mode — handler stubbed)", path);
 }
 
 #[on_command(OpenTwin)]
@@ -142,7 +153,19 @@ fn on_open_twin(trigger: On<OpenTwin>, mut commands: Commands) {
         });
         return;
     }
-    info!("[OpenTwin] path={} (handler stubbed)", path);
+    // Strict-mode validation — the lenient counterpart `OpenFolder`
+    // auto-classifies; callers who routed here directly (recents,
+    // HTTP, scripts) expect a real Twin and an error otherwise.
+    let manifest = std::path::Path::new(&path).join(lunco_twin::MANIFEST_FILENAME);
+    if !manifest.is_file() {
+        warn!(
+            "[OpenTwin] {} has no {} — refusing (use OpenFolder for plain folders)",
+            path,
+            lunco_twin::MANIFEST_FILENAME
+        );
+        return;
+    }
+    info!("[OpenTwin] path={} (Twin spawn — handler stubbed)", path);
 }
 
 #[on_command(SaveAll)]
@@ -192,16 +215,8 @@ fn on_pick_resolved(trigger: On<PickResolved>, mut commands: Commands) {
         PickFollowUp::OpenTwin => {
             commands.trigger(OpenTwin { path });
         }
-        PickFollowUp::SaveAs(_doc) => {
-            // `lunco-doc-bevy::SaveAsDocument` does not yet carry a
-            // `path` field; threading the picked path through happens
-            // in a follow-up that extends the struct + updates each
-            // domain's observer. Until then, log and drop.
-            warn!(
-                "[PickResolved] SaveAs path={} dropped — \
-                 SaveAsDocument.path threading is not yet wired",
-                path
-            );
+        PickFollowUp::SaveAs(doc) => {
+            commands.trigger(SaveAsDocument { doc: *doc, path });
         }
         PickFollowUp::SaveAsTwin => {
             commands.trigger(SaveAsTwin { folder: path });

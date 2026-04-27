@@ -241,23 +241,28 @@ pub struct SaveDocument {
     pub doc: DocumentId,
 }
 
-/// Request the owning domain persist the document **to a user-picked
-/// new location**. Fires a file-picker, writes the current source to
-/// the chosen path, rebinds the document's [`DocumentOrigin`] to the
-/// new writable `File` variant, updates `last_saved_generation`, and
-/// fires [`DocumentSaved`] on success.
+/// Request the owning domain persist the document **to a new location**.
 ///
-/// Differs from [`SaveDocument`] in two ways:
-/// 1. Always opens the picker, even when the document already has a
-///    canonical path — Save-As intentionally overrides the bound path.
-/// 2. Handles [`DocumentOrigin::Untitled`] — the picker's chosen path
-///    promotes the doc to a writable File origin.
+/// `path` semantics mirror [`OpenFile`](lunco_workbench::file_ops::OpenFile):
 ///
-/// Cancelling the picker is a no-op (no error toast, no save event).
+/// - **Empty** → the observer fires
+///   [`picker::PickHandle`](../lunco_workbench/picker/struct.PickHandle.html)
+///   with `PickFollowUp::SaveAs(doc)` and returns. The workbench's
+///   `on_pick_resolved` re-fires this command with the chosen path
+///   filled in. Cancellation is silent.
+/// - **Non-empty** → the observer writes directly, rebinds the
+///   document's [`DocumentOrigin`] to the new writable `File` variant,
+///   updates `last_saved_generation`, and fires [`DocumentSaved`].
+///
+/// This single shape covers UI dialogs, recents, drag-drop, HTTP
+/// automation, and the Untitled-promotion path (Ctrl+S on a draft
+/// routes to `SaveAsDocument { doc, path: "" }`).
 #[Command(default)]
 pub struct SaveAsDocument {
     /// The document to persist.
     pub doc: DocumentId,
+    /// Target path. Empty triggers the picker.
+    pub path: String,
 }
 
 /// Request to remove the document from its registry (and any linked

@@ -728,7 +728,7 @@ fn resolve_editor_intent(
         EditorIntent::Undo => commands.trigger(UndoDocument { doc }),
         EditorIntent::Redo => commands.trigger(RedoDocument { doc }),
         EditorIntent::Save => commands.trigger(SaveDocument { doc }),
-        EditorIntent::SaveAs => commands.trigger(SaveAsDocument { doc }),
+        EditorIntent::SaveAs => commands.trigger(SaveAsDocument { doc, path: String::new() }),
         EditorIntent::Close => {
             // Ctrl+W goes through the same dirty-check + modal-prompt
             // pipeline as the tab × button. Push the tab id into the
@@ -895,7 +895,7 @@ fn on_save_document(
         // Matches VS Code's behaviour (Ctrl+S on an Untitled buffer
         // opens the Save-As dialog).
         if document.origin().is_untitled() {
-            commands.trigger(SaveAsDocument { doc });
+            commands.trigger(SaveAsDocument { doc, path: String::new() });
             return;
         }
         let Some(path) = document.canonical_path() else {
@@ -937,10 +937,28 @@ fn on_save_document(
     commands.trigger(DocumentSaved::local(doc));
 }
 
-/// Observer for [`SaveAsDocument`] — fires the native save picker,
-/// writes the chosen file, rebinds the document's origin to the new
-/// path, and emits [`DocumentSaved`] on success. Cancelling the
-/// picker is a silent no-op.
+/// Observer for [`SaveAsDocument`].
+///
+/// Two-phase flow keyed on the `path` field:
+///
+/// 1. **`path` empty** — assemble a [`SaveHint`](lunco_storage::SaveHint)
+///    (suggested filename from doc display name, start dir from the
+///    active Twin's folder, `.mo` filter) and fire
+///    [`PickHandle`](lunco_workbench::picker::PickHandle) with
+///    [`PickFollowUp::SaveAs(doc)`](lunco_workbench::picker::PickFollowUp).
+///    The workbench's `on_pick_resolved` re-fires `SaveAsDocument`
+///    with the chosen path. Cancellation is silent — no second fire.
+///
+/// 2. **`path` non-empty** — write the document's source via
+///    [`Storage::write`](lunco_storage::Storage), rebind its origin to
+///    the new writable [`File`](lunco_doc::DocumentOrigin) variant,
+///    mark saved, fire [`DocumentSaved`].
+///
+/// The two-phase split keeps the observer synchronous (no blocking
+/// rfd on the UI thread) and gives every caller — Ctrl+Shift+S, menu,
+/// HTTP automation, recents — the same shape: trigger
+/// `SaveAsDocument { doc, path: "" }` to force the dialog, or supply
+/// `path` to skip it.
 fn on_save_as_document(
     trigger: On<SaveAsDocument>,
     mut registry: ResMut<ModelicaDocumentRegistry>,
@@ -949,13 +967,13 @@ fn on_save_as_document(
     mut commands: Commands,
 ) {
     let doc = trigger.event().doc;
-    // Snapshot everything we need before the modal picker — `ResMut`s
-    // are held across the rfd call but the dialog is blocking on
-    // native, so keep the held set small.
-    let (source, suggested_name, start_dir) = {
+    let target_path = trigger.event().path.clone();
+
+    // Phase 1 — empty path: fire the picker and bail.
+    if target_path.is_empty() {
         let Some(host) = registry.host(doc) else { return };
         let document = host.document();
-        let suggested = {
+        let suggested_name = {
             let raw = document.origin().display_name();
             // Attach `.mo` if the user hasn't already chosen a full
             // filename (Untitled<N> is the common case).
@@ -969,42 +987,30 @@ fn on_save_as_document(
         // doc lands inside the project the user is working on by
         // default. Falls through to the picker's default when no
         // active Twin is set.
-        let start = workspace
+        let start_dir = workspace
             .active_twin
             .and_then(|id| workspace.twin(id))
             .map(|t| lunco_storage::StorageHandle::File(t.root.clone()));
-        (document.source().to_string(), suggested, start)
+        commands.trigger(lunco_workbench::picker::PickHandle {
+            mode: lunco_workbench::picker::PickMode::SaveFile(lunco_storage::SaveHint {
+                suggested_name: Some(suggested_name),
+                start_dir,
+                filters: vec![lunco_storage::OpenFilter::new("Modelica models", &["mo"])],
+            }),
+            on_resolved: lunco_workbench::picker::PickFollowUp::SaveAs(doc),
+        });
+        return;
+    }
+
+    // Phase 2 — non-empty path: write directly.
+    let path = std::path::PathBuf::from(&target_path);
+    let source = {
+        let Some(host) = registry.host(doc) else { return };
+        host.document().source().to_string()
     };
 
     let storage = lunco_storage::FileStorage::new();
-    let hint = lunco_storage::SaveHint {
-        suggested_name: Some(suggested_name),
-        start_dir,
-        filters: vec![lunco_storage::OpenFilter::new(
-            "Modelica models",
-            &["mo"],
-        )],
-    };
-    let handle = match <lunco_storage::FileStorage as lunco_storage::Storage>::pick_save(
-        &storage, &hint,
-    ) {
-        Ok(Some(h)) => h,
-        Ok(None) => {
-            // User cancelled the picker. Not an error.
-            return;
-        }
-        Err(e) => {
-            let msg = format!("Save-As picker failed: {e}");
-            error!("[SaveAs] {msg}");
-            console.error(msg);
-            return;
-        }
-    };
-    let Some(path) = handle.as_file_path().map(std::path::Path::to_path_buf) else {
-        // FileStorage only produces `File(..)` handles; defensive.
-        console.warn("Save-As returned a non-file handle".to_string());
-        return;
-    };
+    let handle = lunco_storage::StorageHandle::File(path.clone());
     if let Err(e) = <lunco_storage::FileStorage as lunco_storage::Storage>::write(
         &storage,
         &handle,
@@ -1019,12 +1025,10 @@ fn on_save_as_document(
     // Rebind the document's origin to the new writable path and mark
     // it saved. `set_origin` does not touch source or generation.
     if let Some(host) = registry.host_mut(doc) {
-        host.document_mut().set_origin(
-            lunco_doc::DocumentOrigin::File {
-                path: path.clone(),
-                writable: true,
-            },
-        );
+        host.document_mut().set_origin(lunco_doc::DocumentOrigin::File {
+            path: path.clone(),
+            writable: true,
+        });
     }
     registry.mark_document_saved(doc);
     let msg = format!("Saved {} bytes to {}", source.len(), path.display());
