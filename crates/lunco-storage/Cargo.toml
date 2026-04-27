@@ -10,6 +10,11 @@ description = "I/O abstraction for LunCoSim — Storage trait + backends (FileSt
 rfd = "0.15"
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
+# Optional Bevy integration — enabled by the `picker` feature. The trait
+# + handle types stay usable headless (CLI tools, tests, the rumoca
+# pipeline) without paying the ECS cost. Bevy apps that want the
+# event-driven file picker turn the feature on.
+bevy = { workspace = true, optional = true }
 
 [features]
 # Empty stubs that unlock the corresponding `StorageHandle` variants.
@@ -21,3 +26,7 @@ fsa_stub = []
 idb_stub = []
 opfs_stub = []
 http_stub = []
+# Pulls in Bevy ECS and exposes `PickHandle` + friends. Workbench-side
+# crates (`lunco-workbench`, app binaries) flip this on; headless tools
+# leave it off.
+picker = ["dep:bevy"]

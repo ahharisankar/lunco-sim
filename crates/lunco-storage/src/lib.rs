@@ -37,7 +37,13 @@ use std::path::{Path, PathBuf};
 
 pub mod file_storage;
 
+#[cfg(feature = "picker")]
+pub mod picker;
+
 pub use file_storage::FileStorage;
+
+#[cfg(feature = "picker")]
+pub use picker::{PickFollowUp, PickHandle, PickInFlight, PickMode};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Errors

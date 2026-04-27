@@ -6227,6 +6227,7 @@ dependencies = [
 name = "lunco-storage"
 version = "0.1.0"
 dependencies = [
+ "bevy",
  "rfd",
  "serde",
  "thiserror 1.0.69",
