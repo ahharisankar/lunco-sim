@@ -5,6 +5,42 @@ use bevy_egui::EguiPlugin;
 use lunco_modelica::ModelicaPlugin;
 
 fn main() {
+    // Cap rayon's global pool to leave headroom for Bevy's renderer.
+    //
+    // History: when projection + ast_refresh still ran on rayon, the
+    // unconfigured pool grabbed `num_cpus - 1` threads and starved
+    // the renderer's pipelined extract — every Add/Move edit froze
+    // the UI for 1.5–2.5 s. Hard cap at 2 fixed it.
+    //
+    // After the SyntaxCache refactor (commits TBD), projection +
+    // ast_refresh both run on Bevy's `AsyncComputeTaskPool`, NOT on
+    // rayon. The only remaining rayon caller is rumoca's
+    // `parse_files_parallel`, which fires once at compile-time MSL
+    // preload and again per file load — short bursts, not background
+    // work that races the renderer. A cap of 2 there made first-
+    // compile MSL preload 8× slower than CLI (~64 s vs 8 s wall;
+    // worse under contention).
+    //
+    // New policy: leave 2 cores for Bevy (renderer + main), give the
+    // rest to rumoca. On a 16-core machine that's 14 threads — close
+    // to CLI parity. On low-core machines (≤4) we still cap at 2
+    // because the original starvation problem dominates there.
+    let n_cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let rayon_threads = if n_cpus <= 4 { 2 } else { n_cpus.saturating_sub(2) };
+    let rayon_init = rayon::ThreadPoolBuilder::new()
+        .num_threads(rayon_threads)
+        .build_global();
+    match rayon_init {
+        Ok(()) => eprintln!(
+            "[modelica_workbench] rayon global pool capped at {rayon_threads} threads (of {n_cpus} CPUs)"
+        ),
+        Err(e) => eprintln!(
+            "[modelica_workbench] WARN: rayon already initialised, our cap LOST: {e}"
+        ),
+    }
+
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {

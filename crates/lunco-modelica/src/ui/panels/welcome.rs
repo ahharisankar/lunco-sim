@@ -975,7 +975,7 @@ impl Panel for WelcomePanel {
         if create_new {
             world
                 .commands()
-                .trigger(crate::ui::commands::CreateNewScratchModel);
+                .trigger(crate::ui::commands::CreateNewScratchModel {});
         }
         if open_folder {
             #[cfg(not(target_arch = "wasm32"))]

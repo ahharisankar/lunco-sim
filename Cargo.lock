@@ -6016,6 +6016,7 @@ dependencies = [
 name = "lunco-doc"
 version = "0.1.0"
 dependencies = [
+ "bevy_reflect",
  "lunco-core",
 ]
 
@@ -6025,6 +6026,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "bevy_egui",
+ "lunco-core",
  "lunco-doc",
  "web-time",
 ]
@@ -6116,6 +6118,7 @@ dependencies = [
  "lunco-viz",
  "lunco-workbench",
  "lunco-workspace",
+ "rayon",
  "regex",
  "rfd",
  "rumoca-phase-parse",

@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lunco_doc::{Document, DocumentError, DocumentId, DocumentOp, DocumentOrigin};
-use rumoca_phase_parse::parse_to_ast;
+use rumoca_phase_parse::{parse_to_ast, parse_to_syntax};
 use rumoca_session::parsing::ast::StoredDefinition;
 
 use crate::pretty::{self, ComponentDecl, ConnectEquation, Placement, PortRef};
@@ -159,6 +159,16 @@ pub struct AstCache {
 impl AstCache {
     /// Parse `source` into a fresh cache at the given generation.
     pub fn from_source(source: &str, generation: u64) -> Self {
+        // DIAGNOSTIC: when `LUNCO_NO_PARSE=1`, return an Err result
+        // instantly without invoking rumoca. Lets us prove whether
+        // the parse function itself is what blocks the renderer
+        // (independent of which thread it runs on).
+        if std::env::var_os("LUNCO_NO_PARSE").is_some() {
+            return Self {
+                generation,
+                result: Err("LUNCO_NO_PARSE diagnostic — parse skipped".into()),
+            };
+        }
         let result = match parse_to_ast(source, "model.mo") {
             Ok(ast) => Ok(Arc::new(ast)),
             Err(e) => Err(e.to_string()),
@@ -169,6 +179,61 @@ impl AstCache {
     /// Shortcut: the parsed AST, if parsing succeeded.
     pub fn ast(&self) -> Option<&StoredDefinition> {
         self.result.as_ref().ok().map(|a| a.as_ref())
+    }
+}
+
+/// Lenient, error-recovering parse cache attached to a
+/// [`ModelicaDocument`].
+///
+/// Sibling to [`AstCache`]. Where `AstCache` carries `Result` (strict
+/// parser via `parse_to_ast` — `Err` on any error), `SyntaxCache`
+/// always carries an AST: rumoca's `parse_to_syntax` salvages what it
+/// can even on broken sources. Used by panels that must keep
+/// rendering through partial-parse states (the Twin Browser shows a
+/// "broken file" badge but never blanks the class tree).
+///
+/// Both caches are populated by the same off-thread refresh in
+/// [`crate::ui::ast_refresh`], so they always advance together —
+/// callers comparing `ast.generation` and `syntax.generation` can
+/// rely on them being equal.
+#[derive(Debug, Clone)]
+pub struct SyntaxCache {
+    /// Document generation at which this cache was produced.
+    pub generation: u64,
+    /// Best-effort parsed AST. Always present, even when the source
+    /// has parse errors — rumoca's lenient parser returns whatever it
+    /// could recover.
+    pub ast: Arc<StoredDefinition>,
+    /// Whether the lenient parse reported any errors. UIs that show a
+    /// "broken file" badge read this; an `ast` with parts missing
+    /// but `has_errors == false` means the source is genuinely valid
+    /// (e.g. an empty model file).
+    pub has_errors: bool,
+}
+
+impl SyntaxCache {
+    /// Parse `source` into a fresh cache at the given generation.
+    pub fn from_source(source: &str, generation: u64) -> Self {
+        if std::env::var_os("LUNCO_NO_PARSE").is_some() {
+            return Self {
+                generation,
+                ast: Arc::new(StoredDefinition::default()),
+                has_errors: false,
+            };
+        }
+        let syntax = parse_to_syntax(source, "model.mo");
+        let has_errors = syntax.has_errors();
+        let ast = Arc::new(syntax.best_effort().clone());
+        Self {
+            generation,
+            ast,
+            has_errors,
+        }
+    }
+
+    /// Shortcut: the salvaged AST.
+    pub fn ast(&self) -> &StoredDefinition {
+        &self.ast
     }
 }
 
@@ -183,6 +248,9 @@ pub struct ModelicaDocument {
     id: DocumentId,
     source: String,
     ast: Arc<AstCache>,
+    /// Lenient parse cache. Populated by the same off-thread refresh
+    /// as [`Self::ast`] — see [`SyntaxCache`] for why we keep both.
+    syntax: Arc<SyntaxCache>,
     generation: u64,
     origin: DocumentOrigin,
     /// Generation at which the document was last persisted to disk.
@@ -226,22 +294,29 @@ impl ModelicaDocument {
     ) -> Self {
         let source = source.into();
         let ast = Arc::new(AstCache::from_source(&source, 0));
-        Self::from_parts(id, source, origin, ast)
+        let syntax = Arc::new(SyntaxCache::from_source(&source, 0));
+        Self::from_parts(id, source, origin, ast, syntax)
     }
 
     /// Build a document from pre-computed parts. Skips the rumoca
-    /// parse — callers must supply an [`AstCache`] whose `generation`
-    /// field is `0`. Used by the class cache to avoid re-parsing a
-    /// class every time a tab binds to it.
+    /// parses — callers must supply an [`AstCache`] **and** a
+    /// [`SyntaxCache`] whose `generation` fields are both `0`. Used
+    /// by the class cache to avoid re-parsing a class every time a
+    /// tab binds to it.
     pub fn from_parts(
         id: DocumentId,
         source: String,
         origin: DocumentOrigin,
         ast: Arc<AstCache>,
+        syntax: Arc<SyntaxCache>,
     ) -> Self {
         debug_assert_eq!(
             ast.generation, 0,
             "from_parts expects a freshly-parsed AstCache"
+        );
+        debug_assert_eq!(
+            syntax.generation, 0,
+            "from_parts expects a freshly-parsed SyntaxCache"
         );
         let last_saved_generation = if origin.is_untitled() {
             None
@@ -252,6 +327,7 @@ impl ModelicaDocument {
             id,
             source,
             ast,
+            syntax,
             generation: 0,
             origin,
             last_saved_generation,
@@ -291,6 +367,27 @@ impl ModelicaDocument {
         self.last_source_edit_at
     }
 
+    /// The cached lenient parse. Always present, may be stale —
+    /// same staleness contract as [`Self::ast`]. Browser, outline,
+    /// and any panel that must keep rendering through partial-parse
+    /// states reads this; UI is the only consumer of `has_errors`.
+    pub fn syntax(&self) -> &SyntaxCache {
+        &self.syntax
+    }
+
+    /// The `Arc` backing [`Self::syntax`]. Use this when you need to
+    /// hand the cache to another thread or hold it across a registry
+    /// borrow without keeping the document borrowed.
+    pub fn syntax_arc(&self) -> &Arc<SyntaxCache> {
+        &self.syntax
+    }
+
+    /// Returns `true` when the lenient parse is behind the current
+    /// source generation. Mirrors [`Self::ast_is_stale`].
+    pub fn syntax_is_stale(&self) -> bool {
+        self.syntax.generation != self.generation
+    }
+
     /// Install a freshly-parsed AST cache produced off-thread.
     ///
     /// The async refresh path (`crate::ui::ast_refresh`) parses on
@@ -308,6 +405,41 @@ impl ModelicaDocument {
         self.last_source_edit_at = None;
     }
 
+    /// Install a freshly-parsed [`SyntaxCache`] produced off-thread.
+    /// Same generation gate as [`Self::install_ast`]. Prefer
+    /// [`Self::install_parse_results`] when both caches were produced
+    /// from the same source-snapshot — that variant guarantees they
+    /// land at the same generation atomically.
+    pub fn install_syntax(&mut self, syntax: SyntaxCache) {
+        if syntax.generation != self.generation {
+            return;
+        }
+        self.syntax = Arc::new(syntax);
+    }
+
+    /// Atomically install both the strict and the lenient parse
+    /// caches from a single off-thread refresh pass. Either both land
+    /// or neither does — readers comparing `ast.generation` to
+    /// `syntax.generation` can rely on them being equal after a
+    /// successful install.
+    ///
+    /// Both caches must carry the same generation **and** that
+    /// generation must match `self.generation` — otherwise the
+    /// source has moved on while parsing was in flight and the
+    /// results are stale (the next debounce will kick a fresh parse).
+    pub fn install_parse_results(&mut self, ast: AstCache, syntax: SyntaxCache) {
+        debug_assert_eq!(
+            ast.generation, syntax.generation,
+            "install_parse_results expects ast and syntax at the same generation"
+        );
+        if ast.generation != self.generation {
+            return;
+        }
+        self.ast = Arc::new(ast);
+        self.syntax = Arc::new(syntax);
+        self.last_source_edit_at = None;
+    }
+
     /// A clone of the source text (used by the off-thread parse task).
     /// Cheap: `String::clone` does a heap copy but for our typical
     /// 20-100 KB sources this is microseconds — negligible vs the
@@ -316,23 +448,22 @@ impl ModelicaDocument {
         self.source.clone()
     }
 
-    /// Force an immediate AST reparse and mark the result as matching
-    /// the current source generation. Callers that must see a fresh
-    /// parse (Compile, Format Document, any path that hands the AST
-    /// to rumoca-sim) use this before reading `ast()`.
+    /// Force an immediate strict + lenient reparse and mark both
+    /// results as matching the current source generation. Callers
+    /// that must see a fresh parse (Compile, Format Document, any
+    /// path that hands the AST to rumoca-sim) use this before reading
+    /// [`Self::ast`] or [`Self::syntax`].
     ///
-    /// Idempotent — a no-op when `ast().generation == self.generation`.
+    /// Idempotent — a no-op when both caches are already at the
+    /// current generation.
     pub fn refresh_ast_now(&mut self) {
-        if !self.ast_is_stale() {
+        if !self.ast_is_stale() && !self.syntax_is_stale() {
             return;
         }
-        // TEMP timing — we suspect this is the multi-second hot spot
-        // when the user adds components to a multi-class doc. If it
-        // is, the fix is to move parse_to_ast off the main thread or
-        // cache the per-class subtree.
         let t = web_time::Instant::now();
         let bytes = self.source.len();
         self.ast = Arc::new(AstCache::from_source(&self.source, self.generation));
+        self.syntax = Arc::new(SyntaxCache::from_source(&self.source, self.generation));
         let elapsed_ms = t.elapsed().as_secs_f64() * 1000.0;
         if elapsed_ms > 5.0 {
             bevy::log::info!(
@@ -340,7 +471,7 @@ impl ModelicaDocument {
                 self.generation
             );
         }
-        // Once the AST catches up, there's no outstanding edit to
+        // Once both caches catch up, there's no outstanding edit to
         // debounce for.
         self.last_source_edit_at = None;
     }

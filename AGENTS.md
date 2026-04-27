@@ -106,6 +106,85 @@ app.add_plugins((MinimalPlugins, ScheduleRunnerPlugin::run_loop(...)))  // Layer
    // No Layer 3, no Layer 4
 ```
 
+## 4.2 Typed Commands — `#[Command]` / `#[on_command]` / `register_commands!()`
+
+**Every user-facing intent is a typed `Command`.** UI clicks, HTTP API calls, MCP tool invocations, scripts, and AI agents all dispatch the *same* typed event; observers in domain code do the work. One input shape, one log line, one place to find every entry point.
+
+The pattern is three macros from `lunco_core` (re-exporting `lunco-command-macro`):
+
+### Defining a command
+
+```rust
+use lunco_core::{Command, on_command, register_commands};
+use lunco_doc::DocumentId;
+
+/// Open a Modelica file and create a tab for it.
+#[Command(default)]                         // ← expands to:
+pub struct OpenFile {                       //   #[derive(Event, Reflect, Clone, Debug, Default)]
+    pub path: String,                       //   #[reflect(Event, Default)]
+}
+```
+
+`#[Command]` (no `default`) when the struct can't sensibly default. Use `#[Command(default)]` (the common case) so the HTTP API can fill in omitted fields. Empty unit-style commands take an empty named-fields body: `pub struct Ping {}`.
+
+### Defining the observer
+
+```rust
+#[on_command(OpenFile)]                     // ← generates `__register_on_open_file(app)`
+fn on_open_file(trigger: On<OpenFile>, mut commands: Commands) {
+    let path = trigger.event().path.clone();
+    /* … */
+}
+```
+
+The macro keeps `trigger: On<X>` as the synthetic first parameter and binds `cmd = trigger.event()` automatically — bodies that already use `trigger.event()` work unchanged. New observer bodies should prefer `cmd.field`.
+
+### Registering inside `Plugin::build`
+
+```rust
+// One source-of-truth list at module scope. Alphabetical for diff hygiene.
+register_commands!(
+    on_open_file,
+    on_compile_model,
+    on_set_view_mode,
+    /* … */
+);
+
+impl Plugin for ModelicaCommandsPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<CloseDialogState>();   // resources
+        register_all_commands(app);                // observers + reflect-types in one shot
+    }
+}
+```
+
+`register_commands!()` collapses a per-observer `__register_on_X(app)` boilerplate cascade into a single function call. Adding a new typed command is a three-line change: struct + observer + one identifier in the list.
+
+### Field types
+
+- **`DocumentId`** is `Reflect`-derived in `lunco-doc` — use the typed `DocumentId` directly in command fields. **Never `u64` shims.** The HTTP-wire `{"doc": 1}` auto-converts via reflection.
+- New domain identifier types should derive `Reflect` for the same reason. Adding `bevy_reflect = "0.18"` to a leaf crate is cheap (no renderer / ECS deps).
+
+### Anti-patterns (do not do this)
+
+```rust
+// ✗ Hand-rolled equivalent of #[Command(default)] — verbose, drifts from canonical form
+#[derive(Event, Reflect, Clone, Debug, Default)]
+#[reflect(Event, Default)]
+pub struct Foo { … }
+
+// ✗ Hand-rolled registration — easy to forget either half, no auto-discovery
+app.register_type::<Foo>().add_observer(on_foo);
+
+// ✗ Threading u64 doc-ids through commands to dodge a Reflect requirement
+pub struct Foo { pub doc: u64 }   // use DocumentId
+```
+
+### When NOT to use `#[Command]`
+
+- **Notifications** (system tells the world "X happened"): `DocumentChanged`, `DocumentSaved`, lifecycle events. These are observed *by* domain crates, not invoked by users — hand-rolled `#[derive(Event, Clone, Debug)]` is fine.
+- **High-frequency continuous signals** (joystick, drag deltas, telemetry): use the `ControlStream` channel in [`docs/architecture/01-ontology.md`](docs/architecture/01-ontology.md#controlstream), not the Command Bus.
+
 ## 5. Implementation Patterns
 ### Dynamic Update Pattern
 When adding a new tunable parameter:

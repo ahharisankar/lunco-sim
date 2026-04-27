@@ -148,3 +148,11 @@ opt-level = "z"
 lto = "fat"
 codegen-units = 1
 strip = true
+
+# Profile for samply / perf — release codegen with line-table debug info so
+# stacks symbolicate to function names. Strip is off; otherwise identical to
+# release. Build with `cargo run --profile profiling --bin ...`.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"

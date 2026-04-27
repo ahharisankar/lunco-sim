@@ -55,6 +55,7 @@ use std::collections::HashMap;
 use web_time::Instant;
 
 use bevy::prelude::*;
+use lunco_core::Command;
 use lunco_doc::DocumentId;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -208,7 +209,7 @@ impl DocumentSaved {
 /// [`DocumentChanged`], and performs whatever view-state sync the
 /// domain requires (e.g. for Modelica, update the text buffer). Domains
 /// that don't own `doc` ignore the trigger.
-#[derive(Event, Clone, Debug)]
+#[Command(default)]
 pub struct UndoDocument {
     /// The document whose most recent op should be undone.
     pub doc: DocumentId,
@@ -217,7 +218,7 @@ pub struct UndoDocument {
 /// Request to redo the last undone op on the document.
 ///
 /// Counterpart of [`UndoDocument`]. Same per-domain dispatch rules.
-#[derive(Event, Clone, Debug)]
+#[Command(default)]
 pub struct RedoDocument {
     /// The document whose most recent undone op should be re-applied.
     pub doc: DocumentId,
@@ -234,7 +235,7 @@ pub struct RedoDocument {
 /// Dirty state (generation vs. last-saved generation) is a per-document
 /// concern; the owning domain updates its internal tracker in the
 /// observer.
-#[derive(Event, Clone, Debug)]
+#[Command(default)]
 pub struct SaveDocument {
     /// The document to persist.
     pub doc: DocumentId,
@@ -253,7 +254,7 @@ pub struct SaveDocument {
 ///    promotes the doc to a writable File origin.
 ///
 /// Cancelling the picker is a no-op (no error toast, no save event).
-#[derive(Event, Clone, Debug)]
+#[Command(default)]
 pub struct SaveAsDocument {
     /// The document to persist.
     pub doc: DocumentId,
@@ -266,7 +267,7 @@ pub struct SaveAsDocument {
 /// path, which fires [`DocumentClosed`]. Foreign domains ignore the
 /// trigger. Idempotent — closing a non-existent or already-closed
 /// document is a no-op.
-#[derive(Event, Clone, Debug)]
+#[Command(default)]
 pub struct CloseDocument {
     /// The document to close.
     pub doc: DocumentId,

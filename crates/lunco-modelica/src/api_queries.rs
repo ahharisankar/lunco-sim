@@ -1031,11 +1031,16 @@ impl ApiQueryProvider for SetModelInputProvider {
     ) -> ApiResponse {
         // Wire-format mirror of the Reflect event:
         // `{ doc: u64, name: String, value: f64 }`. `doc == 0` means
-        // "active document" — same convention the event uses.
-        let doc = params
-            .get("doc")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        // "active document" — same convention the event uses. We
+        // accept it as `u64` over the wire and wrap into the typed
+        // `DocumentId` immediately so the rest of the call site
+        // doesn't think in raw integers.
+        let doc = lunco_doc::DocumentId(
+            params
+                .get("doc")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+        );
         let Some(name) = params
             .get("name")
             .and_then(|v| v.as_str())

@@ -9,6 +9,90 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::time::Instant;
+
+/// CLI options parsed from `std::env::args()`. Kept tiny on purpose
+/// — adding `clap` would pull megabytes of build into a tool whose
+/// whole point is to make the workbench start faster.
+#[derive(Default)]
+struct Options {
+    verbose: bool,
+    warm: bool,
+    warm_only: Option<Vec<String>>,
+}
+
+impl Options {
+    fn parse() -> Self {
+        let mut opts = Self::default();
+        let mut iter = std::env::args().skip(1);
+        while let Some(arg) = iter.next() {
+            match arg.as_str() {
+                "-h" | "--help" => {
+                    print_help();
+                    std::process::exit(0);
+                }
+                "-v" | "--verbose" => opts.verbose = true,
+                "--warm" => opts.warm = true,
+                "--warm-only" => {
+                    let list = iter.next().unwrap_or_else(|| {
+                        eprintln!("error: --warm-only requires a comma-separated list of qualified names");
+                        std::process::exit(2);
+                    });
+                    opts.warm_only = Some(
+                        list.split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect(),
+                    );
+                    // Implies --warm so users don't have to pass both.
+                    opts.warm = true;
+                }
+                other => {
+                    eprintln!("error: unknown argument `{other}` (use --help for usage)");
+                    std::process::exit(2);
+                }
+            }
+        }
+        opts
+    }
+}
+
+fn print_help() {
+    println!("msl_indexer — index MSL components and (optionally) warm rumoca compile caches");
+    println!();
+    println!("USAGE:");
+    println!("  msl_indexer [OPTIONS]");
+    println!();
+    println!("OPTIONS:");
+    println!("  -v, --verbose         Per-file logging during the scan pass");
+    println!("      --warm            After indexing, full-compile a default list of common");
+    println!("                        MSL examples to warm rumoca's semantic-summary cache.");
+    println!("                        First workbench compile of those examples then becomes");
+    println!("                        a cache hit (ms instead of minutes).");
+    println!("      --warm-only LIST  Comma-separated qualified names to warm instead of the");
+    println!("                        default list. Implies --warm.");
+    println!("                        e.g. --warm-only Modelica.Blocks.Examples.PID_Controller");
+    println!("  -h, --help            Show this help");
+    println!();
+    println!("OUTPUT:");
+    println!("  msl_index.json (next to the MSL source root) — read by the workbench at startup");
+    println!("  ~/Documents/luncosim-workspace/.cache/rumoca/parsed-files/ — populated as a side");
+    println!("    effect of the scan pass; --warm additionally populates semantic-summaries/");
+}
+
+/// Default warm list — the examples users hit most often when they
+/// open the Welcome page. Compiling these once after a cache wipe
+/// makes the first workbench interaction with each one fast.
+/// Add new entries here as we discover other common landings.
+const DEFAULT_WARM_EXAMPLES: &[&str] = &[
+    "Modelica.Blocks.Examples.PID_Controller",
+    "Modelica.Blocks.Examples.Filter",
+    "Modelica.Mechanics.Rotational.Examples.First",
+    "Modelica.Mechanics.Translational.Examples.Damper",
+    "Modelica.Electrical.Analog.Examples.ChuaCircuit",
+    "Modelica.Electrical.Analog.Examples.RLCircuit",
+    "Modelica.Thermal.HeatTransfer.Examples.TwoMasses",
+];
 
 // ---------------------------------------------------------------------------
 // Fallback strategy for ports without a Placement annotation
@@ -230,6 +314,13 @@ struct MSLIndexer {
     /// by `extract_documentation_infos` during `scan_dir` while the
     /// `.mo` source is still in memory.
     doc_infos: HashMap<String, String>,
+    /// Per-file logging during scan_dir when true; otherwise a tick
+    /// every couple seconds with running counters.
+    verbose: bool,
+    files_scanned: usize,
+    bytes_scanned: usize,
+    scan_started: Option<Instant>,
+    last_progress_print: Option<Instant>,
 }
 
 /// Scan a Modelica source buffer and map each class's simple name to
@@ -439,10 +530,19 @@ impl MSLIndexer {
             classes: HashMap::new(),
             placements: HashMap::new(),
             doc_infos: HashMap::new(),
+            verbose: false,
+            files_scanned: 0,
+            bytes_scanned: 0,
+            scan_started: None,
+            last_progress_print: None,
         }
     }
 
     fn scan_dir(&mut self, dir: &Path, package_prefix: &str) {
+        if self.scan_started.is_none() {
+            self.scan_started = Some(Instant::now());
+            self.last_progress_print = Some(Instant::now());
+        }
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -456,6 +556,38 @@ impl MSLIndexer {
                     self.scan_dir(&path, &new_prefix);
                 } else if path.extension().map_or(false, |ext| ext == "mo") {
                     if let Ok(source) = fs::read_to_string(&path) {
+                        self.files_scanned += 1;
+                        self.bytes_scanned += source.len();
+                        // Verbose: one line per file as it's parsed.
+                        // Quiet: a tick every 2s with running counters
+                        // so the user sees liveness without 2.5k log
+                        // lines.
+                        if self.verbose {
+                            let kb = source.len() as f64 / 1024.0;
+                            println!(
+                                "[scan] {} ({:.1} KB)",
+                                path.strip_prefix(dir.ancestors().last().unwrap_or(dir))
+                                    .unwrap_or(&path)
+                                    .display(),
+                                kb,
+                            );
+                        } else if let Some(last) = self.last_progress_print {
+                            if last.elapsed() >= std::time::Duration::from_secs(2) {
+                                let elapsed = self
+                                    .scan_started
+                                    .map(|t| t.elapsed().as_secs_f64())
+                                    .unwrap_or(0.0);
+                                let mb = self.bytes_scanned as f64 / (1024.0 * 1024.0);
+                                println!(
+                                    "[scan] {} files, {:.1} MB, {:.1}s elapsed (current: {})",
+                                    self.files_scanned,
+                                    mb,
+                                    elapsed,
+                                    package_prefix,
+                                );
+                                self.last_progress_print = Some(Instant::now());
+                            }
+                        }
                         let file_name = path
                             .file_name()
                             .unwrap()
@@ -869,25 +1001,258 @@ fn main() {
     if std::env::var_os("RUMOCA_CACHE_DIR").is_none() {
         let target = lunco_assets::cache_dir().join("rumoca");
         std::env::set_var("RUMOCA_CACHE_DIR", &target);
-        println!("Using rumoca parse cache at {}", target.display());
+        println!("[indexer] using rumoca parse cache at {}", target.display());
     }
+
+    let opts = Options::parse();
 
     let msl_path = lunco_assets::msl_dir().join("Modelica");
     if !msl_path.exists() {
-        println!("MSL not found at {:?}", msl_path);
+        println!("[indexer] MSL not found at {:?}", msl_path);
         return;
     }
 
-    println!("Scanning MSL at {:?}", msl_path);
+    let t_total = Instant::now();
+    println!("[indexer] scanning MSL at {:?} (verbose={})", msl_path, opts.verbose);
+
     let mut indexer = MSLIndexer::new();
+    indexer.verbose = opts.verbose;
     indexer.scan_dir(&msl_path, "Modelica");
 
-    println!("Indexing components (resolving inheritance)...");
+    let scan_secs = indexer
+        .scan_started
+        .map(|t| t.elapsed().as_secs_f64())
+        .unwrap_or(0.0);
+    let scan_mb = indexer.bytes_scanned as f64 / (1024.0 * 1024.0);
+    println!(
+        "[indexer] scan done: {} files, {:.1} MB in {:.1}s",
+        indexer.files_scanned, scan_mb, scan_secs,
+    );
+
+    println!("[indexer] indexing components (resolving inheritance)...");
+    let t_index = Instant::now();
     let components = indexer.index_all();
+    println!(
+        "[indexer] index done: {} components in {:.1}s",
+        components.len(),
+        t_index.elapsed().as_secs_f64()
+    );
 
     let output_path = lunco_assets::msl_dir().join("msl_index.json");
     let json = serde_json::to_string_pretty(&components).unwrap();
     fs::write(&output_path, json).unwrap();
+    println!("[indexer] wrote {} → {}", components.len(), output_path.display());
 
-    println!("Wrote {} components to {:?}", components.len(), output_path);
+    if opts.warm {
+        println!();
+        warm_compile_pass(&opts);
+    }
+
+    println!();
+    println!(
+        "[indexer] all done in {:.1}s",
+        t_total.elapsed().as_secs_f64()
+    );
+}
+
+/// Drive a full rumoca compile of every requested model so that
+/// rumoca's semantic-summary cache (under `<cache>/rumoca/source-roots/
+/// semantic-summaries/`) is populated. The workbench's first compile
+/// of the same model is then a cache hit (ms instead of minutes).
+///
+/// Sources to compile come from three places, in priority order:
+///   1. `--warm-only NAME[,NAME...]` — explicit qualified names or .mo
+///      file paths. Anything containing `/`, `\`, or ending in `.mo`
+///      is treated as a path; everything else as an MSL qualified name.
+///   2. `LUNCOSIM_WARM_DIRS` env var — `:`-separated list of directories
+///      to scan for `*.mo` files. Every top-level model in each file
+///      is warmed under its `<file_stem_or_package>.<model_name>`
+///      qualified path.
+///   3. If neither (1) nor (2) yielded anything: the built-in
+///      [`DEFAULT_WARM_EXAMPLES`] list of common MSL examples.
+///
+/// Each compile is gated by [`ModelicaCompiler::compile_loaded`]'s
+/// existing 5-second heartbeat (see lib.rs), so even a multi-minute
+/// MSL-heavy compile prints proof-of-life every 5s.
+fn warm_compile_pass(opts: &Options) {
+    println!("[warm] starting compile pass — populating rumoca semantic-summary cache");
+    let t_total = Instant::now();
+
+    let mut compiler = lunco_modelica::ModelicaCompiler::new();
+
+    // Resolve work units. Each entry: (display_label, kind). The
+    // `WarmKind` enum is declared at module scope so `push_file_units`
+    // can refer to it.
+    let mut units: Vec<(String, WarmKind)> = Vec::new();
+
+    // (1) --warm-only — mixed paths and qualified names.
+    if let Some(list) = &opts.warm_only {
+        for item in list {
+            if item.contains('/') || item.contains('\\') || item.ends_with(".mo") {
+                push_file_units(&std::path::PathBuf::from(item), &mut units);
+            } else {
+                units.push((item.clone(), WarmKind::MslClass(item.clone())));
+            }
+        }
+    }
+
+    // (2) LUNCOSIM_WARM_DIRS — scan dirs for .mo files.
+    if let Some(dirs) = std::env::var_os("LUNCOSIM_WARM_DIRS") {
+        let dirs = dirs.to_string_lossy().to_string();
+        for dir in dirs.split(':').filter(|s| !s.is_empty()) {
+            let path = std::path::PathBuf::from(dir);
+            if !path.exists() {
+                eprintln!("[warm] LUNCOSIM_WARM_DIRS entry does not exist: {}", path.display());
+                continue;
+            }
+            if path.is_file() {
+                push_file_units(&path, &mut units);
+            } else if path.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(&path) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.extension().map_or(false, |e| e == "mo") {
+                            push_file_units(&p, &mut units);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // (3) Default fallback — common MSL examples.
+    if units.is_empty() {
+        for ex in DEFAULT_WARM_EXAMPLES {
+            units.push((ex.to_string(), WarmKind::MslClass(ex.to_string())));
+        }
+    }
+
+    println!("[warm] {} units to compile", units.len());
+    for (i, (label, _)) in units.iter().enumerate() {
+        println!("[warm]   {}/{}: {}", i + 1, units.len(), label);
+    }
+    println!();
+
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+    let mut total_compile_secs = 0.0f64;
+
+    for (i, (label, kind)) in units.iter().enumerate() {
+        println!("[warm] [{}/{}] compiling {} ...", i + 1, units.len(), label);
+        let t = Instant::now();
+        let result = match kind {
+            WarmKind::MslClass(qn) => compiler.compile_msl_class(qn),
+            WarmKind::FileWithSource {
+                qualified,
+                source,
+                filename,
+            } => compiler.compile_str(qualified, source, filename),
+        };
+        let secs = t.elapsed().as_secs_f64();
+        total_compile_secs += secs;
+        match result {
+            Ok(_) => {
+                println!("[warm] [{}/{}] ✓ {} compiled in {:.1}s", i + 1, units.len(), label, secs);
+                succeeded += 1;
+            }
+            Err(e) => {
+                let msg: String = e.chars().take(200).collect();
+                println!(
+                    "[warm] [{}/{}] ✗ {} FAILED in {:.1}s: {}",
+                    i + 1,
+                    units.len(),
+                    label,
+                    secs,
+                    msg
+                );
+                failed += 1;
+            }
+        }
+    }
+
+    println!();
+    println!(
+        "[warm] done: {} succeeded, {} failed, total compile {:.1}s, wall {:.1}s",
+        succeeded,
+        failed,
+        total_compile_secs,
+        t_total.elapsed().as_secs_f64(),
+    );
+}
+
+/// Read a `.mo` file and emit one warm unit per top-level class found
+/// in it (model / block / package contents). Uses the lenient parser
+/// so syntactically-broken files still surface what they can.
+///
+/// `qualified` follows MLS scoping: a top-level `model Foo` produces
+/// `Foo`; a `package Foo { model Bar }` produces `Foo.Bar`.
+fn push_file_units(
+    path: &std::path::Path,
+    units: &mut Vec<(String, WarmKind)>,
+) {
+    let Ok(source) = std::fs::read_to_string(path) else {
+        eprintln!("[warm] read failed: {}", path.display());
+        return;
+    };
+    let filename = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("model.mo")
+        .to_string();
+    // Lenient parse to discover top-level classes. Errors don't kill
+    // the warm — we still emit any classes the parser could salvage.
+    let syntax = rumoca_phase_parse::parse_to_syntax(&source, &filename);
+    let ast = syntax.best_effort();
+    let mut emitted = 0;
+    for (top_name, class_def) in &ast.classes {
+        // If the top class is a package, descend one level so we warm
+        // the actual models the user runs (the package itself isn't
+        // simulable). One level is enough for the bundled assets;
+        // deeper nesting would need recursion.
+        if matches!(class_def.class_type, ClassType::Package) {
+            for (inner_name, _) in &class_def.classes {
+                let qualified = format!("{}.{}", top_name, inner_name);
+                let label = format!("{} ({})", qualified, path.display());
+                units.push((
+                    label,
+                    WarmKind::FileWithSource {
+                        qualified,
+                        source: source.clone(),
+                        // Match what the workbench passes to
+                        // compile_str so cache keys align: the
+                        // workbench uses the literal "model.mo".
+                        filename: "model.mo".to_string(),
+                    },
+                ));
+                emitted += 1;
+            }
+        } else {
+            let qualified = top_name.clone();
+            let label = format!("{} ({})", qualified, path.display());
+            units.push((
+                label,
+                WarmKind::FileWithSource {
+                    qualified,
+                    source: source.clone(),
+                    filename: "model.mo".to_string(),
+                },
+            ));
+            emitted += 1;
+        }
+    }
+    if emitted == 0 {
+        eprintln!(
+            "[warm] no compilable classes found in {} (parse errors?)",
+            path.display()
+        );
+    }
+}
+
+enum WarmKind {
+    MslClass(String),
+    FileWithSource {
+        qualified: String,
+        source: String,
+        filename: String,
+    },
 }

@@ -96,6 +96,49 @@ Users can drag, split, tab, and float panels freely. Layout persists via `bevy_w
 | `modelica_workbench` | Desktop | Full Modelica workbench with all panels |
 | `modelica_workbench_web` | wasm32 | Web version (inline worker, no threads) |
 | `modelica_tester` | CLI | Standalone tester for Modelica compilation |
+| `msl_indexer` | CLI | Build `msl_index.json`; with `--warm` also full-compiles a list of models so rumoca's semantic-summary cache is hot before the workbench opens |
+| `modelica_run` | CLI | Headless: compile a `.mo`, step it for a fixed duration, optionally dump per-step CSV |
+
+### CLI workflow — warm cache, then run headless
+
+The two CLI binaries compose:
+
+```bash
+# 1. (one-time per cache wipe) Warm the rumoca semantic-summary cache for
+#    every bundled asset model + a default list of common MSL examples.
+#    Takes ~7 min cold, ~30s if the parse cache from a prior run is intact.
+LUNCOSIM_WARM_DIRS="$(pwd)/assets/models" \
+  cargo run --release --bin msl_indexer -- --warm
+
+# 2. Run AnnotatedRocketStage.RocketStage for 10s, dump per-step telemetry
+#    to CSV. After the warm pass above, compile is ~ms instead of minutes.
+cargo run --release --bin modelica_run -- \
+    assets/models/AnnotatedRocketStage.mo \
+    AnnotatedRocketStage.RocketStage \
+    --duration 10 \
+    --input valve.opening=1.0 \
+    --record time,engine.thrust,airframe.altitude,airframe.velocity,tank.m \
+    --output /tmp/rocket.csv
+```
+
+Both binaries share the same compile path the workbench uses, so the
+warm cache benefits all three. `modelica_run` prints 1-second progress
+ticks (sim-time, RTF, ETA) and a 5-second compile heartbeat — there's
+no silent stall regardless of model size.
+
+`msl_indexer` flags:
+- `--warm` — full-compile a default list of common MSL examples after indexing
+- `--warm-only NAME[,NAME…]` — explicit list (mix of MSL qualified names and `.mo` paths)
+- `LUNCOSIM_WARM_DIRS=path1:path2` — env var, scans each dir for `.mo` files and warms every top-level model
+- `-v, --verbose` — per-file scan logging
+
+`modelica_run` flags:
+- `<FILE.mo> <CLASS>` — required positional args
+- `-d, --duration SECS` (default 10), `-t, --dt SECS` (default 0.01)
+- `--output PATH` — write per-step CSV
+- `--input N=V` — set runtime input (repeatable; warns on unknown name)
+- `--record VAR,VAR` — comma-separated subset (default: all observables)
+- `-v, --verbose` — per-step logging (otherwise 1-second wall-clock ticks)
 
 ## Key Dependencies
 

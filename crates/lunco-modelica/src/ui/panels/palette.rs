@@ -470,7 +470,7 @@ fn place_via_add_component(world: &mut World, def: MSLComponentDef) {
     world
         .commands()
         .trigger(crate::api_edits::AddModelicaComponent {
-            doc: doc_id.raw(),
+            doc: doc_id,
             class,
             type_name: def.msl_path.clone(),
             name,

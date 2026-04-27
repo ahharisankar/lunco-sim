@@ -251,11 +251,77 @@ impl ModelicaCompiler {
         source: &str,
         filename: &str,
     ) -> Result<Box<rumoca_session::compile::DaeCompilationResult>, String> {
-        let t_total = web_time::Instant::now();
         self.session.update_document(filename, source);
+        self.compile_loaded(model_name)
+    }
+
+    /// Compile an MSL class that is already loaded into the session
+    /// (no `update_document` call). Used by the `msl_indexer --warm`
+    /// pass to populate rumoca's semantic-summary cache for common
+    /// examples — the workbench's first compile of those classes is
+    /// then a cache hit instead of paying the full multi-minute walk.
+    pub fn compile_msl_class(
+        &mut self,
+        qualified: &str,
+    ) -> Result<Box<rumoca_session::compile::DaeCompilationResult>, String> {
+        self.compile_loaded(qualified)
+    }
+
+    /// Inner helper: heartbeat + session.compile + final timing log.
+    /// Both [`Self::compile_str`] (user-edited source) and
+    /// [`Self::compile_msl_class`] (already-loaded MSL class) flow
+    /// through here so the heartbeat behaviour is identical.
+    fn compile_loaded(
+        &mut self,
+        model_name: &str,
+    ) -> Result<Box<rumoca_session::compile::DaeCompilationResult>, String> {
+        let t_total = web_time::Instant::now();
+
+        // Heartbeat: rumoca's compile pipeline is opaque from outside
+        // and can take minutes on cold caches with MSL-heavy models
+        // (parol Debug::fmt overhead — see ../rumoca/docs/design-notes/
+        // perf-parol-trace-overhead.md). Without a periodic log line,
+        // the user sees nothing for the entire duration and reasonably
+        // assumes the worker hung. Spawn a tiny thread that emits an
+        // INFO log every 5s while the synchronous compile is in
+        // flight; signal it to stop on return.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let still_compiling = std::sync::Arc::new(AtomicBool::new(true));
+        let stopper = std::sync::Arc::clone(&still_compiling);
+        let model_for_thread = model_name.to_string();
+        // Spawn detached — we deliberately do NOT join after compile
+        // returns. The heartbeat sleeps in 5-second chunks; joining
+        // would block the worker for up to a full tick (5 s) on EVERY
+        // compile, even fast cache-hit ones. The workbench's
+        // is_compiling flag would then stay set for that whole window,
+        // and the Step dispatcher would idle visibly. Letting the
+        // JoinHandle drop detaches the thread; it self-exits within
+        // 5 s of `stopper=false` with at most one stray "still
+        // compiling +N s" log line if the timing aligns badly.
+        let _ = std::thread::spawn(move || {
+            let started = web_time::Instant::now();
+            let tick = std::time::Duration::from_secs(5);
+            loop {
+                std::thread::sleep(tick);
+                if !stopper.load(Ordering::Relaxed) {
+                    return;
+                }
+                log::info!(
+                    "[ModelicaCompiler] still compiling `{}` (+{:.0}s)",
+                    model_for_thread,
+                    started.elapsed().as_secs_f64()
+                );
+            }
+        });
+
         let result = self
             .session
             .compile_model_dae_strict_reachable_uncached_with_recovery(model_name);
+
+        still_compiling.store(false, Ordering::Relaxed);
+        // No `join` — see spawn comment above. The thread is detached
+        // and will exit on its own within one tick.
+
         log::info!(
             "[ModelicaCompiler] compile `{}` finished in {:.2}s ({})",
             model_name,
@@ -388,23 +454,28 @@ fn build_modelica_core(app: &mut App) {
         }
     }
 
-    // Do NOT override `RUMOCA_CACHE_DIR`. Leaving it unset lets
-    // rumoca-session use its XDG default (`~/.cache/rumoca/...`),
-    // which is the same location the standalone `modelica_tester`
-    // CLI and any other rumoca-using tool share. That share is
-    // what keeps startup-to-first-compile fast: a cache populated
-    // by one tool is hit by the next.
+    // Point rumoca at the workspace's shared `.cache/rumoca/`, the
+    // same one `modelica_run` and `msl_indexer` use. Without this
+    // alignment, the workbench reads XDG default (`~/.cache/rumoca`)
+    // while the CLI tools warm `<workspace>/.cache/rumoca` —
+    // `msl_indexer --warm` then does NOTHING for first workbench
+    // compile, which stretches from ~12 s (warm) to 13+ minutes (cold,
+    // observed). Honor an externally-set `RUMOCA_CACHE_DIR` if the
+    // caller wants a sandboxed location (CI, tests).
     //
-    // Earlier versions of this code pinned the cache to the
-    // workspace `.cache/rumoca/` to keep CI/test runs deterministic.
-    // In practice that guaranteed *cold* caches for interactive
-    // use: every rumoca source change bumps the artifact-cache key
-    // schema, which invalidates the workspace cache while the XDG
-    // cache — populated by the CLI — still matches. Result: CLI
-    // compiles in ~5 s, workbench in minutes. Sharing the XDG
-    // cache with the CLI is the obvious fix; callers that want a
-    // sandboxed cache can still set `RUMOCA_CACHE_DIR` explicitly
-    // before launching the binary.
+    // Historical note: earlier versions deliberately left this
+    // unset to share with `modelica_tester` (which used XDG too).
+    // The new `modelica_run` / `msl_indexer` CLI tools standardised
+    // on workspace, and the workbench needs to follow suit so a
+    // single `--warm` pass benefits every tool.
+    if std::env::var_os("RUMOCA_CACHE_DIR").is_none() {
+        let target = lunco_assets::cache_dir().join("rumoca");
+        std::env::set_var("RUMOCA_CACHE_DIR", &target);
+        log::info!(
+            "[ModelicaPlugin] using rumoca cache at {} (set RUMOCA_CACHE_DIR to override)",
+            target.display(),
+        );
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -439,11 +510,107 @@ fn build_modelica_core(app: &mut App) {
             spawn_modelica_requests.in_set(ModelicaSet::SpawnRequests),
         ));
 
+    // Global frame-time tracker. Logs every Update tick that exceeds
+    // a threshold AND every tick within a 5-second window after the
+    // last Modelica edit. The canvas-render-internal SLOW frame
+    // instrumentation only caught time spent inside one panel; this
+    // catches main-thread blocking in ANY system on the Bevy schedule
+    // (other panels, observers, drive_*_cache, etc.).
+    app.init_resource::<FrameTimeProbe>();
+    app.add_systems(bevy::prelude::First, frame_time_probe_start);
+    app.add_systems(bevy::prelude::PreUpdate, frame_time_probe_pre_update_end);
+    app.add_systems(bevy::prelude::Update, frame_time_probe_update_end);
+    app.add_systems(bevy::prelude::PostUpdate, frame_time_probe_post_update_end);
+    app.add_systems(bevy::prelude::Last, frame_time_probe_end);
+
     #[cfg(target_arch = "wasm32")]
     {
         app.add_systems(Update, inline_worker_process);
         app.add_systems(Update, ui::update_file_load_result);
     }
+}
+
+/// Global frame-time probe — start of frame.
+fn frame_time_probe_start(mut probe: ResMut<FrameTimeProbe>) {
+    let now = web_time::Instant::now();
+    probe.frame_start = Some(now);
+    probe.pre_update_start = Some(now);
+}
+
+fn frame_time_probe_pre_update_end(mut probe: ResMut<FrameTimeProbe>) {
+    let now = web_time::Instant::now();
+    probe.pre_update_ms = probe
+        .pre_update_start
+        .map(|t| now.duration_since(t).as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    probe.update_start = Some(now);
+}
+
+fn frame_time_probe_update_end(mut probe: ResMut<FrameTimeProbe>) {
+    let now = web_time::Instant::now();
+    probe.update_ms = probe
+        .update_start
+        .map(|t| now.duration_since(t).as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    probe.post_update_start = Some(now);
+}
+
+fn frame_time_probe_post_update_end(mut probe: ResMut<FrameTimeProbe>) {
+    let now = web_time::Instant::now();
+    probe.post_update_ms = probe
+        .post_update_start
+        .map(|t| now.duration_since(t).as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    probe.last_start = Some(now);
+}
+
+/// Global frame-time probe — end of frame. Logs the total Bevy
+/// schedule time and (if applicable) flags whether we're inside the
+/// post-edit window so per-edit hitches anywhere in the app surface.
+fn frame_time_probe_end(mut probe: ResMut<FrameTimeProbe>) {
+    let now = web_time::Instant::now();
+    let last_ms = probe
+        .last_start
+        .map(|t| now.duration_since(t).as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    let Some(start) = probe.frame_start else { return };
+    let dt_ms = now.duration_since(start).as_secs_f64() * 1000.0;
+    let in_window = probe
+        .last_edit
+        .map(|t| t.elapsed().as_secs_f64() < 5.0)
+        .unwrap_or(false);
+    if dt_ms > 30.0 || in_window {
+        bevy::log::info!(
+            "[FrameTimeProbe] total={dt_ms:.0}ms pre={:.0} update={:.0} post={:.0} last={last_ms:.0}{}",
+            probe.pre_update_ms,
+            probe.update_ms,
+            probe.post_update_ms,
+            if in_window { " (post-edit window)" } else { "" }
+        );
+    }
+    probe.frame_start = None;
+}
+
+/// Stamp the `last_edit` timestamp from anywhere that mutates a
+/// document. The `apply_ops` site in `canvas_diagram` calls this so
+/// the post-edit window covers any frame after a user edit.
+pub fn frame_time_probe_stamp_edit(world: &mut World) {
+    if let Some(mut probe) = world.get_resource_mut::<FrameTimeProbe>() {
+        probe.last_edit = Some(web_time::Instant::now());
+    }
+}
+
+#[derive(Resource, Default)]
+pub struct FrameTimeProbe {
+    frame_start: Option<web_time::Instant>,
+    pre_update_start: Option<web_time::Instant>,
+    update_start: Option<web_time::Instant>,
+    post_update_start: Option<web_time::Instant>,
+    last_start: Option<web_time::Instant>,
+    pre_update_ms: f64,
+    update_ms: f64,
+    post_update_ms: f64,
+    last_edit: Option<web_time::Instant>,
 }
 
 /// Channels for communicating with the background simulation worker.
@@ -817,8 +984,40 @@ fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>) {
                         // Strip input defaults so they become real runtime slots
                         let (stripped_source, input_defaults) = strip_input_defaults(&source);
 
+                        // Loud breadcrumbs around the two opaque-and-slow
+                        // steps (MSL preload + rumoca compile). Without
+                        // these, the worker silently disappears for the
+                        // duration — the rumoca log macros may or may
+                        // not route through the workbench's tracing sink
+                        // depending on Bevy's tracing-subscriber config.
+                        // `bevy::log::info!` always reaches stdout.
+                        let was_first_compile = compiler.is_none();
+                        if was_first_compile {
+                            bevy::log::info!(
+                                "[worker] first-time compiler init — loading MSL into rumoca session (this can take ~10s on warm cache, minutes on cold `.cache/rumoca`)"
+                            );
+                        }
+                        let t_init = web_time::Instant::now();
                         let compiler = compiler.get_or_insert_with(ModelicaCompiler::new);
-                        match compiler.compile_str(&model_name, &stripped_source, "model.mo") {
+                        if was_first_compile {
+                            bevy::log::info!(
+                                "[worker] compiler init done in {:.2}s",
+                                t_init.elapsed().as_secs_f64(),
+                            );
+                        }
+                        bevy::log::info!(
+                            "[worker] calling compile_str for `{}` ({} bytes)",
+                            model_name, stripped_source.len(),
+                        );
+                        let t_compile = web_time::Instant::now();
+                        let _compile_outcome = compiler.compile_str(&model_name, &stripped_source, "model.mo");
+                        bevy::log::info!(
+                            "[worker] compile_str returned for `{}` in {:.2}s ({})",
+                            model_name,
+                            t_compile.elapsed().as_secs_f64(),
+                            if _compile_outcome.is_ok() { "OK" } else { "ERR" },
+                        );
+                        match _compile_outcome {
                             Ok(comp_res) => {
                                 let mut opts = StepperOptions::default();
                                 opts.atol = 1e-1; opts.rtol = 1e-1;
@@ -1458,8 +1657,23 @@ pub struct ModelicaModel {
     /// scene-serializable.
     #[reflect(ignore)]
     pub document: lunco_doc::DocumentId,
+    /// `true` while a `Step` request is in flight to the worker.
+    /// Cleared when the response arrives in
+    /// [`handle_modelica_responses`]. Distinct from
+    /// [`Self::is_compiling`] — a long-running compile must NOT count
+    /// as a hung step (that conflation is what made the dispatcher's
+    /// "worker hung?" warning spam every frame for the duration of a
+    /// slow Modelica compile).
     #[reflect(ignore)]
     pub is_stepping: bool,
+    /// `true` while a `Compile` request is in flight to the worker.
+    /// Set by the `CompileModel` observer, cleared when a compile-
+    /// shaped result (`is_new_model` / `is_parameter_update`) lands.
+    /// Compiles can take seconds (occasionally minutes for MSL-heavy
+    /// examples); the dispatcher uses this to suppress its
+    /// step-hang warning while a compile is legitimately running.
+    #[reflect(ignore)]
+    pub is_compiling: bool,
     /// `true` after a successful Compile has installed a stepper for
     /// this entity in the Modelica worker. `spawn_modelica_requests`
     /// uses this to dispatch a Compile (instead of a doomed Step) when
@@ -1481,8 +1695,29 @@ fn spawn_modelica_requests(
 ) {
     let dt = time.delta_secs_f64();
 
+    let total_models = q_models.iter().count();
+    let mut sent = 0u32;
+    let mut blocked_stepping = 0u32;
+    let mut blocked_compiling = 0u32;
+    let mut blocked_paused = 0u32;
+    let t0 = web_time::Instant::now();
     for (entity, mut model) in q_models.iter_mut() {
-        if model.is_stepping || model.paused { continue; }
+        if model.is_stepping {
+            // Distinguish "Step request hasn't returned" from "Compile
+            // is legitimately running". The latter can take seconds
+            // (parol Debug::fmt overhead on MSL-heavy examples); we
+            // mustn't treat it as a hung worker.
+            if model.is_compiling {
+                blocked_compiling += 1;
+            } else {
+                blocked_stepping += 1;
+            }
+            continue;
+        }
+        if model.paused {
+            blocked_paused += 1;
+            continue;
+        }
 
         // First-step path: model has been unpaused (user pressed Run)
         // but no Compile has succeeded yet — the worker has no stepper
@@ -1521,6 +1756,20 @@ fn spawn_modelica_requests(
             inputs,
             dt,
         });
+        sent += 1;
+    }
+    // Telemetry: when sim time appears to "stop" the cause is almost
+    // always that every model has `is_stepping=true` and Step results
+    // never came back to clear it. Logging the per-tick reason makes
+    // a stalled sim debuggable from the runtime log.
+    //
+    // Only warn when the block is GENUINELY a stepping hang —
+    // `blocked_compiling` is a legitimate slow compile (no warning).
+    if total_models > 0 && sent == 0 && blocked_stepping > 0 {
+        bevy::log::warn!(
+            "[spawn_modelica_requests] no Step dispatched: {blocked_stepping} blocked on is_stepping (worker hung?), {blocked_compiling} compiling, {blocked_paused} paused, took {:.2}ms",
+            t0.elapsed().as_secs_f64() * 1000.0,
+        );
     }
 }
 
@@ -1564,6 +1813,13 @@ fn handle_modelica_responses(
             if result.session_id < model.session_id { continue; }
 
             model.is_stepping = false;
+            // Compile-shaped results (new model / parameter update /
+            // reset) close out the corresponding `is_compiling` window
+            // the `CompileModel` observer opened. Step results don't
+            // touch this flag — they were never compile-flagged.
+            if result.is_new_model || result.is_parameter_update || result.is_reset {
+                model.is_compiling = false;
+            }
 
             // Forward log messages to console via bevy_workbench's console system
             if let Some(msg) = &result.log_message {

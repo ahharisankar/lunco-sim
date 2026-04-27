@@ -12,6 +12,11 @@ description = "Document System foundation for LunCoSim — Document, DocumentOp,
 # into a bevy-free identity sub-crate. For now the simpler tradeoff
 # wins; every consumer of lunco-doc already depends on lunco-core.
 lunco-core = { path = "../lunco-core" }
+# `bevy_reflect` is the standalone reflection crate — much smaller
+# than full `bevy` (no renderer / ECS / windowing). Lets `DocumentId`
+# derive `Reflect` so commands and other API-facing types can carry
+# it directly instead of degrading to `u64` at every reflect boundary.
+bevy_reflect = "0.18"
 
 [dev-dependencies]
 # Only for tests. The toy TextDocument needs no external crates.

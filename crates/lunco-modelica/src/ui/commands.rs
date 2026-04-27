@@ -28,6 +28,8 @@ use lunco_doc_bevy::{
 };
 use std::collections::HashMap;
 
+use lunco_core::{Command, on_command, register_commands};
+
 use crate::ast_extract::{
     extract_input_names, extract_inputs_with_defaults, extract_model_name,
     extract_parameters, hash_content,
@@ -48,8 +50,8 @@ use crate::{ModelicaChannels, ModelicaCommand, ModelicaModel};
 /// with a `mem://Untitled<N>` marker path, records it in the Package
 /// Browser's in-memory list, and triggers an [`OpenTab`](lunco_workbench::OpenTab)
 /// so the user lands on the editable tab immediately.
-#[derive(Event, Clone, Debug)]
-pub struct CreateNewScratchModel;
+#[Command(default)]
+pub struct CreateNewScratchModel {}
 
 /// Request to duplicate a read-only (library) model into a new
 /// editable Untitled document.
@@ -66,7 +68,7 @@ pub struct CreateNewScratchModel;
 /// `Blocks/package.mo`), only the target class's source is
 /// extracted — otherwise users would get a 150 KB copy of the
 /// whole Blocks package as their "Untitled" starting point.
-#[derive(Event, Clone, Debug)]
+#[Command(default)]
 pub struct DuplicateModelFromReadOnly {
     pub source_doc: DocumentId,
 }
@@ -85,7 +87,7 @@ pub struct DuplicateModelFromReadOnly {
 /// The duplicated copy lands in Canvas view by default (examples
 /// are composed models — users want to see the diagram, not the
 /// source).
-#[derive(Event, Clone, Debug)]
+#[Command(default)]
 pub struct OpenExampleInWorkspace {
     pub qualified: String,
 }
@@ -102,7 +104,22 @@ pub struct OpenExampleInWorkspace {
 /// [`ModelicaCommand::Compile`] to the worker.
 ///
 /// Unknown / foreign ids are no-ops.
-#[derive(Event, Clone, Debug)]
+/// API readiness probe. Returns immediately with `{"command_id": N}`
+/// — touches no state, side-effect-free, safe to fire from a
+/// readiness-poll loop. Use this instead of `FitCanvas` (which
+/// touches the canvas) or any other state-mutating command when all
+/// you want to know is "is the API up yet?".
+#[Command(default)]
+pub struct Ping {}
+
+#[on_command(Ping)]
+fn on_ping(_cmd: Ping) {
+    // Intentional no-op. The dispatcher's normal flow already returns
+    // `{"command_id": N}` to the caller before this observer fires;
+    // emitting nothing further keeps the response cheap.
+}
+
+#[Command(default)]
 pub struct CompileModel {
     /// The document to compile.
     pub doc: DocumentId,
@@ -125,13 +142,12 @@ pub struct CompileModel {
 /// `doc = 0` targets the currently-active tab. Kept as a raw `u64`
 /// (not `DocumentId`) so the generic `lunco-doc` crate stays free of
 /// the bevy-reflect dependency required to cross the API boundary.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct AutoArrangeDiagram {
     /// Raw `DocumentId::raw()` value, or `0` for "the currently-active
     /// Model tab" (useful from API / tests / scripts that don't track
     /// document ids).
-    pub doc: u64,
+    pub doc: DocumentId,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -148,8 +164,7 @@ pub struct AutoArrangeDiagram {
 /// and not discoverable from outside; the tab title is. A future
 /// `ListDocuments` query will return the ids directly for exact
 /// targeting.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct FocusDocumentByName {
     pub pattern: String,
 }
@@ -157,33 +172,30 @@ pub struct FocusDocumentByName {
 /// Switch the active tab's view mode. `mode` is one of
 /// `"text"`, `"diagram"`, `"icon"`, `"docs"` (case-insensitive).
 /// Unknown modes are ignored.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct SetViewMode {
     /// Doc id, or `0` for the active tab.
-    pub doc: u64,
+    pub doc: DocumentId,
     /// `"text"` | `"diagram"` | `"icon"` | `"docs"`.
     pub mode: String,
 }
 
 /// Set the canvas zoom level for a specific diagram. `1.0` = 100 %.
 /// `0.0` = fit-all (same as [`FitCanvas`]).
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct SetZoom {
     /// Doc id, or `0` for the active tab.
-    pub doc: u64,
+    pub doc: DocumentId,
     /// Absolute zoom. Clamped to the canvas's configured min/max.
     pub zoom: f32,
 }
 
 /// Frame the scene so the whole diagram fits in the viewport.
 /// Equivalent to the `F` keyboard shortcut.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct FitCanvas {
     /// Doc id, or `0` for the active tab.
-    pub doc: u64,
+    pub doc: DocumentId,
 }
 
 /// Open (or focus, if already open) an MSL class as a fresh editable
@@ -192,8 +204,7 @@ pub struct FitCanvas {
 /// Reflect-registered shim over the existing `OpenExampleInWorkspace`
 /// event so scripts can open examples without knowing the internal
 /// event name.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct OpenExample {
     pub qualified: String,
 }
@@ -319,10 +330,6 @@ impl Plugin for ModelicaCommandsPlugin {
             .add_observer(finish_close_after_save)
             .add_observer(on_close_document)
             .add_observer(on_document_closed_cleanup)
-            .add_observer(on_compile_model)
-            .add_observer(on_create_new_scratch_model)
-            .add_observer(on_duplicate_model_from_read_only)
-            .add_observer(on_open_example_in_workspace)
             // Register the `modelica://` scheme with the workbench's
             // cross-domain URI registry so clickable links in
             // Documentation HTML (and any future contexts) route
@@ -333,63 +340,18 @@ impl Plugin for ModelicaCommandsPlugin {
             // fire it via `ExecuteCommand { command: "AutoArrangeDiagram" }`.
             .register_type::<AutoArrangeDiagram>()
             .add_observer(crate::ui::panels::canvas_diagram::on_auto_arrange_diagram)
+            // Compile: reflect-registered so the HTTP API can drive
+            // headless / scripted / CI compilation. Without this the
+            // dispatcher rejects with "Command 'CompileModel' not
+            // found or not API-accessible" and only UI clicks work.
+            // Ping: side-effect-free readiness probe, the proper
+            // alternative to using FitCanvas (or any other state-
+            // mutating command) for "is the API up?" polling.
+            // Registered separately via the macro-generated helper
+            // (see `__register_on_ping(app)` call below the chain).
             // Navigation commands — same reflect-registered pattern so
             // the HTTP API can drive the UI (focus a tab, switch view
             // mode, zoom / fit, drill into an MSL example).
-            .register_type::<FocusDocumentByName>()
-            .register_type::<SetViewMode>()
-            .register_type::<SetZoom>()
-            .register_type::<FitCanvas>()
-            .register_type::<OpenExample>()
-            .register_type::<OpenClass>()
-            .register_type::<MoveComponent>()
-            .register_type::<PanCanvas>()
-            .register_type::<Undo>()
-            .register_type::<Redo>()
-            .register_type::<Exit>()
-            .register_type::<GetFile>()
-            .register_type::<FormatDocument>()
-            .register_type::<OpenFile>()
-            .register_type::<Open>()
-            .register_type::<SetModelInput>()
-            .register_type::<InspectActiveDoc>()
-            .register_type::<CompileActiveModel>()
-            .register_type::<SaveActiveDocument>()
-            .register_type::<SaveActiveDocumentAs>()
-            .register_type::<NewPlotPanel>()
-            .register_type::<AddSignalToPlot>()
-            .register_type::<AddCanvasPlot>()
-            .register_type::<DuplicateActiveDoc>()
-            .register_type::<PauseActiveModel>()
-            .register_type::<ResumeActiveModel>()
-            .register_type::<ResetActiveModel>()
-            .add_observer(on_pause_active_model)
-            .add_observer(on_resume_active_model)
-            .add_observer(on_reset_active_model)
-            .add_observer(on_focus_document_by_name)
-            .add_observer(on_set_view_mode)
-            .add_observer(on_set_zoom)
-            .add_observer(on_fit_canvas)
-            .add_observer(on_open_example)
-            .add_observer(on_open_class)
-            .add_observer(on_move_component)
-            .add_observer(on_pan_canvas)
-            .add_observer(on_undo)
-            .add_observer(on_redo)
-            .add_observer(on_exit)
-            .add_observer(on_get_file)
-            .add_observer(on_format_document)
-            .add_observer(on_open_file)
-            .add_observer(on_open)
-            .add_observer(on_set_model_input)
-            .add_observer(on_inspect_active_doc)
-            .add_observer(on_compile_active_model)
-            .add_observer(on_save_active_document)
-            .add_observer(on_save_active_document_as)
-            .add_observer(on_new_plot_panel)
-            .add_observer(on_add_signal_to_plot)
-            .add_observer(on_add_canvas_plot)
-            .add_observer(on_duplicate_active_doc)
             .add_observer(resolve_editor_intent)
             .add_observer(resolve_new_document_intent)
             // Install our scheme handler into the workbench's
@@ -412,8 +374,55 @@ impl Plugin for ModelicaCommandsPlugin {
                 bevy_egui::EguiPrimaryContextPass,
                 (render_close_dialogs, render_compile_class_picker),
             );
+
+        // All observers marked with `#[on_command(X)]` are registered
+        // in one shot via the `register_commands!()`-generated helper
+        // (see the macro invocation just below this `impl`). Adding a
+        // new typed command is now: write the struct + observer with
+        // their attributes, then add one identifier to the list.
+        register_all_commands(app);
     }
 }
+
+// Single source-of-truth for which typed commands this plugin owns.
+// `register_commands!()` expands to a `pub fn register_all_commands(app)`
+// that calls the per-observer `__register_on_X(app)` helpers
+// (themselves generated by `#[on_command(X)]`). Keep alphabetical so
+// diffs stay tidy.
+register_commands!(
+    on_add_canvas_plot,
+    on_add_signal_to_plot,
+    on_compile_active_model,
+    on_compile_model,
+    on_create_new_scratch_model,
+    on_duplicate_active_doc,
+    on_duplicate_model_from_read_only,
+    on_exit,
+    on_fit_canvas,
+    on_focus_document_by_name,
+    on_format_document,
+    on_get_file,
+    on_inspect_active_doc,
+    on_move_component,
+    on_new_plot_panel,
+    on_open,
+    on_open_class,
+    on_open_example,
+    on_open_example_in_workspace,
+    on_open_file,
+    on_pan_canvas,
+    on_pause_active_model,
+    on_ping,
+    on_redo,
+    on_reset_active_model,
+    on_resume_active_model,
+    on_save_active_document,
+    on_save_active_document_as,
+    on_set_model_input,
+    on_set_view_mode,
+    on_set_zoom,
+    on_undo,
+);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Unsaved-changes close prompt
@@ -731,7 +740,7 @@ fn resolve_editor_intent(
         // matching the pre-migration semantics for keyboard Compile.
         EditorIntent::Compile => {
             commands.trigger(CompileActiveModel {
-                doc: doc.raw(),
+                doc,
                 class: String::new(),
             });
         }
@@ -751,7 +760,7 @@ fn resolve_editor_intent(
 /// intent variants.
 fn resolve_new_document_intent(trigger: On<EditorIntent>, mut commands: Commands) {
     if matches!(*trigger.event(), EditorIntent::NewDocument) {
-        commands.trigger(CreateNewScratchModel);
+        commands.trigger(CreateNewScratchModel {});
     }
 }
 
@@ -1030,6 +1039,7 @@ fn on_close_document(
     registry.remove_document(doc);
 }
 
+#[on_command(CompileModel)]
 fn on_compile_model(
     trigger: On<CompileModel>,
     mut commands: Commands,
@@ -1057,15 +1067,19 @@ fn on_compile_model(
     // costs ~30 s per call in debug builds, and there are four
     // calls, so clicking Compile on an MSL example would lock the
     // UI for minutes. Pulling from the cached AST is constant-time.
-    // Force a fresh parse if the user typed into the editor but the
-    // debounced reparse hasn't run yet (see `ModelicaDocument::apply_patch`
-    // — AST lags source by up to ~250ms during rapid typing).
-    // Compile is a definitive "I want this exact source to be the
-    // compiled model" action, so pay the parse cost right here
-    // instead of risking a stale AST.
-    if let Some(host) = registry.host_mut(doc) {
-        host.document_mut().refresh_ast_now();
-    }
+    // Note: previously this site called `refresh_ast_now()` to force
+    // a fresh parse before extracting metadata. That ran a 2.5 s
+    // rumoca parse synchronously on the main thread (verified in
+    // telemetry: `[Doc] refresh_ast_now: 20052 bytes parsed in
+    // 2522.0ms`) and froze the UI — sim-time stalled, egui animations
+    // stuttered, FixedUpdate skipped 60+ ticks. The off-thread
+    // debounced refresh (see `ui::ast_refresh`) keeps the AST at
+    // most 250 ms behind source, which the metadata extractors
+    // below (params / inputs / bounds / class names) tolerate fine.
+    // The worker re-parses the *source* verbatim for the actual
+    // compile (see `ModelicaCommand::Compile`), so any AST staleness
+    // here only affects telemetry-panel labels for one debounce
+    // cycle, not the compiled model itself.
     let (source, ast_for_extract) = match registry.host(doc) {
         Some(h) => {
             let doc = h.document();
@@ -1173,7 +1187,14 @@ fn on_compile_model(
         if let Ok(mut model) = q_models.get_mut(entity) {
             let old_inputs = std::mem::take(&mut model.inputs);
             model.session_id += 1;
+            // `is_stepping` fences out any in-flight Step results
+            // bearing the old session_id; `is_compiling` tells
+            // `spawn_modelica_requests` that the wait is a normal
+            // long compile (not a hung worker) — suppresses the
+            // per-frame "worker hung?" warning spam during multi-
+            // second Modelica compiles.
             model.is_stepping = true;
+            model.is_compiling = true;
             model.model_name = model_name.clone();
             model.parameters = params.clone();
             model.parameter_bounds = param_bounds.clone();
@@ -1228,6 +1249,7 @@ fn on_compile_model(
                     descriptions: HashMap::new(),
                     document: doc,
                     is_stepping: true,
+                    is_compiling: true,
                     is_compiled: false,
                 },
             ))
@@ -1281,6 +1303,7 @@ fn on_compile_model(
     }
 }
 
+#[on_command(CreateNewScratchModel)]
 fn on_create_new_scratch_model(
     _trigger: On<CreateNewScratchModel>,
     mut registry: ResMut<ModelicaDocumentRegistry>,
@@ -1348,6 +1371,7 @@ fn on_create_new_scratch_model(
     });
 }
 
+#[on_command(DuplicateModelFromReadOnly)]
 fn on_duplicate_model_from_read_only(
     trigger: On<DuplicateModelFromReadOnly>,
     mut registry: ResMut<ModelicaDocumentRegistry>,
@@ -1503,6 +1527,7 @@ fn on_duplicate_model_from_read_only(
     ));
 }
 
+#[on_command(OpenExampleInWorkspace)]
 fn on_open_example_in_workspace(
     trigger: On<OpenExampleInWorkspace>,
     mut cache: ResMut<crate::ui::panels::package_browser::PackageTreeCache>,
@@ -1947,6 +1972,7 @@ fn resolve_active_doc(world: &World) -> Option<DocumentId> {
         .and_then(|ws| ws.active_document)
 }
 
+#[on_command(FocusDocumentByName)]
 fn on_focus_document_by_name(
     trigger: On<FocusDocumentByName>,
     mut commands: Commands,
@@ -1980,14 +2006,15 @@ fn on_focus_document_by_name(
     });
 }
 
+#[on_command(SetViewMode)]
 fn on_set_view_mode(trigger: On<SetViewMode>, mut commands: Commands) {
     let raw = trigger.event().doc;
     let mode_str = trigger.event().mode.clone();
     commands.queue(move |world: &mut World| {
-        let Some(doc) = (if raw == 0 {
+        let Some(doc) = (if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         }) else {
             return;
         };
@@ -2023,14 +2050,15 @@ fn approx_screen_rect() -> lunco_canvas::Rect {
     )
 }
 
+#[on_command(SetZoom)]
 fn on_set_zoom(trigger: On<SetZoom>, mut commands: Commands) {
     let raw = trigger.event().doc;
     let zoom = trigger.event().zoom;
     commands.queue(move |world: &mut World| {
-        let doc = if raw == 0 {
+        let doc = if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         };
         use crate::ui::panels::canvas_diagram::CanvasDiagramState;
         let Some(mut state) = world.get_resource_mut::<CanvasDiagramState>() else {
@@ -2053,13 +2081,14 @@ fn on_set_zoom(trigger: On<SetZoom>, mut commands: Commands) {
     });
 }
 
+#[on_command(FitCanvas)]
 fn on_fit_canvas(trigger: On<FitCanvas>, mut commands: Commands) {
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
-        let doc = if raw == 0 {
+        let doc = if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         };
         use crate::ui::panels::canvas_diagram::CanvasDiagramState;
         let Some(mut state) = world.get_resource_mut::<CanvasDiagramState>() else {
@@ -2074,6 +2103,7 @@ fn on_fit_canvas(trigger: On<FitCanvas>, mut commands: Commands) {
     });
 }
 
+#[on_command(OpenExample)]
 fn on_open_example(
     trigger: On<OpenExample>,
     mut commands: Commands,
@@ -2090,8 +2120,7 @@ fn on_open_example(
 /// duplicates into an editable Untitled doc), this opens the class
 /// directly as an `msl://` tab for exploration. Reuses an existing
 /// tab if the same class is already open.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct OpenClass {
     pub qualified: String,
 }
@@ -2133,6 +2162,7 @@ fn prewarm_msl_library() {
         .detach();
 }
 
+#[on_command(OpenClass)]
 fn on_open_class(trigger: On<OpenClass>, mut commands: Commands) {
     let qualified = trigger.event().qualified.clone();
     commands.queue(move |world: &mut World| {
@@ -2145,8 +2175,7 @@ fn on_open_class(trigger: On<OpenClass>, mut commands: Commands) {
 /// drag uses — emits a `SetPlacement` op so undo/redo + source
 /// rewrite work uniformly. `class` empty ⇒ active editing class on
 /// the active tab.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct MoveComponent {
     pub class: String,
     pub name: String,
@@ -2162,26 +2191,25 @@ pub struct MoveComponent {
 /// Undo the most recent edit on the active document. Reflect-
 /// registered so automation can drive the same undo path the
 /// Ctrl+Z keybinding / toolbar arrow uses. `doc=0` ⇒ active tab.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct Undo {
-    pub doc: u64,
+    pub doc: DocumentId,
 }
 
 /// Redo the most recently undone edit. Mirror of [`Undo`].
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct Redo {
-    pub doc: u64,
+    pub doc: DocumentId,
 }
 
+#[on_command(Undo)]
 fn on_undo(trigger: On<Undo>, mut commands: Commands) {
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
-        let Some(doc) = (if raw == 0 {
+        let Some(doc) = (if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         }) else {
             bevy::log::warn!("[Undo] no active document");
             return;
@@ -2190,13 +2218,14 @@ fn on_undo(trigger: On<Undo>, mut commands: Commands) {
     });
 }
 
+#[on_command(Redo)]
 fn on_redo(trigger: On<Redo>, mut commands: Commands) {
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
-        let Some(doc) = (if raw == 0 {
+        let Some(doc) = (if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         }) else {
             bevy::log::warn!("[Redo] no active document");
             return;
@@ -2209,11 +2238,10 @@ fn on_redo(trigger: On<Redo>, mut commands: Commands) {
 /// coords (+Y down — same frame the projector emits node positions
 /// in). Use it from API tests / automation to position the
 /// viewport before screenshotting.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct PanCanvas {
     /// 0 ⇒ active document.
-    pub doc: u64,
+    pub doc: DocumentId,
     pub x: f32,
     pub y: f32,
 }
@@ -2221,28 +2249,27 @@ pub struct PanCanvas {
 /// Gracefully shut down the application. Exposed so automation can
 /// stop the workbench without the operator having to confirm a kill
 /// signal each time.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct Exit {}
 
 /// Run rumoca-tool-fmt on the active document and replace its
 /// source with the formatted text. Single undo step. No-op on
 /// read-only tabs or when formatting fails (parse errors etc.).
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct FormatDocument {
     /// 0 ⇒ active document.
-    pub doc: u64,
+    pub doc: DocumentId,
 }
 
+#[on_command(FormatDocument)]
 fn on_format_document(trigger: On<FormatDocument>, mut commands: Commands) {
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
         use crate::document::ModelicaOp;
-        let doc = if raw == 0 {
+        let doc = if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         };
         let Some(doc) = doc else {
             bevy::log::warn!("[FormatDocument] no active document");
@@ -2382,30 +2409,29 @@ fn update_status_bar(
 /// pipeline (no path picker — fails if the doc is Untitled). Use
 /// `SaveActiveDocumentAs` to bind a path explicitly without the
 /// modal picker; this is the form scripts and tests should use.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct SaveActiveDocument {
     /// 0 ⇒ active document.
-    pub doc: u64,
+    pub doc: DocumentId,
 }
 
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct SaveActiveDocumentAs {
     /// 0 ⇒ active document.
-    pub doc: u64,
+    pub doc: DocumentId,
     /// Target filesystem path. Bypasses the native picker so
     /// automation can save without GUI interaction.
     pub path: String,
 }
 
+#[on_command(SaveActiveDocument)]
 fn on_save_active_document(trigger: On<SaveActiveDocument>, mut commands: Commands) {
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
-        let doc = if raw == 0 {
+        let doc = if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         };
         let Some(doc) = doc else {
             bevy::log::warn!("[SaveActiveDocument] no active document");
@@ -2415,16 +2441,17 @@ fn on_save_active_document(trigger: On<SaveActiveDocument>, mut commands: Comman
     });
 }
 
+#[on_command(SaveActiveDocumentAs)]
 fn on_save_active_document_as(
     trigger: On<SaveActiveDocumentAs>,
     mut commands: Commands,
 ) {
     let ev = trigger.event().clone();
     commands.queue(move |world: &mut World| {
-        let doc = if ev.doc == 0 {
+        let doc = if ev.doc.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(ev.doc))
+            Some(ev.doc)
         };
         let Some(doc) = doc else {
             bevy::log::warn!("[SaveActiveDocumentAs] no active document");
@@ -2463,19 +2490,19 @@ fn on_save_active_document_as(
 /// API shim: duplicate the active read-only document into a fresh
 /// editable workspace tab. Fires the existing
 /// `DuplicateModelFromReadOnly` event with `doc=0` ⇒ active.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct DuplicateActiveDoc {
-    pub doc: u64,
+    pub doc: DocumentId,
 }
 
+#[on_command(DuplicateActiveDoc)]
 fn on_duplicate_active_doc(trigger: On<DuplicateActiveDoc>, mut commands: Commands) {
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
-        let doc = if raw == 0 {
+        let doc = if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         };
         let Some(doc) = doc else {
             bevy::log::warn!("[DuplicateActiveDoc] no active document");
@@ -2503,33 +2530,31 @@ fn on_duplicate_active_doc(trigger: On<DuplicateActiveDoc>, mut commands: Comman
 /// A separate Step-one-frame command is intentionally deferred until
 /// #59 (named experiments / Runs panel) lands — the infrastructure
 /// for a "force one step" flag is better designed alongside that.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct PauseActiveModel {
-    pub doc: u64,
+    pub doc: DocumentId,
 }
 
 /// See [`PauseActiveModel`].
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct ResumeActiveModel {
-    pub doc: u64,
+    pub doc: DocumentId,
 }
 
 /// See [`PauseActiveModel`].
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct ResetActiveModel {
-    pub doc: u64,
+    pub doc: DocumentId,
 }
 
+#[on_command(PauseActiveModel)]
 fn on_pause_active_model(trigger: On<PauseActiveModel>, mut commands: Commands) {
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
-        let Some(doc) = (if raw == 0 {
+        let Some(doc) = (if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         }) else {
             return;
         };
@@ -2541,13 +2566,14 @@ fn on_pause_active_model(trigger: On<PauseActiveModel>, mut commands: Commands) 
     });
 }
 
+#[on_command(ResumeActiveModel)]
 fn on_resume_active_model(trigger: On<ResumeActiveModel>, mut commands: Commands) {
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
-        let Some(doc) = (if raw == 0 {
+        let Some(doc) = (if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         }) else {
             return;
         };
@@ -2559,13 +2585,14 @@ fn on_resume_active_model(trigger: On<ResumeActiveModel>, mut commands: Commands
     });
 }
 
+#[on_command(ResetActiveModel)]
 fn on_reset_active_model(trigger: On<ResetActiveModel>, mut commands: Commands) {
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
-        let Some(doc) = (if raw == 0 {
+        let Some(doc) = (if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         }) else {
             return;
         };
@@ -2603,8 +2630,7 @@ fn entity_for_doc(world: &World, doc: DocumentId) -> Option<Entity> {
 /// scalar signal. Pure UI overlay — does not emit Modelica source.
 /// Uses the active document's coordinate frame (same as
 /// `MoveComponent`: -100..100 typical, +Y down).
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct AddCanvasPlot {
     pub x: f32,
     pub y: f32,
@@ -2615,6 +2641,7 @@ pub struct AddCanvasPlot {
     pub signal: String,
 }
 
+#[on_command(AddCanvasPlot)]
 fn on_add_canvas_plot(trigger: On<AddCanvasPlot>, mut commands: Commands) {
     let ev = trigger.event().clone();
     commands.queue(move |world: &mut World| {
@@ -2672,8 +2699,7 @@ fn on_add_canvas_plot(trigger: On<AddCanvasPlot>, mut commands: Commands) {
 /// `VisualizationConfig`. The initial `signals` list (Modelica
 /// dotted variable paths) is bound on creation; more can be added
 /// later via [`AddSignalToPlot`].
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct NewPlotPanel {
     /// Tab title. Empty ⇒ auto-named "Plot #N".
     pub title: String,
@@ -2682,6 +2708,7 @@ pub struct NewPlotPanel {
     pub signals: Vec<String>,
 }
 
+#[on_command(NewPlotPanel)]
 fn on_new_plot_panel(trigger: On<NewPlotPanel>, mut commands: Commands) {
     let ev = trigger.event().clone();
     commands.queue(move |world: &mut World| {
@@ -2739,13 +2766,13 @@ fn on_new_plot_panel(trigger: On<NewPlotPanel>, mut commands: Commands) {
 
 /// Add one signal to an existing plot panel. `plot=0` ⇒ the
 /// singleton default Modelica graph.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct AddSignalToPlot {
     pub plot: u64,
     pub signal: String,
 }
 
+#[on_command(AddSignalToPlot)]
 fn on_add_signal_to_plot(trigger: On<AddSignalToPlot>, mut commands: Commands) {
     let ev = trigger.event().clone();
     commands.queue(move |world: &mut World| {
@@ -2787,11 +2814,10 @@ fn on_add_signal_to_plot(trigger: On<AddSignalToPlot>, mut commands: Commands) {
 /// it to curl / scripts. Type-check / parse / DAE errors land in
 /// `WorkbenchState.compilation_error` which the Diagnostics panel
 /// already surfaces.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct CompileActiveModel {
     /// 0 ⇒ active document.
-    pub doc: u64,
+    pub doc: DocumentId,
     /// Optional target class. Empty = inherit picker / drilled-in /
     /// detected-name behaviour. When non-empty, the compile bypasses
     /// the GUI class-picker for documents with multiple non-package
@@ -2802,14 +2828,15 @@ pub struct CompileActiveModel {
     pub class: String,
 }
 
+#[on_command(CompileActiveModel)]
 fn on_compile_active_model(trigger: On<CompileActiveModel>, mut commands: Commands) {
     let raw = trigger.event().doc;
     let class = trigger.event().class.clone();
     commands.queue(move |world: &mut World| {
-        let doc = if raw == 0 {
+        let doc = if raw.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(raw))
+            Some(raw)
         };
         let Some(doc) = doc else {
             bevy::log::warn!("[CompileActiveModel] no active document");
@@ -2824,10 +2851,10 @@ fn on_compile_active_model(trigger: On<CompileActiveModel>, mut commands: Comman
 /// (top-level class names, parse error if any). API automation
 /// uses this to diagnose why a drill-in or projection produced
 /// zero nodes — if the AST is empty, the file failed strict parse.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct InspectActiveDoc {}
 
+#[on_command(InspectActiveDoc)]
 fn on_inspect_active_doc(_trigger: On<InspectActiveDoc>, mut commands: Commands) {
     commands.queue(|world: &mut World| {
         let doc = resolve_active_doc(world);
@@ -2894,12 +2921,12 @@ fn on_inspect_active_doc(_trigger: On<InspectActiveDoc>, mut commands: Commands)
 /// tab as an Untitled document seeded from the file's contents.
 /// Used by API automation to load bundled examples or external
 /// files without a Twin folder being open.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct OpenFile {
     pub path: String,
 }
 
+#[on_command(OpenFile)]
 fn on_open_file(trigger: On<OpenFile>, mut commands: Commands) {
     let path = trigger.event().path.clone();
     commands.queue(move |world: &mut World| {
@@ -3021,8 +3048,7 @@ fn focus_in_memory_doc(world: &mut World, name: &str) {
 /// fetch a file's content via the API without spawning a separate
 /// shell. Resolves `path` relative to the workbench's current
 /// working directory.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct GetFile {
     pub path: String,
 }
@@ -3043,12 +3069,12 @@ pub struct GetFile {
 /// The legacy `OpenFile` / `OpenClass` / `OpenExample` commands stay
 /// available for callers that already use them; this is purely the
 /// scheme-aware front door.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct Open {
     pub uri: String,
 }
 
+#[on_command(Open)]
 fn on_open(trigger: On<Open>, mut commands: Commands) {
     let uri = trigger.event().uri.clone();
     if uri.is_empty() {
@@ -3096,11 +3122,10 @@ fn on_open(trigger: On<Open>, mut commands: Commands) {
 /// to the runtime-relevant subset.
 ///
 /// See spec 033 P2 for the design rationale.
-#[derive(Event, Reflect, Clone, Debug, Default)]
-#[reflect(Event, Default)]
+#[Command(default)]
 pub struct SetModelInput {
     /// Document id whose linked entity holds the running model.
-    pub doc: u64,
+    pub doc: DocumentId,
     /// Input name to set. Must already exist on the model — this
     /// command does not introduce new inputs.
     pub name: String,
@@ -3110,6 +3135,7 @@ pub struct SetModelInput {
     pub value: f64,
 }
 
+#[on_command(SetModelInput)]
 fn on_set_model_input(trigger: On<SetModelInput>, mut commands: Commands) {
     let doc_raw = trigger.event().doc;
     let name = trigger.event().name.clone();
@@ -3165,18 +3191,18 @@ impl SetModelInputError {
 /// `SetModelInputProvider` (in `crate::api_queries`) so the two paths
 /// can never drift.
 ///
-/// `doc_raw == 0` means "active document" — same convention as
+/// `doc_raw.is_unassigned()` means "active document" — same convention as
 /// [`SetModelInput`]'s wire form.
 pub fn apply_set_model_input(
     world: &mut World,
-    doc_raw: u64,
+    doc_raw: DocumentId,
     name: &str,
     value: f64,
 ) -> Result<DocumentId, SetModelInputError> {
-    let doc = if doc_raw == 0 {
+    let doc = if doc_raw.is_unassigned() {
         resolve_active_doc(world).ok_or(SetModelInputError::NoActiveDocument)?
     } else {
-        DocumentId::new(doc_raw)
+        doc_raw
     };
     let registry = world.resource::<crate::ui::state::ModelicaDocumentRegistry>();
     let entities = registry.entities_linked_to(doc);
@@ -3201,6 +3227,7 @@ pub fn apply_set_model_input(
     Ok(doc)
 }
 
+#[on_command(GetFile)]
 fn on_get_file(trigger: On<GetFile>) {
     let path = trigger.event().path.clone();
     match std::fs::read_to_string(&path) {
@@ -3218,6 +3245,7 @@ fn on_get_file(trigger: On<GetFile>) {
     }
 }
 
+#[on_command(Exit)]
 fn on_exit(_trigger: On<Exit>, mut commands: Commands) {
     bevy::log::info!("[Exit] AppExit triggered via API");
     commands.queue(|world: &mut World| {
@@ -3229,13 +3257,14 @@ fn on_exit(_trigger: On<Exit>, mut commands: Commands) {
     });
 }
 
+#[on_command(PanCanvas)]
 fn on_pan_canvas(trigger: On<PanCanvas>, mut commands: Commands) {
     let ev = trigger.event().clone();
     commands.queue(move |world: &mut World| {
-        let doc = if ev.doc == 0 {
+        let doc = if ev.doc.is_unassigned() {
             resolve_active_doc(world)
         } else {
-            Some(DocumentId::new(ev.doc))
+            Some(ev.doc)
         };
         use crate::ui::panels::canvas_diagram::CanvasDiagramState;
         let Some(mut state) = world.get_resource_mut::<CanvasDiagramState>() else {
@@ -3247,6 +3276,7 @@ fn on_pan_canvas(trigger: On<PanCanvas>, mut commands: Commands) {
     });
 }
 
+#[on_command(MoveComponent)]
 fn on_move_component(trigger: On<MoveComponent>, mut commands: Commands) {
     let ev = trigger.event().clone();
     commands.queue(move |world: &mut World| {
