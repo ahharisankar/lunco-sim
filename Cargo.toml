@@ -21,6 +21,7 @@ members = [
     "crates/lunco-sandbox-edit",
     "crates/lunco-ui",
     "crates/lunco-assets",
+    "crates/lunco-materials",
     "crates/lunco-networking",
     "crates/lunco-command-macro",
     "crates/lunco-terrain",

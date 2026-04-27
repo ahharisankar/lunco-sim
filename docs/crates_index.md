@@ -59,6 +59,7 @@ Modular bridge between OpenUSD and Bevy, covering visuals, physics, and simulati
 | **`lunco-usd-avian`** | Physics bridge: maps `USDPhysics` schemas (RigidBody, Colliders) to Avian3D components. |
 | **`lunco-usd-sim`** | Intercepts specialized simulation schemas (e.g., PhysX Vehicles) and maps them to LunCo models. |
 | **`lunco-usd-composer`** | Handles USD asset path resolution and stage flattening for complex multi-file assets. |
+| **`lunco-materials`** | Self-contained procedural material plugins (SolarPanel, Blueprint) for the USD rendering pipeline. |
 
 ---
 
@@ -108,30 +109,149 @@ Primary entry points and simulation assembly targets.
 
 ## Detailed Crate Responsibilities
 
-### lunco-core
-**Layer: 1 (Foundation)**
-The bedrock of the simulation. Defines the `DigitalPort` and `PhysicalPort` architectural primitives that allow software and hardware to talk. It also owns the `CommandMessage` system, which is the primary way to trigger actions in the simulation, and the `ComponentGraph`, which serves as the canonical data structure for all 2D diagram visualizations (Modelica, FSW, SysML).
+### 1. Workspace & Core Foundation
 
-### lunco-celestial
-**Layer: 2 (Domain)**
-Handles the large-scale spatial truth. Implements planetary ephemeris (where is Mars right now?), body-fixed rotation, and the Sphere of Influence (SOI) system that automatically transitions entities between coordinate grids (e.g., from Earth orbit to Lunar orbit). It provides gravity vectors for every entity based on their current body.
+**`lunco-core`**
+The bedrock of the simulation. Defines `DigitalPort` and `PhysicalPort` architectural primitives for software/hardware interaction. It also owns the `CommandMessage` system and the `ComponentGraph` which serves as the canonical data structure for all 2D diagram visualizations (Modelica, FSW, SysML).
 
-### lunco-cosim
-**Layer: 2 (Domain)**
-The "Master Clock" for multi-engine simulations. It uses a wire-and-socket model to connect variables between different simulation solvers. For example, it can wire a Modelica battery model's `voltage` output to an OBC's sensor input, or an Avian physics position to a Modelica solar panel's `height` input. It follows FMI/SSP principles for causality and propagation.
+**`lunco-workspace`**
+Manages the editor session ("what's open right now"). Tracks open Twins, active documents, perspectives, and recent files. It acts as a headless analog to a VS Code workspace, providing session-level metadata without depending on ECS or UI.
 
-### lunco-networking
-**Layer: 2b (Middleware)**
-A transparent shim that adds multiplayer capabilities. It uses `renet2` for transport and `bevy_replicon` for ECS state sync. It features a layered authentication model and a collaborative "Edit Log" that records every sandbox action (spawns, moves, deletes) to ensure all clients converge to the same state. It is designed to be removable for single-player performance.
+**`lunco-twin`**
+Defines the simulation unit on disk: a folder with a `twin.toml` manifest. Handles file-system indexing, recursive sub-twin discovery, and document membership rules (nearest-neighbor ownership) using storage handles.
 
-### lunco-usd-bevy
-**Layer: 3 (Visual)**
-The primary bridge for OpenUSD. It recursively walks a USD stage and spawns Bevy entities for every Prim, mapping standard USD visuals (Cubes, Spheres, Meshes) and `xformOp` transforms. It allows designers to author scenes in standard tools like Omniverse or Blender and have them appear instantly in the simulation.
+**`lunco-doc`**
+Foundation for structured, mutable artifacts (Modelica, USD, etc.) with built-in undo/redo logic. Defines the `DocumentHost` container and the atomic `DocumentOp` pattern for state mutation and inversion.
 
-### lunco-workbench
-**Layer: 4 (UI Shell)**
-Provides the engineering-IDE frame. It handles the docking engine (tabs, splits, floats), the "Perspective" system (named layout presets like "Build" or "Simulate"), and the Twin Browser. It acts as the host for every other domain's UI panels.
+**`lunco-storage`**
+I/O abstraction layer providing a unified `Storage` trait for reading and writing handles. Supports native FS and memory (for tests), with architectural stubs for future browser (OPFS/IndexedDB) and remote backends.
 
-### lunco-modelica
-**Layer: 7 (Modeling)**
-Integrates the Modelica language. It provides an AST-based editor where every change is a semantic operation (e.g., `AddComponent`) rather than just a text edit. It compiles models via a worker process and allows them to be used as `SimComponent`s in the co-simulation loop.
+**`lunco-assets`**
+Unified asset management system. Resolves shared cache locations across git worktrees, downloads external assets via `Assets.toml` with SHA-256 verification, and handles texture pre-processing (resize/convert).
+
+**`lunco-cache`**
+Generic resource cache with in-flight deduplication. Ensures that concurrent requests for expensive resources (like large USD stages or Modelica ASTs) collapse into a single background task, sharing the resulting parsed data.
+
+**`lunco-theme`**
+Centralized design tokens based on the Catppuccin palette. Provides semantic tokens for general UI (accent, success, error) and schematic-specific colors for diagram wires and badges, ensuring visual consistency across all panels.
+
+**`lunco-command-macro`**
+Procedural macros for the typed command system. Provides the `#[Command]`, `#[on_command]`, and `register_commands!` macros used to simplify the creation and registration of simulation actions.
+
+**`lunco-doc-bevy`**
+Bevy ECS integration for the Document System. Provides lifecycle events (Opened, Changed, Saved) and the `TwinJournal`, an append-only change log that records every document event in the session.
+
+---
+
+### 2. Simulation Engine
+
+**`lunco-celestial`**
+High-precision orbital mechanics and solar system simulation. Handles planetary ephemeris, body-fixed rotation, gravity vectors, and the Sphere of Influence (SOI) system for automatic coordinate frame transitions between bodies.
+
+**`lunco-environment`**
+Position-dependent environmental state (gravity, atmosphere, radiation, etc.). Uses a provider-consumer pattern to compute local conditions for each entity based on its proximity to celestial bodies and their specific environment models.
+
+**`lunco-terrain`**
+Procedural QuadSphere terrain generation and collision. Implements cube-to-sphere projection, LOD subdivision, and heightmap-based collision for planetary surfaces, ensuring deterministic terrain across networked clients.
+
+**`lunco-cosim`**
+Multi-engine simulation orchestrator. Wires named outputs from one engine (e.g., Modelica) to named inputs of another (e.g., Avian physics) via `SimConnection` components, following FMI/SSP patterns for causality and propagation.
+
+---
+
+### 3. Vessel Control & Hardware
+
+**`lunco-mobility`**
+Physics models for surface mobility and traction. Implements high-performance raycast-based wheel models, suspension dynamics (spring-damper), and steering mixing (Skid/Ackermann) for realistic planetary rover simulation.
+
+**`lunco-robotics`**
+High-level vessel assembly and spawning logic. Orchestrates the composition of complex robots from constituent parts, linking chassis, wheels, software, and sensors into a cohesive simulation unit.
+
+**`lunco-avatar`**
+Human-interaction layer. Provides composable camera behaviors (SpringArm, Orbit, FreeFlight) with smooth jitter-free transitions and coordinate-grid awareness for avatar-based exploration of celestial bodies.
+
+**`lunco-obc`**
+On-Board Computer emulation. Acts as the signal-processing bridge (DAC/ADC) between digital Flight Software registers (`i16`) and physical hardware units (`f32`), emulating hardware quantization and scaling.
+
+**`lunco-fsw`**
+Decentralized Flight Software architecture. Manages vessel subsystems as independent ECS entities communicating via an asynchronous `CommandMessage` fabric, mapping semantic SysML names to hardware entities.
+
+**`lunco-hardware`**
+Physical actuator and sensor implementations. Bridges `PhysicalPort` values to the `avian3d` physics engine, providing concrete motor, brake, and sensor components that interact with the simulation world.
+
+**`lunco-controller`**
+Input mapping and translation. Converts raw human-interface device inputs (Keyboard, Gamepad, Mouse) into abstract `VesselIntent` actions and typed command events for consumption by Flight Software.
+
+---
+
+### 4. USD Integration Layer
+
+**`lunco-usd`**
+High-level USD orchestrator and engineering metadata bridge. Maps LunCo-specific metadata (`lunco:*` namespace) from USD stages to Bevy components, enriching 3D models with simulation-critical data like Ephemeris IDs.
+
+**`lunco-usd-bevy`**
+Core OpenUSD visual bridge. Maps USD prim hierarchies, shapes (Cubes, Spheres, Meshes), and transforms into Bevy entities and components for instant visual synchronization from USDA source files.
+
+**`lunco-usd-avian`**
+Physics bridge for OpenUSD. Automatically maps `USDPhysics` schemas (RigidBody, Colliders) to Avian3D components using high-performance ECS observers that react to USD prim paths.
+
+**`lunco-usd-sim`**
+Specialized simulation metadata bridge. Intercepts complex industry-standard vehicle schemas (like NVIDIA PhysX Vehicles) and substitutes them with optimized LunCo simulation models (e.g., Raycast wheels).
+
+**`lunco-usd-composer`**
+Handles USD asset path resolution and stage flattening. Resolves complex multi-file composition (references, sublayers) into a unified data map for the simulation stage loader, anchoring paths to the Bevy asset directory.
+
+**`lunco-materials`**
+Procedural material library for the USD pipeline. Provides self-contained plugins for specialized shaders (SolarPanel, Blueprint grid) that are automatically assigned to entities based on USD `primvars` metadata.
+
+---
+
+### 5. Networking & API
+
+**`lunco-networking`**
+Transparent multiplayer shim. Handles ECS replication, transport abstraction (UDP/WebSockets), and collaborative editing via a verified `AuthorizedCommand` flow and Lamport-ordered `EditLog` for history and undo.
+
+**`lunco-api`**
+Transport-agnostic API core. Exposes simulation state and command discovery via HTTP, mapping ULID-based stable entity IDs to process-local Bevy entities for external control and inspection.
+
+**`lunco-telemetry`**
+Reflection-based data extraction engine. Automatically samples and standardizes internal physics and software values for broadcast to external monitoring systems or Mission Control bridges (YAMCS/XTCE).
+
+**`lunco-attributes`**
+Distributed tuning registry. Allows external processes to mutate simulation state using string-based paths (e.g., `"vessel.rover1.suspension.k"`) that map 1:1 with SysML architectural models.
+
+---
+
+### 6. Workbench & UI Tools
+
+**`lunco-workbench`**
+The engineering-IDE shell. Handles the docking engine (tabs, splits), perspective presets (Build, Simulate), and the Twin Browser, acting as the primary host for all other domain-specific UI panels.
+
+**`lunco-ui`**
+Reusable UI infrastructure. Provides the `WidgetSystem` for cached ECS widgets, the `CommandBuilder` for action-driven interaction, and `WorldPanel` for 3D in-scene UI elements attached to entities.
+
+**`lunco-viz`**
+Domain-agnostic visualization framework. Collects simulation data into a `SignalRegistry` and renders it via `Visualization` kinds (LinePlots, Gauges) into various view targets like 2D panels or the 3D viewport.
+
+**`lunco-canvas`**
+2D scene editor substrate. Provides the stateful viewport and tool foundation for diagramming and node-based editing, powering the Modelica diagram editor and other schematic-based tools.
+
+**`lunco-sandbox-edit`**
+In-scene editing toolkit for the 3D viewport. Implements click-to-place spawning, transform gizmos for manipulation, and inspector panels for real-time property editing during simulation assembly.
+
+---
+
+### 7. Scripting & Modeling
+
+**`lunco-modelica`**
+Modelica language integration. Provides AST-based editing, compilation via Rumoca, and interactive diagramming, allowing complex industrial models to drive simulation entities and vessel subsystems.
+
+**`lunco-scripting`**
+Reflected memory bridge for Python and Lua. Enables dynamic logic providers to read and write simulation memory directly, supporting both deterministic physics loops and interactive REPL sessions.
+
+---
+
+### 8. Applications
+
+**`lunco-client`**
+Primary simulation entry point. Aggregates all domain plugins into cohesive application targets (Native/Web), orchestrating global configuration, scenario assembly, and environment integration.
