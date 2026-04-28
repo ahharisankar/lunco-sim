@@ -36,6 +36,30 @@ mod models_palette;
 /// 
 /// Supports:
 fn main() {
+    // Match modelica_workbench's pattern: scan argv for `--api <port>`
+    // so the window title can advertise the listening port. Saves
+    // confusion when several instances run side-by-side.
+    let api_port: Option<u16> = {
+        let args: Vec<String> = std::env::args().collect();
+        let mut port = None;
+        for i in 0..args.len() {
+            if args[i] == "--api" {
+                port = Some(3000);
+                if i + 1 < args.len() {
+                    if let Ok(p) = args[i + 1].parse::<u16>() {
+                        port = Some(p);
+                    }
+                }
+                break;
+            }
+        }
+        port
+    };
+    let window_title = match api_port {
+        Some(p) => format!("rover_sandbox_usd — Listening on {p}"),
+        None => "rover_sandbox_usd".to_string(),
+    };
+
     let mut app = App::new();
     app.insert_resource(Time::<Fixed>::from_hz(60.0))
         .insert_resource(lunco_core::TimeWarpState { physics_enabled: true, ..default() })
@@ -48,7 +72,7 @@ fn main() {
             })
             .set(WindowPlugin {
                 primary_window: Some(Window {
-                    title: "rover_sandbox_usd".into(),
+                    title: window_title,
                     resolution: bevy::window::WindowResolution::new(1600, 1000),
                     position: WindowPosition::Centered(MonitorSelection::Primary),
                     ..default()

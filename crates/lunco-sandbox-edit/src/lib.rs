@@ -31,6 +31,7 @@
 pub mod catalog;
 pub mod commands;
 pub mod gizmo;
+pub mod physics_viz;
 pub mod selection;
 pub mod spawn;
 pub mod undo;
@@ -78,6 +79,20 @@ impl Plugin for SandboxEditPlugin {
         ));
         app.add_systems(Update, gizmo::sync_gizmo_camera);
         app.add_systems(Update, undo::handle_undo_input);
+
+        // Physics-state arrows (velocity, force) for entities that
+        // opt in via `PhysicsArrows`. Cheap when no entity opts in.
+        app.init_resource::<physics_viz::GlobalPhysicsArrows>();
+        app.register_type::<physics_viz::PhysicsArrows>();
+        app.add_systems(Startup, physics_viz::configure_gizmo_overlay);
+        app.add_systems(
+            Update,
+            (
+                physics_viz::auto_mark_dynamic_bodies,
+                physics_viz::draw_physics_arrows,
+            ),
+        );
+        physics_viz::register_all_commands(app);
 
         // Custom picking backend: always report selected `GizmoTarget`s as
         // hit by the pointer. Counteracts the gizmo's internal
