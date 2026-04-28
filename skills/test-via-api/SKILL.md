@@ -57,7 +57,7 @@ cargo run --bin modelica_workbench -- --api 3000   # run_in_background:true
 # 2. Wait for API. Use a Monitor with an until-loop, NOT chained sleeps:
 until curl -s -o /dev/null -X POST http://127.0.0.1:3000/api/commands \
   -H "Content-Type: application/json" \
-  -d '{"command":"FitCanvas","params":{}}' 2>/dev/null; do sleep 1; done
+  -d '{"command":"Ping","params":{}}' 2>/dev/null; do sleep 1; done
 
 # 3. Send commands (see catalog below).
 

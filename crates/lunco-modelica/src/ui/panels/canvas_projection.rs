@@ -707,6 +707,35 @@ pub fn import_model_to_diagram_from_ast(
             }
         }
 
+        // Re-extract the icon at runtime through the same code path
+        // the standalone Icon view uses. The pre-baked
+        // `MSLComponentDef.icon_graphics` from `msl_index.json` drops
+        // primitives whose `extends` base sits in a sibling package
+        // the indexer's resolver doesn't reach (SpeedSensor extends
+        // PartialAbsoluteSensor extends Icons.RoundSensor — only the
+        // last hop survives the index in some cases). Going through
+        // `class_cache::peek_or_load_msl_class` for each base means
+        // both views render the same primitives, and instance-time
+        // changes to the inheritance chain don't require a re-index.
+        if let Some(def) = component_def.as_mut() {
+            let qualified = def.msl_path.clone();
+            if let Some(class) = crate::class_cache::peek_or_load_msl_class(&qualified) {
+                use std::sync::Arc;
+                let mut resolver = |lookup: &str| -> Option<Arc<rumoca_session::parsing::ast::ClassDef>> {
+                    crate::class_cache::peek_or_load_msl_class(lookup)
+                };
+                let mut visited = std::collections::HashSet::new();
+                if let Some(icon) = crate::annotations::extract_icon_inherited(
+                    &qualified,
+                    class.as_ref(),
+                    &mut resolver,
+                    &mut visited,
+                ) {
+                    def.icon_graphics = Some(icon);
+                }
+            }
+        }
+
         if let Some(def) = component_def {
             let mut pos = None;
             // Build the full icon-local → canvas affine in one place.

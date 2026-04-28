@@ -219,57 +219,6 @@ fn fallback_port_position(causality: &Causality, port_index: usize) -> (f32, f32
     }
 }
 
-/// Scan raw Modelica source text and extract every connector Placement
-/// centre in parent-diagram coords.
-///
-/// Matches declarations of the form:
-/// ```modelica
-/// TypeName portName annotation(Placement(transformation(extent={{x1,y1},{x2,y2}}, origin={ox,oy}...
-/// ```
-///
-/// Returns `port_name → center (x, y)` in Modelica diagram coords
-/// (-100..100). Honors `origin={ox,oy}` when present — without it, MSL
-/// connectors authored as `extent={{-20,-20},{20,20}}, origin={60,-120}`
-/// (a bottom-edge port like `Integrator.reset`) collapsed to (0, 0)
-/// and rendered at the icon centre instead of the bottom edge.
-///
-/// First occurrence wins (file-level, not class-scoped — good enough
-/// for MSL where port names are unique per file in practice).
-fn extract_all_placements(source: &str) -> HashMap<String, (f32, f32)> {
-    let mut map = HashMap::new();
-    // Capture: 1=name, 2=extent_p1, 3=extent_p2, 4=optional origin pair.
-    // The origin half is `(?:...)?` so unannotated extents still parse.
-    let re = regex::Regex::new(
-        r"(?s)\b(\w+)\b[^;]{0,300}?annotation\s*\(\s*Placement\s*\(\s*transformation\s*\([^)]*?extent\s*=\s*\{\{([^}]+)\},\{([^}]+)\}\}(?:[^)]*?\borigin\s*=\s*\{([^}]+)\})?"
-    ).expect("valid regex");
-
-    let parse_pair = |s: &str| -> Option<(f32, f32)> {
-        let v: Vec<f32> = s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
-        if v.len() >= 2 { Some((v[0], v[1])) } else { None }
-    };
-
-    for caps in re.captures_iter(source) {
-        let name = caps[1].to_string();
-        if let (Some((x1, y1)), Some((x2, y2))) = (
-            parse_pair(&caps[2]),
-            parse_pair(&caps[3]),
-        ) {
-            // Default origin is (0, 0) per MLS Annex D when not
-            // specified. When given, its components add to the
-            // extent's centre to yield the connector's true position
-            // in the parent diagram's coordinate system.
-            let (ox, oy) = caps
-                .get(4)
-                .and_then(|m| parse_pair(m.as_str()))
-                .unwrap_or((0.0, 0.0));
-            let cx = (x1 + x2) / 2.0 + ox;
-            let cy = (y1 + y2) / 2.0 + oy;
-            map.entry(name).or_insert((cx, cy));
-        }
-    }
-    map
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct PortDef {
     name: String,
@@ -367,10 +316,6 @@ fn is_top_level_self_ref(name: &str, current_path: &str, is_package_file: bool) 
 
 struct MSLIndexer {
     classes: HashMap<String, ClassDef>,
-    /// Pre-extracted port placements: class_name → (port_name → (x, y)).
-    /// Populated in `scan_dir` while the source text is already in memory,
-    /// so we never need to re-read .mo files or store them long-term.
-    placements: HashMap<String, HashMap<String, (f32, f32)>>,
     /// Per-class first-paragraph plain-text from
     /// `annotation(Documentation(info="…"))`. Keyed by the simple
     /// class name (not fully-qualified) — good enough at MSL scale
@@ -593,7 +538,6 @@ impl MSLIndexer {
     fn new() -> Self {
         Self {
             classes: HashMap::new(),
-            placements: HashMap::new(),
             doc_infos: HashMap::new(),
             verbose: false,
             files_scanned: 0,
@@ -683,7 +627,6 @@ impl MSLIndexer {
                         .ok()
                         .and_then(|mut pairs| pairs.pop().map(|(_, ast)| ast));
                         if let Some(ast) = ast_opt {
-                            let file_placements = extract_all_placements(&source);
                             // Extract Documentation info text while the
                             // `.mo` source is still in memory. Merged
                             // into the indexer-wide map keyed by simple
@@ -697,20 +640,18 @@ impl MSLIndexer {
                             for (k, v) in extract_documentation_infos(&source) {
                                 self.doc_infos.entry(k).or_insert(v);
                             }
-                            for name in ast.classes.keys() {
-                                let full = if is_top_level_self_ref(
-                                    name,
-                                    package_prefix,
-                                    is_package_file,
-                                ) {
-                                    package_prefix.to_string()
-                                } else if package_prefix.is_empty() {
-                                    name.to_string()
-                                } else {
-                                    format!("{}.{}", package_prefix, name)
-                                };
-                                self.placements.insert(full, file_placements.clone());
-                            }
+                            // Port placements come from rumoca's typed
+                            // annotation tree at port-build time
+                            // (see `resolve_inheritance` →
+                            // `extract_placement(&comp.annotation)`),
+                            // so no separate text-regex scan is needed
+                            // here. That scan was the source of three
+                            // independent bugs (variable-name capture,
+                            // origin-before-extent ordering, nested-
+                            // class scoping) and locked the indexer to
+                            // an MSL-shaped source layout. Going through
+                            // rumoca makes the same path work for any
+                            // library rumoca can parse.
                             self.add_stored_definition(ast, package_prefix, is_package_file);
                         }
                         // source is dropped here — no long-term storage of .mo text
@@ -885,11 +826,33 @@ impl MSLIndexer {
                     }
 
                     if !ports.iter().any(|p| p.name == comp.name) {
-                        let (x, y) = self.placements
-                            .get(class_name)
-                            .and_then(|m| m.get(&comp.name))
-                            .copied()
-                            .unwrap_or_else(|| fallback_port_position(&comp.causality, ports.len()));
+                        // Read the placement straight from rumoca's
+                        // typed annotation tree — same code path the
+                        // workbench uses at runtime
+                        // (`crate::annotations::extract_placement`).
+                        // Replaces the prior text-regex scan that
+                        // (1) couldn't pull `origin=` when authored
+                        // before `extent=`, (2) silently dropped
+                        // placements declared in nested-class scopes,
+                        // and (3) was MSL-specific by virtue of being
+                        // unable to handle parser variations from
+                        // other Modelica libraries. Going through
+                        // rumoca means any library rumoca can parse
+                        // also gets correctly-positioned ports.
+                        let (x, y) = lunco_modelica::annotations::extract_placement(
+                            &comp.annotation,
+                        )
+                        .map(|p| {
+                            let extent = &p.transformation.extent;
+                            let cx = (extent.p1.x + extent.p2.x) / 2.0
+                                + p.transformation.origin.x;
+                            let cy = (extent.p1.y + extent.p2.y) / 2.0
+                                + p.transformation.origin.y;
+                            (cx as f32, cy as f32)
+                        })
+                        .unwrap_or_else(|| {
+                            fallback_port_position(&comp.causality, ports.len())
+                        });
 
                         ports.push(PortDef {
                             name: comp.name.clone(),

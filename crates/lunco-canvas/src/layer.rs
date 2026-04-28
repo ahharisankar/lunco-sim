@@ -141,6 +141,25 @@ impl EdgesLayer {
 impl Layer for EdgesLayer {
     fn draw(&mut self, ctx: &mut DrawCtx, scene: &Scene, selection: &Selection) {
         let sr = ctx.screen_rect;
+        // Pre-pass: count edge incidences per (node, port) endpoint
+        // so we know which ports host a junction (≥3 wires meet
+        // there) — Dymola/OMEdit draw a small filled circle at
+        // those points to disambiguate "two crossing wires that
+        // are connected" from "two wires that just happen to
+        // visually overlap". 2-port connections (the common case)
+        // never get a dot.
+        let mut endpoint_counts: std::collections::HashMap<
+            (crate::scene::NodeId, crate::scene::PortId),
+            u32,
+        > = std::collections::HashMap::new();
+        for (_eid, edge) in scene.edges() {
+            *endpoint_counts
+                .entry((edge.from.node, edge.from.port.clone()))
+                .or_insert(0) += 1;
+            *endpoint_counts
+                .entry((edge.to.node, edge.to.port.clone()))
+                .or_insert(0) += 1;
+        }
         for (eid, edge) in scene.edges() {
             let Some(from_node) = scene.node(edge.from.node) else { continue };
             let Some(to_node) = scene.node(edge.to.node) else { continue };
@@ -162,8 +181,19 @@ impl Layer for EdgesLayer {
                 to_node.rect.min.x + to_port.local_offset.x,
                 to_node.rect.min.y + to_port.local_offset.y,
             );
-            let from_s = ctx.viewport.world_to_screen(from_w, sr);
-            let to_s = ctx.viewport.world_to_screen(to_w, sr);
+            // Snap endpoints to integer pixels. Without this, the
+            // floating-point world→screen transform produces sub-
+            // pixel endpoint coordinates that egui anti-aliases at
+            // different sub-pixel offsets per zoom step, making the
+            // wire visibly jitter / shift its connection point as
+            // the user pans or zooms. The icon's port marker (also
+            // drawn at world-to-screen of the same world coord)
+            // shifts in lockstep, so snapping both keeps them
+            // aligned to the same pixel grid.
+            let from_s_raw = ctx.viewport.world_to_screen(from_w, sr);
+            let to_s_raw = ctx.viewport.world_to_screen(to_w, sr);
+            let from_s = crate::scene::Pos::new(from_s_raw.x.round(), from_s_raw.y.round());
+            let to_s = crate::scene::Pos::new(to_s_raw.x.round(), to_s_raw.y.round());
             let visual = self
                 .registry_handle
                 .build_edge(edge.kind.as_str(), &edge.data)
@@ -171,6 +201,31 @@ impl Layer for EdgesLayer {
             let selected =
                 selection.contains(crate::selection::SelectItem::Edge(*eid));
             visual.draw(ctx, from_s, to_s, selected);
+        }
+        // Post-pass: junction dots. A small filled circle at any
+        // port that hosts ≥3 incident wires. Drawn on top of the
+        // edges (last in this layer) but still under the nodes
+        // layer, so the icon body covers it where they overlap.
+        let theme = crate::theme::current(ctx.ui.ctx());
+        let dot_color = theme.overlay_text;
+        for ((node_id, port_id), count) in &endpoint_counts {
+            if *count < 3 {
+                continue;
+            }
+            let Some(node) = scene.node(*node_id) else { continue };
+            let Some(port) = node.ports.iter().find(|p| p.id == *port_id) else { continue };
+            let world = crate::scene::Pos::new(
+                node.rect.min.x + port.local_offset.x,
+                node.rect.min.y + port.local_offset.y,
+            );
+            let p = ctx.viewport.world_to_screen(world, sr);
+            let center = egui::pos2(p.x.round(), p.y.round());
+            // Radius scaled with zoom so the dot stays visible at
+            // wide-zoom and doesn't dominate when zoomed in.
+            let r = (3.0 * ctx.viewport.zoom.clamp(0.5, 2.0)).max(2.5);
+            ctx.ui
+                .painter()
+                .circle_filled(center, r, dot_color);
         }
     }
     fn name(&self) -> &'static str {

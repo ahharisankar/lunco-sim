@@ -41,10 +41,36 @@ fn main() {
         ),
     }
 
+    // Mirror `LunCoApiConfig::from_args` so the title can advertise
+    // the listening port — automation drives the workbench via this
+    // port, having it visible in the title bar avoids confusion when
+    // multiple instances run side-by-side (e.g. user on 3000 + a
+    // sandboxed test on 3001).
+    let api_port: Option<u16> = {
+        let args: Vec<String> = std::env::args().collect();
+        let mut port = None;
+        for i in 0..args.len() {
+            if args[i] == "--api" {
+                port = Some(3000);
+                if i + 1 < args.len() {
+                    if let Ok(p) = args[i + 1].parse::<u16>() {
+                        port = Some(p);
+                    }
+                }
+                break;
+            }
+        }
+        port
+    };
+    let window_title = match api_port {
+        Some(p) => format!("LunCo Modelica Workbench — Listening on {p}"),
+        None => "LunCo Modelica Workbench".to_string(),
+    };
+
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "LunCo Modelica Workbench".into(),
+                title: window_title,
                 ..default()
             }),
             ..default()

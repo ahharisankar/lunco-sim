@@ -1531,12 +1531,14 @@ fn render_icon_view(ui: &mut egui::Ui, world: &mut World) {
             class_name: Some(short_name.as_str()),
             parameters: (!parameters.is_empty()).then_some(parameters.as_slice()),
         };
-        crate::icon_paint::paint_graphics_full(
+        crate::icon_paint::paint_graphics_themed(
             painter,
             icon_rect,
             icon.coordinate_system,
             crate::icon_paint::IconOrientation::default(),
             Some(&sub),
+            None,
+            Some(&theme.modelica_icons),
             &icon.graphics,
         );
         // No workbench-side class label — the icon's authored
