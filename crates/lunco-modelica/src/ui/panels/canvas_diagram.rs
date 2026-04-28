@@ -208,6 +208,13 @@ pub struct IconNodeData {
     /// `extends` chain. `None` only when the class has literally no
     /// Icon in inheritance — then the visual falls back to a label box.
     pub icon_graphics: Option<crate::annotations::Icon>,
+    /// Decoded `Diagram(graphics={...})` annotation, populated only
+    /// for connector classes that author one. When set the renderer
+    /// uses this instead of `icon_graphics` — MSL signal connectors
+    /// (RealInput, RealOutput, …) put the `%name` text label and
+    /// the larger filled triangle in their Diagram annotation, while
+    /// keeping a stripped-down Icon for use as a port marker.
+    pub diagram_graphics: Option<crate::annotations::Diagram>,
     /// Per-instance rotation (degrees CCW, Modelica convention).
     pub rotation_deg: f32,
     /// Mirror flags applied before rotation (MLS Annex D order).
@@ -275,6 +282,10 @@ struct IconNodeVisual {
     /// classes show their authored graphics instead of falling back
     /// to a generic placeholder.
     icon_graphics: Option<crate::annotations::Icon>,
+    /// `Diagram(...)` graphics for connector instances rendered at
+    /// top-level on a parent diagram. Preferred over `icon_graphics`
+    /// when present.
+    diagram_graphics: Option<crate::annotations::Diagram>,
     /// Pre-formatted `(parameter_name, value)` pairs for `%paramName`
     /// text substitution. Carries class defaults from
     /// `MSLComponentDef.parameters` (instance-modification overlay
@@ -338,7 +349,18 @@ impl NodeVisual for IconNodeVisual {
             mirror_y: self.mirror_y,
         };
         let mut drew_icon = false;
-        if let Some(icon) = &self.icon_graphics {
+        // Prefer Diagram graphics for connectors that author them —
+        // MSL signal connectors keep their `%name` Text label and
+        // larger filled triangle in the Diagram annotation, while
+        // their Icon stays small (used as a port marker on
+        // sub-components). Picks the diagram form when this is the
+        // top-level connector instance.
+        let display_graphics: Option<(&crate::annotations::CoordinateSystem, &[crate::annotations::GraphicItem])> =
+            self.diagram_graphics
+                .as_ref()
+                .map(|d| (&d.coordinate_system, d.graphics.as_slice()))
+                .or_else(|| self.icon_graphics.as_ref().map(|i| (&i.coordinate_system, i.graphics.as_slice())));
+        if let Some((coord_sys, graphics)) = display_graphics {
             let sub = crate::icon_paint::TextSubstitution {
                 name: (!self.instance_name.is_empty()).then_some(self.instance_name.as_str()),
                 class_name: (!self.class_name.is_empty()).then_some(self.class_name.as_str()),
@@ -370,12 +392,12 @@ impl NodeVisual for IconNodeVisual {
             crate::icon_paint::paint_graphics_themed(
                 painter,
                 rect,
-                icon.coordinate_system,
+                *coord_sys,
                 orientation,
                 Some(&sub),
                 Some(resolver_ref),
                 palette.as_ref(),
-                &icon.graphics,
+                graphics,
             );
             drew_icon = true;
         }
@@ -1914,6 +1936,7 @@ fn build_registry() -> VisualRegistry {
             icon_only: d.icon_only,
             expandable_connector: d.expandable_connector,
             icon_graphics: d.icon_graphics.clone(),
+            diagram_graphics: d.diagram_graphics.clone(),
             parameters: d.parameters.clone(),
             rotation_deg: d.rotation_deg,
             mirror_x: d.mirror_x,
@@ -2240,6 +2263,11 @@ fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramNodeId, Canv
                 ),
                 expandable_connector: node.component_def.is_expandable_connector,
                 icon_graphics: node.component_def.icon_graphics.clone(),
+                diagram_graphics: if node.component_def.class_kind == "connector" {
+                    node.component_def.diagram_graphics.clone()
+                } else {
+                    None
+                },
                 rotation_deg: node.icon_transform.rotation_deg,
                 mirror_x: node.icon_transform.mirror_x,
                 mirror_y: node.icon_transform.mirror_y,
@@ -6247,6 +6275,11 @@ fn synthesize_msl_node(
             icon_only: crate::class_cache::is_icon_only_class(&comp.msl_path),
             expandable_connector: comp.is_expandable_connector,
             icon_graphics: comp.icon_graphics.clone(),
+            diagram_graphics: if comp.class_kind == "connector" {
+                comp.diagram_graphics.clone()
+            } else {
+                None
+            },
             rotation_deg: 0.0,
             mirror_x: false,
             mirror_y: false,

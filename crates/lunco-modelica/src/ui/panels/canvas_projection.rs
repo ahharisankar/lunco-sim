@@ -956,6 +956,7 @@ fn register_local_class(
             ports,
             parameters: Vec::new(),
             icon_graphics: icon,
+            diagram_graphics: crate::annotations::extract_diagram(&class_def.annotation),
             is_expandable_connector,
             short_description: None,
             documentation_info: None,

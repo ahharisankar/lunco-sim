@@ -201,6 +201,13 @@ pub struct MSLComponentDef {
     /// type-label box.
     #[serde(default)]
     pub icon_graphics: Option<crate::annotations::Icon>,
+    /// Decoded `Diagram(graphics={...})` annotation. Connectors author
+    /// a separate Diagram annotation (with their `%name` Text label)
+    /// distinct from the Icon used at port markers — when a connector
+    /// instance appears at top-level on a parent's diagram, the
+    /// renderer prefers this over `icon_graphics`.
+    #[serde(default)]
+    pub diagram_graphics: Option<crate::annotations::Diagram>,
     /// `expandable connector` class type (MLS §9.1.3). Rendered with
     /// a dashed border on the canvas so users can distinguish them
     /// from regular connectors — they auto-collect variables across

@@ -313,6 +313,8 @@ struct MSLComponentDef {
     /// graphics primitives apart reliably).
     #[serde(default)]
     icon_graphics: Option<lunco_modelica::annotations::Icon>,
+    #[serde(default)]
+    diagram_graphics: Option<lunco_modelica::annotations::Diagram>,
     ports: Vec<PortDef>,
     parameters: Vec<ParamDef>,
 }
@@ -1018,6 +1020,14 @@ impl MSLIndexer {
                     &mut resolver,
                     &mut icon_visited,
                 );
+                // Diagram annotation — used when a connector instance
+                // is rendered on a parent's diagram (carries the
+                // `%name` Text label and the larger filled triangle
+                // graphic that MSL signal connectors use only in the
+                // diagram view, not as port markers).
+                let diagram_graphics = lunco_modelica::annotations::extract_diagram(
+                    &class.annotation,
+                );
 
                 // Tiny `%name` / `textString="..."` extraction kept
                 // for the palette text fallback when a class has no
@@ -1051,6 +1061,7 @@ impl MSLIndexer {
                     class_kind,
                     icon_text,
                     icon_graphics,
+                    diagram_graphics,
                     ports,
                     parameters,
                 });
