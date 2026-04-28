@@ -1351,7 +1351,7 @@ fn render_status_bar_inner(
         let history: Vec<_> = bus.history().cloned().collect();
         (latest, history)
     };
-    let perf_stats = *world.resource::<perf_hud::PerfStats>();
+    let perf_stats = world.resource::<perf_hud::PerfStats>().clone();
     let perf_enabled = world.resource::<perf_hud::PerfHudSettings>().enabled;
 
     ui.horizontal(|ui| {
@@ -1417,14 +1417,19 @@ fn render_status_bar_inner(
                     .physics_ms
                     .map(|ms| format!(" · phys {:.1}ms", ms))
                     .unwrap_or_default();
+                let p99 = perf_stats
+                    .frame_ms_stats()
+                    .map(|(_, _, p99)| format!(" · p99 {:.1}ms", p99))
+                    .unwrap_or_default();
                 ui.label(
                     egui::RichText::new(format!(
-                        "FPS {:.1} · {:.1}ms{}",
-                        perf_stats.fps, perf_stats.frame_ms, phys
+                        "FPS {:.1} · {:.1}ms{}{}",
+                        perf_stats.fps, perf_stats.frame_ms, p99, phys,
                     ))
                     .small()
                     .monospace(),
                 );
+                draw_frame_time_sparkline(ui, &perf_stats);
             });
         }
 
@@ -1477,6 +1482,67 @@ fn render_status_bar_inner(
                 });
             });
     });
+}
+
+/// Draws a small frame-time sparkline in the status bar so spikes
+/// the smoothed `FPS` number hides become visible. Y axis auto-
+/// scales to whatever the worst recent sample was; a faint reference
+/// line at 16.67 ms (60 FPS) anchors the eye.
+fn draw_frame_time_sparkline(ui: &mut egui::Ui, stats: &perf_hud::PerfStats) {
+    if stats.frame_history.is_empty() {
+        return;
+    }
+    // Plot dimensions chosen to fit the 18 px-tall status bar with
+    // a few px of breathing room.
+    let size = egui::vec2(120.0, 14.0);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let painter = ui.painter().with_clip_rect(rect);
+
+    // Auto-scale: top of the plot is the worst recent sample, but
+    // never below ~25 ms so a calm 60 FPS run doesn't make 1 ms
+    // jitter look like a spike.
+    let max_ms: f32 = stats
+        .frame_history
+        .iter()
+        .copied()
+        .fold(0.0_f32, f32::max)
+        .max(25.0);
+
+    // 16.67 ms (60 FPS) reference line.
+    let ref_y = rect.bottom() - rect.height() * (16.67 / max_ms).min(1.0);
+    painter.line_segment(
+        [egui::pos2(rect.left(), ref_y), egui::pos2(rect.right(), ref_y)],
+        egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(150, 150, 150, 80)),
+    );
+
+    let n = stats.frame_history.len();
+    let step = rect.width() / (perf_hud::FRAME_HISTORY_LEN - 1).max(1) as f32;
+    let mut prev: Option<egui::Pos2> = None;
+    for (i, ms) in stats.frame_history.iter().enumerate() {
+        let x = rect.left() + i as f32 * step;
+        let y = rect.bottom() - rect.height() * (*ms / max_ms).clamp(0.0, 1.0);
+        let here = egui::pos2(x, y);
+        // Per-sample colour: green ≤16.67 ms, yellow ≤33 ms, red above.
+        let colour = if *ms <= 16.67 {
+            egui::Color32::from_rgb(120, 220, 120)
+        } else if *ms <= 33.34 {
+            egui::Color32::from_rgb(230, 200, 80)
+        } else {
+            egui::Color32::from_rgb(230, 100, 90)
+        };
+        if let Some(p) = prev {
+            painter.line_segment([p, here], egui::Stroke::new(1.0, colour));
+        }
+        prev = Some(here);
+    }
+    // Outline so the plot reads as a chart, not random pixels.
+    painter.rect_stroke(
+        rect,
+        0.0,
+        egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(120, 120, 120, 100)),
+        egui::StrokeKind::Inside,
+    );
+    let _ = n;
 }
 
 fn render_panel_solo(

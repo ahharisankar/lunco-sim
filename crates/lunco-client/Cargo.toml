@@ -51,6 +51,16 @@ openusd = { workspace = true }
 bevy_egui = { workspace = true }
 bevy-inspector-egui = { workspace = true }
 
+# Replace glibc's allocator with mimalloc on native targets. Bevy +
+# avian generate huge cross-thread allocator traffic; glibc's
+# arena-per-thread fallback still hits a global lock which serialised
+# our hot frames against the avian contact-graph rebuild. mimalloc
+# uses per-thread heaps and lock-free fast paths, giving consistent
+# frame times. Wasm has its own allocator path, so this dep is native-
+# only.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+mimalloc = "0.1"
+
 [features]
 default = ["celestial"]
 celestial = []

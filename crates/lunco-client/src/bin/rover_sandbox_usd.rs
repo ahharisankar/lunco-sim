@@ -4,6 +4,16 @@
 //! so all entities (rover chassis + wheels) exist before physics runs.
 //! This matches the original rover_sandbox behavior exactly.
 
+// glibc's allocator serialises cross-thread allocations through a
+// shared arena lock; with avian's contact graph allocating heavily on
+// a parallel task pool every fixed tick, the main render thread paid
+// a tail-latency penalty on every alloc. mimalloc uses per-thread
+// heaps and a lock-free fast path, removing the contention. Native
+// only — wasm has its own allocator pipeline.
+#[cfg(not(target_arch = "wasm32"))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use bevy::prelude::*;
 use bevy::asset::AssetPlugin;
 use bevy::pbr::wireframe::WireframePlugin;
@@ -39,8 +49,13 @@ fn main() {
     // Match modelica_workbench's pattern: scan argv for `--api <port>`
     // so the window title can advertise the listening port. Saves
     // confusion when several instances run side-by-side.
+    //
+    // Also parse `--no-vsync`. By default the window uses Bevy's
+    // `PresentMode::Fifo` (VSync on), which caps FPS to the display
+    // refresh — typically 60 Hz on laptops. Useful for measuring real
+    // CPU/GPU headroom without the display cap.
+    let args: Vec<String> = std::env::args().collect();
     let api_port: Option<u16> = {
-        let args: Vec<String> = std::env::args().collect();
         let mut port = None;
         for i in 0..args.len() {
             if args[i] == "--api" {
@@ -54,6 +69,17 @@ fn main() {
             }
         }
         port
+    };
+    let no_vsync = args.iter().any(|a| a == "--no-vsync");
+    // `--log-diag` toggles Bevy's `LogDiagnosticsPlugin`, which prints
+    // FPS / FrameTime / EntityCount and — when `bevy_diagnostic` is on
+    // for avian — the physics step time, every second. Off by default
+    // because the lines are noisy; flip it on while hunting perf.
+    let log_diag = args.iter().any(|a| a == "--log-diag");
+    let present_mode = if no_vsync {
+        bevy::window::PresentMode::Mailbox
+    } else {
+        bevy::window::PresentMode::Fifo
     };
     let window_title = match api_port {
         Some(p) => format!("rover_sandbox_usd — Listening on {p}"),
@@ -75,6 +101,7 @@ fn main() {
                     title: window_title,
                     resolution: bevy::window::WindowResolution::new(1600, 1000),
                     position: WindowPosition::Centered(MonitorSelection::Primary),
+                    present_mode,
                     ..default()
                 }),
                 ..default()
@@ -100,6 +127,10 @@ fn main() {
             group
         })
         .add_plugins(WireframePlugin::default())
+        // EntityCount is cheap and useful any time we look at perf; add
+        // unconditionally. LogDiagnosticsPlugin is loud — it prints a
+        // multi-line summary every second — so gate it on `--log-diag`.
+        .add_plugins(bevy::diagnostic::EntityCountDiagnosticsPlugin::default())
         .add_plugins(PhysicsPlugins::default().set(avian3d::prelude::PhysicsInterpolationPlugin::interpolate_all()))
         .add_plugins(CoSimPlugin)
         .add_plugins(lunco_workbench::WorkbenchPlugin)
@@ -173,6 +204,10 @@ fn main() {
             spawn_fallback_avatar,
         ).chain().after(avian3d::prelude::PhysicsSystems::Writeback))
         .add_plugins(lunco_api::LunCoApiPlugin::default());
+
+    if log_diag {
+        app.add_plugins(bevy::diagnostic::LogDiagnosticsPlugin::default());
+    }
 
     app.run();
 }

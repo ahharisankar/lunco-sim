@@ -35,9 +35,15 @@ impl SettingsSection for PerfHudSettings {
     const KEY: &'static str = "perf_hud";
 }
 
+/// How many frame-time samples to keep for the status-bar sparkline.
+/// At 60 FPS that's about 4 seconds — long enough to spot a hitch
+/// in your peripheral vision, short enough that the plot redraws
+/// quickly when conditions change.
+pub const FRAME_HISTORY_LEN: usize = 240;
+
 /// Live, per-frame perf samples. Not persisted — these are reset
 /// when the HUD is disabled and resampled while it's on.
-#[derive(Resource, Default, Debug, Clone, Copy)]
+#[derive(Resource, Default, Debug, Clone)]
 pub struct PerfStats {
     /// Smoothed FPS from Bevy's `FrameTimeDiagnosticsPlugin`.
     pub fps: f32,
@@ -46,6 +52,27 @@ pub struct PerfStats {
     /// Wall-clock cost of the avian physics step, ms. `None` when no
     /// physics-aware plugin is publishing.
     pub physics_ms: Option<f32>,
+    /// Ring buffer of recent frame times, oldest first. Used by the
+    /// status-bar sparkline so spikes that the smoothed `frame_ms`
+    /// number hides become visible. Capped at [`FRAME_HISTORY_LEN`].
+    pub frame_history: std::collections::VecDeque<f32>,
+}
+
+impl PerfStats {
+    /// `(min, max, p99)` over `frame_history`, all in ms. Returns
+    /// `None` when the history is empty so callers can skip drawing.
+    pub fn frame_ms_stats(&self) -> Option<(f32, f32, f32)> {
+        if self.frame_history.is_empty() {
+            return None;
+        }
+        let mut sorted: Vec<f32> = self.frame_history.iter().copied().collect();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let min = *sorted.first().unwrap();
+        let max = *sorted.last().unwrap();
+        let p99_idx = ((sorted.len() as f32) * 0.99) as usize;
+        let p99 = sorted[p99_idx.min(sorted.len() - 1)];
+        Some((min, max, p99))
+    }
 }
 
 /// Flip the perf HUD on/off. Persisted via `lunco-settings`.
@@ -73,7 +100,9 @@ fn sample_frame_time(
     mut stats: ResMut<PerfStats>,
 ) {
     if !settings.enabled {
-        if stats.fps != 0.0 || stats.frame_ms != 0.0 || stats.physics_ms.is_some() {
+        if stats.fps != 0.0 || stats.frame_ms != 0.0 || stats.physics_ms.is_some()
+            || !stats.frame_history.is_empty()
+        {
             *stats = PerfStats::default();
         }
         return;
@@ -84,9 +113,48 @@ fn sample_frame_time(
         }
     }
     if let Some(d) = diags.get(&FrameTimeDiagnosticsPlugin::FRAME_TIME) {
+        // Push the **raw** (un-smoothed) value to the history so
+        // spikes survive into the sparkline; keep the smoothed value
+        // for the headline number where stability is preferred.
+        if let Some(raw) = d.value() {
+            if stats.frame_history.len() == FRAME_HISTORY_LEN {
+                stats.frame_history.pop_front();
+            }
+            stats.frame_history.push_back(raw as f32);
+        }
         if let Some(v) = d.smoothed() {
             stats.frame_ms = v as f32;
         }
+    }
+}
+
+/// Logs a line whenever a frame exceeds the spike threshold. The
+/// "since-last-spike" delta lets us see *cadence* in the log: a
+/// regular gap (e.g. every 16 ms = FixedUpdate, every ~1000 ms = asset
+/// gc, etc.) points to a fixed-cadence offender; random gaps point to
+/// allocation churn or external events.
+const SPIKE_THRESHOLD_MS: f32 = 20.0;
+
+fn log_frame_spikes(
+    settings: Res<PerfHudSettings>,
+    stats: Res<PerfStats>,
+    // (frame_index, last_spike_frame)
+    mut state: Local<(u64, Option<u64>)>,
+) {
+    if !settings.enabled {
+        return;
+    }
+    state.0 += 1;
+    let Some(&latest_ms) = stats.frame_history.back() else { return };
+    if latest_ms < SPIKE_THRESHOLD_MS {
+        return;
+    }
+    let frame = state.0;
+    let since = state.1.map(|prev| frame - prev);
+    state.1 = Some(frame);
+    match since {
+        Some(dt) => info!("[spike] frame {} took {:.1}ms (last spike {} frames ago)", frame, latest_ms, dt),
+        None => info!("[spike] frame {} took {:.1}ms (first spike)", frame, latest_ms),
     }
 }
 
@@ -122,6 +190,8 @@ impl Plugin for PerfHudPlugin {
         }
         app.add_systems(Startup, register_settings_menu);
         app.add_systems(Update, sample_frame_time);
+        // Log spikes after sampling so the just-pushed sample is read.
+        app.add_systems(Update, log_frame_spikes.after(sample_frame_time));
         register_all_commands(app);
     }
 }
