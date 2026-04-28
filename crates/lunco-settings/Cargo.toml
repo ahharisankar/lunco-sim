@@ -1,0 +1,11 @@
+[package]
+name = "lunco-settings"
+version = "0.1.0"
+edition = "2021"
+description = "Centralised user-settings system for LunCoSim. One JSON file (~/.lunco/settings.json), namespaced sections, auto-persist on change."
+
+[dependencies]
+bevy = { workspace = true, default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+lunco-assets = { path = "../lunco-assets" }

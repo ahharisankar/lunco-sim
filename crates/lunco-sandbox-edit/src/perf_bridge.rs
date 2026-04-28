@@ -8,7 +8,7 @@ use avian3d::diagnostics::{
     PhysicsDiagnosticsPlugin, PhysicsTotalDiagnostics, PhysicsTotalDiagnosticsPlugin,
 };
 use bevy::prelude::*;
-use lunco_workbench::perf_hud::PerfStats;
+use lunco_workbench::perf_hud::{PerfHudSettings, PerfStats};
 
 /// Adds avian's diagnostics plugins (the framework one + the
 /// total-step one that actually inserts `PhysicsTotalDiagnostics`)
@@ -30,9 +30,10 @@ impl Plugin for PerfBridgePlugin {
 
 fn sample_physics_step(
     diags: Option<Res<PhysicsTotalDiagnostics>>,
+    settings: Res<PerfHudSettings>,
     mut stats: ResMut<PerfStats>,
 ) {
-    if !stats.enabled {
+    if !settings.enabled {
         if stats.physics_ms.is_some() {
             stats.physics_ms = None;
         }

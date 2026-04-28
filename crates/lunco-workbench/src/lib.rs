@@ -1351,7 +1351,8 @@ fn render_status_bar_inner(
         let history: Vec<_> = bus.history().cloned().collect();
         (latest, history)
     };
-    let perf = *world.resource::<perf_hud::PerfStats>();
+    let perf_stats = *world.resource::<perf_hud::PerfStats>();
+    let perf_enabled = world.resource::<perf_hud::PerfHudSettings>().enabled;
 
     ui.horizontal(|ui| {
         // The whole strip is one clickable region; the popup anchors
@@ -1408,17 +1409,18 @@ fn render_status_bar_inner(
         }
 
         // Right-aligned perf segment. Hidden when the HUD is off so
-        // we don't show stale zeroes; toggled via `TogglePerfHud`.
-        if perf.enabled {
+        // we don't show stale zeroes; toggled via `TogglePerfHud` or
+        // the Settings menu.
+        if perf_enabled {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let phys = perf
+                let phys = perf_stats
                     .physics_ms
                     .map(|ms| format!(" · phys {:.1}ms", ms))
                     .unwrap_or_default();
                 ui.label(
                     egui::RichText::new(format!(
                         "FPS {:.1} · {:.1}ms{}",
-                        perf.fps, perf.frame_ms, phys
+                        perf_stats.fps, perf_stats.frame_ms, phys
                     ))
                     .small()
                     .monospace(),

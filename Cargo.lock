@@ -6256,6 +6256,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lunco-settings"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "lunco-assets",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lunco-storage"
 version = "0.1.0"
 dependencies = [
@@ -6442,6 +6452,7 @@ dependencies = [
  "lunco-core",
  "lunco-doc",
  "lunco-doc-bevy",
+ "lunco-settings",
  "lunco-storage",
  "lunco-theme",
  "lunco-twin",

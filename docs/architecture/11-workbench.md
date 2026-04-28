@@ -350,6 +350,49 @@ write via temp-file + rename — a kill mid-write can't corrupt the
 file. A corrupt file silently falls back to empty recents on next
 boot.
 
+### 9b. Settings (`lunco-settings`)
+
+User preferences (perf HUD on/off, editor word-wrap, palette filters,
+…) persist to a single `~/.lunco/settings.json` via the
+`lunco-settings` crate. Layouts and recents stay separate by design
+— layouts are TOML and high-structure, recents are high-churn list
+state — but everything else funnels through `settings.json`.
+
+The shape mirrors VS Code: one document, namespaced keys. Each
+domain crate owns a typed slice that implements `SettingsSection`:
+
+```rust
+#[derive(Resource, Serialize, Deserialize, Default, Clone, PartialEq)]
+struct PerfHudSettings { enabled: bool }
+
+impl SettingsSection for PerfHudSettings {
+    const KEY: &'static str = "perf_hud";
+}
+
+// In Plugin::build:
+app.register_settings_section::<PerfHudSettings>();
+```
+
+After registration the slice is a normal `Resource`. The crate:
+
+- Loads `settings.json` once on startup; deserialises each
+  registered section out of its key (or seeds `Default` if absent).
+- Persists on change via `Res::is_changed()` — per-section system
+  re-serialises into the in-memory mirror, central
+  `Last`-schedule flush writes the file.
+- Treats absent or corrupt `settings.json` as "use defaults"; never
+  panics. Atomic writes (write + rename) keep partial files from
+  corrupting on kill.
+
+UI surfaces the same resource three ways — a Settings-menu row
+(`WorkbenchLayout::register_settings`), a typed `#[Command]` for
+the API/script bus (e.g. `TogglePerfHud`), and direct mutation. All
+three converge on the same persisted resource.
+
+**Don't** invent per-feature JSON files for new settings. **Do**
+keep `recents.json` separate (different lifetime / churn) and
+`layouts.toml` separate (TOML schema, structural).
+
 ## 10. Theming and keybinds
 
 - Theming via egui's visuals system. Shipped themes: Dark, Light, High

@@ -38,7 +38,8 @@ members = [
     "crates/lunco-cache",
     "crates/lunco-theme",
     "crates/lunco-storage",
-    "crates/lunco-workspace"
+    "crates/lunco-workspace",
+    "crates/lunco-settings"
 ]
 resolver = "2"
 
