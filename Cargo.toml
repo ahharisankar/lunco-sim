@@ -53,12 +53,12 @@ scnr2_macro = { git = "https://github.com/jsinger67/scnr2", tag = "0.3.3" }
 # bugs locally, re-enable the patch block below pointing at a sibling
 # `../rumoca` checkout.
 #
-# [patch."https://github.com/LunCoSim/rumoca"]
-# rumoca-session   = { path = "../rumoca/crates/rumoca-session" }
-# rumoca-sim       = { path = "../rumoca/crates/rumoca-sim" }
-# rumoca-phase-parse = { path = "../rumoca/crates/rumoca-phase-parse" }
-# rumoca-tool-fmt  = { path = "../rumoca/crates/rumoca-tool-fmt" }
-# rumoca-tool-lint = { path = "../rumoca/crates/rumoca-tool-lint" }
+[patch."https://github.com/LunCoSim/rumoca"]
+rumoca-session   = { path = "../rumoca/crates/rumoca-session" }
+rumoca-sim       = { path = "../rumoca/crates/rumoca-sim" }
+rumoca-phase-parse = { path = "../rumoca/crates/rumoca-phase-parse" }
+rumoca-tool-fmt  = { path = "../rumoca/crates/rumoca-tool-fmt" }
+rumoca-tool-lint = { path = "../rumoca/crates/rumoca-tool-lint" }
 
 [workspace.package]
 description = "Initialize multi-crate workspace architecture for vessel control simulation"

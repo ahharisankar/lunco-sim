@@ -847,6 +847,13 @@ impl MSLIndexer {
                     if comp.condition.is_some() {
                         continue;
                     }
+                    // Skip protected components — they're internal to
+                    // the model (e.g. Integrator's `local_reset` /
+                    // `local_set`) and shouldn't render as external
+                    // ports. OMEdit / Dymola don't draw them either.
+                    if comp.is_protected {
+                        continue;
+                    }
 
                     if !ports.iter().any(|p| p.name == comp.name) {
                         // Read the placement straight from rumoca's

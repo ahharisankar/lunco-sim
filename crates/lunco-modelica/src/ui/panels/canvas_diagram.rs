@@ -544,6 +544,13 @@ impl NodeVisual for IconNodeVisual {
                         // dot OMEdit shows.
                         let parent_w = node.rect.width().max(1.0);
                         let parent_h = node.rect.height().max(1.0);
+                        // Use the authored placement extent as-is for
+                        // every connector class — that is the size MSL
+                        // authors intended (Flange_a's 20×20 dot, the
+                        // 20×20 RealInput triangle on plain blocks, the
+                        // 40×40 RealInput on LimPID). OMEdit / Dymola
+                        // render at this size; over-scaling produces a
+                        // triangle that dominates the icon body.
                         let half_x = (port_size_x_icon * 0.5 / 100.0) * (parent_w * 0.5);
                         let half_y = (port_size_y_icon * 0.5 / 100.0) * (parent_h * 0.5);
                         let world_rect = lunco_canvas::Rect::from_min_max(
@@ -1105,19 +1112,15 @@ impl EdgeVisual for OrthogonalEdgeVisual {
                 for w in pts.windows(2) {
                     painter.line_segment([w[0], w[1]], stroke);
                 }
-                // Causal-signal arrowhead at the input end. Mirrors
-                // the auto-Z branch below — without it, every
-                // authored-waypoint signal wire (the common case for
-                // MSL examples) lost its arrow even though the
-                // workbench-routed ones kept theirs.
-                // OMEdit/Dymola convention: causal-signal wires
-                // get a filled triangle arrowhead at their input
-                // end. Sized to match OMEdit's stroke-and-arrow
-                // ratio at fit-zoom — visible but not chunky.
-                if self.is_causal && pts.len() >= 2 {
-                    let n = pts.len();
-                    paint_arrowhead(painter, pts[n - 2], pts[n - 1], col, scale);
-                }
+                // No wire-end arrowhead for causal signals: the
+                // destination connector class's authored `Icon`
+                // (RealInput's filled triangle, BooleanInput's, …)
+                // already paints the visible arrow at the port
+                // location. Drawing a `paint_arrowhead` on top
+                // produced a tiny duplicate triangle overlapping the
+                // bigger authored icon — visually muddy and
+                // off-spec relative to OMEdit / Dymola. The icon
+                // renderer in [`IconNodeVisual::draw`] handles it.
                 return;
             }
             // else: fall through to auto-Z below
@@ -1140,10 +1143,13 @@ impl EdgeVisual for OrthogonalEdgeVisual {
             painter.line_segment([w[0], w[1]], stroke);
         }
 
-        // Causal-signal arrowhead at the input end of an auto-
-        // routed wire. Same sizing as the authored-waypoint
-        // branch above.
-        if self.is_causal && polyline.len() >= 2 {
+        // No wire-end arrowhead — see the authored-waypoint branch
+        // above for the rationale (the destination connector class's
+        // authored Icon is the arrow). Kept the helper available
+        // (`paint_arrowhead`) for the orthogonal router's dev visual
+        // / future non-MSL connection kinds, but the default MSL
+        // signal path no longer calls it.
+        if false && self.is_causal && polyline.len() >= 2 {
             let n = polyline.len();
             paint_arrowhead(
                 painter,
