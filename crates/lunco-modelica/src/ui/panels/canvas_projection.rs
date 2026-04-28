@@ -1194,7 +1194,7 @@ fn connector_icon_color(
 /// an empty string for expression shapes the icon-text path can't
 /// usefully render (function calls, complex matrix literals, etc.).
 fn format_modifier_expr(expr: &rumoca_session::parsing::ast::Expression) -> String {
-    use rumoca_session::parsing::ast::{Expression, OpUnary, TerminalType};
+    use rumoca_session::parsing::ast::{Expression, OpBinary, OpUnary, TerminalType};
     match expr {
         Expression::Terminal { terminal_type, token } => {
             let raw = token.text.as_ref();
@@ -1211,15 +1211,37 @@ fn format_modifier_expr(expr: &rumoca_session::parsing::ast::Expression) -> Stri
         Expression::Unary { op, rhs } => match (op, rhs.as_ref()) {
             (OpUnary::Minus(_), inner) => {
                 let inner = format_modifier_expr(inner);
-                if inner.is_empty() {
-                    String::new()
-                } else {
-                    format!("-{}", inner)
-                }
+                if inner.is_empty() { String::new() } else { format!("-{}", inner) }
+            }
+            (OpUnary::Plus(_), inner) => {
+                let inner = format_modifier_expr(inner);
+                if inner.is_empty() { String::new() } else { format!("+{}", inner) }
             }
             _ => String::new(),
         },
-        Expression::Parenthesized { inner } => format_modifier_expr(inner),
+        Expression::Parenthesized { inner } => {
+            let inner = format_modifier_expr(inner);
+            if inner.is_empty() { String::new() } else { format!("({})", inner) }
+        }
+        // Render simple arithmetic so MSL params like `k=1/(k*Ni)`
+        // (gainTrack in LimPID) substitute as the expression text
+        // OMEdit shows underneath the gain block, not a blank.
+        Expression::Binary { op, lhs, rhs } => {
+            let l = format_modifier_expr(lhs);
+            let r = format_modifier_expr(rhs);
+            if l.is_empty() || r.is_empty() {
+                return String::new();
+            }
+            let sym = match op {
+                OpBinary::Add(_) => "+",
+                OpBinary::Sub(_) => "-",
+                OpBinary::Mul(_) => "*",
+                OpBinary::Div(_) => "/",
+                OpBinary::Exp(_) => "^",
+                _ => return String::new(),
+            };
+            format!("{}{}{}", l, sym, r)
+        }
         Expression::Array { elements, .. } => {
             let parts: Vec<String> = elements.iter().map(format_modifier_expr).collect();
             if parts.iter().any(|s| s.is_empty()) {

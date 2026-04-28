@@ -93,6 +93,18 @@ fn format_default_expr(expr: &rumoca_session::parsing::ast::Expression) -> Strin
                     format!("-{}", inner)
                 }
             }
+            // `+1` is parsed as Unary{Plus, Terminal "1"}. Without
+            // this branch the leading `+` swallowed the whole
+            // expression to empty, so MSL params declared as `k1=+1`
+            // (Math.Add, Math.Add3) had blank defaults in the index.
+            (OpUnary::Plus(_), inner) => {
+                let inner = format_default_expr(inner);
+                if inner.is_empty() {
+                    String::new()
+                } else {
+                    format!("+{}", inner)
+                }
+            }
             _ => String::new(),
         },
         Expression::Parenthesized { inner } => format_default_expr(inner),
