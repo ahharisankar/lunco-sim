@@ -469,8 +469,12 @@ impl NodeVisual for IconNodeVisual {
             let dir = port_edge_dir(world.x - cx, world.y - cy);
 
             let fill = theme_snap.port_fill;
-            let stroke = egui::Stroke::new(1.0, theme_snap.port_stroke);
-            paint_port_shape(painter, center, shape, dir, fill, stroke);
+            // viewport.zoom is pixels-per-world-unit (~3.5 at fit-
+            // zoom). Multiplying directly produced 5+px markers.
+            // sqrt-damp + clamp like wires so markers stay tiny.
+            let scale = (ctx.viewport.zoom / 3.0).sqrt().clamp(0.7, 1.4);
+            let stroke = egui::Stroke::new(0.6 * scale, theme_snap.port_stroke);
+            paint_port_shape(painter, center, shape, dir, fill, stroke, scale);
         }
 
         // Hover tooltip. The canvas claims the whole widget rect
@@ -640,6 +644,7 @@ fn paint_flow_dots(
     polyline: &[egui::Pos2],
     base_color: egui::Color32,
     time: f64,
+    scale: f32,
 ) {
     if polyline.len() < 2 {
         return;
@@ -670,7 +675,7 @@ fn paint_flow_dots(
             if s <= acc + seg_len {
                 let t = ((s - acc) / seg_len).clamp(0.0, 1.0);
                 let p = w[0] + (w[1] - w[0]) * t;
-                painter.circle_filled(p, 2.2, dot_color);
+                painter.circle_filled(p, 2.2 * scale, dot_color);
                 break;
             }
             acc += seg_len;
@@ -916,20 +921,31 @@ impl EdgeVisual for OrthogonalEdgeVisual {
         // Mechanical / thermal / electrical chains stay at the slim
         // default so dense plant networks don't overwhelm the eye.
         //
-        // Scale everything wire-related (stroke, stub length, arrow
-        // size) by the viewport zoom so the diagram reads consistently
-        // at any magnification — at 4× zoom the wires are 4× thicker
-        // and the arrows 4× bigger, just like the icon primitives the
-        // wires connect to. Clamped at 0.5× on the low end so wires
-        // stay visible when zoomed all the way out.
-        let scale = ctx.viewport.zoom.max(0.5);
+        // OMEdit / Dymola use roughly fixed pixel widths for wires
+        // regardless of zoom — wires read as 1-2px hairlines at any
+        // magnification. We mirror that: stroke width is a constant
+        // pixel value, *not* multiplied by viewport.zoom (which is
+        // pixels-per-world-unit and ranges ~0.5..10 across normal
+        // fit/zoom-in extremes; multiplying by it produced 10px
+        // wires at typical fit zoom). Arrows + port markers still
+        // scale gently below.
         let base_width = if selected {
-            if self.is_causal { 2.8 } else { 2.0 }
+            if self.is_causal { 1.4 } else { 1.0 }
         } else if self.is_causal {
-            2.0
+            1.0
         } else {
-            1.2
+            0.6
         };
+        // A *gentle* zoom influence on stroke for very high zoom-in
+        // (so wires don't look like floss next to a 1000-px-wide
+        // icon). sqrt damps the curve; at zoom=1 it's ~0.58, at
+        // zoom=10 it's ~1.83. Clamped 0.7..1.6 for sanity.
+        let zoom_norm = (ctx.viewport.zoom / 3.0).sqrt().clamp(0.7, 1.6);
+        let width = base_width * zoom_norm;
+        // `scale` is exposed downstream for arrows / stubs / port
+        // markers — same gently-damped formula keeps them in
+        // sensible proportion to the wires.
+        let scale = zoom_norm;
         let width = base_width * scale;
         let stroke = egui::Stroke::new(width, col);
         let painter = ctx.ui.painter();
@@ -986,6 +1002,10 @@ impl EdgeVisual for OrthogonalEdgeVisual {
                 // authored-waypoint signal wire (the common case for
                 // MSL examples) lost its arrow even though the
                 // workbench-routed ones kept theirs.
+                // OMEdit/Dymola convention: causal-signal wires
+                // get a filled triangle arrowhead at their input
+                // end. Sized to match OMEdit's stroke-and-arrow
+                // ratio at fit-zoom — visible but not chunky.
                 if self.is_causal && pts.len() >= 2 {
                     let n = pts.len();
                     paint_arrowhead(painter, pts[n - 2], pts[n - 1], col, scale);
@@ -1012,15 +1032,18 @@ impl EdgeVisual for OrthogonalEdgeVisual {
             painter.line_segment([w[0], w[1]], stroke);
         }
 
-        // Arrowhead at the input end on causal-only connections —
-        // OMEdit/Dymola convention. Heuristic: connector type ends
-        // with "Output"/"Input" → causal signal. Arrow points along
-        // the last segment, AT the target port (the input side).
+        // Causal-signal arrowhead at the input end of an auto-
+        // routed wire. Same sizing as the authored-waypoint
+        // branch above.
         if self.is_causal && polyline.len() >= 2 {
             let n = polyline.len();
-            let tail = polyline[n - 2];
-            let tip = polyline[n - 1];
-            paint_arrowhead(painter, tail, tip, col, scale);
+            paint_arrowhead(
+                painter,
+                polyline[n - 2],
+                polyline[n - 1],
+                col,
+                scale,
+            );
         }
 
         // Live-flow animation: small dots moving along the polyline
@@ -1088,9 +1111,9 @@ impl EdgeVisual for OrthogonalEdgeVisual {
                 if v < 0.0 {
                     let mut rev = polyline.clone();
                     rev.reverse();
-                    paint_flow_dots(painter, &rev, col, anim_time);
+                    paint_flow_dots(painter, &rev, col, anim_time, scale);
                 } else {
-                    paint_flow_dots(painter, &polyline, col, anim_time);
+                    paint_flow_dots(painter, &polyline, col, anim_time, scale);
                 }
             }
         }
@@ -1423,14 +1446,14 @@ fn paint_arrowhead(
     }
     let (ux, uy) = (dx / len, dy / len);
     let (px, py) = (-uy, ux); // perpendicular
-    // Base 14×7 head at zoom 1.0; scaled by `scale` (the viewport
-    // zoom factor) so arrows grow/shrink in lockstep with the wires
-    // and icons they belong to. A fixed-pixel head looked tiny on
-    // 4× zoom and dominated at 0.3× — both broke the visual
-    // proportions of the diagram. Scale-aware sizing keeps the arrow
-    // proportional to its host wire at every zoom level.
-    let head_len: f32 = 14.0 * scale;
-    let head_halfw: f32 = 7.0 * scale;
+    // Base 7×3.5 filled triangle. Smaller than before so the arrow
+    // doesn't visually slide toward the line midpoint when the
+    // final segment is short (orthogonal routing leaves a small
+    // stub at the input port; an oversized head ate the whole stub).
+    // Also clamp head_len to ≤40 % of the final-segment length so
+    // the tail never reaches past the previous waypoint.
+    let head_len: f32 = (7.0 * scale).min(len * 0.4);
+    let head_halfw: f32 = head_len * 0.5;
     let base = egui::pos2(tip.x - ux * head_len, tip.y - uy * head_len);
     let b1 = egui::pos2(base.x + px * head_halfw, base.y + py * head_halfw);
     let b2 = egui::pos2(base.x - px * head_halfw, base.y - py * head_halfw);
@@ -1598,8 +1621,17 @@ fn paint_port_shape(
     dir: PortDir,
     fill: egui::Color32,
     stroke: egui::Stroke,
+    scale: f32,
 ) {
-    const R: f32 = 5.0;
+    // OMEdit shows the connector class's authored Icon (RealInput
+    // triangle, Flange ring, …) — *not* a separate port marker.
+    // We try to suppress our own marker for connectors that already
+    // ship an Icon (those are painted by the icon renderer). This
+    // helper is a fallback for connectors without an authored Icon
+    // (or where icon resolution failed). Keep the marker tiny so
+    // the workbench doesn't double-decorate.
+    let r: f32 = 0.6 * scale;
+    let R = r;
     match shape {
         PortShape::InputSquare => {
             let rect = egui::Rect::from_center_size(center, egui::vec2(R * 1.6, R * 1.6));
@@ -4986,11 +5018,38 @@ fn diagram_annotation_for_target(
 
 /// Walk a dotted qualified class path through `ast.classes` into
 /// nested `class.classes`. Returns the deepest matching class, if any.
+///
+/// Honours the file's `within` clause: MSL files like
+/// `Modelica/Blocks/package.mo` start with `within Modelica;`, so their
+/// AST root contains `Blocks`, not `Modelica`. A drill-in target of
+/// `Modelica.Blocks.Examples.PID_Controller` must therefore have the
+/// `Modelica` prefix stripped before the walk; otherwise the first
+/// segment never matches and the diagram-decoration layer silently
+/// renders nothing.
 fn walk_qualified<'a>(
     ast: &'a rumoca_session::parsing::ast::StoredDefinition,
     qualified: &str,
 ) -> Option<&'a rumoca_session::parsing::ast::ClassDef> {
-    let mut segments = qualified.split('.');
+    let stripped = if let Some(within) = ast.within.as_ref() {
+        let prefix = within
+            .name
+            .iter()
+            .map(|t| t.text.as_ref())
+            .collect::<Vec<_>>()
+            .join(".");
+        if !prefix.is_empty() {
+            if let Some(rest) = qualified.strip_prefix(&prefix) {
+                rest.strip_prefix('.').unwrap_or(rest)
+            } else {
+                qualified
+            }
+        } else {
+            qualified
+        }
+    } else {
+        qualified
+    };
+    let mut segments = stripped.split('.');
     let first = segments.next()?;
     let mut current = ast.classes.iter().find(|(n, _)| n.as_str() == first).map(|(_, c)| c)?;
     for seg in segments {

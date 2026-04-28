@@ -76,20 +76,19 @@ fn main() {
             ..default()
         }))
         .add_plugins(EguiPlugin::default())
-        // Phase-0 vello spike: install the plugin and a hard-coded
-        // test scene so we can verify bevy_vello + bevy_egui coexist
-        // in our pipeline. Camera + scene live in `vello_spike` below.
-        // Disable bevy_egui's "auto-attach PrimaryEguiContext to any
-        // camera" behaviour — with two cameras (workbench + vello),
-        // it tagged both, panicking with "attempted to reuse schedule
-        // EguiPrimaryContextPass". We manually tag setup_sandbox's
-        // camera below.
-        .insert_resource(bevy_egui::EguiGlobalSettings {
-            auto_create_primary_context: false,
-            ..default()
-        })
-        .add_plugins(bevy_vello::VelloPlugin::default())
-        .add_plugins(lunco_modelica::ui::vello_canvas::VelloCanvasPlugin)
+        // Vello-backed diagram canvas — TBD.
+        //
+        // The pipeline (lunco-canvas's DiagramRenderer trait,
+        // EguiRenderer + VelloRenderer backends, per-tab offscreen
+        // render targets in `lunco_modelica::ui::vello_canvas`) is
+        // landed and renders all MSL geometry primitives. Re-enable
+        // by un-commenting the two `add_plugins` lines below once
+        // the text-rendering issue (bevy_vello 0.13.1 entities
+        // don't appear in offscreen `RenderTarget::Image`) is
+        // resolved upstream or worked around. The egui canvas
+        // remains the production paint path until then.
+        // .add_plugins(bevy_vello::VelloPlugin::default())
+        // .add_plugins(lunco_modelica::ui::vello_canvas::VelloCanvasPlugin)
         .add_plugins(lunco_workbench::WorkbenchPlugin)
         // LuncoVizPlugin must come before any plugin that publishes
         // signals (ModelicaPlugin below) so the `SignalRegistry`
