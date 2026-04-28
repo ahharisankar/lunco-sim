@@ -87,7 +87,19 @@ fn main() {
     };
 
     let mut app = App::new();
-    app.insert_resource(Time::<Fixed>::from_hz(60.0))
+    // Cap how much catchup `FixedUpdate` does after a slow frame.
+    // Default Bevy behaviour: if a frame took 50ms, the next frame
+    // runs 3 fixed ticks (16.67ms each) to catch up — *which makes
+    // that frame slow too*, breeding the next slow frame. The cap
+    // lives on `Time<Virtual>` (clamps how much delta accumulates
+    // per real-time tick); `Time<Fixed>` reads delta from Virtual,
+    // so capping Virtual transitively caps fixed catchup. 33ms ≈ 2
+    // fixed ticks — residual real time is *dropped* instead of
+    // compounded, breaking the jitter cascade.
+    let mut virtual_time = Time::<Virtual>::default();
+    virtual_time.set_max_delta(std::time::Duration::from_millis(33));
+    app.insert_resource(virtual_time)
+        .insert_resource(Time::<Fixed>::from_hz(60.0))
         .insert_resource(lunco_core::TimeWarpState { physics_enabled: true, ..default() })
         .insert_resource(avian3d::prelude::Gravity::ZERO)
         .insert_resource(lunco_celestial::Gravity::flat(9.81, bevy::math::DVec3::NEG_Y))

@@ -67,6 +67,29 @@ pub fn settings_path() -> PathBuf {
     lunco_assets::user_config_dir().join("settings.json")
 }
 
+/// Read a single section directly from disk, **before** the App is
+/// built. Used by plugins that need to gate *plugin registration*
+/// itself on a persisted preference (e.g. only adding a heavy
+/// diagnostic plugin when the user has the perf HUD turned on).
+///
+/// Returns `S::default()` when the file or key is missing — same
+/// semantics as `register_settings_section`. Toggling the section at
+/// runtime won't retro-actively register/unregister plugins; that
+/// requires an app restart.
+pub fn load_section_from_disk<S: SettingsSection>() -> S {
+    let path = settings_path();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return S::default();
+    };
+    let raw: BTreeMap<String, serde_json::Value> = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return S::default(),
+    };
+    raw.get(S::KEY)
+        .and_then(|v| serde_json::from_value::<S>(v.clone()).ok())
+        .unwrap_or_default()
+}
+
 /// In-memory mirror of `settings.json`. Sections deserialize out of
 /// `raw` on registration; the central flush serialises back into
 /// `raw` and writes to disk when `dirty`.

@@ -14,6 +14,13 @@ use lunco_workbench::perf_hud::{PerfHudSettings, PerfStats};
 /// total-step one that actually inserts `PhysicsTotalDiagnostics`)
 /// and a sampler that copies `step_time` into `PerfStats.physics_ms`
 /// when the HUD is enabled.
+///
+/// `PhysicsTotalDiagnosticsPlugin` *does* show up as a per-step
+/// spike source in profiling (~30 ms bursts every few seconds),
+/// but it's only ~10% of avian's overall spike contribution and
+/// gating it on the persisted HUD-at-startup flag confused users
+/// who toggle the HUD at runtime ("phys reads zero"). Always-on is
+/// the better tradeoff.
 pub struct PerfBridgePlugin;
 
 impl Plugin for PerfBridgePlugin {

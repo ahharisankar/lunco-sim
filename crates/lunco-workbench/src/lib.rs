@@ -1415,15 +1415,20 @@ fn render_status_bar_inner(
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let phys = perf_stats
                     .physics_ms
-                    .map(|ms| format!(" · phys {:.1}ms", ms))
+                    .map(|ms| format!(" · phys {:>4.1}ms", ms))
                     .unwrap_or_default();
                 let p99 = perf_stats
                     .frame_ms_stats()
-                    .map(|(_, _, p99)| format!(" · p99 {:.1}ms", p99))
+                    .map(|(_, _, p99)| format!(" · p99 {:>5.1}ms", p99))
                     .unwrap_or_default();
+                // Fixed-width fields so the HUD doesn't shift when
+                // FPS crosses 99→100 or frame_ms crosses 9→10. Values
+                // are right-justified inside their fields by the
+                // padding spec; monospace alone isn't enough because
+                // the *number of characters* changes.
                 ui.label(
                     egui::RichText::new(format!(
-                        "FPS {:.1} · {:.1}ms{}{}",
+                        "FPS {:>5.1} · {:>5.1}ms{}{}",
                         perf_stats.fps, perf_stats.frame_ms, p99, phys,
                     ))
                     .small()
