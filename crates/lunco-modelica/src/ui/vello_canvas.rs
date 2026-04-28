@@ -23,7 +23,7 @@ use bevy_egui::{egui, EguiContexts, EguiTextureHandle, EguiUserTextures};
 use bevy_vello::prelude::*;
 use bevy_vello::vello::{
     kurbo::{Affine, BezPath, Rect, RoundedRect, Stroke},
-    peniko::{Color, Fill},
+    peniko::{Brush, Color, Fill},
 };
 use lunco_doc::DocumentId;
 
@@ -57,6 +57,10 @@ struct TabTarget {
     /// against the panel's current rect.
     #[allow(dead_code)]
     size: (u32, u32),
+    /// Per-frame buffer: text labels the diagram wants drawn this
+    /// frame. The drawing system fills this; the sync system
+    /// reconciles it with the actual `VelloText2d` entities.
+    pending_texts: Vec<DesiredText>,
 }
 
 impl VelloCanvasTargets {
@@ -75,16 +79,46 @@ pub struct VelloCanvasPlugin;
 impl Plugin for VelloCanvasPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VelloCanvasTargets>()
+            .init_resource::<VelloFontHandle>()
+            .add_systems(Startup, load_vello_font)
             .add_systems(
                 Update,
                 (
                     ensure_targets_for_open_tabs,
                     draw_diagram_into_vello_scene,
+                    sync_text_entities,
                 )
                     .chain(),
             );
-        // Phase-1 floating debug window retired — `CanvasDiagramPanel`
-        // now composites the texture as the canvas backdrop directly.
+    }
+}
+
+/// Cached handle to the vello-side font used by every text label.
+/// Loaded once at startup from the DejaVu Sans .ttf the workbench
+/// already ships for egui's fallback. Same bytes, separate vello
+/// font registry — vello rasterises its own vector glyphs from the
+/// .ttf, independent of egui's bitmap atlas.
+#[derive(Resource, Default)]
+struct VelloFontHandle {
+    handle: Option<Handle<VelloFont>>,
+}
+
+fn load_vello_font(
+    mut fonts: ResMut<Assets<VelloFont>>,
+    mut store: ResMut<VelloFontHandle>,
+) {
+    match std::fs::read(lunco_assets::dejavu_sans_path()) {
+        Ok(bytes) => {
+            let asset = VelloFont::new(bytes);
+            store.handle = Some(fonts.add(asset));
+            info!("[VelloCanvas] DejaVu Sans loaded as vello font");
+        }
+        Err(e) => {
+            warn!(
+                "[VelloCanvas] could not load DejaVu Sans for vello text: {e}; \
+                 text labels will be missing from the vello backdrop"
+            );
+        }
     }
 }
 
@@ -130,6 +164,7 @@ fn ensure_targets_for_open_tabs(
                 camera,
                 scene,
                 size: (DEFAULT_TEX_W, DEFAULT_TEX_H),
+                pending_texts: Vec::new(),
             },
         );
         info!(
@@ -145,6 +180,43 @@ fn ensure_targets_for_open_tabs(
 /// closed tab. Phase 1.5 wiring; not consulted yet.
 #[derive(Component)]
 struct VelloCanvasFor(DocumentId);
+
+/// Marker on every text-label entity owned by a per-tab vello render.
+/// Carries the doc id + a compact identity key so the per-frame
+/// `sync_text_entities` system can diff against the desired set
+/// without despawning entire trees on every redraw.
+#[derive(Component, Debug, Clone)]
+struct VelloDiagramText {
+    doc: DocumentId,
+    key: TextKey,
+}
+
+/// Stable per-text-label identity used by the diff. `(node, slot)`
+/// where `slot` is the index of the Text primitive within the
+/// node's icon graphics — paired with the icon's authored draw
+/// order so the same Text rebuilds against the same entity each
+/// frame and we avoid spawn/despawn churn on simple value changes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TextKey {
+    node_id: lunco_canvas::NodeId,
+    slot: u16,
+}
+
+/// Snapshot of one desired text label produced during the diagram
+/// scan. The sync system materialises these into `VelloText2d`
+/// entities each frame.
+#[derive(Clone)]
+struct DesiredText {
+    key: TextKey,
+    /// World-space position of the text origin (after coord-system
+    /// + per-primitive transforms).
+    pos: Vec2,
+    /// Effective font size in canvas world units.
+    size_world: f32,
+    text: String,
+    color: bevy::prelude::Color,
+    anchor: bevy_vello::prelude::VelloTextAnchor,
+}
 
 fn allocate_target(
     width: u32,
@@ -174,17 +246,18 @@ fn allocate_target(
 }
 
 /// Per-frame: walk every open tab's canvas scene and emit vello
-/// paths into the matching `VelloScene2d`. First cut paints each
-/// node as a filled rounded rectangle in canvas world coords —
-/// proves the pipeline; primitive-fidelity rendering (icons,
-/// edges, labels, ports) lands in Phase 1.5+.
+/// paths into the matching `VelloScene2d`. Text primitives are
+/// recorded into `target.pending_texts` for the follow-up
+/// `sync_text_entities` system; vello renders text via separate
+/// entities, not scene draw commands.
 fn draw_diagram_into_vello_scene(
-    targets: Res<VelloCanvasTargets>,
+    mut targets: ResMut<VelloCanvasTargets>,
     canvas_state: Option<Res<CanvasDiagramState>>,
     mut scenes: Query<&mut VelloScene2d>,
 ) {
     let Some(canvas_state) = canvas_state else { return };
-    for (doc, target) in targets.by_doc.iter() {
+    for (doc, target) in targets.by_doc.iter_mut() {
+        target.pending_texts.clear();
         let Ok(mut scene) = scenes.get_mut(target.scene) else { continue };
         scene.reset();
         // `get` (not `get_for_doc`) falls back to the unbound
@@ -213,34 +286,6 @@ fn draw_diagram_into_vello_scene(
                 target.size.1 as f64 / 2.0,
             ),
         );
-        // DEBUG: alignment marker — a magenta cross at the texture
-        // centre, drawn in screen space so we know the camera /
-        // target plumbing works. If the diagram nodes vanish but
-        // this cross is visible, the bug is in node-coord mapping;
-        // if the cross is also missing, the camera or render-target
-        // is misconfigured.
-        scene.fill(
-            Fill::NonZero,
-            Affine::default(),
-            Color::new([1.0, 0.0, 1.0, 0.9]),
-            None,
-            &Rect::new(-40.0, -3.0, 40.0, 3.0),
-        );
-        scene.fill(
-            Fill::NonZero,
-            Affine::default(),
-            Color::new([1.0, 0.0, 1.0, 0.9]),
-            None,
-            &Rect::new(-3.0, -40.0, 3.0, 40.0),
-        );
-        // DEBUG: log the node count + first rect once per change.
-        let node_count = doc_state.canvas.scene.nodes().count();
-        if let Some((_, n)) = doc_state.canvas.scene.nodes().next() {
-            bevy::log::info!(
-                "[VelloCanvas] {} nodes, first rect: ({:.1},{:.1})..({:.1},{:.1})",
-                node_count, n.rect.min.x, n.rect.min.y, n.rect.max.x, n.rect.max.y,
-            );
-        }
 
         // Single Affine for the whole world transform: ties the
         // vello render to the same Viewport (pan + zoom) the egui
@@ -402,7 +447,7 @@ fn draw_diagram_into_vello_scene(
         // Line, Polygon, Ellipse). Text/Bitmap follow in subsequent
         // commits.
         use crate::ui::panels::canvas_diagram::IconNodeData;
-        for (_id, node) in canvas_scene.nodes() {
+        for (node_id, node) in canvas_scene.nodes() {
             let icon_node_data = node.data.downcast_ref::<IconNodeData>();
             if let Some(d) = icon_node_data {
                 if let Some(icon) = &d.icon_graphics {
@@ -412,12 +457,25 @@ fn draw_diagram_into_vello_scene(
                     );
                     let inner_xform = xform * icon_to_world;
                     let unit_scale = ((sx.abs() + sy.abs()) * 0.5) as f64;
-                    for prim in &icon.graphics {
+                    // `unit_scale` is icon-local → canvas-world.
+                    // Text Transforms hand vello-world coords directly
+                    // to the camera, so we also need the canvas-world →
+                    // vello-world factor (the viewport zoom). One
+                    // multiplied scale lands text at the right size on
+                    // the texture.
+                    let world_scale = unit_scale * (zoom as f64);
+                    for (slot, prim) in icon.graphics.iter().enumerate() {
                         draw_icon_primitive(
                             &mut scene,
                             inner_xform,
                             unit_scale,
+                            world_scale,
                             prim,
+                            *doc,
+                            *node_id,
+                            slot as u16,
+                            d,
+                            &mut target.pending_texts,
                         );
                     }
                 } else {
@@ -711,12 +769,21 @@ fn line_stroke_for(
 /// Translate one Modelica icon primitive to vello calls. Coordinate
 /// space is icon-local — `inner_xform` already carries the icon→
 /// canvas-world transform; vello applies the global scene transform
-/// on top.
+/// on top. Text primitives are recorded into `texts_out` for the
+/// follow-up entity-spawn pass; vello renders text via separate
+/// entities, not scene draw commands.
+#[allow(clippy::too_many_arguments)]
 fn draw_icon_primitive(
     scene: &mut VelloScene2d,
     inner_xform: Affine,
     unit_scale: f64,
+    world_scale: f64,
     prim: &crate::annotations::GraphicItem,
+    doc: DocumentId,
+    node_id: lunco_canvas::NodeId,
+    slot: u16,
+    icon_node: &crate::ui::panels::canvas_diagram::IconNodeData,
+    texts_out: &mut Vec<DesiredText>,
 ) {
     use crate::annotations::GraphicItem;
     use bevy_vello::vello::kurbo::{Ellipse as KurboEllipse, Point as KurboPoint};
@@ -824,10 +891,204 @@ fn draw_icon_primitive(
                 scene.stroke(&stroke, prim_xform, col, None, &kell);
             }
         }
-        // Text + Bitmap: skipped for now. Text needs vello's `text`
-        // feature + a font registry; Bitmap needs an image registry.
-        // Both arrive in a follow-up commit.
-        GraphicItem::Text(_) | GraphicItem::Bitmap(_) => {}
+        GraphicItem::Text(t) => {
+            // Apply MSL %name / %class / %paramName substitutions
+            // and push a snapshot into the per-tab text buffer; the
+            // follow-up sync system materialises it as a `VelloText2d`
+            // entity. Position is the centre of the text's authored
+            // extent in icon-local coords; we transform it once here
+            // through the icon→world matrix so the entity's
+            // Transform sits at the right canvas-world position.
+            let short = icon_node
+                .qualified_type
+                .rsplit('.')
+                .next()
+                .unwrap_or(&icon_node.qualified_type)
+                .to_string();
+            let sub = crate::icon_paint::TextSubstitution {
+                name: (!icon_node.instance_name.is_empty())
+                    .then_some(icon_node.instance_name.as_str()),
+                class_name: Some(short.as_str()),
+                parameters: (!icon_node.parameters.is_empty())
+                    .then_some(icon_node.parameters.as_slice()),
+            };
+            let resolved = sub.apply(&t.text_string);
+            if resolved.is_empty() {
+                return;
+            }
+            let cx_local = (t.extent.p1.x + t.extent.p2.x) * 0.5;
+            let cy_local = (t.extent.p1.y + t.extent.p2.y) * 0.5;
+            let h_local = (t.extent.p2.y - t.extent.p1.y).abs();
+            // Apply per-primitive origin + rotation by composing the
+            // local transform onto the icon-world matrix, then map
+            // (0,0) of the local frame to a world point. We don't
+            // apply rotation to the entity yet — vello's text entity
+            // takes a `Transform` we'd need to extract a rotation
+            // from. Most MSL labels are rotation=0, so this is fine
+            // until we wire rotated labels.
+            let prim_xform = inner_xform
+                * Affine::translate((t.origin.x, t.origin.y))
+                * Affine::rotate(t.rotation.to_radians());
+            let world = prim_xform * bevy_vello::vello::kurbo::Point::new(cx_local, cy_local);
+            // Authored font_size of 0 means "auto-fit to extent
+            // height" per MLS Annex D. For non-zero values, use the
+            // authored size in icon-local units. unit_scale converts
+            // icon-local → canvas-world, but vello text expects the
+            // size in vello world units (which equal canvas-world
+            // since Camera2d uses 1:1).
+            let size_units = if t.font_size > 0.0 {
+                t.font_size as f32
+            } else {
+                h_local as f32 * 0.8
+            };
+            // Convert icon-local font size to vello-world via the
+            // composite icon→canvas-world→vello-world scale.
+            let size_world = (size_units as f64 * world_scale) as f32;
+            // Authored colour, with MLS Annex D default of black.
+            let color = match t.text_color {
+                Some(c) => bevy::prelude::Color::srgba_u8(c.r, c.g, c.b, 255),
+                None => bevy::prelude::Color::srgba(0.95, 0.95, 0.96, 1.0),
+            };
+            texts_out.push(DesiredText {
+                key: TextKey { node_id, slot },
+                pos: bevy::math::Vec2::new(world.x as f32, world.y as f32),
+                size_world,
+                text: resolved,
+                color,
+                anchor: bevy_vello::prelude::VelloTextAnchor::Center,
+            });
+            // Suppress unused warnings for fields we don't yet apply.
+            let _ = (scene, doc);
+        }
+        GraphicItem::Bitmap(_) => {}
+    }
+}
+
+/// Reconcile each tab's `pending_texts` with the live set of
+/// `VelloText2d` entities. Spawn new ones, update changed ones,
+/// despawn obsolete ones. A simple O(n) match-and-update — text
+/// counts in a Modelica diagram are 10-100, so the overhead is
+/// negligible vs. the redraw frame budget.
+fn sync_text_entities(
+    mut commands: Commands,
+    mut targets: ResMut<VelloCanvasTargets>,
+    font: Res<VelloFontHandle>,
+    mut q: Query<(Entity, &mut VelloDiagramText, &mut VelloText2d, &mut Transform)>,
+) {
+    let Some(font_handle) = font.handle.clone() else { return };
+
+    // DEBUG: spawn one giant test label at (0, 0) the first time we
+    // run, to verify text rendering paths into the texture at all.
+    static SPAWNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if SPAWNED.set(()).is_ok() {
+        commands.spawn((
+            VelloText2d {
+                value: "VELLO".to_string(),
+                style: VelloTextStyle {
+                    font: font_handle.clone(),
+                    font_size: 80.0,
+                    brush: Brush::Solid(bevy_vello::vello::peniko::Color::new([
+                        1.0, 0.5, 0.0, 1.0,
+                    ])),
+                    ..default()
+                },
+                ..default()
+            },
+            VelloTextAnchor::Center,
+            Transform::from_xyz(0.0, 0.0, 1.0),
+        ));
+        info!("[VelloCanvas] spawned debug VELLO label at (0,0)");
+    }
+
+    // DEBUG: one-shot log of pending text counts per tab. Useful
+    // verification that the draw pass actually filled the buffer.
+    {
+        let summary: Vec<(String, usize)> = targets
+            .by_doc
+            .iter()
+            .map(|(d, t)| (format!("{:?}", d), t.pending_texts.len()))
+            .collect();
+        static LAST: std::sync::OnceLock<std::sync::Mutex<Vec<(String, usize)>>> =
+            std::sync::OnceLock::new();
+        let last = LAST.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+        if let Ok(mut last) = last.lock() {
+            if *last != summary {
+                bevy::log::info!("[VelloCanvas] pending_texts per tab: {:?}", summary);
+                *last = summary;
+            }
+        }
+    }
+
+    // Index existing entities by `(doc, key)` for diff lookup.
+    let mut existing: std::collections::HashMap<
+        (DocumentId, TextKey),
+        Entity,
+    > = std::collections::HashMap::new();
+    for (e, marker, _, _) in q.iter() {
+        existing.insert((marker.doc, marker.key.clone()), e);
+    }
+    // Track which entities we kept so we can despawn the rest.
+    let mut kept: std::collections::HashSet<Entity> = std::collections::HashSet::new();
+
+    for (doc, target) in targets.by_doc.iter_mut() {
+        for desired in target.pending_texts.drain(..) {
+            let key = (*doc, desired.key.clone());
+            if let Some(&entity) = existing.get(&key) {
+                // Update in place.
+                if let Ok((_e, _marker, mut text, mut transform)) = q.get_mut(entity) {
+                    text.value = desired.text.clone();
+                    text.style.font = font_handle.clone();
+                    text.style.brush = Brush::Solid(
+                        bevy_vello::vello::peniko::Color::new([
+                            desired.color.to_srgba().red,
+                            desired.color.to_srgba().green,
+                            desired.color.to_srgba().blue,
+                            desired.color.to_srgba().alpha,
+                        ])
+                    );
+                    text.style.font_size = desired.size_world;
+                    transform.translation =
+                        Vec3::new(desired.pos.x, -desired.pos.y, 1.0);
+                }
+                kept.insert(entity);
+            } else {
+                // Spawn fresh.
+                let text = VelloText2d {
+                    value: desired.text,
+                    style: VelloTextStyle {
+                        font: font_handle.clone(),
+                        font_size: desired.size_world,
+                        brush: Brush::Solid(bevy_vello::vello::peniko::Color::new([
+                            desired.color.to_srgba().red,
+                            desired.color.to_srgba().green,
+                            desired.color.to_srgba().blue,
+                            desired.color.to_srgba().alpha,
+                        ])),
+                        ..default()
+                    },
+                    ..default()
+                };
+                let entity = commands
+                    .spawn((
+                        text,
+                        desired.anchor,
+                        Transform::from_xyz(desired.pos.x, -desired.pos.y, 1.0),
+                        VelloDiagramText {
+                            doc: *doc,
+                            key: desired.key,
+                        },
+                    ))
+                    .id();
+                kept.insert(entity);
+            }
+        }
+    }
+
+    // Despawn anything we didn't touch this frame.
+    for (e, _marker, _, _) in q.iter() {
+        if !kept.contains(&e) {
+            commands.entity(e).despawn();
+        }
     }
 }
 

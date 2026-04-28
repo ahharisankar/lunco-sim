@@ -243,7 +243,7 @@ impl<'a> TextSubstitution<'a> {
     /// Plumbing parameter values through `paint_graphics` is a
     /// follow-up — until then "show nothing" beats "show
     /// `%controllerType` as a label".
-    fn apply(&self, s: &str) -> String {
+    pub fn apply(&self, s: &str) -> String {
         // Walk the string, eat any `%ident`, look up known names.
         // Cheap manual scan — avoids a regex dep for one production
         // site. Treats `%%` as literal `%` per MLS Annex D.

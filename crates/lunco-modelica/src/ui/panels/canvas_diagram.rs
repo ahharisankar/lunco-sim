@@ -3538,33 +3538,6 @@ impl CanvasDiagramPanel {
 
         mark("snapshots+sigreg", &mut phase_t, &mut phase_log);
 
-        // Phase-1 vello backdrop: paint the per-tab vello render
-        // target as the canvas background BEFORE the egui scene
-        // layers draw on top. The texture comes from
-        // `VelloCanvasTargets`, which lives in the bevy world. We
-        // capture the rect we're about to use, then composite the
-        // texture there. As Phase 2 ports more primitives to vello
-        // we'll progressively dim the overlapping egui layers.
-        let pre_rect = ui.available_rect_before_wrap();
-        if let Some(doc) = active_doc {
-            if let Some(targets) = world
-                .get_resource::<crate::ui::vello_canvas::VelloCanvasTargets>()
-            {
-                if let Some(texture_id) = targets.texture_id(doc) {
-                    let painter = ui.painter_at(pre_rect);
-                    painter.image(
-                        texture_id,
-                        pre_rect,
-                        egui::Rect::from_min_max(
-                            egui::pos2(0.0, 0.0),
-                            egui::pos2(1.0, 1.0),
-                        ),
-                        egui::Color32::WHITE,
-                    );
-                }
-            }
-        }
-
         let (response, events) = {
             let mut state = world.resource_mut::<CanvasDiagramState>();
             let docstate = state.get_mut(active_doc);
@@ -3573,6 +3546,18 @@ impl CanvasDiagramPanel {
             docstate.canvas.ui(ui)
         };
         mark("canvas.ui (scene render)", &mut phase_t, &mut phase_log);
+
+        // Vello continues to render the diagram in the background
+        // into a per-tab offscreen texture (see `vello_canvas.rs`).
+        // The composite back into the panel is intentionally not
+        // wired right now — vello text rendering with offscreen
+        // RenderTarget::Image targets is buggy in bevy_vello 0.13.1
+        // (entities spawn + extract correctly but the text glyphs
+        // never appear in the image). Until that's resolved, the
+        // egui canvas continues to paint the diagram for users; the
+        // vello pipeline is exercised end-to-end for everything
+        // EXCEPT text + bitmap and stays ready for re-enabling once
+        // the upstream fix lands.
 
         // ── Palette drag-and-drop drop handler ──
         //
