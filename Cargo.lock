@@ -6327,6 +6327,7 @@ dependencies = [
  "bevy",
  "big_space",
  "lunco-core",
+ "lunco-doc",
  "lunco-fsw",
  "lunco-mobility",
  "lunco-usd-avian",

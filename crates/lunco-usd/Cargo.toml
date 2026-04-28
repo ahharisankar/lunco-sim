@@ -10,6 +10,7 @@ lunco-usd-bevy = { path = "../lunco-usd-bevy" }
 lunco-usd-avian = { path = "../lunco-usd-avian" }
 lunco-usd-sim = { path = "../lunco-usd-sim" }
 lunco-core = { path = "../lunco-core" }
+lunco-doc = { path = "../lunco-doc" }
 serde = { version = "1.0", features = ["derive"] }
 tracing = "0.1"
 

@@ -18,6 +18,9 @@
 
 use bevy::prelude::*;
 
+pub mod document;
+
+pub use document::{LayerId, UsdChange, UsdDocument, UsdOp};
 pub use lunco_usd_bevy::{UsdPrimPath, UsdStageAsset};
 pub use lunco_usd_avian::UsdAvianPlugin;
 pub use lunco_usd_sim::UsdSimPlugin;
