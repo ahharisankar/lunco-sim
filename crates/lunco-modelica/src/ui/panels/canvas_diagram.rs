@@ -75,6 +75,11 @@ pub struct CanvasThemeSnapshot {
     pub select_stroke: egui::Color32,
     pub inactive_stroke: egui::Color32,
     pub icon_only_stroke: egui::Color32,
+    /// When false (default), authored MSL icons render without a
+    /// workbench-drawn hairline frame around them. The icon's own
+    /// primitives are the bounds. Selection / icon-only / expandable
+    /// rings still draw — they carry semantic info, not just bounds.
+    pub show_authored_icon_border: bool,
 }
 
 impl CanvasThemeSnapshot {
@@ -104,6 +109,7 @@ impl CanvasThemeSnapshot {
             // decorative, doesn't carry connectors" via the same
             // colour the app uses for other cautionary chrome.
             icon_only_stroke: t.warning,
+            show_authored_icon_border: false,
         }
     }
 }
@@ -161,6 +167,25 @@ fn layer_theme_from(theme: &lunco_theme::Theme) -> lunco_canvas::CanvasLayerThem
 fn store_canvas_theme(ctx: &egui::Context, snap: CanvasThemeSnapshot) {
     let id = egui::Id::new("lunco.modelica.canvas_theme_snapshot");
     ctx.data_mut(|d| d.insert_temp(id, snap));
+}
+
+/// Stash the active theme's Modelica icon palette in the egui data
+/// cache so leaf paint helpers (running outside the Bevy world) can
+/// remap authored MSL colors to fit the active theme. Read-side:
+/// [`modelica_icon_palette_from_ctx`].
+fn store_modelica_icon_palette(
+    ctx: &egui::Context,
+    palette: lunco_theme::ModelicaIconPalette,
+) {
+    let id = egui::Id::new("lunco.modelica.icon_palette");
+    ctx.data_mut(|d| d.insert_temp(id, palette));
+}
+
+fn modelica_icon_palette_from_ctx(
+    ctx: &egui::Context,
+) -> Option<lunco_theme::ModelicaIconPalette> {
+    let id = egui::Id::new("lunco.modelica.icon_palette");
+    ctx.data(|d| d.get_temp::<lunco_theme::ModelicaIconPalette>(id))
 }
 
 /// Typed payload carried in `lunco_canvas::Node.data` for every
@@ -327,13 +352,15 @@ impl NodeVisual for IconNodeVisual {
                 node_state.values.get(name).copied()
             };
             let resolver_ref: &dyn Fn(&str) -> Option<f64> = &resolver;
-            crate::icon_paint::paint_graphics_with_resolver(
+            let palette = modelica_icon_palette_from_ctx(ctx.ui.ctx());
+            crate::icon_paint::paint_graphics_themed(
                 painter,
                 rect,
                 icon.coordinate_system,
                 orientation,
                 Some(&sub),
                 Some(resolver_ref),
+                palette.as_ref(),
                 &icon.graphics,
             );
             drew_icon = true;
@@ -358,25 +385,26 @@ impl NodeVisual for IconNodeVisual {
             }
         }
 
-        // Border policy: a *very subtle* inactive border by default
-        // so components have visible bounds against the canvas
-        // grid without competing with the icon's own primitives,
-        // plus stronger strokes on selection / icon-only /
-        // expandable accents. Matches OMEdit's diagram view, which
-        // also draws a hairline frame around every component.
+        // Border policy:
+        //   - Selection ring: always drawn (functional feedback).
+        //   - Icon-only / expandable connector accents: always drawn
+        //     (carry semantic info — "decorative" / "expandable").
+        //   - Placeholder card outline: always drawn (the card has
+        //     no other body and would melt into the canvas otherwise).
+        //   - Authored-icon hairline: opt-in via the theme snapshot's
+        //     `show_authored_icon_border` flag, off by default. The
+        //     icon's own primitives carry its bounds; the workbench
+        //     hairline competed with them and was reported as visual
+        //     noise. Power users can flip the flag in Settings later.
         let stroke = if selected {
-            egui::Stroke::new(2.0, theme_snap.select_stroke)
+            Some(egui::Stroke::new(2.0, theme_snap.select_stroke))
         } else if self.icon_only {
-            egui::Stroke::new(1.0, theme_snap.icon_only_stroke)
+            Some(egui::Stroke::new(1.0, theme_snap.icon_only_stroke))
         } else if self.expandable_connector {
-            egui::Stroke::new(1.5, theme_snap.select_stroke)
+            Some(egui::Stroke::new(1.5, theme_snap.select_stroke))
         } else if !drew_icon {
-            // Placeholder card needs a regular outline.
-            egui::Stroke::new(1.0, theme_snap.inactive_stroke)
-        } else {
-            // Authored icon: draw a hairline border at low alpha so
-            // the bounds are visible without obscuring authored
-            // fills. ~30% alpha of the inactive_stroke colour.
+            Some(egui::Stroke::new(1.0, theme_snap.inactive_stroke))
+        } else if theme_snap.show_authored_icon_border {
             let c = theme_snap.inactive_stroke;
             let dim = egui::Color32::from_rgba_unmultiplied(
                 c.r(),
@@ -384,13 +412,17 @@ impl NodeVisual for IconNodeVisual {
                 c.b(),
                 (c.a() / 3).max(40),
             );
-            egui::Stroke::new(0.75, dim)
-        };
-        let wants_dashed = (self.icon_only || self.expandable_connector) && !selected;
-        if wants_dashed {
-            paint_dashed_rect(painter, rect, 6.0, stroke);
+            Some(egui::Stroke::new(0.75, dim))
         } else {
-            painter.rect_stroke(rect, 6.0, stroke, egui::StrokeKind::Outside);
+            None
+        };
+        if let Some(stroke) = stroke {
+            let wants_dashed = (self.icon_only || self.expandable_connector) && !selected;
+            if wants_dashed {
+                paint_dashed_rect(painter, rect, 6.0, stroke);
+            } else {
+                painter.rect_stroke(rect, 6.0, stroke, egui::StrokeKind::Outside);
+            }
         }
 
         // Instance name: deliberately NOT drawn here. Modelica icons
@@ -3276,6 +3308,7 @@ impl CanvasDiagramPanel {
                 ui.ctx(),
                 CanvasThemeSnapshot::from_theme(&theme),
             );
+            store_modelica_icon_palette(ui.ctx(), theme.modelica_icons.clone());
             lunco_canvas::theme::store(
                 ui.ctx(),
                 layer_theme_from(&theme),

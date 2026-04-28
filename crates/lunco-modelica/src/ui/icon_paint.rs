@@ -25,6 +25,38 @@ use crate::annotations::{
     GraphicItem, Line, LinePattern, Point, Polygon, Rectangle, Text,
 };
 
+/// Palette used by the active `paint_graphics_*` call.
+///
+/// Modelica icon rendering happens on the main (egui) thread. We keep
+/// the active `ModelicaIconPalette` in a thread-local so the leaf
+/// helpers (`color_or_default`, `stroke_for`, `effective_fill_color`)
+/// can apply theme remap without re-plumbing every internal signature.
+/// `Option::None` ⇒ identity (no remap), which is the right default
+/// for callers that haven't installed a palette yet.
+thread_local! {
+    static ACTIVE_PALETTE: std::cell::RefCell<Option<lunco_theme::ModelicaIconPalette>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn with_active_palette<R>(palette: Option<&lunco_theme::ModelicaIconPalette>, f: impl FnOnce() -> R) -> R {
+    let prev = ACTIVE_PALETTE.with(|cell| cell.replace(palette.cloned()));
+    let result = f();
+    ACTIVE_PALETTE.with(|cell| {
+        *cell.borrow_mut() = prev;
+    });
+    result
+}
+
+fn remap_color(c: egui::Color32) -> egui::Color32 {
+    ACTIVE_PALETTE.with(|cell| {
+        if let Some(p) = cell.borrow().as_ref() {
+            p.remap(c)
+        } else {
+            c
+        }
+    })
+}
+
 /// Resolve a `FillPattern` + `fillColor` into the colour used for the
 /// fill polygon. Modelica defines several variants (Solid, gradients
 /// like HorizontalCylinder/VerticalCylinder/Sphere, hatching like
@@ -138,17 +170,44 @@ pub fn paint_graphics_with_resolver(
     resolver: Option<&dyn Fn(&str) -> Option<f64>>,
     graphics: &[GraphicItem],
 ) {
-    let xform = coord_xform_oriented(coord_system.extent, screen_rect, orientation);
-    for item in graphics {
-        match item {
-            GraphicItem::Rectangle(r) => paint_rectangle(painter, &xform, r, resolver),
-            GraphicItem::Line(l) => paint_line(painter, &xform, l),
-            GraphicItem::Polygon(p) => paint_polygon(painter, &xform, p),
-            GraphicItem::Text(t) => paint_text(painter, &xform, t, substitution, resolver),
-            GraphicItem::Ellipse(e) => paint_ellipse(painter, &xform, e),
-            GraphicItem::Bitmap(b) => paint_bitmap(painter, &xform, b),
+    paint_graphics_themed(
+        painter,
+        screen_rect,
+        coord_system,
+        orientation,
+        substitution,
+        resolver,
+        None,
+        graphics,
+    )
+}
+
+/// Same as [`paint_graphics_with_resolver`], but with an explicit
+/// theme palette. Pass `Some(&theme.modelica_icons)` for the active
+/// theme to apply remap; `None` for identity (legacy callers).
+pub fn paint_graphics_themed(
+    painter: &egui::Painter,
+    screen_rect: egui::Rect,
+    coord_system: CoordinateSystem,
+    orientation: IconOrientation,
+    substitution: Option<&TextSubstitution<'_>>,
+    resolver: Option<&dyn Fn(&str) -> Option<f64>>,
+    palette: Option<&lunco_theme::ModelicaIconPalette>,
+    graphics: &[GraphicItem],
+) {
+    with_active_palette(palette, || {
+        let xform = coord_xform_oriented(coord_system.extent, screen_rect, orientation);
+        for item in graphics {
+            match item {
+                GraphicItem::Rectangle(r) => paint_rectangle(painter, &xform, r, resolver),
+                GraphicItem::Line(l) => paint_line(painter, &xform, l),
+                GraphicItem::Polygon(p) => paint_polygon(painter, &xform, p),
+                GraphicItem::Text(t) => paint_text(painter, &xform, t, substitution, resolver),
+                GraphicItem::Ellipse(e) => paint_ellipse(painter, &xform, e),
+                GraphicItem::Bitmap(b) => paint_bitmap(painter, &xform, b),
+            }
         }
-    }
+    });
 }
 
 /// Substitutions the renderer applies to `Text.text_string` before
@@ -958,11 +1017,15 @@ fn load_bitmap_bytes(filename: &str) -> Option<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 fn to_egui_color(c: Color) -> egui::Color32 {
-    egui::Color32::from_rgb(c.r, c.g, c.b)
+    remap_color(egui::Color32::from_rgb(c.r, c.g, c.b))
 }
 
 fn color_or_default(c: Option<Color>, default: egui::Color32) -> egui::Color32 {
-    c.map(to_egui_color).unwrap_or(default)
+    // Authored colours go through the palette; the workbench-provided
+    // default (e.g. MLS Annex D's implicit black) also gets remapped
+    // so a `Polygon` without `fillColor` still draws correctly under
+    // a dark theme instead of an invisible all-black blob.
+    c.map(to_egui_color).unwrap_or_else(|| remap_color(default))
 }
 
 /// Build a stroke from Modelica `lineColor` + `pattern` + `thickness`.

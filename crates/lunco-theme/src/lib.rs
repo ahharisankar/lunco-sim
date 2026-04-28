@@ -246,10 +246,183 @@ pub struct Theme {
     /// typography). Shared by every block-diagram-style editor in
     /// the workspace.
     pub schematic: SchematicTokens,
+    /// Anchor + invert rules for re-coloring authored Modelica icon
+    /// primitives so MSL (designed for paper-white backgrounds) reads
+    /// well under the active theme. Identity in light mode.
+    pub modelica_icons: ModelicaIconPalette,
     pub spacing: SpacingScale,
     pub rounding: RoundingScale,
     /// Generic registry for domain-specific theme overrides.
     pub overrides: HashMap<(u64, u64), egui::Color32>,
+}
+
+/// Color-mapping rules for Modelica icon primitives.
+///
+/// MSL was authored against a paper-white canvas with black outlines
+/// and saturated accents. Rendered untouched on a dark theme, the
+/// black outlines vanish into the bg and the bright primary blue/red
+/// scream against the muted UI palette.
+///
+/// This palette runs every authored MSL `Color` through:
+///   1. **Anchor table** — canonical MSL colors (pure black, pure
+///      white, primary RGB, the gray ramp) get an explicit theme-
+///      tuned remap. Match is RGB distance ≤ `anchor_eps`.
+///   2. **Luminance invert (HSL)** — anything else flips its lightness
+///      while keeping hue + saturation, then clamps to
+///      `[invert_l_min, invert_l_max]` so user-authored colors stay
+///      readable without losing identity.
+///
+/// Light theme defaults to identity (no remap) — MSL already looks
+/// right on a light background.
+#[derive(Clone, Debug)]
+pub struct ModelicaIconPalette {
+    pub enabled: bool,
+    /// `(msl_rgb, target)` pairs. First match wins.
+    pub anchors: Vec<(egui::Color32, egui::Color32)>,
+    /// L1 RGB distance under which an authored color counts as the
+    /// anchor. 8 catches `{0,0,255}` ↔ `{0,0,254}` style near-misses
+    /// without colliding distinct hues.
+    pub anchor_eps: u8,
+    pub invert_l_min: f32,
+    pub invert_l_max: f32,
+}
+
+impl ModelicaIconPalette {
+    /// Identity palette — every color passes through unchanged.
+    pub fn identity() -> Self {
+        Self {
+            enabled: false,
+            anchors: Vec::new(),
+            anchor_eps: 0,
+            invert_l_min: 0.0,
+            invert_l_max: 1.0,
+        }
+    }
+
+    /// Dark-theme defaults: re-color the canonical MSL palette so it
+    /// sits naturally on a dark Catppuccin-mocha-ish bg, invert the
+    /// rest. Tuned by eye; iterate via theme JSON as needed.
+    pub fn dark_default(c: &ColorPalette) -> Self {
+        // Anchor RGBs: the values MSL uses everywhere. We match these
+        // ±eps and substitute the theme-mapped equivalent.
+        let anchors: Vec<(egui::Color32, egui::Color32)> = vec![
+            // Pure black — outlines, default text. Map to high-contrast
+            // theme text so outlines read on dark bg.
+            (egui::Color32::from_rgb(0, 0, 0), c.text),
+            // Pure white — default fillColor (the "page" feel). Map to
+            // a slightly lighter surface than the canvas bg so MSL
+            // bodies (Inertia rectangle, white-fill rects) feel like
+            // they sit on a card, not blend into the background.
+            (egui::Color32::from_rgb(255, 255, 255), c.surface2),
+            // Pure blue — `%name` titles, signal block accents. Use
+            // the theme's blue/sapphire so it harmonises with wires.
+            (egui::Color32::from_rgb(0, 0, 255), c.sapphire),
+            // Pure red — error markers. Slightly desaturated.
+            (egui::Color32::from_rgb(255, 0, 0), c.red),
+            // MSL "warm red" 191,0,0 — heat ports, thermal indicators.
+            (egui::Color32::from_rgb(191, 0, 0), c.maroon),
+            // Pure green — sensors, "ok" markers.
+            (egui::Color32::from_rgb(0, 255, 0), c.green),
+            // Modest green 0,128,0 — same family.
+            (egui::Color32::from_rgb(0, 128, 0), c.green),
+            // Light gray 192,192,192 — flange axles, cylinder rims.
+            // Theme overlay2 is a near-equivalent on dark.
+            (egui::Color32::from_rgb(192, 192, 192), c.overlay2),
+            // Mid gray 128,128,128 — secondary outlines, hatching.
+            (egui::Color32::from_rgb(128, 128, 128), c.overlay1),
+            // Dark gray 64,64,64 — secondary text (e.g. parameter
+            // labels like `tau`). Map to subtext so it reads.
+            (egui::Color32::from_rgb(64, 64, 64), c.subtext0),
+            // 95-ish gray (often used for transmission shading).
+            (egui::Color32::from_rgb(95, 95, 95), c.overlay0),
+            // Lighter "gray ramp" 224,224,224 — light shading.
+            (egui::Color32::from_rgb(224, 224, 224), c.surface2),
+        ];
+        Self {
+            enabled: true,
+            anchors,
+            anchor_eps: 8,
+            invert_l_min: 0.18,
+            invert_l_max: 0.92,
+        }
+    }
+
+    /// Apply remap rules to `(r, g, b, a)`. Alpha preserved.
+    pub fn remap_rgba(&self, r: u8, g: u8, b: u8, a: u8) -> (u8, u8, u8, u8) {
+        if !self.enabled {
+            return (r, g, b, a);
+        }
+        // Anchor pass — first within-eps match wins.
+        let eps = self.anchor_eps as i32;
+        for (src, dst) in &self.anchors {
+            let dr = (src.r() as i32 - r as i32).abs();
+            let dg = (src.g() as i32 - g as i32).abs();
+            let db = (src.b() as i32 - b as i32).abs();
+            if dr.max(dg).max(db) <= eps {
+                return (dst.r(), dst.g(), dst.b(), a);
+            }
+        }
+        // Luminance-invert in HSL, clamp to [min,max].
+        let (h, s, l) = rgb_to_hsl(r, g, b);
+        let mut l_inv = 1.0 - l;
+        l_inv = l_inv.clamp(self.invert_l_min, self.invert_l_max);
+        let (rr, gg, bb) = hsl_to_rgb(h, s, l_inv);
+        (rr, gg, bb, a)
+    }
+
+    /// Convenience for `egui::Color32` callers.
+    pub fn remap(&self, c: egui::Color32) -> egui::Color32 {
+        let (r, g, b, a) = self.remap_rgba(c.r(), c.g(), c.b(), c.a());
+        egui::Color32::from_rgba_unmultiplied(r, g, b, a)
+    }
+}
+
+fn rgb_to_hsl(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+    let rf = r as f32 / 255.0;
+    let gf = g as f32 / 255.0;
+    let bf = b as f32 / 255.0;
+    let max = rf.max(gf).max(bf);
+    let min = rf.min(gf).min(bf);
+    let l = (max + min) * 0.5;
+    if (max - min).abs() < f32::EPSILON {
+        return (0.0, 0.0, l);
+    }
+    let d = max - min;
+    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+    let h = if max == rf {
+        ((gf - bf) / d) + if gf < bf { 6.0 } else { 0.0 }
+    } else if max == gf {
+        ((bf - rf) / d) + 2.0
+    } else {
+        ((rf - gf) / d) + 4.0
+    } / 6.0;
+    (h, s, l)
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    if s.abs() < f32::EPSILON {
+        let v = (l * 255.0).round() as u8;
+        return (v, v, v);
+    }
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+    let r = hue_to_rgb(p, q, h + 1.0 / 3.0);
+    let g = hue_to_rgb(p, q, h);
+    let b = hue_to_rgb(p, q, h - 1.0 / 3.0);
+    (
+        (r * 255.0).round().clamp(0.0, 255.0) as u8,
+        (g * 255.0).round().clamp(0.0, 255.0) as u8,
+        (b * 255.0).round().clamp(0.0, 255.0) as u8,
+    )
+}
+
+fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
+    if t < 0.0 { t += 1.0; }
+    if t > 1.0 { t -= 1.0; }
+    if t < 1.0 / 6.0 { return p + (q - p) * 6.0 * t; }
+    if t < 1.0 / 2.0 { return q; }
+    if t < 2.0 / 3.0 { return p + (q - p) * (2.0 / 3.0 - t) * 6.0; }
+    p
 }
 
 #[derive(Clone, Debug, Reflect)]
@@ -297,11 +470,13 @@ impl Theme {
         let colors = ColorPalette::from_catppuccin(catppuccin_egui::MOCHA);
         let tokens = DesignTokens::from_palette(&colors);
         let schematic = SchematicTokens::from_palette(&colors);
+        let modelica_icons = ModelicaIconPalette::dark_default(&colors);
         Self {
             mode: ThemeMode::Dark,
             colors,
             tokens,
             schematic,
+            modelica_icons,
             spacing: SpacingScale::default(),
             rounding: RoundingScale::default(),
             overrides: HashMap::new(),
@@ -317,6 +492,7 @@ impl Theme {
             colors,
             tokens,
             schematic,
+            modelica_icons: ModelicaIconPalette::identity(),
             spacing: SpacingScale::default(),
             rounding: RoundingScale::default(),
             overrides: HashMap::new(),
