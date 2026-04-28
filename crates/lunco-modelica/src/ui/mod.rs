@@ -80,9 +80,11 @@ pub mod input_activity;
 /// Phase 1: bevy_vello-backed diagram canvas, one render target per
 /// open document tab. See module docs.
 pub mod vello_canvas;
-/// Backend-agnostic 2-D drawing API. Two implementations
-/// (egui, vello) selected at runtime. See module docs.
-pub mod renderer;
+// Renderer trait + backends moved to `lunco-canvas`. Re-export at
+// the workbench level for callers that already pulled it in via
+// `crate::ui::renderer::*` so the old import paths keep working
+// during the migration.
+pub use lunco_canvas::renderer;
 
 /// Modelica section of the Twin Browser — class-tree contributed by
 /// this crate to `lunco-workbench`'s `BrowserSectionRegistry`.

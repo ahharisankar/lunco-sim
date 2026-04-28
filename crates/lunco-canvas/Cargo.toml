@@ -6,6 +6,10 @@ description = "LunCoSim's generic canvas — stateful Scene + Viewport + pluggab
 
 [dependencies]
 bevy_egui = { workspace = true }
+# `lunco-canvas` owns both rendering backends so embedders can pick
+# at runtime without wiring two parallel paint pipelines. egui is
+# the historical default; vello is the GPU-compute path.
+bevy_vello = { workspace = true }
 indexmap = { version = "2.6", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

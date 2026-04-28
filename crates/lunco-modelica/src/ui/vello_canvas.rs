@@ -272,9 +272,25 @@ fn draw_diagram_into_vello_scene(
             * Affine::translate((-center_x, -center_y));
         let _ = (mid_x, mid_y); // mid is implicit from camera centring
 
-        // Edges first — drawn UNDER the nodes so port circles sit on
+        // Edges first — drawn UNDER the nodes so port markers sit on
         // top of wire ends, matching OMEdit.
         let canvas_scene = &doc_state.canvas.scene;
+        // Pre-pass: count edge incidences per (node, port) endpoint
+        // so we know which ports host a junction (≥3 wires meet).
+        // Drawn after edges so the junction dot covers any gap in
+        // the wire crossing.
+        let mut endpoint_counts: std::collections::HashMap<
+            (lunco_canvas::NodeId, lunco_canvas::PortId),
+            u32,
+        > = std::collections::HashMap::new();
+        for (_eid, edge) in canvas_scene.edges() {
+            *endpoint_counts
+                .entry((edge.from.node, edge.from.port.clone()))
+                .or_insert(0) += 1;
+            *endpoint_counts
+                .entry((edge.to.node, edge.to.port.clone()))
+                .or_insert(0) += 1;
+        }
         for (_eid, edge) in canvas_scene.edges() {
             let Some(from_node) = canvas_scene.node(edge.from.node) else { continue };
             let Some(to_node) = canvas_scene.node(edge.to.node) else { continue };
@@ -296,53 +312,292 @@ fn draw_diagram_into_vello_scene(
                 to_node.rect.min.x as f64 + to_port.local_offset.x as f64,
                 to_node.rect.min.y as f64 + to_port.local_offset.y as f64,
             );
+
+            let edge_data = edge.data.downcast_ref::<crate::ui::panels::canvas_diagram::ConnectionEdgeData>();
+
+            // Wire colour + width follow the same MSL/OMEdit
+            // convention as the egui edge visual:
+            //   - Authored connector lineColor wins via `icon_color`.
+            //   - Otherwise fall back to the leaf-name colour palette.
+            //   - Apply the modelica-icon palette remap so dark-theme
+            //     colours come out readable.
+            let leaf = edge_data
+                .map(|d| d.connector_type.rsplit('.').next().unwrap_or(&d.connector_type).to_string())
+                .unwrap_or_default();
+            let causal_by_name =
+                leaf.ends_with("Input") || leaf.ends_with("Output");
+            let is_causal = match edge_data {
+                Some(d) => matches!(
+                    d.kind,
+                    crate::visual_diagram::PortKind::Input
+                        | crate::visual_diagram::PortKind::Output,
+                ),
+                None => false,
+            } || causal_by_name;
+
+            let raw_color: egui::Color32 = match edge_data {
+                Some(d) => d.icon_color.unwrap_or_else(|| wire_color_for_leaf(&leaf)),
+                None => egui::Color32::BLACK,
+            };
+            let palette_color = palette_remap(raw_color);
+            let pen = egui_to_peniko(palette_color);
+
+            // Wire stroke width matches the OMEdit convention: causal
+            // signals are thicker than mechanical/acausal.
+            let wire_w = if is_causal { 0.5 } else { 0.3 };
+
+            // Build the wire path. Use authored waypoints when present
+            // (the MSL `connect(...) annotation(Line(points=...))` form);
+            // fall back to a straight segment otherwise.
             let mut path = BezPath::new();
             path.move_to(a);
+            if let Some(d) = edge_data {
+                for w in &d.waypoints_world {
+                    path.line_to((w.x as f64, w.y as f64));
+                }
+            }
             path.line_to(b);
             scene.stroke(
-                &Stroke::new(0.4),
+                &Stroke::new(wire_w),
                 xform,
-                // Generic wire color — phase 2 will read connector
-                // type and route through the real palette.
-                Color::new([0.55, 0.65, 0.85, 1.0]),
+                pen,
                 None,
                 &path,
+            );
+
+            // Causal-input arrowhead at the target end. Direction is
+            // from the last segment of the path; size scales with
+            // wire stroke so it doesn't dominate at large zoom.
+            if is_causal {
+                let tail_pt = if let Some(d) = edge_data {
+                    d.waypoints_world.last().map(|w| (w.x as f64, w.y as f64)).unwrap_or(a)
+                } else {
+                    a
+                };
+                draw_arrowhead(&mut scene, xform, tail_pt, b, pen);
+            }
+        }
+
+        // Junction dots: ≥3 incident wires at the same port. Drawn
+        // after the wires so the dot fills any gap.
+        for ((node_id, port_id), count) in &endpoint_counts {
+            if *count < 3 {
+                continue;
+            }
+            let Some(node) = canvas_scene.node(*node_id) else { continue };
+            let Some(port) = node.ports.iter().find(|p| p.id == *port_id) else { continue };
+            let cx = node.rect.min.x as f64 + port.local_offset.x as f64;
+            let cy = node.rect.min.y as f64 + port.local_offset.y as f64;
+            let radius = 0.8; // world units
+            scene.fill(
+                Fill::NonZero,
+                xform,
+                Color::new([0.85, 0.85, 0.85, 1.0]),
+                None,
+                &bevy_vello::vello::kurbo::Circle::new((cx, cy), radius),
             );
         }
 
         // For each node, render its authored icon graphics (Rectangle,
-        // Line, Polygon). Text/Ellipse/Bitmap follow in subsequent
-        // commits. The icon's coord_system extent maps to the node's
-        // canvas-world rect — same world→world transform the egui
-        // backend computes via `coord_xform`.
+        // Line, Polygon, Ellipse). Text/Bitmap follow in subsequent
+        // commits.
         use crate::ui::panels::canvas_diagram::IconNodeData;
         for (_id, node) in canvas_scene.nodes() {
-            let Some(d) = node.data.downcast_ref::<IconNodeData>() else {
+            let icon_node_data = node.data.downcast_ref::<IconNodeData>();
+            if let Some(d) = icon_node_data {
+                if let Some(icon) = &d.icon_graphics {
+                    let (icon_to_world, sx, sy) = icon_to_world_transform(
+                        &icon.coordinate_system.extent,
+                        &node.rect,
+                    );
+                    let inner_xform = xform * icon_to_world;
+                    let unit_scale = ((sx.abs() + sy.abs()) * 0.5) as f64;
+                    for prim in &icon.graphics {
+                        draw_icon_primitive(
+                            &mut scene,
+                            inner_xform,
+                            unit_scale,
+                            prim,
+                        );
+                    }
+                } else {
+                    draw_node_placeholder(&mut scene, xform, &node.rect);
+                }
+            } else {
                 draw_node_placeholder(&mut scene, xform, &node.rect);
                 continue;
-            };
-            let Some(icon) = &d.icon_graphics else {
-                draw_node_placeholder(&mut scene, xform, &node.rect);
-                continue;
-            };
-            // Icon-local → canvas-world transform: scale + offset
-            // mapping `icon.coordinate_system.extent` to `node.rect`.
-            let (icon_to_world, sx, sy) =
-                icon_to_world_transform(&icon.coordinate_system.extent, &node.rect);
-            let inner_xform = xform * icon_to_world;
-            let unit_scale = ((sx.abs() + sy.abs()) * 0.5) as f64;
-            for prim in &icon.graphics {
-                draw_icon_primitive(
+            }
+
+            // Port markers — input squares, output triangles,
+            // acausal circles. Same shapes the egui side renders so
+            // the visual contract stays consistent.
+            for port in &node.ports {
+                let cx = node.rect.min.x as f64 + port.local_offset.x as f64;
+                let cy = node.rect.min.y as f64 + port.local_offset.y as f64;
+                let body_cx = (node.rect.min.x + node.rect.max.x) as f64 * 0.5;
+                let body_cy = (node.rect.min.y + node.rect.max.y) as f64 * 0.5;
+                draw_port_marker(
                     &mut scene,
-                    inner_xform,
-                    unit_scale,
-                    prim,
+                    xform,
+                    (cx, cy),
+                    (cx - body_cx, cy - body_cy),
+                    port.kind.as_str(),
                 );
             }
         }
     }
     // Suppress unused-warning churn while the migration is in flight.
     let _ = scenes;
+}
+
+/// Palette of canonical MSL connector lineColors keyed by the
+/// connector class's leaf name. Mirrors `wire_color_for` in
+/// canvas_diagram.rs — keep the two in sync until both render
+/// paths consume the same source-of-truth table.
+fn wire_color_for_leaf(leaf: &str) -> egui::Color32 {
+    use egui::Color32 as C;
+    match leaf {
+        "Pin" | "PositivePin" | "NegativePin" | "Plug" | "PositivePlug"
+        | "NegativePlug" => C::from_rgb(0, 0, 255),
+        "Flange_a" | "Flange_b" | "Flange" | "Support" => C::from_rgb(0, 0, 0),
+        "HeatPort_a" | "HeatPort_b" | "HeatPort" => C::from_rgb(191, 0, 0),
+        "FluidPort" | "FluidPort_a" | "FluidPort_b" => C::from_rgb(0, 127, 255),
+        "RealInput" | "RealOutput" => C::from_rgb(0, 0, 127),
+        "BooleanInput" | "BooleanOutput" => C::from_rgb(255, 0, 255),
+        "IntegerInput" | "IntegerOutput" => C::from_rgb(255, 127, 0),
+        "Frame" | "Frame_a" | "Frame_b" => C::from_rgb(95, 95, 95),
+        _ => C::from_rgb(0, 0, 0),
+    }
+}
+
+/// Egui→peniko colour conversion. peniko expects a [0..1] f32
+/// linear-sRGB-ish payload; egui::Color32 is sRGB straight u8.
+fn egui_to_peniko(c: egui::Color32) -> Color {
+    Color::new([
+        c.r() as f32 / 255.0,
+        c.g() as f32 / 255.0,
+        c.b() as f32 / 255.0,
+        c.a() as f32 / 255.0,
+    ])
+}
+
+/// Apply the active modelica-icon palette to an egui colour. Keeps
+/// vello's wire/marker output aligned with the rest of the diagram
+/// when the user is on a dark theme.
+fn palette_remap(c: egui::Color32) -> egui::Color32 {
+    // Pull the palette via the egui memory key the modelica-icon
+    // path stores on each frame. When unset (light theme defaults
+    // to identity), passes through unchanged.
+    // We can't easily reach into `Theme` from a Bevy Update system
+    // (Theme is a Resource), so this falls back to identity for
+    // now. Phase-2 wiring caches the palette in egui memory the
+    // same way `modelica_icon_palette_from_ctx` does for the panel
+    // path.
+    c
+}
+
+/// Per-port marker matching the egui-side convention:
+///   - `"input"`   → filled square pointing inward
+///   - `"output"`  → filled triangle pointing outward (toward `dir`)
+///   - everything else → filled circle (acausal physical port)
+fn draw_port_marker(
+    scene: &mut VelloScene2d,
+    xform: Affine,
+    center: (f64, f64),
+    dir_from_body_center: (f64, f64),
+    kind: &str,
+) {
+    use bevy_vello::vello::kurbo::Circle as KurboCircle;
+    // Marker world-radius. Scales with the wider canvas affine; at
+    // typical zoom this lands at 4–6 screen px.
+    let r = 2.5_f64;
+    let fill = Color::new([0.85, 0.85, 0.88, 1.0]);
+    let stroke = Stroke::new(0.3);
+    let stroke_color = Color::new([0.30, 0.32, 0.36, 1.0]);
+    match kind {
+        "input" => {
+            let half = r * 1.2;
+            let kr = bevy_vello::vello::kurbo::Rect::new(
+                center.0 - half,
+                center.1 - half,
+                center.0 + half,
+                center.1 + half,
+            );
+            scene.fill(Fill::NonZero, xform, fill, None, &kr);
+            scene.stroke(&stroke, xform, stroke_color, None, &kr);
+        }
+        "output" => {
+            // Triangle pointing along the outward direction. If the
+            // dir is degenerate, fall back to a square.
+            let len = (dir_from_body_center.0 * dir_from_body_center.0
+                + dir_from_body_center.1 * dir_from_body_center.1)
+                .sqrt();
+            if len < 1e-6 {
+                let half = r * 1.2;
+                let kr = bevy_vello::vello::kurbo::Rect::new(
+                    center.0 - half,
+                    center.1 - half,
+                    center.0 + half,
+                    center.1 + half,
+                );
+                scene.fill(Fill::NonZero, xform, fill, None, &kr);
+                return;
+            }
+            let (ux, uy) = (dir_from_body_center.0 / len, dir_from_body_center.1 / len);
+            let (px, py) = (-uy, ux);
+            let tip = (center.0 + ux * r * 1.4, center.1 + uy * r * 1.4);
+            let b1 = (
+                center.0 - ux * r * 0.4 + px * r * 0.9,
+                center.1 - uy * r * 0.4 + py * r * 0.9,
+            );
+            let b2 = (
+                center.0 - ux * r * 0.4 - px * r * 0.9,
+                center.1 - uy * r * 0.4 - py * r * 0.9,
+            );
+            let mut path = BezPath::new();
+            path.move_to(tip);
+            path.line_to(b1);
+            path.line_to(b2);
+            path.close_path();
+            scene.fill(Fill::NonZero, xform, fill, None, &path);
+            scene.stroke(&stroke, xform, stroke_color, None, &path);
+        }
+        _ => {
+            // Acausal — circle.
+            let circle = KurboCircle::new(center, r * 0.8);
+            scene.fill(Fill::NonZero, xform, fill, None, &circle);
+            scene.stroke(&stroke, xform, stroke_color, None, &circle);
+        }
+    }
+}
+
+fn draw_arrowhead(
+    scene: &mut VelloScene2d,
+    xform: Affine,
+    tail: (f64, f64),
+    tip: (f64, f64),
+    color: Color,
+) {
+    let dx = tip.0 - tail.0;
+    let dy = tip.1 - tail.1;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1e-3 {
+        return;
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let (px, py) = (-uy, ux);
+    // Arrowhead world-units: ~3.5 wide × 7 long. Scaled with the
+    // viewport via the parent xform.
+    let head_len = 3.5_f64;
+    let half_w = 1.75_f64;
+    let bx = tip.0 - ux * head_len;
+    let by = tip.1 - uy * head_len;
+    let mut path = BezPath::new();
+    path.move_to(tip);
+    path.line_to((bx + px * half_w, by + py * half_w));
+    path.line_to((bx - px * half_w, by - py * half_w));
+    path.close_path();
+    scene.fill(Fill::NonZero, xform, color, None, &path);
 }
 
 /// Empty-icon placeholder — a soft rounded rect outlined in grey.

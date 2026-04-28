@@ -5985,6 +5985,7 @@ name = "lunco-canvas"
 version = "0.1.0"
 dependencies = [
  "bevy_egui",
+ "bevy_vello",
  "indexmap",
  "serde",
  "serde_json",
