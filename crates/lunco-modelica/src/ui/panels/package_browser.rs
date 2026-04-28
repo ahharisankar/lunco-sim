@@ -307,40 +307,79 @@ fn scan_msl_dir(dir: &std::path::Path, package_path: String) -> Vec<PackageNode>
                     is_loading: false,
                 });
             } else if path.extension().map(|e| e == "mo").unwrap_or(false) {
-                // `package.mo` is the package's own definition file,
-                // not a sibling class. The package itself is already
-                // surfaced as the parent `Category`; rendering an
-                // additional row for `package.mo` duplicates that
-                // navigation node and adds a stray `[?]`/`[P]` row.
-                // Match Dymola/OMEdit which never show `package.mo`
-                // as a class entry.
                 if name == "package.mo" {
+                    // Don't surface `package.mo` as its own row — it
+                    // IS the parent package's definition. But its
+                    // inline sub-classes (e.g. `package Examples` in
+                    // `Blocks/package.mo`) are real siblings of the
+                    // other `.mo` files in this directory; harvest
+                    // them below outside the per-entry loop.
                     continue;
                 }
                 let display_name = name.strip_suffix(".mo").unwrap_or(&name).to_string();
-                let model_path = format!("{}.{}", package_path, display_name);
-                let id = format!(
-                    "msl_path:{}",
-                    model_path.strip_prefix("Modelica.").unwrap_or(&model_path)
-                );
-                // Only keep the kind — the docstring goes into the
-                // class's AST when the file's opened, and the Docs
-                // view reads it from there. Storing it on the
-                // navigation node would just duplicate the source of
-                // truth.
-                let (class_kind, _) = peek_class_header(&path);
-                results.push(PackageNode::Model {
-                    id,
-                    name: display_name,
-                    library: ModelLibrary::MSL,
-                    class_kind,
-                });
+                let qualified = format!("{}.{}", package_path, display_name);
+                results.push(node_from_modelica_file(&path, &qualified, &display_name));
             }
         }
     }
 
-    results.sort_by_key(|n| n.name().to_lowercase());
+    // Merge inline children from `package.mo`. MSL packages are
+    // hybrid: some children are sibling `.mo` files (Continuous.mo,
+    // Discrete.mo), others live inline inside `package.mo`
+    // (Examples, Noise, BusUsage_Utilities, ...). OMEdit shows them
+    // all as peers of the parent — we need to do the same or
+    // Examples is invisible. Skip duplicates: if a sibling file
+    // already provides a class of that name, keep the file version.
+    let pkg_mo = dir.join("package.mo");
+    if pkg_mo.is_file() {
+        if let Ok(source) = std::fs::read_to_string(&pkg_mo) {
+            let ast = rumoca_phase_parse::parse_to_recovered_ast(
+                &source,
+                &pkg_mo.display().to_string(),
+            );
+            if let Some((_, top_class)) = ast.classes.iter().next() {
+                let existing_names: std::collections::HashSet<String> =
+                    results.iter().map(|n| n.name().to_string()).collect();
+                for (child_short, child_def) in &top_class.classes {
+                    if existing_names.contains(child_short) {
+                        continue;
+                    }
+                    let child_qualified = format!("{}.{}", package_path, child_short);
+                    results.push(class_def_to_node(
+                        &pkg_mo,
+                        &child_qualified,
+                        child_short,
+                        child_def,
+                    ));
+                }
+            }
+        }
+    }
+
+    results.sort_by_key(omedit_sort_key);
     results
+}
+
+/// Sort key matching OMEdit's tree convention. Priority order:
+///
+/// 1. `UsersGuide` — documentation hub, always pinned to the top of
+///    its parent (every MSL top-level package has one).
+/// 2. `Examples` — runnable example collection, second pin.
+/// 3. Other sub-packages (folders) — alphabetical.
+/// 4. Leaf classes (model / block / connector / ...) — alphabetical.
+///
+/// Both the disk scan and the inline AST walk use this same key, so
+/// directory- and single-file-packaged content sort identically.
+fn omedit_sort_key(n: &PackageNode) -> (u8, String) {
+    let group: u8 = match n.name() {
+        "UsersGuide" => 0,
+        "Examples" => 1,
+        _ => match n {
+            PackageNode::Category { .. } => 2,
+            PackageNode::Model { .. } => 3,
+        },
+    };
+    (group, n.name().to_lowercase())
 }
 
 fn build_bundled_tree() -> Vec<PackageNode> {
@@ -771,7 +810,10 @@ impl Panel for PackageBrowserPanel {
 
         if let Some(action) = to_open {
             match action {
-                PackageAction::Open(id, name, lib) => open_model(world, id, name, lib),
+                PackageAction::Open(id, name, lib) => {
+                    queue_drill_in_if_inline(world, &id, &lib);
+                    open_model(world, id, name, lib);
+                }
                 PackageAction::Instantiate { msl_path, display_name } => {
                     instantiate_on_active_canvas(world, &msl_path, &display_name);
                 }
@@ -1347,6 +1389,112 @@ fn msl_path_for_id(id: &str, library: &ModelLibrary) -> String {
 /// Returns `None` only on I/O failure or files with no recognisable
 /// class header in the first 50 lines (rare — one would have to
 /// invent a new keyword Modelica doesn't define).
+/// Parse a Modelica `.mo` file and turn its top-level class into a
+/// [`PackageNode`]. When the file's class is a `package` containing
+/// inner classes, the result is a [`PackageNode::Category`] whose
+/// children are the inline classes (recursively, so nested packages
+/// inside the same file expand too — matches OMEdit's tree shape).
+/// Leaf classes (model/block/connector/...) become [`PackageNode::Model`].
+///
+/// Falls back to a kind-only `Model` node when the parse fails — the
+/// scanner stays robust against partial / experimental files.
+fn node_from_modelica_file(
+    path: &std::path::Path,
+    qualified: &str,
+    display_name: &str,
+) -> PackageNode {
+    // Peek the class kind first — single-file packages need a full
+    // AST walk to expose their inline children, but leaf classes
+    // (model/block/connector/function/record/type) just become a
+    // Model node. Skipping the full rumoca parse on every leaf
+    // file in MSL is a huge speedup (most `.mo` files are leaves).
+    let (kind_str, _) = peek_class_header(path);
+    if kind_str.as_deref() != Some("package") {
+        return leaf_model_node(qualified, display_name, kind_str);
+    }
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return leaf_model_node(qualified, display_name, kind_str),
+    };
+    let ast = rumoca_phase_parse::parse_to_recovered_ast(&source, &path.display().to_string());
+    let Some((_, top_class)) = ast.classes.iter().next() else {
+        return leaf_model_node(qualified, display_name, kind_str);
+    };
+    class_def_to_node(path, qualified, display_name, top_class)
+}
+
+/// Recursive AST → tree node. Inner packages expand into Categories
+/// with children; leaf classes become Model rows. Files are tracked
+/// on every node so click-to-open can resolve the source file by
+/// walking up the qualified path until an existing `.mo` is found
+/// (handles directory- and single-file-package layouts uniformly).
+fn class_def_to_node(
+    file_path: &std::path::Path,
+    qualified: &str,
+    short_name: &str,
+    class_def: &rumoca_session::parsing::ast::ClassDef,
+) -> PackageNode {
+    use rumoca_session::parsing::ClassType;
+    let kind_str = class_kind_to_str(&class_def.class_type);
+    let is_package = matches!(class_def.class_type, ClassType::Package);
+    if is_package && !class_def.classes.is_empty() {
+        let mut children: Vec<PackageNode> = class_def
+            .classes
+            .iter()
+            .map(|(child_short, child_def)| {
+                let child_qualified = format!("{}.{}", qualified, child_short);
+                class_def_to_node(file_path, &child_qualified, child_short, child_def)
+            })
+            .collect();
+        // Same OMEdit ordering inside inline-package contents:
+        // UsersGuide pinned, Examples second, then folders, then
+        // leaves — alphabetical within each group.
+        children.sort_by_key(omedit_sort_key);
+        let id = format!(
+            "msl_path:{}",
+            qualified.strip_prefix("Modelica.").unwrap_or(qualified)
+        );
+        PackageNode::Category {
+            id,
+            name: short_name.to_string(),
+            package_path: qualified.to_string(),
+            fs_path: file_path.to_path_buf(),
+            children: Some(children),
+            is_loading: false,
+        }
+    } else {
+        leaf_model_node(qualified, short_name, Some(kind_str.to_string()))
+    }
+}
+
+fn leaf_model_node(qualified: &str, short_name: &str, class_kind: Option<String>) -> PackageNode {
+    let id = format!(
+        "msl_path:{}",
+        qualified.strip_prefix("Modelica.").unwrap_or(qualified)
+    );
+    PackageNode::Model {
+        id,
+        name: short_name.to_string(),
+        library: ModelLibrary::MSL,
+        class_kind,
+    }
+}
+
+fn class_kind_to_str(kind: &rumoca_session::parsing::ClassType) -> &'static str {
+    use rumoca_session::parsing::ClassType;
+    match kind {
+        ClassType::Model => "model",
+        ClassType::Block => "block",
+        ClassType::Connector => "connector",
+        ClassType::Function => "function",
+        ClassType::Record => "record",
+        ClassType::Type => "type",
+        ClassType::Package => "package",
+        ClassType::Class => "class",
+        ClassType::Operator => "operator",
+    }
+}
+
 /// Peek the class header from a `.mo` file. Returns `(class_kind,
 /// description)` — kind is the Modelica keyword, description is the
 /// first quoted string after the class name (Modelica's "comment" —
@@ -1684,18 +1832,52 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
             let filename = id_clone.strip_prefix("bundled://").unwrap_or("");
             crate::models::get_model(filename).unwrap_or("").to_string()
         } else if let Some(rel_path) = id_clone.strip_prefix("msl_path:") {
-            // Id is the dot-separated qualified name without the
-            // file extension (e.g. `Mechanics.Rotational.Examples.Backlash`).
-            // Translate dots to path separators and append `.mo`. The
-            // legacy `replace("/mo", ".mo")` trick was a workaround
-            // for an id-formatting bug (the id used to include `.mo`
-            // as part of the dotted path); since `scan_msl_dir` now
-            // strips the suffix before constructing the id, the
-            // translation is straightforward: dots → slashes, then
-            // append `.mo`.
-            let disk_path = format!("{}.mo", rel_path.replace('.', "/"));
+            // Walk up the dotted path looking for the file that owns
+            // this class. MSL uses three storage conventions, often
+            // mixed within one library:
+            //
+            //   1. Directory-structured: `Mechanics/Rotational/Examples/Backlash.mo`
+            //      — one class per file, file path mirrors qualified name.
+            //   2. Single-file package: `Blocks/Continuous.mo` containing
+            //      `package Continuous ... block Integrator ... end;`
+            //      — qualified `Blocks.Continuous.Integrator` lives in
+            //      `Continuous.mo`.
+            //   3. Inline-in-`package.mo`: `Blocks/package.mo` containing
+            //      `package Blocks ... package Examples ... model PID ...`
+            //      — qualified `Blocks.Examples.PID` lives in
+            //      `Blocks/package.mo`.
+            //
+            // For each level walking up, try both the `.mo` file and
+            // the `/package.mo` of the directory at that level. First
+            // existing match wins. Drill-in (queued separately) lands
+            // on the specific class within the loaded file.
             let msl_root = lunco_assets::msl_dir();
-            let full_path = msl_root.join("Modelica").join(disk_path);
+            let parts: Vec<&str> = rel_path.split('.').collect();
+            let mut full_path: std::path::PathBuf = msl_root.join("Modelica");
+            'walk: for end in (1..=parts.len()).rev() {
+                // <Modelica>/<segment0>/<...>/<segmentN>.mo
+                let mut as_file = msl_root.join("Modelica");
+                as_file.push(parts[..end].join("/"));
+                as_file.set_extension("mo");
+                if as_file.exists() {
+                    full_path = as_file;
+                    break 'walk;
+                }
+                // <Modelica>/<segment0>/<...>/<segmentN>/package.mo
+                let mut as_pkg = msl_root.join("Modelica");
+                as_pkg.push(parts[..end].join("/"));
+                as_pkg.push("package.mo");
+                if as_pkg.exists() {
+                    full_path = as_pkg;
+                    break 'walk;
+                }
+            }
+            // Final fallback: Modelica's own package.mo. Catches the
+            // case where the class is defined inline inside the
+            // root MSL package itself (rare, but valid Modelica).
+            if !full_path.is_file() {
+                full_path = msl_root.join("Modelica").join("package.mo");
+            }
             std::fs::read_to_string(&full_path).unwrap_or_else(|e| {
                 format!("// Error reading {}\n// {:?}", full_path.display(), e)
             })
@@ -1835,7 +2017,10 @@ pub(crate) fn render_root_subtree(world: &mut World, ui: &mut egui::Ui, root_id:
     }
     if let Some(a) = action {
         match a {
-            PackageAction::Open(id, name, lib) => open_model(world, id, name, lib),
+            PackageAction::Open(id, name, lib) => {
+                queue_drill_in_if_inline(world, &id, &lib);
+                open_model(world, id, name, lib);
+            }
             PackageAction::Instantiate {
                 msl_path,
                 display_name,
@@ -1843,6 +2028,23 @@ pub(crate) fn render_root_subtree(world: &mut World, ui: &mut egui::Ui, root_id:
             PackageAction::DragStart { msl_path } => stash_drag_payload(world, &msl_path),
         }
     }
+}
+
+/// Queue a drill-in target before opening, so the canvas projector
+/// lands on the specific class the user clicked instead of the
+/// containing file's first non-package class. Critical for inline
+/// classes inside single-file packages (e.g. clicking
+/// `Modelica.Blocks.Continuous.Derivative` opens `Continuous.mo`
+/// — without drill-in the diagram tries to render every class in
+/// the 100KB+ file).
+fn queue_drill_in_if_inline(world: &mut World, id: &str, library: &ModelLibrary) {
+    if !matches!(library, ModelLibrary::MSL) {
+        return;
+    }
+    let qualified = msl_path_for_id(id, library);
+    world
+        .resource_mut::<crate::ui::browser_dispatch::PendingDrillIns>()
+        .queue(id.to_string(), qualified);
 }
 
 /// Look up the MSL component def by path and stash it as the active

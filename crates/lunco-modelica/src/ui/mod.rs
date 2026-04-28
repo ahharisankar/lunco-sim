@@ -72,6 +72,7 @@ pub mod panels;
 pub mod viz;
 pub mod theme;
 pub mod uri_handler;
+pub mod loaded_classes;
 pub mod welcome_progress;
 /// Debounced AST reparse driver — see module docs.
 pub mod ast_refresh;
@@ -115,6 +116,45 @@ fn drain_document_changes(
     for doc in registry.drain_pending_closed() {
         commands.trigger(lunco_doc_bevy::DocumentClosed::local(doc));
     }
+}
+
+/// Shadow-sync observer: a Modelica doc was added → if it's writable
+/// (User-saved) or Untitled (in-memory draft), register it as a
+/// top-level [`LoadedClass`](crate::ui::loaded_classes::LoadedClass)
+/// in the Twin panel. Read-only library reference docs (MSL classes
+/// the user clicked through to inspect) skip — they're already
+/// reachable through the system-library trees.
+fn register_workspace_class_on_doc_opened(
+    trigger: On<lunco_doc_bevy::DocumentOpened>,
+    registry: Res<crate::ui::state::ModelicaDocumentRegistry>,
+    mut loaded: ResMut<loaded_classes::LoadedModelicaClasses>,
+) {
+    let doc_id = trigger.event().doc;
+    let Some(host) = registry.host(doc_id) else {
+        return;
+    };
+    let origin = host.document().origin();
+    if !(origin.is_writable() || origin.is_untitled()) {
+        return;
+    }
+    // Dedupe — DocumentOpened can fire several times per doc id
+    // during the open-pipeline races.
+    let new_id = format!("workspace:{}", doc_id.raw());
+    if loaded.entries.iter().any(|c| c.id() == new_id) {
+        return;
+    }
+    loaded.register(Box::new(loaded_classes::WorkspaceClass::new(doc_id)));
+}
+
+/// Shadow-sync observer: a Modelica doc closed → drop its
+/// `WorkspaceClass` entry.
+fn drop_workspace_class_on_doc_closed(
+    trigger: On<lunco_doc_bevy::DocumentClosed>,
+    mut loaded: ResMut<loaded_classes::LoadedModelicaClasses>,
+) {
+    let doc_id = trigger.event().doc;
+    let id = format!("workspace:{}", doc_id.raw());
+    loaded.unregister(&id);
 }
 
 /// Shadow-sync observer: Modelica doc opened → register entry in the
@@ -422,6 +462,11 @@ impl Plugin for ModelicaUiPlugin {
             .add_observer(sync_workspace_on_doc_opened)
             .add_observer(sync_workspace_on_doc_closed)
             .add_observer(sync_workspace_on_doc_saved)
+            // Twin-panel: keep the loaded-classes list in sync with
+            // the document registry. One `WorkspaceClass` per
+            // writable / Untitled Modelica doc, dropped on close.
+            .add_observer(register_workspace_class_on_doc_opened)
+            .add_observer(drop_workspace_class_on_doc_closed)
             // Kick off a background scan whenever the workbench
             // announces a new Twin (Open Folder / Open Twin / "Save
             // as Twin" promotion). The scan populates the package
@@ -486,17 +531,34 @@ impl Plugin for ModelicaUiPlugin {
         // section; we just append. ensure it exists first to avoid
         // panics during mixed-mode or deferred plugin builds.
         app.init_resource::<lunco_workbench::BrowserSectionRegistry>();
-        // One section per domain — `ModelicaSection` internally
-        // groups MSL / Bundled Examples / Workspace as nested
-        // collapsing headers (Dymola/OMEdit Package-Browser shape).
-        // Future domain crates (`UsdSection`, `SysmlSection`,
-        // `JuliaSection`) follow the same outer pattern: one
-        // BrowserSection per domain, internal sub-grouping owned by
-        // that domain. Keeps the Twin panel scalable as the number
-        // of supported domains grows.
+        // One section per domain — `ModelicaSection` iterates a
+        // live `LoadedModelicaClasses` registry. Each entry is one
+        // top-level Modelica class (system library, twin.toml
+        // external, workspace document, future remote source) —
+        // OMEdit's flat-list-of-libraries shape. Future domain
+        // crates (`UsdSection`, `SysmlSection`, ...) follow the
+        // same outer pattern with their own per-domain registry.
         app.world_mut()
             .resource_mut::<lunco_workbench::BrowserSectionRegistry>()
             .register(browser_section::ModelicaSection::default());
+        app.init_resource::<loaded_classes::LoadedModelicaClasses>();
+        // Default-libraries set: always loaded, not bound to any
+        // Twin. MSL is the foundation; Bundled Examples is
+        // LunCoSim's own learning material. Future implicit libs
+        // (ModelicaServices, Complex) register here too.
+        let mut loaded = app
+            .world_mut()
+            .resource_mut::<loaded_classes::LoadedModelicaClasses>();
+        loaded.register(Box::new(loaded_classes::SystemLibraryClass::new(
+            "msl_root",
+            "Modelica",
+            false,
+        )));
+        loaded.register(Box::new(loaded_classes::SystemLibraryClass::new(
+            "bundled_root",
+            "Bundled Examples",
+            true,
+        )));
     }
 }
 

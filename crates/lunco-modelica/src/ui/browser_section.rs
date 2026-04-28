@@ -78,191 +78,137 @@ impl BrowserSection for ModelicaSection {
     }
 
     fn render(&mut self, ui: &mut egui::Ui, ctx: &mut BrowserCtx<'_>) {
-        // Domain panel layout, Dymola/OMEdit style: standard library
-        // at the top (foundation), bundled examples next, user
-        // workspace at the bottom — three nested groups inside one
-        // `Modelica` section. Future domain crates (USD, SysML,
-        // Mission, Julia) follow the same shape — one outer
-        // BrowserSection per domain with internally-grouped
-        // sub-headers — keeping the Twin panel scalable as domains
-        // accumulate rather than fragmenting into N flat sections.
-        egui::CollapsingHeader::new("Modelica Standard Library")
-            .id_salt(("modelica_section", "msl"))
-            .default_open(false)
-            .show(ui, |ui| render_msl_group(ui, ctx));
-        egui::CollapsingHeader::new("Bundled Examples")
-            .id_salt(("modelica_section", "bundled"))
-            .default_open(true)
-            .show(ui, |ui| render_bundled_group(ui, ctx));
-        egui::CollapsingHeader::new("Workspace")
-            .id_salt(("modelica_section", "workspace"))
-            .default_open(true)
-            .show(ui, |ui| render_workspace_group(ui, ctx));
-    }
-}
-
-/// Render the **Workspace** sub-group — writable + Untitled Modelica
-/// documents the user is actively editing. Source-of-truth read of
-/// [`ModelicaDocumentRegistry`] derived through each doc's
-/// [`SyntaxCache`]. Stateless on every call; the registry itself
-/// drives change detection.
-fn render_workspace_group(ui: &mut egui::Ui, ctx: &mut BrowserCtx<'_>) {
-        // Snapshot what the registry knows so we can release the
-        // borrow before emitting actions (the dispatcher will mutate
-        // the registry when opening tabs). Each entry carries an
-        // `Arc<SyntaxCache>` cloned out of the document — cheap (Arc
-        // bump) and lets the render loop walk the AST without holding
-        // any borrow on the registry.
-        let docs: Vec<(DocumentId, String, std::sync::Arc<SyntaxCache>)> = {
-            let Some(registry) = ctx.world.get_resource::<ModelicaDocumentRegistry>()
-            else {
+        // OMEdit-style flat list of loaded Modelica top-level
+        // classes — system libraries (MSL, future ModelicaServices,
+        // twin.toml externals), bundled examples, and one entry
+        // per writable / Untitled workspace document. Each entry
+        // gets its own `CollapsingHeader`; `LoadedClass`
+        // implementations own their inner rendering. The list is a
+        // live registry mutated by lifecycle observers as Twins and
+        // documents come and go — see `loaded_classes.rs`.
+        let mut entries = match ctx
+            .world
+            .remove_resource::<crate::ui::loaded_classes::LoadedModelicaClasses>()
+        {
+            Some(r) => r,
+            None => {
                 ui.label(
-                    egui::RichText::new("(Modelica document registry not initialised)")
+                    egui::RichText::new("(LoadedModelicaClasses resource missing)")
                         .weak()
                         .italics(),
                 );
                 return;
-            };
-            let mut entries: Vec<(DocumentId, String, std::sync::Arc<SyntaxCache>)> = registry
-                .iter()
-                // Workspace = user content. Read-only library docs
-                // (bundled examples opened via "Open as read-only",
-                // MSL classes the user clicked through to inspect)
-                // are *not* part of the workspace — they're
-                // references. Keep only writable files (User-opened,
-                // saved drafts) and untitled drafts (unsaved scratch).
-                .filter(|(_, host)| {
-                    let origin = host.document().origin();
-                    origin.is_writable() || origin.is_untitled()
-                })
-                .map(|(id, host)| {
-                    let doc = host.document();
-                    let display = doc.origin().display_name();
-                    // `Arc::clone` of the SyntaxCache — no parse, no
-                    // source clone. The doc's off-thread refresh
-                    // keeps this current.
-                    let syntax = std::sync::Arc::clone(&doc.syntax_arc());
-                    (id, display, syntax)
-                })
-                .collect();
-            entries.sort_by(|a, b| a.1.cmp(&b.1));
-            entries
+            }
         };
 
-        if docs.is_empty() {
+        if entries.entries.is_empty() {
             ui.label(
-                egui::RichText::new("Workspace is empty.")
+                egui::RichText::new("No Modelica classes loaded.")
                     .weak()
                     .italics(),
             );
+        } else {
+            for class in &mut entries.entries {
+                let name = class.name(ctx);
+                let label = if class.writable() {
+                    name
+                } else {
+                    format!("🔒  {}", name)
+                };
+                egui::CollapsingHeader::new(label)
+                    .id_salt(("loaded_modelica_class", class.id()))
+                    .default_open(class.default_open())
+                    .show(ui, |ui| class.render_children(ui, ctx));
+            }
+        }
+
+        ctx.world.insert_resource(entries);
+    }
+}
+
+/// Render the class tree of one writable / Untitled workspace
+/// document. Called by [`crate::ui::loaded_classes::WorkspaceClass`] —
+/// the outer `CollapsingHeader` row carrying this doc's name has
+/// already been drawn; we just paint the children inline.
+///
+/// Source-of-truth read of [`ModelicaDocumentRegistry`] derived
+/// through the doc's [`SyntaxCache`]. Stateless; the registry's
+/// off-thread refresh keeps the AST current.
+pub(crate) fn render_workspace_doc(
+    ui: &mut egui::Ui,
+    ctx: &mut BrowserCtx<'_>,
+    doc_id: DocumentId,
+) {
+    let syntax: std::sync::Arc<SyntaxCache> = match ctx
+        .world
+        .get_resource::<ModelicaDocumentRegistry>()
+        .and_then(|reg| reg.host(doc_id))
+        .map(|host| std::sync::Arc::clone(&host.document().syntax_arc()))
+    {
+        Some(s) => s,
+        None => {
             ui.label(
-                egui::RichText::new(
-                    "Add Modelica content via the Welcome tab — \
-                     New Model, Open Folder, or Try an example.",
-                )
-                .weak()
-                .small(),
+                egui::RichText::new("(document not in registry)")
+                    .weak()
+                    .italics(),
             );
             return;
         }
+    };
 
-        // Snapshot the theme once so every row in this frame reads
-        // the same semantic colours (dark/light toggles propagate on
-        // the next render). Cloning `Theme` is cheap — colours,
-        // tokens, spacing, rounding, plus a small overrides
-        // HashMap — well under a millisecond.
-        let theme = ctx
-            .world
-            .get_resource::<lunco_theme::Theme>()
-            .cloned()
-            .unwrap_or_else(lunco_theme::Theme::dark);
+    let theme = ctx
+        .world
+        .get_resource::<lunco_theme::Theme>()
+        .cloned()
+        .unwrap_or_else(lunco_theme::Theme::dark);
 
-        // What's currently in the foreground tab? Used to render that
-        // (doc, class) pair as selected so users see "I'm editing
-        // this." Active doc comes from the Workspace session;
-        // active class from `DrilledInClassNames` keyed by that doc.
-        // When no class is drilled in we still highlight every
-        // top-level row of the active doc — answers "which doc am I
-        // looking at" even before any drill-in.
-        let active_doc: Option<DocumentId> = ctx
-            .world
-            .get_resource::<lunco_workbench::WorkspaceResource>()
-            .and_then(|ws| ws.active_document);
-        let active_qualified: Option<String> = active_doc.and_then(|d| {
-            ctx.world
-                .get_resource::<DrilledInClassNames>()
-                .and_then(|m| m.get(d).map(str::to_string))
-        });
+    let active_doc: Option<DocumentId> = ctx
+        .world
+        .get_resource::<lunco_workbench::WorkspaceResource>()
+        .and_then(|ws| ws.active_document);
+    let active_qualified: Option<String> = active_doc.and_then(|d| {
+        ctx.world
+            .get_resource::<DrilledInClassNames>()
+            .and_then(|m| m.get(d).map(str::to_string))
+    });
 
-        // Render only the Modelica hierarchy — the document/file is
-        // not a Modelica concept and showing it as a parent row
-        // duplicates the package name in the common single-class
-        // file case. Each top-level class becomes its own root row;
-        // the doc binding stays implicit (carried via `doc_id` into
-        // the click action). Drafts with no classes show a faint
-        // placeholder row so users know which doc is empty.
-        egui::ScrollArea::vertical()
-            .id_salt("twin_browser_modelica_scroll")
-            .auto_shrink([false; 2])
-            .show(ui, |ui| {
-                for (doc_id, display_name, syntax) in &docs {
-                    let (classes, has_parse_errors) = classes_from_syntax(syntax);
-                    if classes.is_empty() {
-                        // Distinguish empty-draft from broken-file. A
-                        // blank "(no classes yet)" row on a file the
-                        // user just broke looks identical to a healthy
-                        // empty draft — the user thinks their classes
-                        // were deleted. Label the error case explicitly.
-                        let (text, color) = if has_parse_errors {
-                            (
-                                format!("{}  ⚠ parse error", display_name),
-                                egui::Color32::from_rgb(220, 160, 60),
-                            )
-                        } else {
-                            (
-                                format!("{}  (no classes yet)", display_name),
-                                ui.visuals().weak_text_color(),
-                            )
-                        };
-                        ui.label(
-                            egui::RichText::new(text)
-                                .color(color)
-                                .small()
-                                .italics(),
-                        );
-                        continue;
-                    }
-                    for class in &classes {
-                        render_class_row(
-                            ui,
-                            class,
-                            *doc_id,
-                            active_doc,
-                            active_qualified.as_deref(),
-                            &theme,
-                            ctx,
-                        );
-                    }
-                }
-            });
-}
-
-/// Render the **Modelica Standard Library** sub-group — the real MSL
-/// package tree, lazy-loaded on first expand, with click-to-open and
-/// double-click-to-instantiate. Delegates to
-/// [`crate::ui::panels::package_browser::render_root_subtree`] so
-/// the Twin panel and the standalone Package Browser share one
-/// rendering path during the migration.
-fn render_msl_group(ui: &mut egui::Ui, ctx: &mut BrowserCtx<'_>) {
-    crate::ui::panels::package_browser::render_root_subtree(ctx.world, ui, "msl_root");
-}
-
-/// Render the **Bundled Examples** sub-group — read-only models that
-/// ship with the workbench for learning (RC_Circuit, Spring-Mass, …).
-/// Same delegation as MSL; the bundled tree is built eagerly on
-/// `PackageTreeCache::new` so this draws immediately on first frame.
-fn render_bundled_group(ui: &mut egui::Ui, ctx: &mut BrowserCtx<'_>) {
-    crate::ui::panels::package_browser::render_root_subtree(ctx.world, ui, "bundled_root");
+    let (classes, has_parse_errors) = classes_from_syntax(&syntax);
+    if classes.is_empty() {
+        // Distinguish empty-draft from broken-file. A blank
+        // "(no classes yet)" row on a file the user just broke
+        // looks identical to a healthy empty draft — the user
+        // thinks their classes were deleted. Label the error case
+        // explicitly.
+        let (text, color) = if has_parse_errors {
+            (
+                "⚠ parse error".to_string(),
+                egui::Color32::from_rgb(220, 160, 60),
+            )
+        } else {
+            (
+                "(no classes yet)".to_string(),
+                ui.visuals().weak_text_color(),
+            )
+        };
+        ui.label(
+            egui::RichText::new(text)
+                .color(color)
+                .small()
+                .italics(),
+        );
+        return;
+    }
+    for class in &classes {
+        render_class_row(
+            ui,
+            class,
+            doc_id,
+            active_doc,
+            active_qualified.as_deref(),
+            &theme,
+            ctx,
+        );
+    }
 }
 
 /// Derive the class tree + error flag from a [`SyntaxCache`]. Pure
@@ -314,6 +260,25 @@ fn collect_classes(
             children: collect_classes(&class_def.classes, &qualified),
         });
     }
+    // OMEdit ordering: UsersGuide first, Examples second, then
+    // sub-packages alphabetical, then leaf classes alphabetical.
+    // Same convention the package-browser tree uses (see
+    // `package_browser::omedit_sort_key`); duplicated here to avoid
+    // a cross-module dep on a private helper.
+    out.sort_by_key(|c| {
+        let group: u8 = match c.short_name.as_str() {
+            "UsersGuide" => 0,
+            "Examples" => 1,
+            _ => {
+                if matches!(c.kind, ClassType::Package) {
+                    2
+                } else {
+                    3
+                }
+            }
+        };
+        (group, c.short_name.to_lowercase())
+    });
     out
 }
 
