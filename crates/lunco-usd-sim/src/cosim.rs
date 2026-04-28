@@ -304,9 +304,19 @@ pub fn process_usd_cosim_wires(
     q_all: Query<(Entity, &UsdPrimPath)>,
     stages: Res<Assets<UsdStageAsset>>,
 ) {
-    // Index every UsdPrimPath entity by its sdf path string. Built once
-    // per call — wire prims and their endpoints are typically all in
-    // the same stage, so this is cheap.
+    // Bail before building the path index in the common steady-state
+    // case where every wire is already processed. The earlier version
+    // walked `q_all` (every USD prim in the world) and allocated a
+    // String per entity *every frame*, even when there was no work to
+    // do — that turned a one-shot setup into a per-frame full-scene
+    // scan.
+    if q_unprocessed.is_empty() {
+        return;
+    }
+
+    // Index every UsdPrimPath entity by its sdf path string. Wire prims
+    // and their endpoints are typically all in the same stage, so this
+    // is cheap relative to the work it saves.
     let mut by_path: HashMap<String, Entity> = HashMap::new();
     for (e, p) in q_all.iter() {
         by_path.insert(p.path.clone(), e);

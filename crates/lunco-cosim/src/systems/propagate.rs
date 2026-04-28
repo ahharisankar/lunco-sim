@@ -24,7 +24,14 @@ pub fn propagate_connections(
         Query<&mut SimComponent>,
         Query<&mut AvianSim>,
     )>,
+    // Reused across ticks — each FixedUpdate would otherwise allocate a
+    // fresh Vec plus a fresh String per connection. Cleared before use.
+    mut writes: Local<Vec<(Entity, String, f64)>>,
 ) {
+    if q_connections.is_empty() {
+        return;
+    }
+
     // Reset all SimComponent inputs to 0 before propagation.
     // Connection writes use `+=` to accumulate multiple sources (e.g. two force
     // connections), but without this reset the values would grow unboundedly.
@@ -35,7 +42,7 @@ pub fn propagate_connections(
         }
     }
 
-    let mut writes: Vec<(Entity, String, f64)> = Vec::new();
+    writes.clear();
 
     // First pass: read outputs from source ports
     for conn in &q_connections {
@@ -63,8 +70,8 @@ pub fn propagate_connections(
         }
     }
 
-    // Second pass: write to target ports
-    for (end_element, end_connector, value) in writes {
+    // Second pass: write to target ports.
+    for (end_element, end_connector, value) in writes.drain(..) {
         if let Ok(mut comp) = set.p2().get_mut(end_element) {
             let entry = comp.inputs.entry(end_connector.clone()).or_insert(0.0);
             *entry += value;
