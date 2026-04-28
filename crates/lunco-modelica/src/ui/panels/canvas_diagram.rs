@@ -446,7 +446,12 @@ impl NodeVisual for IconNodeVisual {
                 node.rect.min.y + port.local_offset.y,
             );
             let p = ctx.viewport.world_to_screen(world, ctx.screen_rect);
-            let center = egui::pos2(p.x, p.y);
+            // Pixel-snap so the marker centre aligns with the
+            // wire endpoint (which is also snapped — see
+            // `EdgesLayer::draw`). Without this, the wire end
+            // and the port circle drift apart by up to 1 px on
+            // some zoom levels.
+            let center = egui::pos2(p.x.round(), p.y.round());
 
             // Port shape from AST-derived kind (the projector wrote
             // `"input"` / `"output"` / `"acausal"` into `port.kind`;
@@ -763,9 +768,15 @@ fn port_edge_dir(x: f32, y: f32) -> PortDir {
 }
 
 /// Map a Modelica connector type's leaf name to a wire colour.
-/// Colour choices follow Dymola/OMEdit conventions so users coming
-/// from those tools get instant domain recognition. Unknown types
-/// fall back to a neutral grey-blue.
+///
+/// Returns the **canonical MSL Icon line color** for that connector
+/// kind — the same value the connector's authored `Icon(... lineColor=…)`
+/// uses in the standard library. The diagram-level palette remap
+/// (`Theme::modelica_icons`) re-tones these for the active theme on
+/// the way to the painter, so dark-mode users get readable variants
+/// while the underlying values match Dymola/OMEdit on a light
+/// canvas. Used as the FALLBACK when we couldn't read the connector
+/// instance's own `icon_color` from the AST.
 fn wire_color_for(connector_type: &str) -> egui::Color32 {
     let leaf = connector_type
         .rsplit('.')
@@ -773,27 +784,33 @@ fn wire_color_for(connector_type: &str) -> egui::Color32 {
         .unwrap_or(connector_type);
     use egui::Color32 as C;
     match leaf {
-        // Electrical: blue family (Pin, PositivePin, NegativePin, Plug)
+        // Electrical: red (positive) — MSL Pin uses {0,0,255}; OMEdit
+        // renders these as solid red, but the canonical RGB is blue.
+        // We follow the AST line color via icon_color when available.
         "Pin" | "PositivePin" | "NegativePin" | "Plug" | "PositivePlug"
-        | "NegativePlug" => C::from_rgb(60, 120, 200),
-        // Translational + rotational mechanics: brown
+        | "NegativePlug" => C::from_rgb(0, 0, 255),
+        // Translational + rotational mechanics: BLACK — `Flange`
+        // connectors author lineColor=black in MSL. OMEdit renders
+        // mechanical wires black on the white canvas.
         "Flange_a" | "Flange_b" | "Flange" | "Support" => {
-            C::from_rgb(140, 90, 50)
+            C::from_rgb(0, 0, 0)
         }
-        // Heat transfer: orange/red
-        "HeatPort_a" | "HeatPort_b" | "HeatPort" => C::from_rgb(210, 110, 50),
-        // Fluid: green/blue
-        "FluidPort" | "FluidPort_a" | "FluidPort_b" => C::from_rgb(70, 160, 180),
-        // Real signals: magenta
-        "RealInput" | "RealOutput" => C::from_rgb(180, 70, 170),
-        // Boolean signals: red
-        "BooleanInput" | "BooleanOutput" => C::from_rgb(200, 60, 60),
-        // Integer signals: green
-        "IntegerInput" | "IntegerOutput" => C::from_rgb(70, 160, 80),
-        // Frame_a/Frame_b (multibody): purple
-        "Frame" | "Frame_a" | "Frame_b" => C::from_rgb(120, 80, 180),
-        // Default — neutral grey-blue, distinguishable from selection
-        _ => C::from_rgb(110, 130, 150),
+        // Heat transfer: red (191,0,0) — canonical thermal color.
+        "HeatPort_a" | "HeatPort_b" | "HeatPort" => C::from_rgb(191, 0, 0),
+        // Fluid: blue (canonical Modelica.Fluid uses lineColor blue).
+        "FluidPort" | "FluidPort_a" | "FluidPort_b" => C::from_rgb(0, 127, 255),
+        // Real signals: deep blue {0,0,127} — what every MSL Real
+        // signal connector authors as its lineColor. OMEdit renders
+        // these as bold blue with arrowheads.
+        "RealInput" | "RealOutput" => C::from_rgb(0, 0, 127),
+        // Boolean signals: purple {255,0,255} per MSL Interfaces.
+        "BooleanInput" | "BooleanOutput" => C::from_rgb(255, 0, 255),
+        // Integer signals: green {255,127,0} (orange) per MSL.
+        "IntegerInput" | "IntegerOutput" => C::from_rgb(255, 127, 0),
+        // Frame_a/Frame_b (multibody): orange-brown.
+        "Frame" | "Frame_a" | "Frame_b" => C::from_rgb(95, 95, 95),
+        // Default — black (will remap to theme text on dark).
+        _ => C::from_rgb(0, 0, 0),
     }
 }
 
@@ -873,16 +890,47 @@ impl EdgeVisual for OrthogonalEdgeVisual {
         to: CanvasPos,
         selected: bool,
     ) {
+        // Apply the active modelica icon palette so the canonical MSL
+        // wire colors (deep blue for signals, black for mechanical,
+        // red for thermal, etc.) get re-toned for dark themes via the
+        // same anchor table the icon primitives go through. Light
+        // theme = identity, so OMEdit-style colors come through
+        // unchanged.
+        let palette = modelica_icon_palette_from_ctx(ctx.ui.ctx());
+        let mapped = palette
+            .as_ref()
+            .map(|p| p.remap(self.color))
+            .unwrap_or(self.color);
         let col = if selected {
             // Selection: brighten the per-type colour rather than
             // collapsing every wire to one universal "selected" blue.
             // Keeps the connector type recognisable through selection
             // chrome.
-            brighten(self.color)
+            brighten(mapped)
         } else {
-            self.color
+            mapped
         };
-        let width = if selected { 2.2 } else { 1.5 };
+        // OMEdit/Dymola convention: causal signal wires carry the
+        // visual weight (they're the "logical flow" the reader cares
+        // about) and render thicker than acausal physical wires.
+        // Mechanical / thermal / electrical chains stay at the slim
+        // default so dense plant networks don't overwhelm the eye.
+        //
+        // Scale everything wire-related (stroke, stub length, arrow
+        // size) by the viewport zoom so the diagram reads consistently
+        // at any magnification — at 4× zoom the wires are 4× thicker
+        // and the arrows 4× bigger, just like the icon primitives the
+        // wires connect to. Clamped at 0.5× on the low end so wires
+        // stay visible when zoomed all the way out.
+        let scale = ctx.viewport.zoom.max(0.5);
+        let base_width = if selected {
+            if self.is_causal { 2.8 } else { 2.0 }
+        } else if self.is_causal {
+            2.0
+        } else {
+            1.2
+        };
+        let width = base_width * scale;
         let stroke = egui::Stroke::new(width, col);
         let painter = ctx.ui.painter();
 
@@ -933,6 +981,15 @@ impl EdgeVisual for OrthogonalEdgeVisual {
                 for w in pts.windows(2) {
                     painter.line_segment([w[0], w[1]], stroke);
                 }
+                // Causal-signal arrowhead at the input end. Mirrors
+                // the auto-Z branch below — without it, every
+                // authored-waypoint signal wire (the common case for
+                // MSL examples) lost its arrow even though the
+                // workbench-routed ones kept theirs.
+                if self.is_causal && pts.len() >= 2 {
+                    let n = pts.len();
+                    paint_arrowhead(painter, pts[n - 2], pts[n - 1], col, scale);
+                }
                 return;
             }
             // else: fall through to auto-Z below
@@ -949,7 +1006,7 @@ impl EdgeVisual for OrthogonalEdgeVisual {
             self.from_dir,
             egui::pos2(to.x, to.y),
             self.to_dir,
-            STUB_PX,
+            STUB_PX * scale,
         );
         for w in polyline.windows(2) {
             painter.line_segment([w[0], w[1]], stroke);
@@ -963,7 +1020,7 @@ impl EdgeVisual for OrthogonalEdgeVisual {
             let n = polyline.len();
             let tail = polyline[n - 2];
             let tip = polyline[n - 1];
-            paint_arrowhead(painter, tail, tip, col);
+            paint_arrowhead(painter, tail, tip, col, scale);
         }
 
         // Live-flow animation: small dots moving along the polyline
@@ -1351,7 +1408,13 @@ fn paint_wire_tooltip(
 /// Used to indicate signal direction at the input end of causal
 /// connections — matches `arrow={Arrow.None,Arrow.Filled}` in MLS
 /// `Line` annotations.
-fn paint_arrowhead(painter: &egui::Painter, tail: egui::Pos2, tip: egui::Pos2, color: egui::Color32) {
+fn paint_arrowhead(
+    painter: &egui::Painter,
+    tail: egui::Pos2,
+    tip: egui::Pos2,
+    color: egui::Color32,
+    scale: f32,
+) {
     let dx = tip.x - tail.x;
     let dy = tip.y - tail.y;
     let len = (dx * dx + dy * dy).sqrt();
@@ -1360,11 +1423,17 @@ fn paint_arrowhead(painter: &egui::Painter, tail: egui::Pos2, tip: egui::Pos2, c
     }
     let (ux, uy) = (dx / len, dy / len);
     let (px, py) = (-uy, ux); // perpendicular
-    const HEAD_LEN: f32 = 9.0;
-    const HEAD_HALFW: f32 = 4.0;
-    let base = egui::pos2(tip.x - ux * HEAD_LEN, tip.y - uy * HEAD_LEN);
-    let b1 = egui::pos2(base.x + px * HEAD_HALFW, base.y + py * HEAD_HALFW);
-    let b2 = egui::pos2(base.x - px * HEAD_HALFW, base.y - py * HEAD_HALFW);
+    // Base 14×7 head at zoom 1.0; scaled by `scale` (the viewport
+    // zoom factor) so arrows grow/shrink in lockstep with the wires
+    // and icons they belong to. A fixed-pixel head looked tiny on
+    // 4× zoom and dominated at 0.3× — both broke the visual
+    // proportions of the diagram. Scale-aware sizing keeps the arrow
+    // proportional to its host wire at every zoom level.
+    let head_len: f32 = 14.0 * scale;
+    let head_halfw: f32 = 7.0 * scale;
+    let base = egui::pos2(tip.x - ux * head_len, tip.y - uy * head_len);
+    let b1 = egui::pos2(base.x + px * head_halfw, base.y + py * head_halfw);
+    let b2 = egui::pos2(base.x - px * head_halfw, base.y - py * head_halfw);
     painter.add(egui::Shape::convex_polygon(
         vec![tip, b1, b2],
         color,
@@ -1693,10 +1762,18 @@ fn build_registry() -> VisualRegistry {
             .next()
             .unwrap_or(&d.connector_type)
             .to_string();
+        // PortKind from rumoca's typed classifier covers most cases,
+        // but short-form connectors (`connector RealInput = input Real`)
+        // currently land as `Acausal` because rumoca attaches the
+        // `input`/`output` keyword to the alias-target, not to the
+        // classifier's `class.causality` slot. Pattern-match the
+        // canonical Modelica signal connector names so the wire still
+        // renders as causal (thicker stroke + arrowhead at input).
+        let causal_by_name = leaf.ends_with("Input") || leaf.ends_with("Output");
         let is_causal = matches!(
             d.kind,
             crate::visual_diagram::PortKind::Input | crate::visual_diagram::PortKind::Output,
-        );
+        ) || causal_by_name;
         OrthogonalEdgeVisual {
             color: d
                 .icon_color
