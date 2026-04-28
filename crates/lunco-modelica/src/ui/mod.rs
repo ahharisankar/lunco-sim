@@ -77,6 +77,9 @@ pub mod welcome_progress;
 /// Debounced AST reparse driver — see module docs.
 pub mod ast_refresh;
 pub mod input_activity;
+/// Phase 1: bevy_vello-backed diagram canvas, one render target per
+/// open document tab. See module docs.
+pub mod vello_canvas;
 
 /// Modelica section of the Twin Browser — class-tree contributed by
 /// this crate to `lunco-workbench`'s `BrowserSectionRegistry`.

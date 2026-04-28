@@ -76,6 +76,20 @@ fn main() {
             ..default()
         }))
         .add_plugins(EguiPlugin::default())
+        // Phase-0 vello spike: install the plugin and a hard-coded
+        // test scene so we can verify bevy_vello + bevy_egui coexist
+        // in our pipeline. Camera + scene live in `vello_spike` below.
+        // Disable bevy_egui's "auto-attach PrimaryEguiContext to any
+        // camera" behaviour — with two cameras (workbench + vello),
+        // it tagged both, panicking with "attempted to reuse schedule
+        // EguiPrimaryContextPass". We manually tag setup_sandbox's
+        // camera below.
+        .insert_resource(bevy_egui::EguiGlobalSettings {
+            auto_create_primary_context: false,
+            ..default()
+        })
+        .add_plugins(bevy_vello::VelloPlugin::default())
+        .add_plugins(lunco_modelica::ui::vello_canvas::VelloCanvasPlugin)
         .add_plugins(lunco_workbench::WorkbenchPlugin)
         // LuncoVizPlugin must come before any plugin that publishes
         // signals (ModelicaPlugin below) so the `SignalRegistry`
@@ -114,5 +128,15 @@ fn setup_sandbox(mut commands: Commands) {
     // they need via Package Browser / Twin / Ctrl+N. Auto-loading
     // Battery was a debug convenience that confused new users —
     // `cargo run` would show a random model with no explanation.
-    commands.spawn(Camera2d);
+    //
+    // `PrimaryEguiContext` pins egui's window-side rendering to *this*
+    // camera. Without the explicit marker, adding a second `Camera2d`
+    // (e.g. the vello-spike's offscreen camera) makes bevy_egui's
+    // auto-context-pick ambiguous and the workbench chrome silently
+    // stops rendering to the window — only the offscreen vello content
+    // shows up in screenshots.
+    commands.spawn((Camera2d, bevy_egui::PrimaryEguiContext));
 }
+
+// Phase-0 spike test scene removed; Phase 1 lives in
+// `lunco_modelica::ui::vello_canvas`.
