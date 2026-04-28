@@ -208,6 +208,13 @@ pub struct IconNodeData {
     /// `extends` chain. `None` only when the class has literally no
     /// Icon in inheritance — then the visual falls back to a label box.
     pub icon_graphics: Option<crate::annotations::Icon>,
+    /// Decoded `Diagram(graphics={...})` annotation, populated only
+    /// for connector classes that author one. When set the renderer
+    /// uses this instead of `icon_graphics` — MSL signal connectors
+    /// (RealInput, RealOutput, …) put the `%name` text label and
+    /// the larger filled triangle in their Diagram annotation, while
+    /// keeping a stripped-down Icon for use as a port marker.
+    pub diagram_graphics: Option<crate::annotations::Diagram>,
     /// Per-instance rotation (degrees CCW, Modelica convention).
     pub rotation_deg: f32,
     /// Mirror flags applied before rotation (MLS Annex D order).
@@ -219,6 +226,13 @@ pub struct IconNodeData {
     /// substitution. Class defaults today; instance modifications
     /// follow.
     pub parameters: Vec<(String, String)>,
+    /// Per-port connector-icon descriptors: `(port_name,
+    /// connector_class_qualified_path, size_x, size_y, rotation_deg)`.
+    /// The painter renders each connector class's authored `Icon` at
+    /// the port location, sized + rotated per the port's authored
+    /// `Placement(transformation(extent=..., rotation=...))`. Empty
+    /// path falls back to the generic per-shape marker.
+    pub port_connector_paths: Vec<(String, String, f32, f32, f32)>,
 }
 
 /// Typed payload for `"modelica.connection"` edges. Same purpose as
@@ -268,6 +282,10 @@ struct IconNodeVisual {
     /// classes show their authored graphics instead of falling back
     /// to a generic placeholder.
     icon_graphics: Option<crate::annotations::Icon>,
+    /// `Diagram(...)` graphics for connector instances rendered at
+    /// top-level on a parent diagram. Preferred over `icon_graphics`
+    /// when present.
+    diagram_graphics: Option<crate::annotations::Diagram>,
     /// Pre-formatted `(parameter_name, value)` pairs for `%paramName`
     /// text substitution. Carries class defaults from
     /// `MSLComponentDef.parameters` (instance-modification overlay
@@ -292,6 +310,13 @@ struct IconNodeVisual {
     /// Class name (leaf — e.g. "Resistor"). Drives `%class`
     /// substitution in authored `Text` primitives.
     class_name: String,
+    /// `(port_name, connector_class_qualified_path, size_x, size_y,
+    /// rotation_deg)` from the projected scene.
+    port_connector_paths: Vec<(String, String, f32, f32, f32)>,
+    /// Parent component's fully-qualified type — used as the scope
+    /// root when the indexer wrote a short connector path like
+    /// `"RealInput"` and we need to resolve it via package walk.
+    parent_qualified_type: String,
 }
 
 impl NodeVisual for IconNodeVisual {
@@ -324,7 +349,18 @@ impl NodeVisual for IconNodeVisual {
             mirror_y: self.mirror_y,
         };
         let mut drew_icon = false;
-        if let Some(icon) = &self.icon_graphics {
+        // Prefer Diagram graphics for connectors that author them —
+        // MSL signal connectors keep their `%name` Text label and
+        // larger filled triangle in the Diagram annotation, while
+        // their Icon stays small (used as a port marker on
+        // sub-components). Picks the diagram form when this is the
+        // top-level connector instance.
+        let display_graphics: Option<(&crate::annotations::CoordinateSystem, &[crate::annotations::GraphicItem])> =
+            self.diagram_graphics
+                .as_ref()
+                .map(|d| (&d.coordinate_system, d.graphics.as_slice()))
+                .or_else(|| self.icon_graphics.as_ref().map(|i| (&i.coordinate_system, i.graphics.as_slice())));
+        if let Some((coord_sys, graphics)) = display_graphics {
             let sub = crate::icon_paint::TextSubstitution {
                 name: (!self.instance_name.is_empty()).then_some(self.instance_name.as_str()),
                 class_name: (!self.class_name.is_empty()).then_some(self.class_name.as_str()),
@@ -356,12 +392,12 @@ impl NodeVisual for IconNodeVisual {
             crate::icon_paint::paint_graphics_themed(
                 painter,
                 rect,
-                icon.coordinate_system,
+                *coord_sys,
                 orientation,
                 Some(&sub),
                 Some(resolver_ref),
                 palette.as_ref(),
-                &icon.graphics,
+                graphics,
             );
             drew_icon = true;
         }
@@ -453,24 +489,151 @@ impl NodeVisual for IconNodeVisual {
             // some zoom levels.
             let center = egui::pos2(p.x.round(), p.y.round());
 
-            // Port shape from AST-derived kind (the projector wrote
-            // `"input"` / `"output"` / `"acausal"` into `port.kind`;
-            // see the `CanvasPort` construction in `project_scene`).
-            let shape = match port.kind.as_str() {
-                "input" => PortShape::InputSquare,
-                "output" => PortShape::OutputTriangle,
-                _ => PortShape::AcausalCircle,
-            };
-
-            // Outward direction in *screen* space — derived from
-            // which icon edge the port sits closest to.
             let cx = node.rect.min.x + node.rect.width() * 0.5;
             let cy = node.rect.min.y + node.rect.height() * 0.5;
             let dir = port_edge_dir(world.x - cx, world.y - cy);
 
-            let fill = theme_snap.port_fill;
-            let stroke = egui::Stroke::new(1.0, theme_snap.port_stroke);
-            paint_port_shape(painter, center, shape, dir, fill, stroke);
+            // Try the OMEdit-parity path first: render the connector
+            // class's authored `Icon` at the port location. Falls
+            // through to the generic per-shape marker if the class
+            // can't be resolved (rare — typically only when the MSL
+            // pre-warm hasn't reached that connector yet) or the
+            // class has no `Icon` annotation in its inheritance chain.
+            let port_info = self
+                .port_connector_paths
+                .iter()
+                .find(|(name, _, _, _, _)| name == port.id.as_str());
+            let connector_path: &str = port_info
+                .map(|(_, p, _, _, _)| p.as_str())
+                .unwrap_or("");
+            let (port_size_x_icon, port_size_y_icon, port_rotation_deg) = port_info
+                .map(|(_, _, sx, sy, rot)| (*sx, *sy, *rot))
+                .unwrap_or((20.0, 20.0, 0.0));
+            let mut painted_authored = false;
+            // The indexer ideally writes a fully-qualified path, but
+            // older indexes wrote the type as-declared (`"RealInput"`)
+            // — fall back to a scope-chain walk rooted at the parent
+            // class so cached indexes still resolve. First hit wins.
+            let parent_qualified = self.parent_qualified_type.as_str();
+            let candidates: Vec<String> = if connector_path.contains('.') {
+                vec![connector_path.to_string()]
+            } else if !connector_path.is_empty() {
+                let mut out = Vec::new();
+                let mut scope = parent_qualified.to_string();
+                while scope.contains('.') {
+                    let pkg = scope.rsplitn(2, '.').nth(1).unwrap_or("").to_string();
+                    if !pkg.is_empty() {
+                        out.push(format!("{pkg}.Interfaces.{connector_path}"));
+                        out.push(format!("{pkg}.{connector_path}"));
+                    }
+                    scope = pkg;
+                }
+                out.push(connector_path.to_string());
+                out
+            } else {
+                Vec::new()
+            };
+            let resolved = candidates
+                .into_iter()
+                .find_map(|c| {
+                    crate::class_cache::peek_or_load_msl_class(&c).map(|class| (c, class))
+                });
+            if let Some((resolved_path, class)) = resolved {
+                use std::sync::Arc;
+                let mut resolver = |lookup: &str| -> Option<Arc<rumoca_session::parsing::ast::ClassDef>> {
+                    crate::class_cache::peek_or_load_msl_class(lookup)
+                };
+                let mut visited = std::collections::HashSet::new();
+                if let Some(icon) = crate::annotations::extract_icon_inherited(
+                    &resolved_path,
+                    class.as_ref(),
+                    &mut resolver,
+                    &mut visited,
+                ) {
+                        // Render the connector's icon at the port
+                        // location, sized to the port's authored
+                        // `Placement(extent=...)` in the parent's icon
+                        // coords. MSL convention: parent icon coord
+                        // system spans 200 units (-100..100) and the
+                        // parent is placed at `node.rect` in world
+                        // coords. So 1 icon-unit = node_world / 200.
+                        // Connector placement (e.g. Flange_a's
+                        // 20×20 box) maps to 20/200 * node_world =
+                        // 10% of the parent's world width — the small
+                        // dot OMEdit shows.
+                        let parent_w = node.rect.width().max(1.0);
+                        let parent_h = node.rect.height().max(1.0);
+                        // Use the authored placement extent as-is for
+                        // every connector class — that is the size MSL
+                        // authors intended (Flange_a's 20×20 dot, the
+                        // 20×20 RealInput triangle on plain blocks, the
+                        // 40×40 RealInput on LimPID). OMEdit / Dymola
+                        // render at this size; over-scaling produces a
+                        // triangle that dominates the icon body.
+                        let half_x = (port_size_x_icon * 0.5 / 100.0) * (parent_w * 0.5);
+                        let half_y = (port_size_y_icon * 0.5 / 100.0) * (parent_h * 0.5);
+                        let world_rect = lunco_canvas::Rect::from_min_max(
+                            lunco_canvas::Pos::new(world.x - half_x, world.y - half_y),
+                            lunco_canvas::Pos::new(world.x + half_x, world.y + half_y),
+                        );
+                        let s_rect = ctx.viewport.world_rect_to_screen(world_rect, ctx.screen_rect);
+                        let port_rect = egui::Rect::from_min_max(
+                            egui::pos2(s_rect.min.x, s_rect.min.y),
+                            egui::pos2(s_rect.max.x, s_rect.max.y),
+                        );
+                        let palette = modelica_icon_palette_from_ctx(ctx.ui.ctx());
+                        // Compose the connector icon's orientation from
+                        // (a) the parent's mirror flags so a mirrored
+                        // parent (e.g. `extent={{22,-50},{2,-30}}` on
+                        // speedSensor) flips the connector icon too —
+                        // RealOutput's TIP must point AWAY from the
+                        // parent regardless of which canvas side it
+                        // ends up on, and (b) the port's authored
+                        // `Placement(transformation(rotation=...))` so
+                        // a `rotation=270` input sits with its
+                        // triangle pointing the right way (e.g. PI's
+                        // `u_m` on the bottom edge points up).
+                        // MLS `rotation=270` on a port placement means
+                        // 270° CCW *in the visual frame* (where Y is
+                        // down, i.e. screen frame) — rotation=270 on
+                        // PI's `u_m` produces a triangle pointing UP
+                        // on screen. Our `to_screen` applies rotation
+                        // in Modelica's +Y-up frame and then flips Y,
+                        // which is equivalent to rotating CW in the
+                        // visual frame. Negate so the visual outcome
+                        // matches MLS / OMEdit.
+                        let port_orientation = crate::icon_paint::IconOrientation {
+                            rotation_deg: -port_rotation_deg,
+                            mirror_x: self.mirror_x,
+                            mirror_y: self.mirror_y,
+                        };
+                        crate::icon_paint::paint_graphics_themed(
+                            painter,
+                            port_rect,
+                            icon.coordinate_system,
+                            port_orientation,
+                            None,
+                            None,
+                            palette.as_ref(),
+                            &icon.graphics,
+                        );
+                        painted_authored = true;
+                    }
+            }
+
+            if !painted_authored {
+                // Generic fallback for unresolved connectors / classes
+                // that ship no `Icon` annotation.
+                let shape = match port.kind.as_str() {
+                    "input" => PortShape::InputSquare,
+                    "output" => PortShape::OutputTriangle,
+                    _ => PortShape::AcausalCircle,
+                };
+                let fill = theme_snap.port_fill;
+                let scale = (ctx.viewport.zoom / 3.0).sqrt().clamp(0.7, 1.4);
+                let stroke = egui::Stroke::new(0.6 * scale, theme_snap.port_stroke);
+                paint_port_shape(painter, center, shape, dir, fill, stroke, scale);
+            }
         }
 
         // Hover tooltip. The canvas claims the whole widget rect
@@ -640,6 +803,7 @@ fn paint_flow_dots(
     polyline: &[egui::Pos2],
     base_color: egui::Color32,
     time: f64,
+    scale: f32,
 ) {
     if polyline.len() < 2 {
         return;
@@ -670,7 +834,7 @@ fn paint_flow_dots(
             if s <= acc + seg_len {
                 let t = ((s - acc) / seg_len).clamp(0.0, 1.0);
                 let p = w[0] + (w[1] - w[0]) * t;
-                painter.circle_filled(p, 2.2, dot_color);
+                painter.circle_filled(p, 2.2 * scale, dot_color);
                 break;
             }
             acc += seg_len;
@@ -916,20 +1080,31 @@ impl EdgeVisual for OrthogonalEdgeVisual {
         // Mechanical / thermal / electrical chains stay at the slim
         // default so dense plant networks don't overwhelm the eye.
         //
-        // Scale everything wire-related (stroke, stub length, arrow
-        // size) by the viewport zoom so the diagram reads consistently
-        // at any magnification — at 4× zoom the wires are 4× thicker
-        // and the arrows 4× bigger, just like the icon primitives the
-        // wires connect to. Clamped at 0.5× on the low end so wires
-        // stay visible when zoomed all the way out.
-        let scale = ctx.viewport.zoom.max(0.5);
+        // OMEdit / Dymola use roughly fixed pixel widths for wires
+        // regardless of zoom — wires read as 1-2px hairlines at any
+        // magnification. We mirror that: stroke width is a constant
+        // pixel value, *not* multiplied by viewport.zoom (which is
+        // pixels-per-world-unit and ranges ~0.5..10 across normal
+        // fit/zoom-in extremes; multiplying by it produced 10px
+        // wires at typical fit zoom). Arrows + port markers still
+        // scale gently below.
         let base_width = if selected {
-            if self.is_causal { 2.8 } else { 2.0 }
+            if self.is_causal { 1.4 } else { 1.0 }
         } else if self.is_causal {
-            2.0
+            1.0
         } else {
-            1.2
+            0.6
         };
+        // A *gentle* zoom influence on stroke for very high zoom-in
+        // (so wires don't look like floss next to a 1000-px-wide
+        // icon). sqrt damps the curve; at zoom=1 it's ~0.58, at
+        // zoom=10 it's ~1.83. Clamped 0.7..1.6 for sanity.
+        let zoom_norm = (ctx.viewport.zoom / 3.0).sqrt().clamp(0.7, 1.6);
+        let width = base_width * zoom_norm;
+        // `scale` is exposed downstream for arrows / stubs / port
+        // markers — same gently-damped formula keeps them in
+        // sensible proportion to the wires.
+        let scale = zoom_norm;
         let width = base_width * scale;
         let stroke = egui::Stroke::new(width, col);
         let painter = ctx.ui.painter();
@@ -981,15 +1156,15 @@ impl EdgeVisual for OrthogonalEdgeVisual {
                 for w in pts.windows(2) {
                     painter.line_segment([w[0], w[1]], stroke);
                 }
-                // Causal-signal arrowhead at the input end. Mirrors
-                // the auto-Z branch below — without it, every
-                // authored-waypoint signal wire (the common case for
-                // MSL examples) lost its arrow even though the
-                // workbench-routed ones kept theirs.
-                if self.is_causal && pts.len() >= 2 {
-                    let n = pts.len();
-                    paint_arrowhead(painter, pts[n - 2], pts[n - 1], col, scale);
-                }
+                // No wire-end arrowhead for causal signals: the
+                // destination connector class's authored `Icon`
+                // (RealInput's filled triangle, BooleanInput's, …)
+                // already paints the visible arrow at the port
+                // location. Drawing a `paint_arrowhead` on top
+                // produced a tiny duplicate triangle overlapping the
+                // bigger authored icon — visually muddy and
+                // off-spec relative to OMEdit / Dymola. The icon
+                // renderer in [`IconNodeVisual::draw`] handles it.
                 return;
             }
             // else: fall through to auto-Z below
@@ -1012,15 +1187,21 @@ impl EdgeVisual for OrthogonalEdgeVisual {
             painter.line_segment([w[0], w[1]], stroke);
         }
 
-        // Arrowhead at the input end on causal-only connections —
-        // OMEdit/Dymola convention. Heuristic: connector type ends
-        // with "Output"/"Input" → causal signal. Arrow points along
-        // the last segment, AT the target port (the input side).
-        if self.is_causal && polyline.len() >= 2 {
+        // No wire-end arrowhead — see the authored-waypoint branch
+        // above for the rationale (the destination connector class's
+        // authored Icon is the arrow). Kept the helper available
+        // (`paint_arrowhead`) for the orthogonal router's dev visual
+        // / future non-MSL connection kinds, but the default MSL
+        // signal path no longer calls it.
+        if false && self.is_causal && polyline.len() >= 2 {
             let n = polyline.len();
-            let tail = polyline[n - 2];
-            let tip = polyline[n - 1];
-            paint_arrowhead(painter, tail, tip, col, scale);
+            paint_arrowhead(
+                painter,
+                polyline[n - 2],
+                polyline[n - 1],
+                col,
+                scale,
+            );
         }
 
         // Live-flow animation: small dots moving along the polyline
@@ -1088,9 +1269,9 @@ impl EdgeVisual for OrthogonalEdgeVisual {
                 if v < 0.0 {
                     let mut rev = polyline.clone();
                     rev.reverse();
-                    paint_flow_dots(painter, &rev, col, anim_time);
+                    paint_flow_dots(painter, &rev, col, anim_time, scale);
                 } else {
-                    paint_flow_dots(painter, &polyline, col, anim_time);
+                    paint_flow_dots(painter, &polyline, col, anim_time, scale);
                 }
             }
         }
@@ -1423,14 +1604,13 @@ fn paint_arrowhead(
     }
     let (ux, uy) = (dx / len, dy / len);
     let (px, py) = (-uy, ux); // perpendicular
-    // Base 14×7 head at zoom 1.0; scaled by `scale` (the viewport
-    // zoom factor) so arrows grow/shrink in lockstep with the wires
-    // and icons they belong to. A fixed-pixel head looked tiny on
-    // 4× zoom and dominated at 0.3× — both broke the visual
-    // proportions of the diagram. Scale-aware sizing keeps the arrow
-    // proportional to its host wire at every zoom level.
-    let head_len: f32 = 14.0 * scale;
-    let head_halfw: f32 = 7.0 * scale;
+    // Base ~9×4.5 filled triangle to match OMEdit's heavier arrow
+    // weight on signal connections. Clamp head_len to ≤40 % of the
+    // final-segment length so the tail never reaches past the
+    // previous waypoint (orthogonal routing leaves a small stub at
+    // the input port; an oversized head would eat the whole stub).
+    let head_len: f32 = (9.0 * scale).min(len * 0.4);
+    let head_halfw: f32 = head_len * 0.5;
     let base = egui::pos2(tip.x - ux * head_len, tip.y - uy * head_len);
     let b1 = egui::pos2(base.x + px * head_halfw, base.y + py * head_halfw);
     let b2 = egui::pos2(base.x - px * head_halfw, base.y - py * head_halfw);
@@ -1598,8 +1778,19 @@ fn paint_port_shape(
     dir: PortDir,
     fill: egui::Color32,
     stroke: egui::Stroke,
+    scale: f32,
 ) {
-    const R: f32 = 5.0;
+    // OMEdit shows the connector class's authored Icon (RealInput's
+    // filled triangle, Flange's grey rectangle, RealOutput's outlined
+    // triangle, …) — *not* a generic shape. The proper fix is to
+    // render that Icon at each port location at icon-scale (TODO:
+    // resolve `port.connector_type` → class → `extract_icon_inherited`
+    // → `paint_graphics` into a port-sized rect). Until then this
+    // helper draws a generic per-shape stand-in sized to roughly
+    // match OMEdit's connector-icon visual weight so flange/input
+    // markers are clearly visible.
+    let r: f32 = 1.4 * scale;
+    let R = r;
     match shape {
         PortShape::InputSquare => {
             let rect = egui::Rect::from_center_size(center, egui::vec2(R * 1.6, R * 1.6));
@@ -1745,11 +1936,14 @@ fn build_registry() -> VisualRegistry {
             icon_only: d.icon_only,
             expandable_connector: d.expandable_connector,
             icon_graphics: d.icon_graphics.clone(),
+            diagram_graphics: d.diagram_graphics.clone(),
             parameters: d.parameters.clone(),
             rotation_deg: d.rotation_deg,
             mirror_x: d.mirror_x,
             mirror_y: d.mirror_y,
             instance_name: d.instance_name.clone(),
+            port_connector_paths: d.port_connector_paths.clone(),
+            parent_qualified_type: d.qualified_type.clone(),
         }
     });
     reg.register_edge_kind("modelica.connection", |data: &lunco_canvas::NodeData| {
@@ -2069,6 +2263,11 @@ fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramNodeId, Canv
                 ),
                 expandable_connector: node.component_def.is_expandable_connector,
                 icon_graphics: node.component_def.icon_graphics.clone(),
+                diagram_graphics: if node.component_def.class_kind == "connector" {
+                    node.component_def.diagram_graphics.clone()
+                } else {
+                    None
+                },
                 rotation_deg: node.icon_transform.rotation_deg,
                 mirror_x: node.icon_transform.mirror_x,
                 mirror_y: node.icon_transform.mirror_y,
@@ -2077,7 +2276,25 @@ fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramNodeId, Canv
                     .component_def
                     .parameters
                     .iter()
-                    .map(|p| (p.name.clone(), p.default.clone()))
+                    .map(|p| {
+                        let v = node
+                            .parameter_values
+                            .get(&p.name)
+                            .cloned()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| p.default.clone());
+                        let value = match si_unit_suffix(&p.param_type) {
+                            Some(unit) if !v.is_empty() => format!("{v} {unit}"),
+                            _ => v,
+                        };
+                        (p.name.clone(), value)
+                    })
+                    .collect(),
+                port_connector_paths: node
+                    .component_def
+                    .ports
+                    .iter()
+                    .map(|p| (p.name.clone(), p.msl_path.clone(), p.size_x, p.size_y, p.rotation_deg))
                     .collect(),
             }),
             ports,
@@ -2608,6 +2825,24 @@ impl CanvasDiagramState {
     /// [`cleanup_removed_documents`].
     pub fn drop_doc(&mut self, doc: lunco_doc::DocumentId) {
         self.per_doc.remove(&doc);
+    }
+
+    /// Iterate the document ids that currently have canvas state.
+    /// Used by the vello-canvas plugin to allocate / reclaim
+    /// per-tab render targets.
+    pub fn iter_doc_ids(&self) -> impl Iterator<Item = lunco_doc::DocumentId> + '_ {
+        self.per_doc.keys().copied()
+    }
+
+    /// Read-only state for an explicit doc id, or `None` when no
+    /// canvas state exists yet. Distinguishes "doc absent" from
+    /// "doc present but empty", which the fallback-returning `get`
+    /// can't.
+    pub fn get_for_doc(
+        &self,
+        doc: lunco_doc::DocumentId,
+    ) -> Option<&CanvasDocState> {
+        self.per_doc.get(&doc)
     }
 
     /// Has this doc ever been projected? `false` until
@@ -3519,6 +3754,7 @@ impl CanvasDiagramPanel {
         }
 
         mark("snapshots+sigreg", &mut phase_t, &mut phase_log);
+
         let (response, events) = {
             let mut state = world.resource_mut::<CanvasDiagramState>();
             let docstate = state.get_mut(active_doc);
@@ -3527,6 +3763,18 @@ impl CanvasDiagramPanel {
             docstate.canvas.ui(ui)
         };
         mark("canvas.ui (scene render)", &mut phase_t, &mut phase_log);
+
+        // Vello continues to render the diagram in the background
+        // into a per-tab offscreen texture (see `vello_canvas.rs`).
+        // The composite back into the panel is intentionally not
+        // wired right now — vello text rendering with offscreen
+        // RenderTarget::Image targets is buggy in bevy_vello 0.13.1
+        // (entities spawn + extract correctly but the text glyphs
+        // never appear in the image). Until that's resolved, the
+        // egui canvas continues to paint the diagram for users; the
+        // vello pipeline is exercised end-to-end for everything
+        // EXCEPT text + bitmap and stays ready for re-enabling once
+        // the upstream fix lands.
 
         // ── Palette drag-and-drop drop handler ──
         //
@@ -4953,13 +5201,85 @@ fn diagram_annotation_for_target(
     class.and_then(|c| crate::annotations::extract_diagram(&c.annotation))
 }
 
+/// SI unit suffix for the most common `Modelica.Units.SI.*` types used
+/// by MSL Mechanics / Electrical / Blocks. Returned string is appended
+/// to `%paramName` substitutions so the canvas matches OMEdit's
+/// "value + unit" presentation (`J=2 kg.m2`, `c=1e4 N.m/rad`, …).
+///
+/// TODO: replace with proper type resolution. The authoritative source
+/// is the type's declaration — `type Torque = Real(unit="N.m")` — not a
+/// hand-maintained table. Plumb `unit` through `msl_indexer` (resolve
+/// `comp.type_name` via scope chain + `class_cache`, walk the
+/// `extends Real(unit=...)` modification) so `ParamDef.unit` is
+/// populated from source. Once that lands, drop this fn and read
+/// `p.unit` directly. Stopgap covers the high-frequency MSL types so
+/// the PID example matches OMEdit; user-defined SI types (e.g.
+/// `type Pressure = Real(unit="Pa")` in user models) fall through to
+/// the bare value until the proper resolver is in.
+fn si_unit_suffix(param_type: &str) -> Option<&'static str> {
+    let leaf = param_type.rsplit('.').next().unwrap_or(param_type);
+    Some(match leaf {
+        "Torque" => "N.m",
+        "Inertia" => "kg.m2",
+        "Mass" => "kg",
+        "Length" => "m",
+        "Distance" => "m",
+        "Time" => "s",
+        "Angle" => "rad",
+        "AngularVelocity" => "rad/s",
+        "AngularAcceleration" => "rad/s2",
+        "Velocity" => "m/s",
+        "Acceleration" => "m/s2",
+        "Force" => "N",
+        "Power" => "W",
+        "Energy" => "J",
+        "Frequency" => "Hz",
+        "Temperature" | "ThermodynamicTemperature" => "K",
+        "Voltage" => "V",
+        "Current" => "A",
+        "Resistance" => "Ohm",
+        "Capacitance" => "F",
+        "Inductance" => "H",
+        "RotationalSpringConstant" | "TranslationalSpringConstant" => "N.m/rad",
+        "RotationalDampingConstant" | "TranslationalDampingConstant" => "N.m.s/rad",
+        _ => return None,
+    })
+}
+
 /// Walk a dotted qualified class path through `ast.classes` into
 /// nested `class.classes`. Returns the deepest matching class, if any.
+///
+/// Honours the file's `within` clause: MSL files like
+/// `Modelica/Blocks/package.mo` start with `within Modelica;`, so their
+/// AST root contains `Blocks`, not `Modelica`. A drill-in target of
+/// `Modelica.Blocks.Examples.PID_Controller` must therefore have the
+/// `Modelica` prefix stripped before the walk; otherwise the first
+/// segment never matches and the diagram-decoration layer silently
+/// renders nothing.
 fn walk_qualified<'a>(
     ast: &'a rumoca_session::parsing::ast::StoredDefinition,
     qualified: &str,
 ) -> Option<&'a rumoca_session::parsing::ast::ClassDef> {
-    let mut segments = qualified.split('.');
+    let stripped = if let Some(within) = ast.within.as_ref() {
+        let prefix = within
+            .name
+            .iter()
+            .map(|t| t.text.as_ref())
+            .collect::<Vec<_>>()
+            .join(".");
+        if !prefix.is_empty() {
+            if let Some(rest) = qualified.strip_prefix(&prefix) {
+                rest.strip_prefix('.').unwrap_or(rest)
+            } else {
+                qualified
+            }
+        } else {
+            qualified
+        }
+    } else {
+        qualified
+    };
+    let mut segments = stripped.split('.');
     let first = segments.next()?;
     let mut current = ast.classes.iter().find(|(n, _)| n.as_str() == first).map(|(_, c)| c)?;
     for seg in segments {
@@ -5955,6 +6275,11 @@ fn synthesize_msl_node(
             icon_only: crate::class_cache::is_icon_only_class(&comp.msl_path),
             expandable_connector: comp.is_expandable_connector,
             icon_graphics: comp.icon_graphics.clone(),
+            diagram_graphics: if comp.class_kind == "connector" {
+                comp.diagram_graphics.clone()
+            } else {
+                None
+            },
             rotation_deg: 0.0,
             mirror_x: false,
             mirror_y: false,
@@ -5963,6 +6288,11 @@ fn synthesize_msl_node(
                 .parameters
                 .iter()
                 .map(|p| (p.name.clone(), p.default.clone()))
+                .collect(),
+            port_connector_paths: comp
+                .ports
+                .iter()
+                .map(|p| (p.name.clone(), p.msl_path.clone(), p.size_x, p.size_y, p.rotation_deg))
                 .collect(),
         }),
         ports,

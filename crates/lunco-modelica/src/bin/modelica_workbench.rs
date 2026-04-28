@@ -76,6 +76,19 @@ fn main() {
             ..default()
         }))
         .add_plugins(EguiPlugin::default())
+        // Vello-backed diagram canvas — TBD.
+        //
+        // The pipeline (lunco-canvas's DiagramRenderer trait,
+        // EguiRenderer + VelloRenderer backends, per-tab offscreen
+        // render targets in `lunco_modelica::ui::vello_canvas`) is
+        // landed and renders all MSL geometry primitives. Re-enable
+        // by un-commenting the two `add_plugins` lines below once
+        // the text-rendering issue (bevy_vello 0.13.1 entities
+        // don't appear in offscreen `RenderTarget::Image`) is
+        // resolved upstream or worked around. The egui canvas
+        // remains the production paint path until then.
+        // .add_plugins(bevy_vello::VelloPlugin::default())
+        // .add_plugins(lunco_modelica::ui::vello_canvas::VelloCanvasPlugin)
         .add_plugins(lunco_workbench::WorkbenchPlugin)
         // LuncoVizPlugin must come before any plugin that publishes
         // signals (ModelicaPlugin below) so the `SignalRegistry`
@@ -114,5 +127,15 @@ fn setup_sandbox(mut commands: Commands) {
     // they need via Package Browser / Twin / Ctrl+N. Auto-loading
     // Battery was a debug convenience that confused new users —
     // `cargo run` would show a random model with no explanation.
-    commands.spawn(Camera2d);
+    //
+    // `PrimaryEguiContext` pins egui's window-side rendering to *this*
+    // camera. Without the explicit marker, adding a second `Camera2d`
+    // (e.g. the vello-spike's offscreen camera) makes bevy_egui's
+    // auto-context-pick ambiguous and the workbench chrome silently
+    // stops rendering to the window — only the offscreen vello content
+    // shows up in screenshots.
+    commands.spawn((Camera2d, bevy_egui::PrimaryEguiContext));
 }
+
+// Phase-0 spike test scene removed; Phase 1 lives in
+// `lunco_modelica::ui::vello_canvas`.

@@ -807,6 +807,17 @@ pub fn import_model_to_diagram_from_ast(
                 if let Some(xf) = icon_transform {
                     diagram_node.icon_transform = xf;
                 }
+                // Overlay instance modifications onto the class-default
+                // parameter values so authored icons display the
+                // *modified* value (e.g. `inertia2(J=2)` shows `J=2`
+                // instead of the class default `J=1`).
+                if let Some(comp) = comp_by_short.get(short_name) {
+                    for (k, v) in &comp.modifications {
+                        diagram_node
+                            .parameter_values
+                            .insert(k.clone(), format_modifier_expr(v));
+                    }
+                }
             }
         }
     }
@@ -945,6 +956,7 @@ fn register_local_class(
             ports,
             parameters: Vec::new(),
             icon_graphics: icon,
+            diagram_graphics: crate::annotations::extract_diagram(&class_def.annotation),
             is_expandable_connector,
             short_description: None,
             documentation_info: None,
@@ -1027,6 +1039,9 @@ fn extract_local_class_ports(
             is_flow: !flow_vars.is_empty(),
             x: px,
             y: py,
+            size_x: 20.0,
+            size_y: 20.0,
+            rotation_deg: 0.0,
             color,
             kind,
             flow_vars,
@@ -1172,6 +1187,73 @@ fn connector_icon_color(
     None
 }
 
+
+/// Format an instance-modifier expression to a short display string
+/// for `%paramName` text substitution. Mirrors the
+/// `format_default_expr` used by `msl_indexer` for class defaults so
+/// the canvas substitution is consistent regardless of source. Returns
+/// an empty string for expression shapes the icon-text path can't
+/// usefully render (function calls, complex matrix literals, etc.).
+fn format_modifier_expr(expr: &rumoca_session::parsing::ast::Expression) -> String {
+    use rumoca_session::parsing::ast::{Expression, OpBinary, OpUnary, TerminalType};
+    match expr {
+        Expression::Terminal { terminal_type, token } => {
+            let raw = token.text.as_ref();
+            match terminal_type {
+                TerminalType::String => raw.trim_matches('"').to_string(),
+                _ => raw.to_string(),
+            }
+        }
+        Expression::ComponentReference(cref) => cref
+            .parts
+            .last()
+            .map(|p| p.ident.text.as_ref().to_string())
+            .unwrap_or_default(),
+        Expression::Unary { op, rhs } => match (op, rhs.as_ref()) {
+            (OpUnary::Minus(_), inner) => {
+                let inner = format_modifier_expr(inner);
+                if inner.is_empty() { String::new() } else { format!("-{}", inner) }
+            }
+            (OpUnary::Plus(_), inner) => {
+                let inner = format_modifier_expr(inner);
+                if inner.is_empty() { String::new() } else { format!("+{}", inner) }
+            }
+            _ => String::new(),
+        },
+        Expression::Parenthesized { inner } => {
+            let inner = format_modifier_expr(inner);
+            if inner.is_empty() { String::new() } else { format!("({})", inner) }
+        }
+        // Render simple arithmetic so MSL params like `k=1/(k*Ni)`
+        // (gainTrack in LimPID) substitute as the expression text
+        // OMEdit shows underneath the gain block, not a blank.
+        Expression::Binary { op, lhs, rhs } => {
+            let l = format_modifier_expr(lhs);
+            let r = format_modifier_expr(rhs);
+            if l.is_empty() || r.is_empty() {
+                return String::new();
+            }
+            let sym = match op {
+                OpBinary::Add(_) => "+",
+                OpBinary::Sub(_) => "-",
+                OpBinary::Mul(_) => "*",
+                OpBinary::Div(_) => "/",
+                OpBinary::Exp(_) => "^",
+                _ => return String::new(),
+            };
+            format!("{}{}{}", l, sym, r)
+        }
+        Expression::Array { elements, .. } => {
+            let parts: Vec<String> = elements.iter().map(format_modifier_expr).collect();
+            if parts.iter().any(|s| s.is_empty()) {
+                String::new()
+            } else {
+                format!("{{{}}}", parts.join(","))
+            }
+        }
+        _ => String::new(),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Diagram ↔ Snarl Sync

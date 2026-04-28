@@ -125,6 +125,26 @@ pub struct PortDef {
     /// class's icon definition rather than a hardcoded table.
     #[serde(default)]
     pub color: Option<[u8; 3]>,
+    /// Port size in the parent class's icon coordinate system, taken
+    /// from `annotation(Placement(transformation(extent=...)))` on the
+    /// connector declaration. Used by the canvas painter to render
+    /// the connector class's authored `Icon` at the correct scale —
+    /// MSL convention is to draw a connector instance at its placement
+    /// extent (typically 20×20 in icon coords, scaled with the parent
+    /// to produce the small ~2-unit flange dot OMEdit shows). Defaults
+    /// to (20, 20) when the placement is missing — safe fallback that
+    /// matches the most common authoring pattern.
+    #[serde(default = "PortDef::default_size")]
+    pub size_x: f32,
+    #[serde(default = "PortDef::default_size")]
+    pub size_y: f32,
+    /// Rotation in degrees from `Placement(transformation(rotation=...))`
+    /// on the port declaration (CCW, Modelica convention). Used by
+    /// the canvas painter to rotate the connector class's authored Icon
+    /// so e.g. a `rotation=270` input port shows its triangle pointing
+    /// upward into the parent edge it sits on.
+    #[serde(default)]
+    pub rotation_deg: f32,
     /// Causality classification derived from the connector class's
     /// variables. Drives port shape + arrowhead.
     #[serde(default)]
@@ -135,6 +155,10 @@ pub struct PortDef {
     /// the authored unit.
     #[serde(default)]
     pub flow_vars: Vec<FlowVarMeta>,
+}
+
+impl PortDef {
+    fn default_size() -> f32 { 20.0 }
 }
 
 /// A parameter definition for an MSL component.
@@ -177,6 +201,13 @@ pub struct MSLComponentDef {
     /// type-label box.
     #[serde(default)]
     pub icon_graphics: Option<crate::annotations::Icon>,
+    /// Decoded `Diagram(graphics={...})` annotation. Connectors author
+    /// a separate Diagram annotation (with their `%name` Text label)
+    /// distinct from the Icon used at port markers — when a connector
+    /// instance appears at top-level on a parent's diagram, the
+    /// renderer prefers this over `icon_graphics`.
+    #[serde(default)]
+    pub diagram_graphics: Option<crate::annotations::Diagram>,
     /// `expandable connector` class type (MLS §9.1.3). Rendered with
     /// a dashed border on the canvas so users can distinguish them
     /// from regular connectors — they auto-collect variables across

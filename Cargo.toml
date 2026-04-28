@@ -54,12 +54,12 @@ scnr2_macro = { git = "https://github.com/jsinger67/scnr2", tag = "0.3.3" }
 # bugs locally, re-enable the patch block below pointing at a sibling
 # `../rumoca` checkout.
 #
-# [patch."https://github.com/LunCoSim/rumoca"]
-# rumoca-session   = { path = "../rumoca/crates/rumoca-session" }
-# rumoca-sim       = { path = "../rumoca/crates/rumoca-sim" }
-# rumoca-phase-parse = { path = "../rumoca/crates/rumoca-phase-parse" }
-# rumoca-tool-fmt  = { path = "../rumoca/crates/rumoca-tool-fmt" }
-# rumoca-tool-lint = { path = "../rumoca/crates/rumoca-tool-lint" }
+[patch."https://github.com/LunCoSim/rumoca"]
+rumoca-session   = { path = "../rumoca/crates/rumoca-session" }
+rumoca-sim       = { path = "../rumoca/crates/rumoca-sim" }
+rumoca-phase-parse = { path = "../rumoca/crates/rumoca-phase-parse" }
+rumoca-tool-fmt  = { path = "../rumoca/crates/rumoca-tool-fmt" }
+rumoca-tool-lint = { path = "../rumoca/crates/rumoca-tool-lint" }
 
 [workspace.package]
 description = "Initialize multi-crate workspace architecture for vessel control simulation"
@@ -101,6 +101,12 @@ avian3d = { version = "0.6.1", default-features = false, features = ["3d", "f64"
 big_space = "0.12.0"
 leafwing-input-manager = "0.20.0"
 bevy_egui = { version = "0.39.1", features = ["serde"] }
+# Phase-0 spike: GPU-compute path renderer (Linebender's vello) wired
+# into Bevy. Used to evaluate replacing the egui CPU tessellator for
+# the diagram canvas. Default-features-off keeps SVG/Lottie/text
+# parsers out of the workbench binary while we just need the path
+# encoder.
+bevy_vello = { version = "0.13.1", default-features = false, features = ["text"] }
 bevy-inspector-egui = "0.36.0"
 transform-gizmo-bevy = "0.9.0"
 avian_pickup = "0.5.0-rc.1"
