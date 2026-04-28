@@ -310,34 +310,270 @@ fn draw_diagram_into_vello_scene(
             );
         }
 
-        // Each node → filled rounded rect outlined in soft grey.
+        // For each node, render its authored icon graphics (Rectangle,
+        // Line, Polygon). Text/Ellipse/Bitmap follow in subsequent
+        // commits. The icon's coord_system extent maps to the node's
+        // canvas-world rect — same world→world transform the egui
+        // backend computes via `coord_xform`.
+        use crate::ui::panels::canvas_diagram::IconNodeData;
         for (_id, node) in canvas_scene.nodes() {
-            let r = &node.rect;
-            let rect = RoundedRect::new(
-                r.min.x as f64,
-                r.min.y as f64,
-                r.max.x as f64,
-                r.max.y as f64,
-                1.5,
-            );
-            scene.fill(
-                Fill::NonZero,
-                xform,
-                Color::new([0.95, 0.95, 0.96, 1.0]),
-                None,
-                &rect,
-            );
-            scene.stroke(
-                &Stroke::new(0.3),
-                xform,
-                Color::new([0.30, 0.32, 0.36, 1.0]),
-                None,
-                &rect,
-            );
+            let Some(d) = node.data.downcast_ref::<IconNodeData>() else {
+                draw_node_placeholder(&mut scene, xform, &node.rect);
+                continue;
+            };
+            let Some(icon) = &d.icon_graphics else {
+                draw_node_placeholder(&mut scene, xform, &node.rect);
+                continue;
+            };
+            // Icon-local → canvas-world transform: scale + offset
+            // mapping `icon.coordinate_system.extent` to `node.rect`.
+            let (icon_to_world, sx, sy) =
+                icon_to_world_transform(&icon.coordinate_system.extent, &node.rect);
+            let inner_xform = xform * icon_to_world;
+            let unit_scale = ((sx.abs() + sy.abs()) * 0.5) as f64;
+            for prim in &icon.graphics {
+                draw_icon_primitive(
+                    &mut scene,
+                    inner_xform,
+                    unit_scale,
+                    prim,
+                );
+            }
         }
     }
     // Suppress unused-warning churn while the migration is in flight.
     let _ = scenes;
+}
+
+/// Empty-icon placeholder — a soft rounded rect outlined in grey.
+fn draw_node_placeholder(scene: &mut VelloScene2d, xform: Affine, rect: &lunco_canvas::Rect) {
+    let rr = RoundedRect::new(
+        rect.min.x as f64,
+        rect.min.y as f64,
+        rect.max.x as f64,
+        rect.max.y as f64,
+        1.5,
+    );
+    scene.fill(
+        Fill::NonZero,
+        xform,
+        Color::new([0.95, 0.95, 0.96, 1.0]),
+        None,
+        &rr,
+    );
+    scene.stroke(
+        &Stroke::new(0.3),
+        xform,
+        Color::new([0.30, 0.32, 0.36, 1.0]),
+        None,
+        &rr,
+    );
+}
+
+/// Build the icon-local → canvas-world Affine that maps
+/// `coord_extent` (Modelica diagram coords, +Y up) onto `node_rect`
+/// (canvas-world coords, +Y down). Returns `(affine, sx, sy)` —
+/// callers use `(|sx|+|sy|)/2` as the per-icon-unit scale to convert
+/// authored mm-thickness to world-pixel stroke width.
+fn icon_to_world_transform(
+    coord_extent: &crate::annotations::Extent,
+    node_rect: &lunco_canvas::Rect,
+) -> (Affine, f32, f32) {
+    let cx = (coord_extent.p1.x + coord_extent.p2.x) * 0.5;
+    let cy = (coord_extent.p1.y + coord_extent.p2.y) * 0.5;
+    let cw = (coord_extent.p2.x - coord_extent.p1.x).abs().max(1e-6);
+    let ch = (coord_extent.p2.y - coord_extent.p1.y).abs().max(1e-6);
+    let nx = (node_rect.min.x + node_rect.max.x) as f64 * 0.5;
+    let ny = (node_rect.min.y + node_rect.max.y) as f64 * 0.5;
+    let nw = (node_rect.max.x - node_rect.min.x) as f64;
+    let nh = (node_rect.max.y - node_rect.min.y) as f64;
+    let sx = nw / cw;
+    // Y axis flips here: Modelica +Y up → canvas +Y down.
+    let sy = -nh / ch;
+    let xform = Affine::translate((nx, ny))
+        * Affine::scale_non_uniform(sx, sy)
+        * Affine::translate((-cx, -cy));
+    (xform, sx as f32, sy as f32)
+}
+
+fn to_peniko(c: crate::annotations::Color) -> Color {
+    Color::new([
+        c.r as f32 / 255.0,
+        c.g as f32 / 255.0,
+        c.b as f32 / 255.0,
+        1.0,
+    ])
+}
+
+fn fill_color_for(
+    pattern: crate::annotations::FillPattern,
+    color: Option<crate::annotations::Color>,
+) -> Option<Color> {
+    use crate::annotations::FillPattern;
+    match pattern {
+        FillPattern::None => None,
+        // Per MLS Annex D: missing fillColor with FillPattern.Solid
+        // (or any non-None pattern) defaults to BLACK.
+        _ => Some(color.map(to_peniko).unwrap_or(Color::new([0.0, 0.0, 0.0, 1.0]))),
+    }
+}
+
+fn line_stroke_for(
+    color: Option<crate::annotations::Color>,
+    pattern: crate::annotations::LinePattern,
+    thickness_mm: f64,
+    unit_scale: f64,
+) -> Option<(Stroke, Color)> {
+    use crate::annotations::LinePattern as LP;
+    if matches!(pattern, LP::None) {
+        return None;
+    }
+    let width = (thickness_mm * unit_scale).max(0.5);
+    let mut stroke = Stroke::new(width);
+    let dash = match pattern {
+        LP::Solid | LP::None => None,
+        LP::Dot => Some(vec![width * 1.0, width * 2.0]),
+        LP::Dash => Some(vec![width * 4.0, width * 2.0]),
+        LP::DashDot => Some(vec![width * 4.0, width * 2.0, width * 1.0, width * 2.0]),
+        LP::DashDotDot => Some(vec![
+            width * 4.0,
+            width * 2.0,
+            width * 1.0,
+            width * 2.0,
+            width * 1.0,
+            width * 2.0,
+        ]),
+    };
+    if let Some(d) = dash {
+        stroke = stroke.with_dashes(0.0, d);
+    }
+    let col = color
+        .map(to_peniko)
+        .unwrap_or(Color::new([0.0, 0.0, 0.0, 1.0]));
+    Some((stroke, col))
+}
+
+/// Translate one Modelica icon primitive to vello calls. Coordinate
+/// space is icon-local — `inner_xform` already carries the icon→
+/// canvas-world transform; vello applies the global scene transform
+/// on top.
+fn draw_icon_primitive(
+    scene: &mut VelloScene2d,
+    inner_xform: Affine,
+    unit_scale: f64,
+    prim: &crate::annotations::GraphicItem,
+) {
+    use crate::annotations::GraphicItem;
+    use bevy_vello::vello::kurbo::{Ellipse as KurboEllipse, Point as KurboPoint};
+    match prim {
+        GraphicItem::Rectangle(r) => {
+            // Apply local origin + rotation as part of the affine.
+            let origin = (r.origin.x, r.origin.y);
+            let prim_xform = inner_xform
+                * Affine::translate(origin)
+                * Affine::rotate(r.rotation.to_radians());
+            let p1 = (r.extent.p1.x, r.extent.p1.y);
+            let p2 = (r.extent.p2.x, r.extent.p2.y);
+            let kr = bevy_vello::vello::kurbo::Rect::new(
+                p1.0.min(p2.0),
+                p1.1.min(p2.1),
+                p1.0.max(p2.0),
+                p1.1.max(p2.1),
+            );
+            if let Some(fill_c) = fill_color_for(r.shape.fill_pattern, r.shape.fill_color) {
+                if r.radius > 0.0 {
+                    let rr = RoundedRect::from_rect(kr, r.radius);
+                    scene.fill(Fill::NonZero, prim_xform, fill_c, None, &rr);
+                } else {
+                    scene.fill(Fill::NonZero, prim_xform, fill_c, None, &kr);
+                }
+            }
+            if let Some((stroke, col)) = line_stroke_for(
+                r.shape.line_color,
+                r.shape.line_pattern,
+                r.shape.line_thickness,
+                unit_scale,
+            ) {
+                if r.radius > 0.0 {
+                    let rr = RoundedRect::from_rect(kr, r.radius);
+                    scene.stroke(&stroke, prim_xform, col, None, &rr);
+                } else {
+                    scene.stroke(&stroke, prim_xform, col, None, &kr);
+                }
+            }
+        }
+        GraphicItem::Line(l) => {
+            if l.points.len() < 2 {
+                return;
+            }
+            let prim_xform = inner_xform
+                * Affine::translate((l.origin.x, l.origin.y))
+                * Affine::rotate(l.rotation.to_radians());
+            let mut path = BezPath::new();
+            path.move_to(KurboPoint::new(l.points[0].x, l.points[0].y));
+            for p in &l.points[1..] {
+                path.line_to(KurboPoint::new(p.x, p.y));
+            }
+            if let Some((stroke, col)) = line_stroke_for(
+                l.color,
+                l.pattern,
+                l.thickness,
+                unit_scale,
+            ) {
+                scene.stroke(&stroke, prim_xform, col, None, &path);
+            }
+        }
+        GraphicItem::Polygon(p) => {
+            if p.points.len() < 3 {
+                return;
+            }
+            let prim_xform = inner_xform
+                * Affine::translate((p.origin.x, p.origin.y))
+                * Affine::rotate(p.rotation.to_radians());
+            let mut path = BezPath::new();
+            path.move_to(KurboPoint::new(p.points[0].x, p.points[0].y));
+            for pt in &p.points[1..] {
+                path.line_to(KurboPoint::new(pt.x, pt.y));
+            }
+            path.close_path();
+            if let Some(fill_c) = fill_color_for(p.shape.fill_pattern, p.shape.fill_color) {
+                scene.fill(Fill::EvenOdd, prim_xform, fill_c, None, &path);
+            }
+            if let Some((stroke, col)) = line_stroke_for(
+                p.shape.line_color,
+                p.shape.line_pattern,
+                p.shape.line_thickness,
+                unit_scale,
+            ) {
+                scene.stroke(&stroke, prim_xform, col, None, &path);
+            }
+        }
+        GraphicItem::Ellipse(e) => {
+            let prim_xform = inner_xform
+                * Affine::translate((e.origin.x, e.origin.y))
+                * Affine::rotate(e.rotation.to_radians());
+            let cx = (e.extent.p1.x + e.extent.p2.x) * 0.5;
+            let cy = (e.extent.p1.y + e.extent.p2.y) * 0.5;
+            let rx = (e.extent.p2.x - e.extent.p1.x).abs() * 0.5;
+            let ry = (e.extent.p2.y - e.extent.p1.y).abs() * 0.5;
+            let kell = KurboEllipse::new((cx, cy), (rx, ry), 0.0);
+            if let Some(fill_c) = fill_color_for(e.shape.fill_pattern, e.shape.fill_color) {
+                scene.fill(Fill::NonZero, prim_xform, fill_c, None, &kell);
+            }
+            if let Some((stroke, col)) = line_stroke_for(
+                e.shape.line_color,
+                e.shape.line_pattern,
+                e.shape.line_thickness,
+                unit_scale,
+            ) {
+                scene.stroke(&stroke, prim_xform, col, None, &kell);
+            }
+        }
+        // Text + Bitmap: skipped for now. Text needs vello's `text`
+        // feature + a font registry; Bitmap needs an image registry.
+        // Both arrive in a follow-up commit.
+        GraphicItem::Text(_) | GraphicItem::Bitmap(_) => {}
+    }
 }
 
 /// Embed the active tab's vello render target inside an egui Ui at

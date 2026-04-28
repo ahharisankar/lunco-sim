@@ -80,6 +80,9 @@ pub mod input_activity;
 /// Phase 1: bevy_vello-backed diagram canvas, one render target per
 /// open document tab. See module docs.
 pub mod vello_canvas;
+/// Backend-agnostic 2-D drawing API. Two implementations
+/// (egui, vello) selected at runtime. See module docs.
+pub mod renderer;
 
 /// Modelica section of the Twin Browser — class-tree contributed by
 /// this crate to `lunco-workbench`'s `BrowserSectionRegistry`.
