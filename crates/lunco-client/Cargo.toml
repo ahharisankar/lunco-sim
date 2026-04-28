@@ -55,6 +55,11 @@ bevy-inspector-egui = { workspace = true }
 default = ["celestial"]
 celestial = []
 sandbox = []
+# Tracy profiler. Enable with `--features tracy` and connect a Tracy
+# GUI to see per-system flame graphs. Match the GUI version to the
+# tracy-client version pulled in by Bevy 0.18 (check `cargo tree -p
+# tracy-client` after enabling).
+tracy = ["bevy/trace_tracy"]
 
 # Web-specific: wasm32-unknown-unknown needs JS interop for console output,
 # panic hooks, and RNG (std::time is unavailable on wasm32).

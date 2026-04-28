@@ -114,12 +114,12 @@ build_wasm() {
     info "Building $binary for WebAssembly..."
     info "Crate: $crate"
     info "Target: wasm32-unknown-unknown"
-    info "Profile: release"
-    
+    info "Profile: web-release"
+
     # We use --no-default-features to avoid pulling in the full tokio/axum stack
     # from lunco-api, which depends on mio and other networking primitives
     # that are unsupported on wasm32-unknown-unknown.
-    cargo build --release --target wasm32-unknown-unknown --bin "$binary" -p "$crate" --no-default-features
+    cargo build --profile web-release --target wasm32-unknown-unknown --bin "$binary" -p "$crate" --no-default-features
     
     if [ $? -eq 0 ]; then
         success "WASM binary built successfully"
@@ -143,7 +143,7 @@ generate_bindings() {
 
     # Dynamically find the target directory in case it's overridden in .cargo/config.toml
     local base_target_dir=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
-    local cargo_out_dir="$base_target_dir/wasm32-unknown-unknown/release"
+    local cargo_out_dir="$base_target_dir/wasm32-unknown-unknown/web-release"
     local bindgen_out_dir="$base_target_dir/web/$binary"
     local dist_dir="$PROJECT_DIR/dist/$binary"
 
@@ -281,8 +281,8 @@ clean() {
     base_target_dir=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
     rm -rf "$base_target_dir/web"
     rm -rf "$PROJECT_DIR/dist"
-    rm -f "$base_target_dir/wasm32-unknown-unknown/release/"*_web.wasm
-    rm -f "$base_target_dir/wasm32-unknown-unknown/release/"*_web.d
+    rm -f "$base_target_dir/wasm32-unknown-unknown/web-release/"*_web.wasm
+    rm -f "$base_target_dir/wasm32-unknown-unknown/web-release/"*_web.d
     success "Cleaned"
 }
 

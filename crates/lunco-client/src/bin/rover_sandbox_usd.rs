@@ -89,7 +89,16 @@ fn main() {
             })
             .build()
             .disable::<TransformPlugin>())
-        .add_plugins(BigSpaceDefaultPlugins.build().disable::<big_space::validation::BigSpaceValidationPlugin>())
+        .add_plugins({
+            // big_space only registers `BigSpaceValidationPlugin` when
+            // `debug_assertions` is on (or the `debug` feature). Calling
+            // `.disable::<...>()` panics in release because the plugin
+            // isn't in the group, so we gate the disable on the same cfg.
+            let group = BigSpaceDefaultPlugins.build();
+            #[cfg(any(debug_assertions, feature = "debug"))]
+            let group = group.disable::<big_space::validation::BigSpaceValidationPlugin>();
+            group
+        })
         .add_plugins(WireframePlugin::default())
         .add_plugins(PhysicsPlugins::default().set(avian3d::prelude::PhysicsInterpolationPlugin::interpolate_all()))
         .add_plugins(CoSimPlugin)
@@ -152,24 +161,20 @@ fn main() {
         ).chain())
         // Selection must run before avatar possession so DragModeActive flag is set
         .add_systems(Update, lunco_sandbox_edit::selection::handle_entity_selection.before(lunco_avatar::avatar_raycast_possession))
-        .add_systems(PreUpdate, global_transform_propagation_system)
+        // Manual transform/visibility propagation runs ONCE per frame
+        // after physics writeback. The earlier triple-call (PreUpdate
+        // + two in PostUpdate) ate ~80% of frame time on rover_sandbox
+        // because each call rebuilds a HashMap of every spatial entity
+        // four times. Big_space's own BigSpacePropagationPlugin handles
+        // the CellCoord-rooted hierarchy; this fallback exists only to
+        // cover USD-spawned children that lack CellCoord.
         .add_systems(PostUpdate, (
             global_transform_propagation_system,
-            camera_render_propagation_system,
             spawn_fallback_avatar,
         ).chain().after(avian3d::prelude::PhysicsSystems::Writeback))
         .add_plugins(lunco_api::LunCoApiPlugin::default());
 
     app.run();
-}
-
-fn camera_render_propagation_system(
-    commands: Commands,
-    q_needs: Query<Entity, (Or<(With<Visibility>, With<Mesh3d>, With<Text2d>, With<Transform>)>, Without<InheritedVisibility>, Without<CellCoord>)>,
-    q_spatial: Query<(Entity, &mut GlobalTransform, &Transform, Option<&ChildOf>)>,
-    q_visibility: Query<(Entity, &mut InheritedVisibility, &mut ViewVisibility, &Visibility, Option<&ChildOf>)>,
-) {
-    global_transform_propagation_system(commands, q_needs, q_spatial, q_visibility);
 }
 
 #[derive(Resource, Reflect)]
@@ -305,7 +310,11 @@ fn apply_sandbox_settings(
 
 fn global_transform_propagation_system(
     mut commands: Commands,
-    q_needs: Query<Entity, (Or<(With<Visibility>, With<Mesh3d>, With<Text2d>, With<Transform>)>, Without<InheritedVisibility>, Without<CellCoord>)>,
+    // Only newly-spawned entities need the missing-component patch.
+    // Without `Added<Transform>` this query iterates the entire scene
+    // every frame even though almost all entities already have the
+    // components inserted on a previous tick.
+    q_needs: Query<Entity, (Added<Transform>, Or<(With<Visibility>, With<Mesh3d>, With<Text2d>, With<Transform>)>, Without<InheritedVisibility>, Without<CellCoord>)>,
     mut q_spatial: Query<(Entity, &mut GlobalTransform, &Transform, Option<&ChildOf>)>,
     mut q_visibility: Query<(Entity, &mut InheritedVisibility, &mut ViewVisibility, &Visibility, Option<&ChildOf>)>,
 ) {

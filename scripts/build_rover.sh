@@ -70,7 +70,7 @@ build_web() {
     
     # Build WASM
     info "Compiling to WebAssembly..."
-    cargo build --release --target wasm32-unknown-unknown --bin rover_sandbox_web -p lunco-client
+    cargo build --profile web-release --target wasm32-unknown-unknown --bin rover_sandbox_web -p lunco-client
     
     # Generate bindings
     info "Generating JavaScript bindings..."
@@ -78,7 +78,7 @@ build_web() {
     local pkg_dir="$web_dir/pkg"
     mkdir -p "$pkg_dir"
     
-    wasm-bindgen "$PROJECT_DIR/target/wasm32-unknown-unknown/release/rover_sandbox_web.wasm" \
+    wasm-bindgen "$PROJECT_DIR/target/wasm32-unknown-unknown/web-release/rover_sandbox_web.wasm" \
         --out-dir "$pkg_dir" \
         --target web
     
@@ -121,7 +121,7 @@ clean() {
     info "Cleaning rover sandbox build artifacts..."
     rm -f "$PROJECT_DIR/target/release/rover_sandbox"
     rm -f "$PROJECT_DIR/target/debug/rover_sandbox"
-    rm -f "$PROJECT_DIR/target/wasm32-unknown-unknown/release/rover_sandbox_web.wasm"
+    rm -f "$PROJECT_DIR/target/wasm32-unknown-unknown/web-release/rover_sandbox_web.wasm"
     rm -rf "$PROJECT_DIR/crates/lunco-client/web/pkg"
     success "Cleaned"
 }
