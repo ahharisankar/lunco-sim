@@ -5031,11 +5031,18 @@ fn diagram_annotation_for_target(
 /// SI unit suffix for the most common `Modelica.Units.SI.*` types used
 /// by MSL Mechanics / Electrical / Blocks. Returned string is appended
 /// to `%paramName` substitutions so the canvas matches OMEdit's
-/// "value + unit" presentation (`J=2 kg.m2`, `c=1e4 N.m/rad`, …)
-/// without a full type-resolution pass at index time.
+/// "value + unit" presentation (`J=2 kg.m2`, `c=1e4 N.m/rad`, …).
 ///
-/// Limited to the high-frequency types — anything else falls through
-/// to the bare value, same as before. Expand as new domains are needed.
+/// TODO: replace with proper type resolution. The authoritative source
+/// is the type's declaration — `type Torque = Real(unit="N.m")` — not a
+/// hand-maintained table. Plumb `unit` through `msl_indexer` (resolve
+/// `comp.type_name` via scope chain + `class_cache`, walk the
+/// `extends Real(unit=...)` modification) so `ParamDef.unit` is
+/// populated from source. Once that lands, drop this fn and read
+/// `p.unit` directly. Stopgap covers the high-frequency MSL types so
+/// the PID example matches OMEdit; user-defined SI types (e.g.
+/// `type Pressure = Real(unit="Pa")` in user models) fall through to
+/// the bare value until the proper resolver is in.
 fn si_unit_suffix(param_type: &str) -> Option<&'static str> {
     let leaf = param_type.rsplit('.').next().unwrap_or(param_type);
     Some(match leaf {

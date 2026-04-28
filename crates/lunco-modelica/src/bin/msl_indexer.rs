@@ -754,6 +754,18 @@ impl MSLIndexer {
                                 // returns "" for `Empty` so this is safe.
                                 format_default_expr(&comp.start)
                             });
+                        // TODO: resolve `unit` from the type definition.
+                        // For `parameter SI.Torque tau_constant` the
+                        // authoritative unit lives on `Modelica.Units.SI.Torque`
+                        // as `type Torque = Real(unit="N.m")`. Resolve
+                        // `comp.type_name` through the scope chain +
+                        // imports, walk the `extends Real(unit=...)`
+                        // modification, and store the result here so
+                        // the canvas substitution (currently using a
+                        // hand-maintained table in
+                        // `canvas_diagram::si_unit_suffix`) can read
+                        // `p.unit` directly. Until then `unit` is None
+                        // and user-defined SI types lose their suffix.
                         params.push(ParamDef {
                             name: comp.name.clone(),
                             param_type: comp.type_name.to_string(),
