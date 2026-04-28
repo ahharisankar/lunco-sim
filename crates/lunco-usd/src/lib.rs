@@ -18,9 +18,13 @@
 
 use bevy::prelude::*;
 
+pub mod commands;
 pub mod document;
+pub mod registry;
 
+pub use commands::{UsdCommandsPlugin, USD_DOCUMENT_KIND};
 pub use document::{LayerId, UsdChange, UsdDocument, UsdOp};
+pub use registry::UsdDocumentRegistry;
 pub use lunco_usd_bevy::{UsdPrimPath, UsdStageAsset};
 pub use lunco_usd_avian::UsdAvianPlugin;
 pub use lunco_usd_sim::UsdSimPlugin;
@@ -41,6 +45,11 @@ pub struct UsdPlugins;
 
 impl Plugin for UsdPlugins {
     fn build(&self, app: &mut App) {
-        app.add_plugins((lunco_usd_bevy::UsdBevyPlugin, UsdAvianPlugin, UsdSimPlugin));
+        app.add_plugins((
+            lunco_usd_bevy::UsdBevyPlugin,
+            UsdAvianPlugin,
+            UsdSimPlugin,
+            UsdCommandsPlugin,
+        ));
     }
 }
