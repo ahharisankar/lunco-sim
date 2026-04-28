@@ -807,6 +807,17 @@ pub fn import_model_to_diagram_from_ast(
                 if let Some(xf) = icon_transform {
                     diagram_node.icon_transform = xf;
                 }
+                // Overlay instance modifications onto the class-default
+                // parameter values so authored icons display the
+                // *modified* value (e.g. `inertia2(J=2)` shows `J=2`
+                // instead of the class default `J=1`).
+                if let Some(comp) = comp_by_short.get(short_name) {
+                    for (k, v) in &comp.modifications {
+                        diagram_node
+                            .parameter_values
+                            .insert(k.clone(), format_modifier_expr(v));
+                    }
+                }
             }
         }
     }
@@ -1172,6 +1183,51 @@ fn connector_icon_color(
     None
 }
 
+
+/// Format an instance-modifier expression to a short display string
+/// for `%paramName` text substitution. Mirrors the
+/// `format_default_expr` used by `msl_indexer` for class defaults so
+/// the canvas substitution is consistent regardless of source. Returns
+/// an empty string for expression shapes the icon-text path can't
+/// usefully render (function calls, complex matrix literals, etc.).
+fn format_modifier_expr(expr: &rumoca_session::parsing::ast::Expression) -> String {
+    use rumoca_session::parsing::ast::{Expression, OpUnary, TerminalType};
+    match expr {
+        Expression::Terminal { terminal_type, token } => {
+            let raw = token.text.as_ref();
+            match terminal_type {
+                TerminalType::String => raw.trim_matches('"').to_string(),
+                _ => raw.to_string(),
+            }
+        }
+        Expression::ComponentReference(cref) => cref
+            .parts
+            .last()
+            .map(|p| p.ident.text.as_ref().to_string())
+            .unwrap_or_default(),
+        Expression::Unary { op, rhs } => match (op, rhs.as_ref()) {
+            (OpUnary::Minus(_), inner) => {
+                let inner = format_modifier_expr(inner);
+                if inner.is_empty() {
+                    String::new()
+                } else {
+                    format!("-{}", inner)
+                }
+            }
+            _ => String::new(),
+        },
+        Expression::Parenthesized { inner } => format_modifier_expr(inner),
+        Expression::Array { elements, .. } => {
+            let parts: Vec<String> = elements.iter().map(format_modifier_expr).collect();
+            if parts.iter().any(|s| s.is_empty()) {
+                String::new()
+            } else {
+                format!("{{{}}}", parts.join(","))
+            }
+        }
+        _ => String::new(),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Diagram ↔ Snarl Sync

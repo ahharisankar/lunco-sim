@@ -2109,7 +2109,19 @@ fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramNodeId, Canv
                     .component_def
                     .parameters
                     .iter()
-                    .map(|p| (p.name.clone(), p.default.clone()))
+                    .map(|p| {
+                        let v = node
+                            .parameter_values
+                            .get(&p.name)
+                            .cloned()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| p.default.clone());
+                        let value = match si_unit_suffix(&p.param_type) {
+                            Some(unit) if !v.is_empty() => format!("{v} {unit}"),
+                            _ => v,
+                        };
+                        (p.name.clone(), value)
+                    })
                     .collect(),
             }),
             ports,
@@ -5014,6 +5026,44 @@ fn diagram_annotation_for_target(
             .map(|(_, c)| c)
     };
     class.and_then(|c| crate::annotations::extract_diagram(&c.annotation))
+}
+
+/// SI unit suffix for the most common `Modelica.Units.SI.*` types used
+/// by MSL Mechanics / Electrical / Blocks. Returned string is appended
+/// to `%paramName` substitutions so the canvas matches OMEdit's
+/// "value + unit" presentation (`J=2 kg.m2`, `c=1e4 N.m/rad`, …)
+/// without a full type-resolution pass at index time.
+///
+/// Limited to the high-frequency types — anything else falls through
+/// to the bare value, same as before. Expand as new domains are needed.
+fn si_unit_suffix(param_type: &str) -> Option<&'static str> {
+    let leaf = param_type.rsplit('.').next().unwrap_or(param_type);
+    Some(match leaf {
+        "Torque" => "N.m",
+        "Inertia" => "kg.m2",
+        "Mass" => "kg",
+        "Length" => "m",
+        "Distance" => "m",
+        "Time" => "s",
+        "Angle" => "rad",
+        "AngularVelocity" => "rad/s",
+        "AngularAcceleration" => "rad/s2",
+        "Velocity" => "m/s",
+        "Acceleration" => "m/s2",
+        "Force" => "N",
+        "Power" => "W",
+        "Energy" => "J",
+        "Frequency" => "Hz",
+        "Temperature" | "ThermodynamicTemperature" => "K",
+        "Voltage" => "V",
+        "Current" => "A",
+        "Resistance" => "Ohm",
+        "Capacitance" => "F",
+        "Inductance" => "H",
+        "RotationalSpringConstant" | "TranslationalSpringConstant" => "N.m/rad",
+        "RotationalDampingConstant" | "TranslationalDampingConstant" => "N.m.s/rad",
+        _ => return None,
+    })
 }
 
 /// Walk a dotted qualified class path through `ast.classes` into
