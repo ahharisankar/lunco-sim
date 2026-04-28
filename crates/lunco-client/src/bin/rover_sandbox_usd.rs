@@ -253,23 +253,37 @@ fn setup_sandbox(
 
 /// Spawns a default avatar if no USD-defined Avatar was loaded.
 ///
-/// This acts as a fallback when the scene file doesn't contain an Avatar prim,
-/// ensuring the user always has a controllable camera.
+/// This acts as a fallback when the scene file doesn't contain an Avatar
+/// prim, ensuring the user always has a controllable camera.
+///
+/// USD asset loading is async — checking for `Camera3d` on frame 1 is too
+/// eager and would spawn a fallback even when the scene *will* provide
+/// one a few frames later, leaving the world with two cameras + two
+/// `FloatingOrigin`s (which big_space resets every frame, killing perf
+/// and breaking propagation). Wait a grace period; if the scene didn't
+/// publish a camera by then, spawn the fallback exactly once.
+const FALLBACK_AVATAR_GRACE_SECS: f32 = 2.0;
+
 fn spawn_fallback_avatar(
+    time: Res<Time>,
     q_cameras: Query<Entity, With<Camera3d>>,
     q_grids: Query<Entity, With<Grid>>,
     mut commands: Commands,
     mut done: Local<bool>,
 ) {
     if *done { return; }
-    // Check if ANY camera already exists (USD avatar or fallback)
+    // A USD-spawned camera ends the wait immediately.
     if q_cameras.iter().next().is_some() {
         *done = true;
         return;
     }
+    // Otherwise let USD have its grace window before we step in.
+    if time.elapsed_secs() < FALLBACK_AVATAR_GRACE_SECS {
+        return;
+    }
     let Some(grid) = q_grids.iter().next() else { return; };
 
-    info!("No camera found, spawning fallback FreeFlightCamera");
+    info!("No USD camera after {FALLBACK_AVATAR_GRACE_SECS}s, spawning fallback FreeFlightCamera");
     commands.spawn((
         Camera3d::default(),
         FreeFlightCamera {
