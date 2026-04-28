@@ -55,6 +55,7 @@ mod viewport;
 
 pub mod file_ops;
 pub mod files_panel;
+pub mod perf_hud;
 pub mod picker;
 pub mod status_bus;
 pub mod twin_browser;
@@ -146,6 +147,12 @@ impl Plugin for WorkbenchPlugin {
         // are added separately by their owning plugins.
         if !app.is_plugin_added::<status_bus::StatusBusPlugin>() {
             app.add_plugins(status_bus::StatusBusPlugin);
+        }
+        // Perf HUD (FPS / frame ms / optional physics ms) wired into
+        // the right end of the status bar. Off by default; flip via
+        // the `TogglePerfHud` typed command.
+        if !app.is_plugin_added::<perf_hud::PerfHudPlugin>() {
+            app.add_plugins(perf_hud::PerfHudPlugin);
         }
         // Plugin-driven registry of `DocumentKind`s. Domain crates
         // (modelica, future julia/usd/sysml/...) register their kinds
@@ -1344,6 +1351,7 @@ fn render_status_bar_inner(
         let history: Vec<_> = bus.history().cloned().collect();
         (latest, history)
     };
+    let perf = *world.resource::<perf_hud::PerfStats>();
 
     ui.horizontal(|ui| {
         // The whole strip is one clickable region; the popup anchors
@@ -1397,6 +1405,25 @@ fn render_status_bar_inner(
 
         if response.clicked() {
             ui.memory_mut(|m| m.toggle_popup(popup_id));
+        }
+
+        // Right-aligned perf segment. Hidden when the HUD is off so
+        // we don't show stale zeroes; toggled via `TogglePerfHud`.
+        if perf.enabled {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let phys = perf
+                    .physics_ms
+                    .map(|ms| format!(" · phys {:.1}ms", ms))
+                    .unwrap_or_default();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "FPS {:.1} · {:.1}ms{}",
+                        perf.fps, perf.frame_ms, phys
+                    ))
+                    .small()
+                    .monospace(),
+                );
+            });
         }
 
         // egui::Popup is the post-0.31 API. `open_memory(None)` ties

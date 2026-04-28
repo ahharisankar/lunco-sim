@@ -1,0 +1,46 @@
+//! Bridge avian's `PhysicsTotalDiagnostics` into workbench's
+//! `PerfStats.physics_ms`. Lives here (not in `lunco-workbench`)
+//! because the workbench stays physics-agnostic — it just exposes
+//! an `Option<f32>` field for any crate that knows about avian to
+//! populate.
+
+use avian3d::diagnostics::{
+    PhysicsDiagnosticsPlugin, PhysicsTotalDiagnostics, PhysicsTotalDiagnosticsPlugin,
+};
+use bevy::prelude::*;
+use lunco_workbench::perf_hud::PerfStats;
+
+/// Adds avian's diagnostics plugins (the framework one + the
+/// total-step one that actually inserts `PhysicsTotalDiagnostics`)
+/// and a sampler that copies `step_time` into `PerfStats.physics_ms`
+/// when the HUD is enabled.
+pub struct PerfBridgePlugin;
+
+impl Plugin for PerfBridgePlugin {
+    fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<PhysicsDiagnosticsPlugin>() {
+            app.add_plugins(PhysicsDiagnosticsPlugin);
+        }
+        if !app.is_plugin_added::<PhysicsTotalDiagnosticsPlugin>() {
+            app.add_plugins(PhysicsTotalDiagnosticsPlugin);
+        }
+        app.add_systems(Update, sample_physics_step);
+    }
+}
+
+fn sample_physics_step(
+    diags: Option<Res<PhysicsTotalDiagnostics>>,
+    mut stats: ResMut<PerfStats>,
+) {
+    if !stats.enabled {
+        if stats.physics_ms.is_some() {
+            stats.physics_ms = None;
+        }
+        return;
+    }
+    let Some(d) = diags else {
+        stats.physics_ms = None;
+        return;
+    };
+    stats.physics_ms = Some(d.step_time.as_secs_f32() * 1000.0);
+}

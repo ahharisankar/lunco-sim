@@ -27,6 +27,7 @@ lunco-storage = { path = "../lunco-storage" }
 # Used for the recents-changed fingerprint in `WorkspacePlugin` —
 # stable serialisation lets us skip writes when nothing changed.
 serde_json = "1.0"
+serde = { version = "1", features = ["derive"] }
 # `user_config_dir()` for cross-platform `~/.lunco/recents.json`
 # (Windows: `C:\Users\<user>\.lunco\`, etc.).
 lunco-assets = { path = "../lunco-assets" }

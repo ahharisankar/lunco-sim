@@ -31,6 +31,7 @@
 pub mod catalog;
 pub mod commands;
 pub mod gizmo;
+pub mod perf_bridge;
 pub mod physics_viz;
 pub mod selection;
 pub mod spawn;
@@ -59,6 +60,7 @@ impl Plugin for SandboxEditPlugin {
 
         app.add_plugins(transform_gizmo_bevy::TransformGizmoPlugin);
         app.add_plugins(commands::SpawnCommandPlugin);
+        app.add_plugins(perf_bridge::PerfBridgePlugin);
 
         // Non-UI systems
         app.add_systems(Update, spawn::update_spawn_ghost);

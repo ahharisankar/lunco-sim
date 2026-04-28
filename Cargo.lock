@@ -6447,6 +6447,7 @@ dependencies = [
  "lunco-twin",
  "lunco-workspace",
  "rfd",
+ "serde",
  "serde_json",
  "web-time",
 ]
