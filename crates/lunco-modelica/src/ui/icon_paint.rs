@@ -736,21 +736,19 @@ fn paint_text(
     let p1 = xf.to_screen_rotated(t.extent.p1, t.origin, t.rotation);
     let p2 = xf.to_screen_rotated(t.extent.p2, t.origin, t.rotation);
     let rect = egui::Rect::from_two_pos(p1, p2);
-    // MLS: `fontSize=0` means "auto-fit to extent". We approximate
-    // auto-fit as 80% of the extent's smaller dimension — readable
-    // without overflowing on stubby labels.
-    //
-    // The clamp range is wide intentionally so text scales with the
-    // viewport zoom across the whole useful range. Earlier the clamp
-    // at [6, 72] flattened both ends — at low zoom every label sat at
-    // 6 px, at high zoom every label maxed at 72 px, which read as
-    // "text size is constant, doesn't follow zoom." 3 px is roughly
-    // the readability floor; 256 px is large enough that 1:1 zoom on
-    // a 4K display still gets headroom.
+    // MLS: `fontSize=0` means "auto-fit to extent". `rect` is the
+    // AABB of the two transformed extent corners — when the parent
+    // has a non-axis-aligned rotation (e.g. 270°), the AABB's
+    // width/height swap, so picking either alone gives different
+    // sizes for the same authored Text on rotated vs unrotated
+    // instances. Use the SHORTER dimension so rotation is invariant.
+    // 0.7× and a [10, 48] clamp keep MSL %name labels readable at
+    // fit-zoom without dwarfing the component icons.
     let font_size_px = if t.font_size > 0.0 {
-        (t.font_size as f32 * xf.scale).clamp(3.0, 256.0)
+        (t.font_size as f32 * xf.scale).clamp(4.0, 256.0)
     } else {
-        (rect.height().abs() * 0.8).clamp(3.0, 256.0)
+        let dim = rect.width().abs().min(rect.height().abs());
+        (dim * 0.7).clamp(4.0, 256.0)
     };
     let color = color_or_default(t.text_color, egui::Color32::from_gray(20));
     painter.text(
