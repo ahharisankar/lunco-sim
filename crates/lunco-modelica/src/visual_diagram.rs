@@ -125,6 +125,19 @@ pub struct PortDef {
     /// class's icon definition rather than a hardcoded table.
     #[serde(default)]
     pub color: Option<[u8; 3]>,
+    /// Port size in the parent class's icon coordinate system, taken
+    /// from `annotation(Placement(transformation(extent=...)))` on the
+    /// connector declaration. Used by the canvas painter to render
+    /// the connector class's authored `Icon` at the correct scale —
+    /// MSL convention is to draw a connector instance at its placement
+    /// extent (typically 20×20 in icon coords, scaled with the parent
+    /// to produce the small ~2-unit flange dot OMEdit shows). Defaults
+    /// to (20, 20) when the placement is missing — safe fallback that
+    /// matches the most common authoring pattern.
+    #[serde(default = "PortDef::default_size")]
+    pub size_x: f32,
+    #[serde(default = "PortDef::default_size")]
+    pub size_y: f32,
     /// Causality classification derived from the connector class's
     /// variables. Drives port shape + arrowhead.
     #[serde(default)]
@@ -135,6 +148,10 @@ pub struct PortDef {
     /// the authored unit.
     #[serde(default)]
     pub flow_vars: Vec<FlowVarMeta>,
+}
+
+impl PortDef {
+    fn default_size() -> f32 { 20.0 }
 }
 
 /// A parameter definition for an MSL component.

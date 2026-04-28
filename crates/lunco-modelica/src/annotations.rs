@@ -1072,7 +1072,21 @@ fn extract_dyn_extent(expr: &Expression) -> Option<DynExtent> {
 }
 
 fn extract_line(args: &[Expression]) -> Option<Line> {
-    let points = named_arg(args, "points").and_then(extract_point_array)?;
+    // `points` may be wrapped in `DynamicSelect(static_matrix,
+    // dynamic_matrix)` (MLS §18) — e.g. `Modelica.Blocks.Continuous.Integrator`'s
+    // diagonal line uses it to swap shapes when `use_reset` is set.
+    // Unwrap to the static branch the same way `extent`/`textString`
+    // already do; without this the entire `Line` is dropped (no
+    // points → `?` returns None) and the icon paints with the line
+    // missing — visible as the integrator showing a bare grey "I" with
+    // no blue diagonal.
+    let points_arg = named_arg(args, "points")?;
+    let points = if call_name(points_arg) == Some("DynamicSelect") {
+        let cargs = call_args(points_arg).unwrap_or(&[]);
+        cargs.first().and_then(extract_point_array)?
+    } else {
+        extract_point_array(points_arg)?
+    };
     // `arrow` is an `Arrow[2]` literal: `arrow={Arrow.None, Arrow.Filled}`.
     // Each element parses as a qualified enum ident; missing slots keep
     // the default `Arrow::None`.

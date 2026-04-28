@@ -1038,6 +1038,8 @@ fn extract_local_class_ports(
             is_flow: !flow_vars.is_empty(),
             x: px,
             y: py,
+            size_x: 20.0,
+            size_y: 20.0,
             color,
             kind,
             flow_vars,

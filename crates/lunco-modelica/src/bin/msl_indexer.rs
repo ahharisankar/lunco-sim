@@ -230,7 +230,18 @@ struct PortDef {
     /// (0, 0) means no annotation was found and position is unknown.
     x: f32,
     y: f32,
+    /// Port size in the parent class's icon coords (placement extent
+    /// width/height). Used by the canvas to scale the connector
+    /// class's authored Icon to OMEdit-equivalent size. Defaults to
+    /// 20×20 (matches the most common MSL placement) when no
+    /// Placement annotation was found.
+    #[serde(default = "default_port_size")]
+    size_x: f32,
+    #[serde(default = "default_port_size")]
+    size_y: f32,
 }
+
+fn default_port_size() -> f32 { 20.0 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct ParamDef {
@@ -851,28 +862,79 @@ impl MSLIndexer {
                         // other Modelica libraries. Going through
                         // rumoca means any library rumoca can parse
                         // also gets correctly-positioned ports.
-                        let (x, y) = lunco_modelica::annotations::extract_placement(
+                        let placement = lunco_modelica::annotations::extract_placement(
                             &comp.annotation,
-                        )
-                        .map(|p| {
-                            let extent = &p.transformation.extent;
-                            let cx = (extent.p1.x + extent.p2.x) / 2.0
-                                + p.transformation.origin.x;
-                            let cy = (extent.p1.y + extent.p2.y) / 2.0
-                                + p.transformation.origin.y;
-                            (cx as f32, cy as f32)
-                        })
-                        .unwrap_or_else(|| {
-                            fallback_port_position(&comp.causality, ports.len())
-                        });
+                        );
+                        let (x, y) = placement
+                            .as_ref()
+                            .map(|p| {
+                                let extent = &p.transformation.extent;
+                                let cx = (extent.p1.x + extent.p2.x) / 2.0
+                                    + p.transformation.origin.x;
+                                let cy = (extent.p1.y + extent.p2.y) / 2.0
+                                    + p.transformation.origin.y;
+                                (cx as f32, cy as f32)
+                            })
+                            .unwrap_or_else(|| {
+                                fallback_port_position(&comp.causality, ports.len())
+                            });
+                        let (size_x, size_y) = placement
+                            .as_ref()
+                            .map(|p| {
+                                let e = &p.transformation.extent;
+                                ((e.p2.x - e.p1.x).abs() as f32, (e.p2.y - e.p1.y).abs() as f32)
+                            })
+                            .unwrap_or((20.0, 20.0));
 
+                        // Resolve `type_str` to a fully-qualified path so
+                        // runtime callers (canvas port-icon renderer,
+                        // wire-color resolver) can look the connector
+                        // class up directly via `class_cache`. Without
+                        // this, `parameter RealInput u` writes
+                        // `msl_path = "RealInput"` and downstream
+                        // resolution fails.
+                        //
+                        // Mirrors the scope-chain walk used above for
+                        // `extends` resolution: starting from the
+                        // declaring class's package, peel one segment
+                        // at a time and check `self.classes`.
+                        let mut resolved_path = type_str.clone();
+                        if !self.classes.contains_key(&resolved_path) {
+                            let mut current_scope = class_name.to_string();
+                            while !current_scope.is_empty() {
+                                let candidate = if current_scope.contains('.') {
+                                    format!(
+                                        "{}.{}",
+                                        current_scope.rsplitn(2, '.').nth(1).unwrap_or(""),
+                                        type_str,
+                                    )
+                                } else {
+                                    type_str.clone()
+                                };
+                                if self.classes.contains_key(&candidate) {
+                                    resolved_path = candidate;
+                                    break;
+                                }
+                                if current_scope.contains('.') {
+                                    current_scope = current_scope
+                                        .rsplitn(2, '.')
+                                        .nth(1)
+                                        .unwrap()
+                                        .to_string();
+                                } else {
+                                    current_scope.clear();
+                                }
+                            }
+                        }
                         ports.push(PortDef {
                             name: comp.name.clone(),
                             connector_type: type_str.clone(),
-                            msl_path: type_str,
+                            msl_path: resolved_path,
                             is_flow: is_port,
                             x,
                             y,
+                            size_x,
+                            size_y,
                         });
                     }
                 }

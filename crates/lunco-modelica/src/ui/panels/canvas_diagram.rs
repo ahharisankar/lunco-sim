@@ -219,6 +219,14 @@ pub struct IconNodeData {
     /// substitution. Class defaults today; instance modifications
     /// follow.
     pub parameters: Vec<(String, String)>,
+    /// Per-port connector-icon descriptors: `(port_name,
+    /// connector_class_qualified_path, size_x, size_y)`. The painter
+    /// renders each connector class's authored `Icon` at the port
+    /// location, sized to the port's authored `Placement(extent=...)`
+    /// in the parent class's icon coords (typically 20×20). Empty
+    /// path or missing entry falls back to the generic per-shape
+    /// marker. Match OMEdit / Dymola.
+    pub port_connector_paths: Vec<(String, String, f32, f32)>,
 }
 
 /// Typed payload for `"modelica.connection"` edges. Same purpose as
@@ -292,6 +300,15 @@ struct IconNodeVisual {
     /// Class name (leaf — e.g. "Resistor"). Drives `%class`
     /// substitution in authored `Text` primitives.
     class_name: String,
+    /// `(port_name, connector_class_qualified_path, size_x, size_y)`
+    /// from the projected scene. Painter renders each connector
+    /// class's authored `Icon` at the port location, sized by the
+    /// authored `Placement(extent=...)` in the parent's icon coords.
+    port_connector_paths: Vec<(String, String, f32, f32)>,
+    /// Parent component's fully-qualified type — used as the scope
+    /// root when the indexer wrote a short connector path like
+    /// `"RealInput"` and we need to resolve it via package walk.
+    parent_qualified_type: String,
 }
 
 impl NodeVisual for IconNodeVisual {
@@ -453,28 +470,119 @@ impl NodeVisual for IconNodeVisual {
             // some zoom levels.
             let center = egui::pos2(p.x.round(), p.y.round());
 
-            // Port shape from AST-derived kind (the projector wrote
-            // `"input"` / `"output"` / `"acausal"` into `port.kind`;
-            // see the `CanvasPort` construction in `project_scene`).
-            let shape = match port.kind.as_str() {
-                "input" => PortShape::InputSquare,
-                "output" => PortShape::OutputTriangle,
-                _ => PortShape::AcausalCircle,
-            };
-
-            // Outward direction in *screen* space — derived from
-            // which icon edge the port sits closest to.
             let cx = node.rect.min.x + node.rect.width() * 0.5;
             let cy = node.rect.min.y + node.rect.height() * 0.5;
             let dir = port_edge_dir(world.x - cx, world.y - cy);
 
-            let fill = theme_snap.port_fill;
-            // viewport.zoom is pixels-per-world-unit (~3.5 at fit-
-            // zoom). Multiplying directly produced 5+px markers.
-            // sqrt-damp + clamp like wires so markers stay tiny.
-            let scale = (ctx.viewport.zoom / 3.0).sqrt().clamp(0.7, 1.4);
-            let stroke = egui::Stroke::new(0.6 * scale, theme_snap.port_stroke);
-            paint_port_shape(painter, center, shape, dir, fill, stroke, scale);
+            // Try the OMEdit-parity path first: render the connector
+            // class's authored `Icon` at the port location. Falls
+            // through to the generic per-shape marker if the class
+            // can't be resolved (rare — typically only when the MSL
+            // pre-warm hasn't reached that connector yet) or the
+            // class has no `Icon` annotation in its inheritance chain.
+            let port_info = self
+                .port_connector_paths
+                .iter()
+                .find(|(name, _, _, _)| name == port.id.as_str());
+            let connector_path: &str = port_info
+                .map(|(_, p, _, _)| p.as_str())
+                .unwrap_or("");
+            let (port_size_x_icon, port_size_y_icon) = port_info
+                .map(|(_, _, sx, sy)| (*sx, *sy))
+                .unwrap_or((20.0, 20.0));
+            let mut painted_authored = false;
+            // The indexer ideally writes a fully-qualified path, but
+            // older indexes wrote the type as-declared (`"RealInput"`)
+            // — fall back to a scope-chain walk rooted at the parent
+            // class so cached indexes still resolve. First hit wins.
+            let parent_qualified = self.parent_qualified_type.as_str();
+            let candidates: Vec<String> = if connector_path.contains('.') {
+                vec![connector_path.to_string()]
+            } else if !connector_path.is_empty() {
+                let mut out = Vec::new();
+                let mut scope = parent_qualified.to_string();
+                while scope.contains('.') {
+                    let pkg = scope.rsplitn(2, '.').nth(1).unwrap_or("").to_string();
+                    if !pkg.is_empty() {
+                        out.push(format!("{pkg}.Interfaces.{connector_path}"));
+                        out.push(format!("{pkg}.{connector_path}"));
+                    }
+                    scope = pkg;
+                }
+                out.push(connector_path.to_string());
+                out
+            } else {
+                Vec::new()
+            };
+            let resolved = candidates
+                .into_iter()
+                .find_map(|c| {
+                    crate::class_cache::peek_or_load_msl_class(&c).map(|class| (c, class))
+                });
+            if let Some((resolved_path, class)) = resolved {
+                use std::sync::Arc;
+                let mut resolver = |lookup: &str| -> Option<Arc<rumoca_session::parsing::ast::ClassDef>> {
+                    crate::class_cache::peek_or_load_msl_class(lookup)
+                };
+                let mut visited = std::collections::HashSet::new();
+                if let Some(icon) = crate::annotations::extract_icon_inherited(
+                    &resolved_path,
+                    class.as_ref(),
+                    &mut resolver,
+                    &mut visited,
+                ) {
+                        // Render the connector's icon at the port
+                        // location, sized to the port's authored
+                        // `Placement(extent=...)` in the parent's icon
+                        // coords. MSL convention: parent icon coord
+                        // system spans 200 units (-100..100) and the
+                        // parent is placed at `node.rect` in world
+                        // coords. So 1 icon-unit = node_world / 200.
+                        // Connector placement (e.g. Flange_a's
+                        // 20×20 box) maps to 20/200 * node_world =
+                        // 10% of the parent's world width — the small
+                        // dot OMEdit shows.
+                        let parent_w = node.rect.width().max(1.0);
+                        let parent_h = node.rect.height().max(1.0);
+                        let half_x = (port_size_x_icon * 0.5 / 100.0) * (parent_w * 0.5);
+                        let half_y = (port_size_y_icon * 0.5 / 100.0) * (parent_h * 0.5);
+                        let world_rect = lunco_canvas::Rect::from_min_max(
+                            lunco_canvas::Pos::new(world.x - half_x, world.y - half_y),
+                            lunco_canvas::Pos::new(world.x + half_x, world.y + half_y),
+                        );
+                        let s_rect = ctx.viewport.world_rect_to_screen(world_rect, ctx.screen_rect);
+                        let port_rect = egui::Rect::from_min_max(
+                            egui::pos2(s_rect.min.x, s_rect.min.y),
+                            egui::pos2(s_rect.max.x, s_rect.max.y),
+                        );
+                        let palette = modelica_icon_palette_from_ctx(ctx.ui.ctx());
+                        crate::icon_paint::paint_graphics_themed(
+                            painter,
+                            port_rect,
+                            icon.coordinate_system,
+                            crate::icon_paint::IconOrientation::default(),
+                            None,
+                            None,
+                            palette.as_ref(),
+                            &icon.graphics,
+                        );
+                        painted_authored = true;
+                    }
+            }
+
+            if !painted_authored {
+                // Generic fallback for unresolved connectors / classes
+                // that ship no `Icon` annotation.
+                let shape = match port.kind.as_str() {
+                    "input" => PortShape::InputSquare,
+                    "output" => PortShape::OutputTriangle,
+                    _ => PortShape::AcausalCircle,
+                };
+                let fill = theme_snap.port_fill;
+                let scale = (ctx.viewport.zoom / 3.0).sqrt().clamp(0.7, 1.4);
+                let stroke = egui::Stroke::new(0.6 * scale, theme_snap.port_stroke);
+                paint_port_shape(painter, center, shape, dir, fill, stroke, scale);
+            }
         }
 
         // Hover tooltip. The canvas claims the whole widget rect
@@ -1446,13 +1554,12 @@ fn paint_arrowhead(
     }
     let (ux, uy) = (dx / len, dy / len);
     let (px, py) = (-uy, ux); // perpendicular
-    // Base 7×3.5 filled triangle. Smaller than before so the arrow
-    // doesn't visually slide toward the line midpoint when the
-    // final segment is short (orthogonal routing leaves a small
-    // stub at the input port; an oversized head ate the whole stub).
-    // Also clamp head_len to ≤40 % of the final-segment length so
-    // the tail never reaches past the previous waypoint.
-    let head_len: f32 = (7.0 * scale).min(len * 0.4);
+    // Base ~9×4.5 filled triangle to match OMEdit's heavier arrow
+    // weight on signal connections. Clamp head_len to ≤40 % of the
+    // final-segment length so the tail never reaches past the
+    // previous waypoint (orthogonal routing leaves a small stub at
+    // the input port; an oversized head would eat the whole stub).
+    let head_len: f32 = (9.0 * scale).min(len * 0.4);
     let head_halfw: f32 = head_len * 0.5;
     let base = egui::pos2(tip.x - ux * head_len, tip.y - uy * head_len);
     let b1 = egui::pos2(base.x + px * head_halfw, base.y + py * head_halfw);
@@ -1623,14 +1730,16 @@ fn paint_port_shape(
     stroke: egui::Stroke,
     scale: f32,
 ) {
-    // OMEdit shows the connector class's authored Icon (RealInput
-    // triangle, Flange ring, …) — *not* a separate port marker.
-    // We try to suppress our own marker for connectors that already
-    // ship an Icon (those are painted by the icon renderer). This
-    // helper is a fallback for connectors without an authored Icon
-    // (or where icon resolution failed). Keep the marker tiny so
-    // the workbench doesn't double-decorate.
-    let r: f32 = 0.6 * scale;
+    // OMEdit shows the connector class's authored Icon (RealInput's
+    // filled triangle, Flange's grey rectangle, RealOutput's outlined
+    // triangle, …) — *not* a generic shape. The proper fix is to
+    // render that Icon at each port location at icon-scale (TODO:
+    // resolve `port.connector_type` → class → `extract_icon_inherited`
+    // → `paint_graphics` into a port-sized rect). Until then this
+    // helper draws a generic per-shape stand-in sized to roughly
+    // match OMEdit's connector-icon visual weight so flange/input
+    // markers are clearly visible.
+    let r: f32 = 1.4 * scale;
     let R = r;
     match shape {
         PortShape::InputSquare => {
@@ -1782,6 +1891,8 @@ fn build_registry() -> VisualRegistry {
             mirror_x: d.mirror_x,
             mirror_y: d.mirror_y,
             instance_name: d.instance_name.clone(),
+            port_connector_paths: d.port_connector_paths.clone(),
+            parent_qualified_type: d.qualified_type.clone(),
         }
     });
     reg.register_edge_kind("modelica.connection", |data: &lunco_canvas::NodeData| {
@@ -2122,6 +2233,12 @@ fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramNodeId, Canv
                         };
                         (p.name.clone(), value)
                     })
+                    .collect(),
+                port_connector_paths: node
+                    .component_def
+                    .ports
+                    .iter()
+                    .map(|p| (p.name.clone(), p.msl_path.clone(), p.size_x, p.size_y))
                     .collect(),
             }),
             ports,
@@ -6110,6 +6227,11 @@ fn synthesize_msl_node(
                 .parameters
                 .iter()
                 .map(|p| (p.name.clone(), p.default.clone()))
+                .collect(),
+            port_connector_paths: comp
+                .ports
+                .iter()
+                .map(|p| (p.name.clone(), p.msl_path.clone(), p.size_x, p.size_y))
                 .collect(),
         }),
         ports,
