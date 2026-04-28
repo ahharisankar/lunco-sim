@@ -360,7 +360,9 @@ fn render_class_row(
                     qualified_path: class.qualified_path.clone(),
                 });
             }
-            // Description + qualified path move to the hover tooltip.
+            // Hover stays lightweight — short name + qualified path
+            // only. The docstring lives in the Docs view, not on
+            // hover, so we don't duplicate content one click away.
             let muted = theme.text_muted();
             resp.on_hover_ui(|ui| {
                 ui.strong(&class.short_name);
@@ -369,10 +371,6 @@ fn render_class_row(
                         .small()
                         .color(muted),
                 );
-                if let Some(desc) = &class.description {
-                    ui.separator();
-                    ui.label(egui::RichText::new(desc).small());
-                }
             });
         });
     } else {
@@ -397,7 +395,6 @@ fn render_class_row(
                 );
             }
         });
-        let desc = class.description.clone();
         let qualified = class.qualified_path.clone();
         let short = class.short_name.clone();
         let muted = theme.text_muted();
@@ -408,10 +405,6 @@ fn render_class_row(
                     .small()
                     .color(muted),
             );
-            if let Some(desc) = &desc {
-                ui.separator();
-                ui.label(egui::RichText::new(desc).small());
-            }
         });
         if resp.header_response.clicked() {
             ctx.actions.push(BrowserAction::OpenLoadedClass {
@@ -423,12 +416,12 @@ fn render_class_row(
 }
 
 /// Visual descriptor for a class-kind badge.
-struct Badge {
-    letter: &'static str,
-    bg: egui::Color32,
+pub(crate) struct Badge {
+    pub letter: &'static str,
+    pub bg: egui::Color32,
 }
 
-fn type_badge(kind: &ClassType, theme: &lunco_theme::Theme) -> Badge {
+pub(crate) fn type_badge(kind: &ClassType, theme: &lunco_theme::Theme) -> Badge {
     use crate::ui::theme::ModelicaThemeExt;
     let letter = match kind {
         ClassType::Model => "M",
@@ -447,7 +440,27 @@ fn type_badge(kind: &ClassType, theme: &lunco_theme::Theme) -> Badge {
     }
 }
 
-fn paint_badge(ui: &mut egui::Ui, badge: Badge, theme: &lunco_theme::Theme) {
+/// Same badge mapping keyed by the lowercase `class_kind` string
+/// carried on `MSLComponentDef` and `PackageNode::Model::class_kind`.
+/// Lets the package-browser tree use the workspace section's exact
+/// visual for MSL / Bundled rows without duplicating the colour
+/// table. Unknown kinds fall through to `Class` (neutral colour).
+pub(crate) fn type_badge_from_str(class_kind: &str, theme: &lunco_theme::Theme) -> Badge {
+    let kind = match class_kind.to_ascii_lowercase().as_str() {
+        "model" => ClassType::Model,
+        "block" => ClassType::Block,
+        "connector" => ClassType::Connector,
+        "record" => ClassType::Record,
+        "type" => ClassType::Type,
+        "package" => ClassType::Package,
+        "function" => ClassType::Function,
+        "operator" => ClassType::Operator,
+        _ => ClassType::Class,
+    };
+    type_badge(&kind, theme)
+}
+
+pub(crate) fn paint_badge(ui: &mut egui::Ui, badge: Badge, theme: &lunco_theme::Theme) {
     use crate::ui::theme::ModelicaThemeExt;
     ui.add(
         egui::Label::new(

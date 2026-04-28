@@ -111,7 +111,7 @@ fn category_color(name: &str, theme: &lunco_theme::Theme) -> egui::Color32 {
 ///   - any `connector` class (ports/interfaces, not standalone parts)
 ///   - anything under a `.Interfaces.` package (partial-models, ICs)
 ///   - anything under `.Internal.` (library-private helpers)
-fn is_instantiable(c: &MSLComponentDef) -> bool {
+pub(crate) fn is_instantiable(c: &MSLComponentDef) -> bool {
     if c.class_kind.eq_ignore_ascii_case("connector") {
         return false;
     }

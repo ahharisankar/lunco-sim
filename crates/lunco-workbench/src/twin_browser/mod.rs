@@ -373,23 +373,34 @@ impl Panel for TwinBrowserPanel {
                     .italics(),
             );
         } else {
-            for &i in &visible {
-                let section = registry.section_mut(i);
-                let header = egui::CollapsingHeader::new(section.title())
-                    .id_salt(("twin_panel_section", section.id()))
-                    .default_open(section.default_open());
-                header.show(ui, |ui| {
-                    let twin_ref = workspace
-                        .as_ref()
-                        .and_then(|ws| ws.active_twin.and_then(|id| ws.twin(id)));
-                    let mut ctx = BrowserCtx {
-                        twin: twin_ref,
-                        actions: &mut actions,
-                        world,
-                    };
-                    section.render(ui, &mut ctx);
+            // ScrollArea wraps every section so a fully-expanded MSL
+            // tree (~2500 entries) doesn't push later sections (or
+            // the panel itself) off-screen. `auto_shrink=[false; 2]`
+            // forces the viewport to fill the panel rect — without
+            // it egui would shrink the viewport to content and clip
+            // the last items if content grew mid-frame.
+            egui::ScrollArea::vertical()
+                .id_salt("twin_panel_scroll")
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    for &i in &visible {
+                        let section = registry.section_mut(i);
+                        let header = egui::CollapsingHeader::new(section.title())
+                            .id_salt(("twin_panel_section", section.id()))
+                            .default_open(section.default_open());
+                        header.show(ui, |ui| {
+                            let twin_ref = workspace
+                                .as_ref()
+                                .and_then(|ws| ws.active_twin.and_then(|id| ws.twin(id)));
+                            let mut ctx = BrowserCtx {
+                                twin: twin_ref,
+                                actions: &mut actions,
+                                world,
+                            };
+                            section.render(ui, &mut ctx);
+                        });
+                    }
                 });
-            }
         }
 
         if let Some(w) = workspace {

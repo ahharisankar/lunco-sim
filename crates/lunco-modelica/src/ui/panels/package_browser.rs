@@ -37,6 +37,16 @@ pub enum PackageNode {
         id: String,
         name: String,
         library: ModelLibrary,
+        /// Modelica class kind (`"model"`, `"block"`, `"connector"`,
+        /// ...) peeked from the file's first non-comment, non-`within`
+        /// keyword. `None` only for nodes whose source we haven't
+        /// scanned yet (Bundled today; future remote backends). The
+        /// static `MSLComponentDef` index is consulted first; this
+        /// field is the fallback so the kind badge stays correct for
+        /// classes the static index doesn't cover (records, types,
+        /// constants, partial-model siblings, ...). Cheap one-shot
+        /// read at scan time — never re-read during render.
+        class_kind: Option<String>,
     },
 }
 
@@ -297,13 +307,33 @@ fn scan_msl_dir(dir: &std::path::Path, package_path: String) -> Vec<PackageNode>
                     is_loading: false,
                 });
             } else if path.extension().map(|e| e == "mo").unwrap_or(false) {
+                // `package.mo` is the package's own definition file,
+                // not a sibling class. The package itself is already
+                // surfaced as the parent `Category`; rendering an
+                // additional row for `package.mo` duplicates that
+                // navigation node and adds a stray `[?]`/`[P]` row.
+                // Match Dymola/OMEdit which never show `package.mo`
+                // as a class entry.
+                if name == "package.mo" {
+                    continue;
+                }
                 let display_name = name.strip_suffix(".mo").unwrap_or(&name).to_string();
-                let model_path = format!("{}.{}", package_path, name);
-                let id = format!("msl_path:{}", model_path.strip_prefix("Modelica.").unwrap_or(&model_path));
+                let model_path = format!("{}.{}", package_path, display_name);
+                let id = format!(
+                    "msl_path:{}",
+                    model_path.strip_prefix("Modelica.").unwrap_or(&model_path)
+                );
+                // Only keep the kind — the docstring goes into the
+                // class's AST when the file's opened, and the Docs
+                // view reads it from there. Storing it on the
+                // navigation node would just duplicate the source of
+                // truth.
+                let (class_kind, _) = peek_class_header(&path);
                 results.push(PackageNode::Model {
                     id,
                     name: display_name,
                     library: ModelLibrary::MSL,
+                    class_kind,
                 });
             }
         }
@@ -325,6 +355,12 @@ fn build_bundled_tree() -> Vec<PackageNode> {
                 .unwrap_or(m.filename)
                 .to_string(),
             library: ModelLibrary::Bundled,
+            // Bundled sources are baked into the binary, not on disk
+            // — `peek_class_header` can't reach them. Almost all
+            // bundled examples are `model`s; default to that so the
+            // badge reads sensibly until we plumb the kind from the
+            // bundled metadata.
+            class_kind: Some("model".to_string()),
         })
         .collect()
 }
@@ -782,6 +818,7 @@ fn render_node(
     active_path: Option<&str>,
     depth: usize,
     tasks: &mut Vec<Task<ScanResult>>,
+    theme: &lunco_theme::Theme,
 ) -> Option<PackageAction> {
     let indent = depth as f32 * 16.0 + 4.0;
     let mut result = None;
@@ -821,7 +858,9 @@ fn render_node(
                             });
                             break;
                         }
-                        if let Some(req) = render_node(child, ui, active_path, depth + 1, tasks) {
+                        if let Some(req) =
+                            render_node(child, ui, active_path, depth + 1, tasks, theme)
+                        {
                             result = Some(req);
                         }
                     }
@@ -849,7 +888,12 @@ fn render_node(
             }
         }
 
-        PackageNode::Model { id, name, library, .. } => {
+        PackageNode::Model {
+            id,
+            name,
+            library,
+            class_kind,
+        } => {
             let is_active = active_path == Some(id.as_str());
 
             let bg = if is_active {
@@ -858,23 +902,71 @@ fn render_node(
                 egui::Color32::TRANSPARENT
             };
 
-            let lib_icon = match library {
-                ModelLibrary::MSL => "📚",
-                ModelLibrary::Bundled => "📦",
-                ModelLibrary::User => "📁",
-                ModelLibrary::InMemory => "💾",
+            // Class-kind awareness via the static MSL library — the
+            // same `MSLComponentDef` the palette consumes. When the
+            // path resolves, render a Modelica-class badge (M/B/X/F/R/...)
+            // matching the workspace section's style, and gate drag
+            // on `is_instantiable` so connectors / functions /
+            // partial-interfaces don't drag onto a diagram (you
+            // reference them in source instead — Dymola/OMEdit
+            // behaviour). Bundled / user / in-memory rows fall back
+            // to the source-library icon and click-only.
+            let msl_path = msl_path_for_id(id, library);
+            let def = matches!(library, ModelLibrary::MSL)
+                .then(|| crate::visual_diagram::msl_component_by_path(&msl_path))
+                .flatten();
+            // Prefer the static `MSLComponentDef.class_kind` (richer
+            // — also gives `is_instantiable`'s heuristics for
+            // .Interfaces / .Internal); fall back to the kind peeked
+            // at scan time so classes the static index doesn't cover
+            // (records, types, constants, partial-model siblings)
+            // still get the right badge.
+            let resolved_kind: Option<&str> = def
+                .as_ref()
+                .map(|d| d.class_kind.as_str())
+                .or_else(|| class_kind.as_deref());
+            let drag_enabled = match (&def, resolved_kind) {
+                (Some(d), _) => crate::ui::panels::palette::is_instantiable(d),
+                // No static def → drag if the peeked kind is
+                // instantiable on a diagram. Mirrors the same
+                // model/block whitelist `is_instantiable` uses,
+                // minus the .Interfaces / .Internal path filters
+                // (those need the def to disambiguate).
+                (None, Some(k)) => matches!(k, "model" | "block"),
+                (None, None) => false,
+            };
+            let sense = if drag_enabled {
+                egui::Sense::click_and_drag()
+            } else {
+                egui::Sense::click()
             };
 
-            let resp = ui.horizontal(|ui| {
-                ui.add_space(indent + 16.0);
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(format!("{} {}", lib_icon, name)).size(11.0),
+            // Use the workspace section's exact `paint_badge` helper
+            // when we have a kind — same coloured pill, same letter
+            // mapping. Falls back to a source-library emoji only when
+            // we have no kind at all (rare; mostly Bundled today
+            // before the bundled-metadata index lands).
+            let resp = ui
+                .horizontal(|ui| {
+                    ui.add_space(indent + 16.0);
+                    if let Some(k) = resolved_kind {
+                        let badge = crate::ui::browser_section::type_badge_from_str(k, theme);
+                        crate::ui::browser_section::paint_badge(ui, badge, theme);
+                    } else {
+                        let icon = match library {
+                            ModelLibrary::MSL => "?",
+                            ModelLibrary::Bundled => "📦",
+                            ModelLibrary::User => "📁",
+                            ModelLibrary::InMemory => "💾",
+                        };
+                        ui.label(egui::RichText::new(icon).size(11.0));
+                    }
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(name.as_str()).size(11.0))
+                            .sense(sense),
                     )
-                    .sense(egui::Sense::click_and_drag()),
-                )
-            })
-            .inner;
+                })
+                .inner;
 
             if is_active {
                 ui.painter().rect_filled(resp.rect, 2.0, bg);
@@ -915,14 +1007,28 @@ fn render_node(
                 ));
             }
 
+            // Hover stays lightweight — qualified path + library
+            // tag, no docstring. The class's description belongs in
+            // the Docs view (model_view's `render_docs_view`), which
+            // renders it as the page subtitle and lays out the full
+            // `Documentation(info=…)` HTML annotation underneath.
+            // Mirroring the docstring on hover would just duplicate
+            // info that's one click away, and the workspace section
+            // already follows the same restraint.
             if resp.hovered() {
-                let info = match library {
+                let lib_tag: &str = match library {
                     ModelLibrary::MSL => "📚 MSL — read-only",
                     ModelLibrary::Bundled => "📦 Bundled — read-only",
                     ModelLibrary::User => "📁 User model — writable",
                     ModelLibrary::InMemory => "💾 In-memory — writable",
                 };
-                resp.on_hover_text(format!("{}\n{}", name, info));
+                let qualified = msl_path.clone();
+                let display_name = name.clone();
+                resp.on_hover_ui(move |ui| {
+                    ui.strong(display_name);
+                    ui.label(egui::RichText::new(qualified).small().weak());
+                    ui.label(egui::RichText::new(lib_tag).small().weak());
+                });
             }
         }
     }
@@ -1226,6 +1332,164 @@ fn msl_path_for_id(id: &str, library: &ModelLibrary) -> String {
     }
 }
 
+/// Peek the Modelica class kind by reading the first few lines of a
+/// `.mo` file. Cheap (~one disk page on cold start, free on warm),
+/// runs once per file at scan time and never re-runs during render.
+///
+/// Strips leading `// line comments`, `/* block comments */`, and
+/// `within …;` headers, then takes the first significant token after
+/// the standard qualifier prefixes (`encapsulated` / `final` /
+/// `partial` / `expandable` / `operator` / `pure` / `impure` /
+/// `redeclare`). Returns the raw keyword (`"model"`, `"block"`,
+/// `"connector"`, ...) so the existing `kind_letter_for` mapping
+/// applies uniformly.
+///
+/// Returns `None` only on I/O failure or files with no recognisable
+/// class header in the first 50 lines (rare — one would have to
+/// invent a new keyword Modelica doesn't define).
+/// Peek the class header from a `.mo` file. Returns `(class_kind,
+/// description)` — kind is the Modelica keyword, description is the
+/// first quoted string after the class name (Modelica's "comment" —
+/// what OMEdit/Dymola show in tooltips).
+///
+/// Reads up to 80 lines, strips line + block comments and
+/// `within …;`, then walks tokens to find the kind keyword and the
+/// following quoted docstring. The docstring may sit on the same
+/// line (`model X "…"`) or the next line (the common MSL pattern
+/// for packages: `package Foo` newline `  "…"`). Both are handled.
+fn peek_class_header(path: &std::path::Path) -> (Option<String>, Option<String>) {
+    use std::io::BufRead;
+    let Ok(f) = std::fs::File::open(path) else {
+        return (None, None);
+    };
+    let reader = std::io::BufReader::new(f);
+    let mut kind: Option<String> = None;
+    let mut tail_after_kind = String::new();
+    let mut in_block_comment = false;
+    for line in reader.lines().take(80).flatten() {
+        let mut s = line.as_str().to_string();
+        // Strip block comments inline. `s` is rebuilt as we walk.
+        let mut cleaned = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if in_block_comment {
+                if c == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    in_block_comment = false;
+                }
+                continue;
+            }
+            if c == '/' && chars.peek() == Some(&'*') {
+                chars.next();
+                in_block_comment = true;
+                continue;
+            }
+            if c == '/' && chars.peek() == Some(&'/') {
+                // Line-comment — discard the rest.
+                break;
+            }
+            cleaned.push(c);
+        }
+        s = cleaned;
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with("within") {
+            continue;
+        }
+        if kind.is_none() {
+            // Walk tokens for the first kind keyword after qualifiers.
+            // Stop when we find a kind; remember the tail of that line
+            // (after the kind+name) so the description can sit on the
+            // same line.
+            let mut tokens = trimmed.split_whitespace();
+            while let Some(tok) = tokens.next() {
+                match tok {
+                    "encapsulated" | "final" | "partial" | "expandable" | "operator" | "pure"
+                    | "impure" | "redeclare" | "replaceable" => continue,
+                    "model" | "block" | "connector" | "function" | "record" | "type"
+                    | "package" | "class" => {
+                        kind = Some(tok.to_string());
+                        // Consume the name token and grab everything after.
+                        let _name = tokens.next();
+                        tail_after_kind = tokens.collect::<Vec<_>>().join(" ");
+                        break;
+                    }
+                    _ => return (None, None),
+                }
+            }
+            // Try same-line docstring first.
+            if let Some(d) = first_quoted(&tail_after_kind) {
+                return (kind, Some(d));
+            }
+            // Otherwise keep scanning for the docstring on later lines.
+            continue;
+        }
+        // Past the class header — look for the first quoted string,
+        // bail at the first `extends`/`import`/equation/declaration
+        // marker so we don't pick up an internal `"..."` string.
+        if trimmed.starts_with("extends")
+            || trimmed.starts_with("import")
+            || trimmed.starts_with("annotation")
+            || trimmed.starts_with("equation")
+            || trimmed.starts_with("algorithm")
+            || trimmed.starts_with("end ")
+        {
+            return (kind, None);
+        }
+        if let Some(d) = first_quoted(trimmed) {
+            return (kind, Some(d));
+        }
+    }
+    (kind, None)
+}
+
+/// Extract the first double-quoted string from a Modelica fragment.
+/// Honors `\"` escapes. Returns `None` if no closed quoted string is
+/// present.
+fn first_quoted(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let start = s.find('"')?;
+    let mut out = String::new();
+    let mut i = start + 1;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'\\' && i + 1 < bytes.len() {
+            out.push(bytes[i + 1] as char);
+            i += 2;
+            continue;
+        }
+        if c == b'"' {
+            return Some(out);
+        }
+        out.push(c as char);
+        i += 1;
+    }
+    None
+}
+
+/// Single-letter class-kind badge matching the workspace section's
+/// vocabulary in `browser_section.rs::type_badge`. Mapped from the
+/// `class_kind` string carried by `MSLComponentDef` (case-insensitive
+/// — `msl_indexer` emits lower-case; defensive against external
+/// indexes that don't). Unknown kinds get `?` so the badge is always
+/// the same width and aligned with neighbouring rows.
+fn kind_letter_for(class_kind: &str) -> &'static str {
+    match class_kind.to_ascii_lowercase().as_str() {
+        "model" => "M",
+        "block" => "B",
+        "class" => "C",
+        "connector" => "X",
+        "record" => "R",
+        "type" => "T",
+        "package" => "P",
+        "function" => "F",
+        "operator" => "O",
+        _ => "?",
+    }
+}
+
 /// Add an instance of an MSL class as a sub-component of the
 /// currently-active canvas tab. Mirrors what the Component Palette
 /// click does, so the read-only / class-resolution / placement logic
@@ -1420,7 +1684,16 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
             let filename = id_clone.strip_prefix("bundled://").unwrap_or("");
             crate::models::get_model(filename).unwrap_or("").to_string()
         } else if let Some(rel_path) = id_clone.strip_prefix("msl_path:") {
-            let disk_path = rel_path.replace('.', "/").replace("/mo", ".mo");
+            // Id is the dot-separated qualified name without the
+            // file extension (e.g. `Mechanics.Rotational.Examples.Backlash`).
+            // Translate dots to path separators and append `.mo`. The
+            // legacy `replace("/mo", ".mo")` trick was a workaround
+            // for an id-formatting bug (the id used to include `.mo`
+            // as part of the dotted path); since `scan_msl_dir` now
+            // strips the suffix before constructing the id, the
+            // translation is straightforward: dots → slashes, then
+            // append `.mo`.
+            let disk_path = format!("{}.mo", rel_path.replace('.', "/"));
             let msl_root = lunco_assets::msl_dir();
             let full_path = msl_root.join("Modelica").join(disk_path);
             std::fs::read_to_string(&full_path).unwrap_or_else(|e| {
@@ -1493,6 +1766,10 @@ pub(crate) fn render_root_subtree(world: &mut World, ui: &mut egui::Ui, root_id:
         .get_resource::<WorkbenchState>()
         .and_then(|s| s.open_model.as_ref().map(|m| m.model_path.clone()));
     let active_path_ref = active_path.as_deref();
+    let theme = world
+        .get_resource::<lunco_theme::Theme>()
+        .cloned()
+        .unwrap_or_else(lunco_theme::Theme::dark);
 
     let mut action: Option<PackageAction> = None;
     {
@@ -1522,7 +1799,9 @@ pub(crate) fn render_root_subtree(world: &mut World, ui: &mut egui::Ui, root_id:
                 ui.set_max_width(ui.available_width());
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                 for child in kids.iter_mut() {
-                    if let Some(a) = render_node(child, ui, active_path_ref, 0, &mut cache.tasks) {
+                    if let Some(a) =
+                        render_node(child, ui, active_path_ref, 0, &mut cache.tasks, &theme)
+                    {
                         action = Some(a);
                     }
                 }

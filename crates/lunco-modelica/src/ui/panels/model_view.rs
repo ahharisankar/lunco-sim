@@ -984,12 +984,13 @@ fn render_docs_view(ui: &mut egui::Ui, world: &mut World) {
     // Resolve the class: drill-in target (qualified), or first non-
     // package class in the AST as fallback. Same picker the canvas's
     // target resolver uses.
-    let (class_name, info, revisions): (
+    let (class_name, class_description, info, revisions): (
+        Option<String>,
         Option<String>,
         Option<String>,
         Option<String>,
     ) = match doc_id {
-        None => (None, None, None),
+        None => (None, None, None, None),
         Some(doc) => {
             let drilled = world
                 .get_resource::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
@@ -1013,11 +1014,23 @@ fn render_docs_view(ui: &mut egui::Ui, world: &mut World) {
                         .map(|(name, class)| {
                             let (info, revs) =
                                 extract_documentation(&class.annotation);
-                            (Some(name), info, revs)
+                            // Class docstring (Modelica's "comment
+                            // string" — first quoted string after
+                            // the class header). Lives on the AST
+                            // class node as `description: Vec<Token>`;
+                            // we take the first token, strip the
+                            // surrounding quotes, drop empties.
+                            let desc = class
+                                .description
+                                .iter()
+                                .next()
+                                .map(|t| t.text.as_ref().trim_matches('"').to_string())
+                                .filter(|s| !s.is_empty());
+                            (Some(name), desc, info, revs)
                         })
-                        .unwrap_or((None, None, None))
+                        .unwrap_or((None, None, None, None))
                 }
-                None => (None, None, None),
+                None => (None, None, None, None),
             }
         }
     };
@@ -1050,6 +1063,23 @@ fn render_docs_view(ui: &mut egui::Ui, world: &mut World) {
                                 .strong()
                                 .color(egui::Color32::from_rgb(230, 235, 245)),
                         );
+                        // Class docstring as subtitle when present —
+                        // Modelica's `model Foo "this is the doc"`
+                        // and the next-line variant for packages
+                        // (`package Foo` ↵ `  "doc"`). Distinct from
+                        // the `Documentation(info=…)` HTML annotation
+                        // rendered below; many MSL packages have only
+                        // the docstring (no HTML), so without this
+                        // the page header reads bare for them.
+                        if let Some(desc) = &class_description {
+                            ui.add_space(2.0);
+                            ui.label(
+                                egui::RichText::new(desc)
+                                    .size(13.0)
+                                    .italics()
+                                    .color(egui::Color32::from_rgb(170, 180, 195)),
+                            );
+                        }
                         ui.add_space(12.0);
                     }
                     match info.as_deref().filter(|s| !s.trim().is_empty()) {
