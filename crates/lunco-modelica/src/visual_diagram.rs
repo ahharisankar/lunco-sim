@@ -138,6 +138,13 @@ pub struct PortDef {
     pub size_x: f32,
     #[serde(default = "PortDef::default_size")]
     pub size_y: f32,
+    /// Rotation in degrees from `Placement(transformation(rotation=...))`
+    /// on the port declaration (CCW, Modelica convention). Used by
+    /// the canvas painter to rotate the connector class's authored Icon
+    /// so e.g. a `rotation=270` input port shows its triangle pointing
+    /// upward into the parent edge it sits on.
+    #[serde(default)]
+    pub rotation_deg: f32,
     /// Causality classification derived from the connector class's
     /// variables. Drives port shape + arrowhead.
     #[serde(default)]

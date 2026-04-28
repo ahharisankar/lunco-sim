@@ -1040,6 +1040,7 @@ fn extract_local_class_ports(
             y: py,
             size_x: 20.0,
             size_y: 20.0,
+            rotation_deg: 0.0,
             color,
             kind,
             flow_vars,

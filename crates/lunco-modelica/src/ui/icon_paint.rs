@@ -739,10 +739,18 @@ fn paint_text(
     // MLS: `fontSize=0` means "auto-fit to extent". We approximate
     // auto-fit as 80% of the extent's smaller dimension — readable
     // without overflowing on stubby labels.
+    //
+    // The clamp range is wide intentionally so text scales with the
+    // viewport zoom across the whole useful range. Earlier the clamp
+    // at [6, 72] flattened both ends — at low zoom every label sat at
+    // 6 px, at high zoom every label maxed at 72 px, which read as
+    // "text size is constant, doesn't follow zoom." 3 px is roughly
+    // the readability floor; 256 px is large enough that 1:1 zoom on
+    // a 4K display still gets headroom.
     let font_size_px = if t.font_size > 0.0 {
-        (t.font_size as f32 * xf.scale).max(6.0)
+        (t.font_size as f32 * xf.scale).clamp(3.0, 256.0)
     } else {
-        (rect.height().abs() * 0.8).clamp(6.0, 72.0)
+        (rect.height().abs() * 0.8).clamp(3.0, 256.0)
     };
     let color = color_or_default(t.text_color, egui::Color32::from_gray(20));
     painter.text(

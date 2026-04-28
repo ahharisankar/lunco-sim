@@ -239,6 +239,12 @@ struct PortDef {
     size_x: f32,
     #[serde(default = "default_port_size")]
     size_y: f32,
+    /// Rotation from `Placement(transformation(rotation=...))` on the
+    /// port declaration. Plumbed to the canvas so connector icons
+    /// land oriented (e.g. PI's bottom `u_m` input has rotation=270
+    /// so the triangle points up).
+    #[serde(default)]
+    rotation_deg: f32,
 }
 
 fn default_port_size() -> f32 { 20.0 }
@@ -892,6 +898,10 @@ impl MSLIndexer {
                                 ((e.p2.x - e.p1.x).abs() as f32, (e.p2.y - e.p1.y).abs() as f32)
                             })
                             .unwrap_or((20.0, 20.0));
+                        let rotation_deg = placement
+                            .as_ref()
+                            .map(|p| p.transformation.rotation as f32)
+                            .unwrap_or(0.0);
 
                         // Resolve `type_str` to a fully-qualified path so
                         // runtime callers (canvas port-icon renderer,
@@ -942,6 +952,7 @@ impl MSLIndexer {
                             y,
                             size_x,
                             size_y,
+                            rotation_deg,
                         });
                     }
                 }

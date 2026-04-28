@@ -220,13 +220,12 @@ pub struct IconNodeData {
     /// follow.
     pub parameters: Vec<(String, String)>,
     /// Per-port connector-icon descriptors: `(port_name,
-    /// connector_class_qualified_path, size_x, size_y)`. The painter
-    /// renders each connector class's authored `Icon` at the port
-    /// location, sized to the port's authored `Placement(extent=...)`
-    /// in the parent class's icon coords (typically 20×20). Empty
-    /// path or missing entry falls back to the generic per-shape
-    /// marker. Match OMEdit / Dymola.
-    pub port_connector_paths: Vec<(String, String, f32, f32)>,
+    /// connector_class_qualified_path, size_x, size_y, rotation_deg)`.
+    /// The painter renders each connector class's authored `Icon` at
+    /// the port location, sized + rotated per the port's authored
+    /// `Placement(transformation(extent=..., rotation=...))`. Empty
+    /// path falls back to the generic per-shape marker.
+    pub port_connector_paths: Vec<(String, String, f32, f32, f32)>,
 }
 
 /// Typed payload for `"modelica.connection"` edges. Same purpose as
@@ -300,11 +299,9 @@ struct IconNodeVisual {
     /// Class name (leaf — e.g. "Resistor"). Drives `%class`
     /// substitution in authored `Text` primitives.
     class_name: String,
-    /// `(port_name, connector_class_qualified_path, size_x, size_y)`
-    /// from the projected scene. Painter renders each connector
-    /// class's authored `Icon` at the port location, sized by the
-    /// authored `Placement(extent=...)` in the parent's icon coords.
-    port_connector_paths: Vec<(String, String, f32, f32)>,
+    /// `(port_name, connector_class_qualified_path, size_x, size_y,
+    /// rotation_deg)` from the projected scene.
+    port_connector_paths: Vec<(String, String, f32, f32, f32)>,
     /// Parent component's fully-qualified type — used as the scope
     /// root when the indexer wrote a short connector path like
     /// `"RealInput"` and we need to resolve it via package walk.
@@ -483,13 +480,13 @@ impl NodeVisual for IconNodeVisual {
             let port_info = self
                 .port_connector_paths
                 .iter()
-                .find(|(name, _, _, _)| name == port.id.as_str());
+                .find(|(name, _, _, _, _)| name == port.id.as_str());
             let connector_path: &str = port_info
-                .map(|(_, p, _, _)| p.as_str())
+                .map(|(_, p, _, _, _)| p.as_str())
                 .unwrap_or("");
-            let (port_size_x_icon, port_size_y_icon) = port_info
-                .map(|(_, _, sx, sy)| (*sx, *sy))
-                .unwrap_or((20.0, 20.0));
+            let (port_size_x_icon, port_size_y_icon, port_rotation_deg) = port_info
+                .map(|(_, _, sx, sy, rot)| (*sx, *sy, *rot))
+                .unwrap_or((20.0, 20.0, 0.0));
             let mut painted_authored = false;
             // The indexer ideally writes a fully-qualified path, but
             // older indexes wrote the type as-declared (`"RealInput"`)
@@ -563,11 +560,36 @@ impl NodeVisual for IconNodeVisual {
                             egui::pos2(s_rect.max.x, s_rect.max.y),
                         );
                         let palette = modelica_icon_palette_from_ctx(ctx.ui.ctx());
+                        // Compose the connector icon's orientation from
+                        // (a) the parent's mirror flags so a mirrored
+                        // parent (e.g. `extent={{22,-50},{2,-30}}` on
+                        // speedSensor) flips the connector icon too —
+                        // RealOutput's TIP must point AWAY from the
+                        // parent regardless of which canvas side it
+                        // ends up on, and (b) the port's authored
+                        // `Placement(transformation(rotation=...))` so
+                        // a `rotation=270` input sits with its
+                        // triangle pointing the right way (e.g. PI's
+                        // `u_m` on the bottom edge points up).
+                        // MLS `rotation=270` on a port placement means
+                        // 270° CCW *in the visual frame* (where Y is
+                        // down, i.e. screen frame) — rotation=270 on
+                        // PI's `u_m` produces a triangle pointing UP
+                        // on screen. Our `to_screen` applies rotation
+                        // in Modelica's +Y-up frame and then flips Y,
+                        // which is equivalent to rotating CW in the
+                        // visual frame. Negate so the visual outcome
+                        // matches MLS / OMEdit.
+                        let port_orientation = crate::icon_paint::IconOrientation {
+                            rotation_deg: -port_rotation_deg,
+                            mirror_x: self.mirror_x,
+                            mirror_y: self.mirror_y,
+                        };
                         crate::icon_paint::paint_graphics_themed(
                             painter,
                             port_rect,
                             icon.coordinate_system,
-                            crate::icon_paint::IconOrientation::default(),
+                            port_orientation,
                             None,
                             None,
                             palette.as_ref(),
@@ -2244,7 +2266,7 @@ fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramNodeId, Canv
                     .component_def
                     .ports
                     .iter()
-                    .map(|p| (p.name.clone(), p.msl_path.clone(), p.size_x, p.size_y))
+                    .map(|p| (p.name.clone(), p.msl_path.clone(), p.size_x, p.size_y, p.rotation_deg))
                     .collect(),
             }),
             ports,
@@ -6237,7 +6259,7 @@ fn synthesize_msl_node(
             port_connector_paths: comp
                 .ports
                 .iter()
-                .map(|p| (p.name.clone(), p.msl_path.clone(), p.size_x, p.size_y))
+                .map(|p| (p.name.clone(), p.msl_path.clone(), p.size_x, p.size_y, p.rotation_deg))
                 .collect(),
         }),
         ports,
