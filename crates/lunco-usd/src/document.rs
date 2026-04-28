@@ -32,7 +32,10 @@
 use std::collections::VecDeque;
 use std::ops::Range;
 
+use bevy::reflect::Reflect;
 use lunco_doc::{Document, DocumentError, DocumentId, DocumentOp, DocumentOrigin};
+
+use crate::text_edit;
 
 /// How many recent changes to keep in the per-document ring buffer.
 ///
@@ -47,9 +50,9 @@ const CHANGE_HISTORY_CAPACITY: usize = 256;
 /// Identifies one layer in a USD stage's layer stack.
 ///
 /// In Phase 1 every document is a single root layer and every op
-/// targets [`LayerId::root`]. The newtype exists now so Phase 5
-/// (sublayer-aware editing) can extend without changing op shapes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// targets [`LayerId::root`]. The newtype exists now so future
+/// sublayer-aware editing can extend without changing op shapes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Reflect)]
 pub struct LayerId(String);
 
 impl LayerId {
@@ -119,27 +122,74 @@ pub enum UsdChange {
 
 /// A typed, reversible mutation to a [`UsdDocument`].
 ///
-/// Phase 1 ships a single op variant — `ReplaceSource` — which is
-/// enough to plumb the `Document` trait, exercise undo/redo, and let
-/// the API/UI dispatch text edits via the typed-command surface.
-/// Prim-level ops (`AddPrim`, `RemovePrim`, `SetAttribute`,
-/// `SetTransform`) land in Phase 5 alongside the Sdf-style writer.
+/// Every variant carries an `edit_target: LayerId` so future
+/// composition-aware editing can name *which layer* receives the
+/// opinion. Today only [`LayerId::root`] is meaningful; non-root
+/// targets are rejected.
 ///
-/// `edit_target` follows the Omniverse pattern: every op names which
-/// layer in the stage's layer stack receives the opinion. Today only
-/// [`LayerId::root`] is meaningful; the field is present so future
-/// layered edits don't require an op-shape rewrite.
-#[derive(Debug, Clone)]
+/// All variants funnel through [`text_edit`] splicers so the source
+/// stays canonical (comments and formatting in untouched regions
+/// survive). Inverses are recorded as the previous full source via
+/// [`UsdOp::ReplaceSource`] — coarse but always correct, and good
+/// enough until per-op tighter inverses become a profiling target.
+#[derive(Debug, Clone, Reflect)]
 pub enum UsdOp {
     /// Replace the entire source buffer with `text`. Inverse is the
-    /// previous source as another `ReplaceSource`. Mirrors Modelica's
-    /// `EditText` — coarse-grained but always valid.
+    /// previous source as another `ReplaceSource`. Used as the
+    /// universal inverse for every other variant.
     ReplaceSource {
         /// Layer to write to. Today: always [`LayerId::root`].
         edit_target: LayerId,
         /// New full source for the layer.
         text: String,
     },
+    /// Add a child prim under `parent_path` with the given prim
+    /// `name` and optional schema `type_name` (`"Xform"`, `"Cube"`,
+    /// …; `None` for an untyped prim). `parent_path == "/"` adds at
+    /// the file root.
+    AddPrim {
+        /// Layer to write to.
+        edit_target: LayerId,
+        /// Parent prim path (`"/"` for top level).
+        parent_path: String,
+        /// Prim name — must be a valid USD identifier in the
+        /// caller's hands; not validated here beyond what the
+        /// splicer accepts.
+        name: String,
+        /// Optional schema type (`Xform`, `Cube`, `Mesh`, …).
+        type_name: Option<String>,
+    },
+    /// Remove the prim at `path` together with its entire `def ... { }`
+    /// block. The inverse re-establishes the prior full source.
+    RemovePrim {
+        /// Layer to write to.
+        edit_target: LayerId,
+        /// Absolute USD path of the prim to remove.
+        path: String,
+    },
+    /// Set the `xformOp:translate` attribute on the prim at `path`.
+    /// Inserts the property + `xformOpOrder` if absent; replaces the
+    /// value otherwise.
+    SetTranslate {
+        /// Layer to write to.
+        edit_target: LayerId,
+        /// Absolute USD path of the prim whose translate to set.
+        path: String,
+        /// `[x, y, z]` in stage units.
+        value: [f64; 3],
+    },
+}
+
+impl Default for UsdOp {
+    fn default() -> Self {
+        // `Reflect`-derived enums need a Default. Pick the always-valid
+        // identity variant: a no-op ReplaceSource of empty text. Real
+        // callers always supply an explicit variant.
+        UsdOp::ReplaceSource {
+            edit_target: LayerId::root(),
+            text: String::new(),
+        }
+    }
 }
 
 impl DocumentOp for UsdOp {}
@@ -319,18 +369,93 @@ impl Document for UsdDocument {
         if !self.origin.accepts_mutations() {
             return Err(DocumentError::ReadOnly);
         }
+        // Edit-target gate is shared across all variants: today the
+        // splicers operate on the root layer only.
+        let edit_target = match &op {
+            UsdOp::ReplaceSource { edit_target, .. }
+            | UsdOp::AddPrim { edit_target, .. }
+            | UsdOp::RemovePrim { edit_target, .. }
+            | UsdOp::SetTranslate { edit_target, .. } => edit_target,
+        };
+        if !edit_target.is_root() {
+            return Err(DocumentError::ValidationFailed(format!(
+                "edit target {:?} not supported (root only)",
+                edit_target
+            )));
+        }
         match op {
-            UsdOp::ReplaceSource { edit_target, text } => {
-                if !edit_target.is_root() {
-                    return Err(DocumentError::ValidationFailed(format!(
-                        "edit target {:?} not supported in Phase 1 (root only)",
-                        edit_target
-                    )));
-                }
+            UsdOp::ReplaceSource { text, .. } => {
                 let range = 0..self.source.len();
                 self.apply_text_replace(range, text, UsdChange::FullReload)
             }
+            UsdOp::AddPrim {
+                parent_path,
+                name,
+                type_name,
+                ..
+            } => {
+                let new_source = text_edit::append_child_prim(
+                    &self.source,
+                    &parent_path,
+                    type_name.as_deref(),
+                    &name,
+                )
+                .ok_or_else(|| {
+                    DocumentError::ValidationFailed(format!(
+                        "AddPrim: parent path `{}` not found",
+                        parent_path
+                    ))
+                })?;
+                let added_path = if parent_path == "/" || parent_path.is_empty() {
+                    format!("/{}", name)
+                } else {
+                    format!("{}/{}", parent_path.trim_end_matches('/'), name)
+                };
+                self.replace_full_source(new_source, UsdChange::Resync { path: added_path })
+            }
+            UsdOp::RemovePrim { path, .. } => {
+                let new_source = text_edit::remove_prim(&self.source, &path).ok_or_else(
+                    || {
+                        DocumentError::ValidationFailed(format!(
+                            "RemovePrim: path `{}` not found",
+                            path
+                        ))
+                    },
+                )?;
+                self.replace_full_source(new_source, UsdChange::Resync { path })
+            }
+            UsdOp::SetTranslate { path, value, .. } => {
+                let new_source = text_edit::set_translate(&self.source, &path, value)
+                    .ok_or_else(|| {
+                        DocumentError::ValidationFailed(format!(
+                            "SetTranslate: path `{}` not found",
+                            path
+                        ))
+                    })?;
+                self.replace_full_source(
+                    new_source,
+                    UsdChange::InfoOnly {
+                        path,
+                        attr: "xformOp:translate".into(),
+                    },
+                )
+            }
         }
+    }
+}
+
+impl UsdDocument {
+    /// Helper used by the prim-level ops — they all reduce to
+    /// "replace the full source after a splice." Bumps the
+    /// generation, emits the supplied change, and records the
+    /// inverse as a verbatim previous-source `ReplaceSource`.
+    fn replace_full_source(
+        &mut self,
+        new_source: String,
+        change: UsdChange,
+    ) -> Result<UsdOp, DocumentError> {
+        let range = 0..self.source.len();
+        self.apply_text_replace(range, new_source, change)
     }
 }
 
@@ -430,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn non_root_edit_target_is_rejected_in_phase_1() {
+    fn non_root_edit_target_is_rejected() {
         let mut doc = UsdDocument::new(DocumentId::new(7), TINY_USDA);
         let err = doc
             .apply(UsdOp::ReplaceSource {
@@ -440,5 +565,92 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, DocumentError::ValidationFailed(_)));
         assert_eq!(doc.generation(), 0);
+    }
+
+    #[test]
+    fn add_prim_appends_at_root_and_undoes() {
+        let mut host =
+            DocumentHost::new(UsdDocument::new(DocumentId::new(8), TINY_USDA));
+        host.apply(Mutation::local(UsdOp::AddPrim {
+            edit_target: LayerId::root(),
+            parent_path: "/".into(),
+            name: "Rover".into(),
+            type_name: Some("Xform".into()),
+        }))
+        .unwrap();
+        assert!(host.document().source().contains("def Xform \"Rover\""));
+        host.undo().unwrap();
+        assert_eq!(host.document().source(), TINY_USDA);
+    }
+
+    #[test]
+    fn add_prim_unknown_parent_validation_error() {
+        let mut doc = UsdDocument::new(DocumentId::new(9), TINY_USDA);
+        let err = doc
+            .apply(UsdOp::AddPrim {
+                edit_target: LayerId::root(),
+                parent_path: "/Nope".into(),
+                name: "Body".into(),
+                type_name: Some("Cube".into()),
+            })
+            .unwrap_err();
+        assert!(matches!(err, DocumentError::ValidationFailed(_)));
+        assert_eq!(doc.generation(), 0);
+    }
+
+    #[test]
+    fn rover_built_from_blank_round_trips_with_undo() {
+        let blank = "#usda 1.0\n";
+        let mut host = DocumentHost::new(UsdDocument::new(DocumentId::new(10), blank));
+
+        host.apply(Mutation::local(UsdOp::AddPrim {
+            edit_target: LayerId::root(),
+            parent_path: "/".into(),
+            name: "Rover".into(),
+            type_name: Some("Xform".into()),
+        }))
+        .unwrap();
+        host.apply(Mutation::local(UsdOp::AddPrim {
+            edit_target: LayerId::root(),
+            parent_path: "/Rover".into(),
+            name: "WheelFL".into(),
+            type_name: Some("Cube".into()),
+        }))
+        .unwrap();
+        host.apply(Mutation::local(UsdOp::SetTranslate {
+            edit_target: LayerId::root(),
+            path: "/Rover/WheelFL".into(),
+            value: [1.0, 0.0, 1.0],
+        }))
+        .unwrap();
+
+        let final_src = host.document().source().to_string();
+        assert!(final_src.contains("def Xform \"Rover\""));
+        assert!(final_src.contains("def Cube \"WheelFL\""));
+        assert!(final_src.contains("xformOp:translate = (1, 0, 1)"));
+
+        // Undo every step → back to blank.
+        host.undo().unwrap();
+        host.undo().unwrap();
+        host.undo().unwrap();
+        assert_eq!(host.document().source(), blank);
+    }
+
+    #[test]
+    fn remove_prim_drops_block_and_undoes() {
+        let with_ball = "#usda 1.0\ndef Xform \"World\"\n{\n    def Sphere \"Ball\"\n    {\n    }\n}\n";
+        let mut host = DocumentHost::new(UsdDocument::with_origin(
+            DocumentId::new(11),
+            with_ball,
+            DocumentOrigin::writable_file("/tmp/x.usda"),
+        ));
+        host.apply(Mutation::local(UsdOp::RemovePrim {
+            edit_target: LayerId::root(),
+            path: "/World/Ball".into(),
+        }))
+        .unwrap();
+        assert!(!host.document().source().contains("Ball"));
+        host.undo().unwrap();
+        assert!(host.document().source().contains("def Sphere \"Ball\""));
     }
 }

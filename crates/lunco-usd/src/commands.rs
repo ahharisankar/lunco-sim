@@ -27,12 +27,14 @@
 //! without any central edit.
 
 use bevy::prelude::*;
-use lunco_core::{on_command, register_commands};
-use lunco_doc::DocumentOrigin;
+use lunco_core::{Command, on_command, register_commands};
+use lunco_doc::{DocumentId, DocumentOrigin};
 use lunco_doc_bevy::{DocumentChanged, DocumentClosed, DocumentOpened, SaveDocument};
-use lunco_twin::{DocumentKindId, DocumentKindMeta, DocumentKindRegistry};
+use lunco_twin::{DocumentKind, DocumentKindId, DocumentKindMeta, DocumentKindRegistry, FileKind};
 use lunco_workbench::file_ops::{NewDocument, OpenFile};
+use lunco_workbench::{TwinAdded, WorkspaceResource};
 
+use crate::document::UsdOp;
 use crate::registry::UsdDocumentRegistry;
 
 /// Stable id for the USD document kind in
@@ -71,11 +73,41 @@ impl Plugin for UsdCommandsPlugin {
             );
 
         app.add_systems(Update, drain_usd_pending_events);
+        app.add_observer(open_usd_docs_on_twin_added);
         register_all_commands(app);
     }
 }
 
+/// On `TwinAdded`, eagerly fire [`OpenFile`] for every `.usd*` file
+/// the new Twin contains. Mirrors how a Modelica twin's `.mo` files
+/// surface in the browser — but for USD we go all the way to "open
+/// the document" so cosim can wire `lunco:modelicaModel` /
+/// `lunco:simWires` participants from prim attributes through
+/// [`UsdSimPlugin`](lunco_usd_sim::UsdSimPlugin).
+///
+/// Skips USD files inside child Twins — those have their own
+/// `TwinAdded` event when the workspace eagerly opens them.
+fn open_usd_docs_on_twin_added(
+    trigger: On<TwinAdded>,
+    workspace: Res<WorkspaceResource>,
+    mut commands: Commands,
+) {
+    let twin_id = trigger.event().twin;
+    let Some(twin) = workspace.twin(twin_id) else {
+        return;
+    };
+    for file in twin.files() {
+        if matches!(file.kind, FileKind::Document(DocumentKind::Usd)) {
+            let abs = twin.root.join(&file.relative_path);
+            commands.trigger(OpenFile {
+                path: abs.to_string_lossy().into_owned(),
+            });
+        }
+    }
+}
+
 register_commands!(
+    on_apply_usd_op,
     on_new_document,
     on_open_file,
     on_save_document,
@@ -188,11 +220,44 @@ fn on_save_document(trigger: On<SaveDocument>, mut commands: Commands) {
     });
 }
 
-// ApplyUsdOp (typed-command surface for programmatic edits) is
-// deferred to Phase 5 — it requires `UsdOp` to be Reflect-derived,
-// which lands together with the prim-level op variants. Until then,
-// in-process callers apply ops directly via
-// [`UsdDocumentRegistry::apply`].
+// ─────────────────────────────────────────────────────────────────────
+// ApplyUsdOp — typed entry for programmatic / UI-driven edits
+// ─────────────────────────────────────────────────────────────────────
+
+/// Apply a [`UsdOp`] to the named document via the typed-command bus.
+///
+/// Same shape as `lunco-modelica`'s op-dispatch commands: UI clicks,
+/// HTTP API calls, and scripts all dispatch this; the observer
+/// routes it through [`UsdDocumentRegistry::apply`] so undo/redo,
+/// change notification, and read-only enforcement stay in one place.
+#[Command(default)]
+pub struct ApplyUsdOp {
+    /// Target document.
+    pub doc: DocumentId,
+    /// Operation to apply.
+    pub op: UsdOp,
+}
+
+#[on_command(ApplyUsdOp)]
+fn on_apply_usd_op(trigger: On<ApplyUsdOp>, mut commands: Commands) {
+    let doc = trigger.event().doc;
+    let op = trigger.event().op.clone();
+    commands.queue(move |world: &mut World| {
+        let mut registry = world.resource_mut::<UsdDocumentRegistry>();
+        match registry.apply(doc, op) {
+            Ok(ack) => {
+                bevy::log::debug!(
+                    "[ApplyUsdOp] {} → gen {}",
+                    doc,
+                    ack.new_gen.unwrap_or(0)
+                );
+            }
+            Err(reject) => {
+                bevy::log::warn!("[ApplyUsdOp] {} rejected: {:?}", doc, reject);
+            }
+        }
+    });
+}
 
 // ─────────────────────────────────────────────────────────────────────
 // Pending-event drain — registry rings → trigger events
@@ -315,6 +380,137 @@ mod tests {
 
         let reg = app.world().resource::<UsdDocumentRegistry>();
         assert_eq!(reg.ids().count(), 0, "non-USD path must not allocate");
+    }
+
+    #[test]
+    fn apply_usd_op_builds_a_rover_through_typed_command_bus() {
+        use crate::document::{LayerId, UsdOp};
+        use lunco_doc::Document;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(UsdCommandsPlugin);
+        app.update();
+
+        // Allocate a blank document.
+        let doc_id = {
+            let mut reg = app.world_mut().resource_mut::<UsdDocumentRegistry>();
+            reg.allocate(
+                "#usda 1.0\n".to_string(),
+                DocumentOrigin::untitled("UntitledRover.usda".to_string()),
+            )
+        };
+        app.update();
+
+        // Drive a sequence of ApplyUsdOp commands — same path UI
+        // toolbars and the HTTP API will use.
+        let ops = [
+            UsdOp::AddPrim {
+                edit_target: LayerId::root(),
+                parent_path: "/".into(),
+                name: "Rover".into(),
+                type_name: Some("Xform".into()),
+            },
+            UsdOp::AddPrim {
+                edit_target: LayerId::root(),
+                parent_path: "/Rover".into(),
+                name: "Body".into(),
+                type_name: Some("Cube".into()),
+            },
+            UsdOp::AddPrim {
+                edit_target: LayerId::root(),
+                parent_path: "/Rover".into(),
+                name: "WheelFL".into(),
+                type_name: Some("Cube".into()),
+            },
+            UsdOp::SetTranslate {
+                edit_target: LayerId::root(),
+                path: "/Rover/WheelFL".into(),
+                value: [1.0, 0.0, 1.0],
+            },
+        ];
+        for op in ops {
+            app.world_mut().trigger(ApplyUsdOp { doc: doc_id, op });
+            app.update();
+        }
+        // One more tick to flush any final queued world commands.
+        app.update();
+
+        let reg = app.world().resource::<UsdDocumentRegistry>();
+        let host = reg.host(doc_id).expect("doc still alive");
+        let src = host.document().source();
+        assert!(src.contains("def Xform \"Rover\""));
+        assert!(src.contains("def Cube \"Body\""));
+        assert!(src.contains("def Cube \"WheelFL\""));
+        assert!(src.contains("xformOp:translate = (1, 0, 1)"));
+        // Generation advanced once per op.
+        assert_eq!(host.document().generation(), 4);
+    }
+
+    #[test]
+    fn twin_added_auto_opens_usd_docs() {
+        // Build a temp folder with a `twin.toml`, two `.usda` files,
+        // and one `.mo` (must be ignored), then drive a TwinAdded
+        // event through the workbench. Our observer should fire
+        // OpenFile for each `.usda`, and the OpenFile observer
+        // (already verified) should allocate a UsdDocument per path.
+        use lunco_twin::TwinMode;
+        use lunco_workbench::WorkspaceResource;
+
+        let tmp = std::env::temp_dir().join("lunco_usd_twin_phase7_test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // Minimal `twin.toml` — keeps the folder a real Twin.
+        std::fs::write(
+            tmp.join("twin.toml"),
+            "name = \"phase7\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("scene_a.usda"),
+            "#usda 1.0\ndef Xform \"A\" {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("scene_b.usda"),
+            "#usda 1.0\ndef Xform \"B\" {}\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.join("controller.mo"), "model Controller end Controller;\n")
+            .unwrap();
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<WorkspaceResource>();
+        app.add_plugins(UsdCommandsPlugin);
+        app.update();
+
+        // Open the Twin and fire TwinAdded ourselves — mirrors what
+        // the workbench's open-folder observer does.
+        let twin = match TwinMode::open(&tmp).expect("twin opens") {
+            TwinMode::Twin(t) => t,
+            other => panic!("expected Twin variant, got {:?}", other),
+        };
+        let twin_id = app
+            .world_mut()
+            .resource_mut::<WorkspaceResource>()
+            .add_twin(twin);
+        app.world_mut()
+            .trigger(lunco_workbench::TwinAdded { twin: twin_id });
+        // Several ticks to flush: TwinAdded → OpenFile triggers →
+        // queued world commands run → DocumentOpened drains.
+        for _ in 0..4 {
+            app.update();
+        }
+
+        let reg = app.world().resource::<UsdDocumentRegistry>();
+        assert_eq!(
+            reg.ids().count(),
+            2,
+            "exactly two USD docs should auto-open from the twin"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

@@ -21,9 +21,10 @@ use bevy::prelude::*;
 pub mod commands;
 pub mod document;
 pub mod registry;
+pub mod text_edit;
 pub mod ui;
 
-pub use commands::{UsdCommandsPlugin, USD_DOCUMENT_KIND};
+pub use commands::{ApplyUsdOp, UsdCommandsPlugin, USD_DOCUMENT_KIND};
 pub use document::{LayerId, UsdChange, UsdDocument, UsdOp};
 pub use registry::UsdDocumentRegistry;
 pub use lunco_usd_bevy::{UsdPrimPath, UsdStageAsset};

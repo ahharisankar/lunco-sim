@@ -34,6 +34,15 @@ impl From<LegacyCommandRequest> for ApiRequest {
 }
 
 /// Unified input that handles both tagged and legacy formats.
+///
+/// `extra` captures any fields not consumed by the named slots. When
+/// the request looks like a typed command (`{"type":"OpenTwin","path":"..."}`)
+/// — i.e. `type_field` names a domain command and the caller hasn't
+/// supplied a `params` envelope — we promote `extra` into `params`
+/// so observers see the field. Without this promotion the field is
+/// silently dropped, the typed event fires with `Default::default()`,
+/// and `path`-empty observers (like `OpenTwin`) silently open the
+/// file picker instead of acting on the supplied path.
 #[derive(Debug, Deserialize)]
 pub struct ApiRequestUnified {
     #[serde(rename = "type", default)]
@@ -44,6 +53,10 @@ pub struct ApiRequestUnified {
     pub language: Option<String>,
     pub code: Option<String>,
     pub filter: Option<serde_json::Value>,
+    /// Catches every other top-level field. Used by the typed-command
+    /// fallback to forward the caller's payload as `params`.
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 impl From<ApiRequestUnified> for ApiRequest {
@@ -72,10 +85,26 @@ impl From<ApiRequestUnified> for ApiRequest {
                     params: env.params.unwrap_or_default(),
                 }
             }
-            _ => ApiRequest::ExecuteCommand {
-                command: env.type_field.unwrap_or_default(),
-                params: serde_json::json!({}),
-            },
+            _ => {
+                // Typed-command shape: `{"type":"OpenTwin","path":"..."}`.
+                // The caller didn't supply a `params` envelope, so
+                // promote whatever extra top-level fields they sent
+                // into `params` — this is what makes the intuitive
+                // shape work without forcing `{"command":"X","params":{...}}`.
+                let params = if let Some(explicit) = env.params {
+                    explicit
+                } else {
+                    let mut map = serde_json::Map::new();
+                    for (k, v) in env.extra {
+                        map.insert(k, v);
+                    }
+                    serde_json::Value::Object(map)
+                };
+                ApiRequest::ExecuteCommand {
+                    command: env.type_field.unwrap_or_default(),
+                    params,
+                }
+            }
         }
     }
 }

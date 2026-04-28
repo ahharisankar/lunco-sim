@@ -27,9 +27,14 @@ use crate::registry::UsdDocumentRegistry;
 
 pub mod browser_section;
 pub mod loaded_stages;
+pub mod viewport;
 
 pub use browser_section::UsdSceneSection;
 pub use loaded_stages::{LoadedStage, LoadedUsdStages, WorkspaceStage};
+pub use viewport::{
+    SetActiveUsdViewport, UsdViewportPanel, UsdViewportPlugin, UsdViewportState,
+    USD_VIEWPORT_PANEL_ID,
+};
 
 /// Plugin that installs the USD Twin-browser section and the lifecycle
 /// observers that keep it in sync with the document registry.

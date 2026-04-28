@@ -27,6 +27,8 @@ use lunco_workbench::BrowserCtx;
 use openusd::sdf;
 use openusd::usda::TextReader;
 
+use crate::commands::ApplyUsdOp;
+use crate::document::{LayerId, UsdOp};
 use crate::registry::UsdDocumentRegistry;
 
 /// A top-level USD stage loaded into the current session.
@@ -65,6 +67,14 @@ pub trait LoadedStage: Send + Sync + 'static {
     /// Phase 3 paints a placeholder; Phase 4 walks the composed prim
     /// hierarchy from `UsdComposer` output.
     fn render_children(&mut self, ui: &mut egui::Ui, ctx: &mut BrowserCtx<'_>);
+
+    /// If this entry corresponds to an open document, return its id
+    /// so the browser can offer "show in viewport" affordances. The
+    /// default is `None` for non-document entries (system libraries
+    /// etc.); [`WorkspaceStage`] overrides.
+    fn doc_id_for_viewport(&self) -> Option<DocumentId> {
+        None
+    }
 }
 
 /// Live registry of [`LoadedStage`] entries. Iterated by the
@@ -198,9 +208,13 @@ impl LoadedStage for WorkspaceStage {
         true
     }
 
+    fn doc_id_for_viewport(&self) -> Option<DocumentId> {
+        Some(self.doc_id)
+    }
+
     fn render_children(&mut self, ui: &mut egui::Ui, ctx: &mut BrowserCtx<'_>) {
-        // Snapshot what we need from the registry, then drop the borrow
-        // so subsequent egui calls don't conflict with the &mut World.
+        // Snapshot source + generation so subsequent UI calls don't
+        // hold a registry borrow across the &mut World lifetime.
         let snapshot = ctx
             .world
             .get_resource::<UsdDocumentRegistry>()
@@ -229,8 +243,12 @@ impl LoadedStage for WorkspaceStage {
             return;
         };
 
-        // Pseudo-root is the only well-known parent — `prim_children("/")`
-        // returns the top-level def/over/class prims.
+        // Collect ops emitted by toolbar buttons during render. We
+        // can't trigger ApplyUsdOp inside render because dispatching
+        // would require &mut World mid-egui-paint; instead we batch
+        // and fire after the borrow ends.
+        let mut pending_ops: Vec<UsdOp> = Vec::new();
+
         let root = match sdf::path("/") {
             Ok(p) => p,
             Err(e) => {
@@ -239,31 +257,70 @@ impl LoadedStage for WorkspaceStage {
             }
         };
         let children = parsed.reader.prim_children(&root);
+
+        // Toolbar at the stage root: add child Xform / Cube / Sphere.
+        // Lets the user start a fresh design even when the file is
+        // empty. Generates collision-free names by suffixing the next
+        // available integer.
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Add to root:").weak());
+            for (label, ty) in [("Xform", "Xform"), ("Cube", "Cube"), ("Sphere", "Sphere")] {
+                if ui.small_button(format!("+ {}", label)).clicked() {
+                    let name = unique_child_name(&parsed.reader, &root, ty);
+                    pending_ops.push(UsdOp::AddPrim {
+                        edit_target: LayerId::root(),
+                        parent_path: "/".into(),
+                        name,
+                        type_name: Some(ty.into()),
+                    });
+                }
+            }
+        });
+
         if children.is_empty() {
             ui.label(
                 egui::RichText::new("(no prims)").weak().italics(),
             );
-            return;
+        } else {
+            for path in children {
+                render_prim(
+                    ui,
+                    &parsed.reader,
+                    &path,
+                    &self.cached_id,
+                    &mut pending_ops,
+                );
+            }
         }
-        for path in children {
-            render_prim(ui, &parsed.reader, &path, &self.cached_id);
+
+        // Now that egui's done drawing, fire the queued ops via the
+        // typed command bus so undo/redo and change notification go
+        // through the canonical path.
+        if !pending_ops.is_empty() {
+            let doc_id = self.doc_id;
+            for op in pending_ops {
+                ctx.world.commands().trigger(ApplyUsdOp { doc: doc_id, op });
+            }
         }
     }
 }
 
 /// Recursive prim-tree walker. One `CollapsingHeader` per prim;
-/// children fetched via [`TextReader::prim_children`].
+/// children fetched via [`TextReader::prim_children`]. Per-prim
+/// toolbar buttons append [`UsdOp`]s into `pending_ops` instead of
+/// triggering directly, so dispatch happens once egui is done
+/// painting.
 ///
 /// Composition arcs (sublayers, references, payloads) are **not**
-/// flattened in Phase 4 — referenced prims show up only after the
-/// `UsdComposer` integration in Phase 6. Today the walk reflects the
-/// raw root layer, which is good enough for the source-of-truth view
-/// most edits target.
+/// flattened — referenced prims show up only after a future
+/// `UsdComposer` integration. Today the walk reflects the raw root
+/// layer, which is the source-of-truth most edits target.
 fn render_prim(
     ui: &mut egui::Ui,
     reader: &TextReader,
     path: &sdf::Path,
     salt: &str,
+    pending_ops: &mut Vec<UsdOp>,
 ) {
     let name = path.name().unwrap_or("(root)").to_string();
     let type_name = prim_type_name(reader, path);
@@ -273,12 +330,51 @@ fn render_prim(
     };
     let children = reader.prim_children(path);
     let header_id = ui.make_persistent_id((salt, path.to_string()));
+
+    let path_str = path.to_string();
+    let row = |ui: &mut egui::Ui, pending: &mut Vec<UsdOp>| {
+        ui.horizontal(|ui| {
+            ui.label(&label);
+            // Right-aligned toolbar.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("×")
+                    .on_hover_text("Remove this prim")
+                    .clicked()
+                {
+                    pending.push(UsdOp::RemovePrim {
+                        edit_target: LayerId::root(),
+                        path: path_str.clone(),
+                    });
+                }
+                for (lbl, ty) in [
+                    ("+S", "Sphere"),
+                    ("+C", "Cube"),
+                    ("+X", "Xform"),
+                ] {
+                    if ui
+                        .small_button(lbl)
+                        .on_hover_text(format!("Add child {}", ty))
+                        .clicked()
+                    {
+                        let child_name = unique_child_name(reader, path, ty);
+                        pending.push(UsdOp::AddPrim {
+                            edit_target: LayerId::root(),
+                            parent_path: path_str.clone(),
+                            name: child_name,
+                            type_name: Some(ty.into()),
+                        });
+                    }
+                }
+            });
+        });
+    };
+
     if children.is_empty() {
-        // Leaf — render as a flat row so the disclosure triangle
-        // doesn't suggest there's something to expand. Indent matches
-        // CollapsingHeader so siblings line up.
+        // Leaf — render as an indented row so siblings line up with
+        // collapsing-header bodies.
         ui.indent(header_id, |ui| {
-            ui.label(label);
+            row(ui, pending_ops);
         });
         return;
     }
@@ -288,13 +384,35 @@ fn render_prim(
         false,
     )
     .show_header(ui, |ui| {
-        ui.label(label);
+        row(ui, pending_ops);
     })
     .body(|ui| {
         for child in children {
-            render_prim(ui, reader, &child, salt);
+            render_prim(ui, reader, &child, salt, pending_ops);
         }
     });
+}
+
+/// Generate a non-colliding child name `"<TypeName>"` /
+/// `"<TypeName>1"` / `"<TypeName>2"` … under `parent`. USD requires
+/// unique names within a parent prim; this lets the toolbar buttons
+/// be one-click without prompting.
+fn unique_child_name(reader: &TextReader, parent: &sdf::Path, type_name: &str) -> String {
+    let existing: std::collections::HashSet<String> = reader
+        .prim_children(parent)
+        .into_iter()
+        .filter_map(|p| p.name().map(|s| s.to_string()))
+        .collect();
+    if !existing.contains(type_name) {
+        return type_name.to_string();
+    }
+    for n in 1u32.. {
+        let candidate = format!("{}{}", type_name, n);
+        if !existing.contains(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!()
 }
 
 /// Read the `typeName` field on a prim spec (e.g. `"Xform"`,

@@ -3183,6 +3183,22 @@ fn on_open_file(trigger: On<OpenFile>, mut commands: Commands) {
             return;
         }
 
+        // Gate on `.mo` extension. Other domain crates (USD, SysML,
+        // …) observe the same `OpenFile` event for their own
+        // extensions; without this gate, a `.usda` Twin auto-load
+        // ended up parsed here as a Modelica file and opened a junk
+        // Canvas tab. The Twin browser surfaces every file kind via
+        // its own section regardless of which observer claims it.
+        let lower = path.to_ascii_lowercase();
+        let is_modelica = std::path::Path::new(&lower)
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|ext| ext == "mo")
+            .unwrap_or(false);
+        if !is_modelica {
+            return;
+        }
+
         let source = match std::fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) => {
