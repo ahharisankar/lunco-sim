@@ -6325,6 +6325,7 @@ version = "0.1.0"
 dependencies = [
  "avian3d",
  "bevy",
+ "bevy_egui",
  "big_space",
  "lunco-core",
  "lunco-doc",
