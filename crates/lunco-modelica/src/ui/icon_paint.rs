@@ -744,12 +744,22 @@ fn paint_text(
     // instances. Use the SHORTER dimension so rotation is invariant.
     // 0.7× and a [10, 48] clamp keep MSL %name labels readable at
     // fit-zoom without dwarfing the component icons.
+    // No clamp — text scales linearly with the rect (which scales
+    // with the icon, which scales with viewport zoom). A label that
+    // fits its node at zoom X also fits at zoom 2X. Clamping caused
+    // labels to overflow the icon at high zoom or freeze at low.
     let font_size_px = if t.font_size > 0.0 {
-        (t.font_size as f32 * xf.scale).clamp(4.0, 256.0)
+        t.font_size as f32 * xf.scale
     } else {
-        let dim = rect.width().abs().min(rect.height().abs());
-        (dim * 0.7).clamp(4.0, 256.0)
+        // 0.95× of the shorter extent dim — close to MLS Annex D's
+        // implicit "fit the extent box" intent and matches what
+        // OMEdit/Dymola render at the same zoom. 0.7 read as too
+        // small relative to OMEdit reference screenshots.
+        rect.width().abs().min(rect.height().abs()) * 0.95
     };
+    if font_size_px < 1.0 {
+        return;
+    }
     let color = color_or_default(t.text_color, egui::Color32::from_gray(20));
     painter.text(
         rect.center(),

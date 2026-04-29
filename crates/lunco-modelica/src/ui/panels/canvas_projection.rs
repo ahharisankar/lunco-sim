@@ -853,6 +853,48 @@ pub fn import_model_to_diagram_from_ast(
         }
     }
 
+    // Backfill edges that the rumoca AST graph dropped — most
+    // commonly `connect(<top-level connector>, <sub.port>)` style,
+    // which the AST builder skips because the top-level connector
+    // isn't a sub-component. The regex-scanned waypoint_map already
+    // has the (a_inst, a_port, b_inst, b_port) for every authored
+    // connect, so we replay any pair whose nodes both exist in the
+    // diagram but no edge connects them yet. Bare-connector
+    // endpoints carry empty `inst` and the connector name in
+    // `port` — match the diagram node by `instance_name == port`
+    // in that case.
+    let mut to_add: Vec<(
+        crate::visual_diagram::DiagramNodeId,
+        String,
+        crate::visual_diagram::DiagramNodeId,
+        String,
+        Vec<(f32, f32)>,
+    )> = Vec::new();
+    for (key, waypoints) in &waypoint_map {
+        let ((a_inst, a_port), (b_inst, b_port)) = key;
+        let a_match = if a_inst.is_empty() { a_port.as_str() } else { a_inst.as_str() };
+        let b_match = if b_inst.is_empty() { b_port.as_str() } else { b_inst.as_str() };
+        let a_id = diagram.nodes.iter().find(|n| n.instance_name == a_match).map(|n| n.id);
+        let b_id = diagram.nodes.iter().find(|n| n.instance_name == b_match).map(|n| n.id);
+        let (Some(a_id), Some(b_id)) = (a_id, b_id) else { continue };
+        // For bare-connector endpoints the "port" is the connector
+        // itself; route from the node body (empty port string).
+        let a_port_str = if a_inst.is_empty() { String::new() } else { a_port.clone() };
+        let b_port_str = if b_inst.is_empty() { String::new() } else { b_port.clone() };
+        let already = diagram.edges.iter().any(|e| {
+            (e.source_node == a_id && e.target_node == b_id)
+                || (e.source_node == b_id && e.target_node == a_id)
+        });
+        if already { continue; }
+        to_add.push((a_id, a_port_str, b_id, b_port_str, waypoints.clone()));
+    }
+    for (a_id, a_port, b_id, b_port, waypoints) in to_add {
+        diagram.add_edge(a_id, a_port, b_id, b_port);
+        if let Some(last) = diagram.edges.last_mut() {
+            last.waypoints = waypoints;
+        }
+    }
+
     if diagram.nodes.is_empty() {
         None
     } else {

@@ -349,18 +349,7 @@ impl NodeVisual for IconNodeVisual {
             mirror_y: self.mirror_y,
         };
         let mut drew_icon = false;
-        // Prefer Diagram graphics for connectors that author them —
-        // MSL signal connectors keep their `%name` Text label and
-        // larger filled triangle in the Diagram annotation, while
-        // their Icon stays small (used as a port marker on
-        // sub-components). Picks the diagram form when this is the
-        // top-level connector instance.
-        let display_graphics: Option<(&crate::annotations::CoordinateSystem, &[crate::annotations::GraphicItem])> =
-            self.diagram_graphics
-                .as_ref()
-                .map(|d| (&d.coordinate_system, d.graphics.as_slice()))
-                .or_else(|| self.icon_graphics.as_ref().map(|i| (&i.coordinate_system, i.graphics.as_slice())));
-        if let Some((coord_sys, graphics)) = display_graphics {
+        if let Some(icon) = &self.icon_graphics {
             let sub = crate::icon_paint::TextSubstitution {
                 name: (!self.instance_name.is_empty()).then_some(self.instance_name.as_str()),
                 class_name: (!self.class_name.is_empty()).then_some(self.class_name.as_str()),
@@ -392,14 +381,31 @@ impl NodeVisual for IconNodeVisual {
             crate::icon_paint::paint_graphics_themed(
                 painter,
                 rect,
-                *coord_sys,
+                icon.coordinate_system,
                 orientation,
                 Some(&sub),
                 Some(resolver_ref),
                 palette.as_ref(),
-                graphics,
+                &icon.graphics,
             );
             drew_icon = true;
+            // Overlay Diagram-annotation graphics — for MSL signal
+            // connectors this carries the `%name` Text label and a
+            // smaller decorative inner polygon. Painted on top of the
+            // Icon so the name appears next to the connector triangle
+            // without replacing the full-size Icon polygon.
+            if let Some(diag) = &self.diagram_graphics {
+                crate::icon_paint::paint_graphics_themed(
+                    painter,
+                    rect,
+                    diag.coordinate_system,
+                    orientation,
+                    Some(&sub),
+                    Some(resolver_ref),
+                    palette.as_ref(),
+                    &diag.graphics,
+                );
+            }
         }
 
         if !drew_icon {
