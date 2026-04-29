@@ -1728,27 +1728,11 @@ fn spawn_modelica_requests(
 ) {
     let dt = time.delta_secs_f64();
 
-    let total_models = q_models.iter().count();
-    let mut sent = 0u32;
-    let mut blocked_stepping = 0u32;
-    let mut blocked_compiling = 0u32;
-    let mut blocked_paused = 0u32;
-    let t0 = web_time::Instant::now();
     for (entity, mut model) in q_models.iter_mut() {
         if model.is_stepping {
-            // Distinguish "Step request hasn't returned" from "Compile
-            // is legitimately running". The latter can take seconds
-            // (parol Debug::fmt overhead on MSL-heavy examples); we
-            // mustn't treat it as a hung worker.
-            if model.is_compiling {
-                blocked_compiling += 1;
-            } else {
-                blocked_stepping += 1;
-            }
             continue;
         }
         if model.paused {
-            blocked_paused += 1;
             continue;
         }
 
@@ -1789,20 +1773,6 @@ fn spawn_modelica_requests(
             inputs,
             dt,
         });
-        sent += 1;
-    }
-    // Telemetry: when sim time appears to "stop" the cause is almost
-    // always that every model has `is_stepping=true` and Step results
-    // never came back to clear it. Logging the per-tick reason makes
-    // a stalled sim debuggable from the runtime log.
-    //
-    // Only warn when the block is GENUINELY a stepping hang —
-    // `blocked_compiling` is a legitimate slow compile (no warning).
-    if total_models > 0 && sent == 0 && blocked_stepping > 0 {
-        bevy::log::warn!(
-            "[spawn_modelica_requests] no Step dispatched: {blocked_stepping} blocked on is_stepping (worker hung?), {blocked_compiling} compiling, {blocked_paused} paused, took {:.2}ms",
-            t0.elapsed().as_secs_f64() * 1000.0,
-        );
     }
 }
 

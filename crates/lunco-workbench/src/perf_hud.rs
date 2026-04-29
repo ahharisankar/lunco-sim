@@ -41,26 +41,6 @@ impl SettingsSection for PerfHudSettings {
 /// quickly when conditions change.
 pub const FRAME_HISTORY_LEN: usize = 240;
 
-/// FixedUpdate per-frame metrics. Bevy's `FixedUpdate` schedule runs
-/// 0, 1, 2, … times per frame depending on accumulated time. When a
-/// slow frame falls behind, the next frame catches up by running
-/// extra ticks — which makes the next frame slow too. That cascade
-/// is the prime suspect for the cyclic spikes.
-///
-/// We track tick count + total fixed-update wall-time per frame so
-/// the spike logger can correlate them with `frame_ms`.
-#[derive(Resource, Default, Debug, Clone, Copy)]
-pub struct FixedUpdateMetrics {
-    /// How many times `FixedUpdate` ran during the last frame.
-    pub ticks_last_frame: u32,
-    /// Wall-clock time, in ms, spent inside FixedUpdate runs that
-    /// occurred during the last frame (sum across all ticks).
-    pub fixed_ms_last_frame: f32,
-    /// Working accumulators reset each Update frame.
-    ticks_acc: u32,
-    ms_acc: f32,
-}
-
 /// Live, per-frame perf samples. Not persisted — these are reset
 /// when the HUD is disabled and resampled while it's on.
 #[derive(Resource, Default, Debug, Clone)]
@@ -148,103 +128,6 @@ fn sample_frame_time(
     }
 }
 
-/// Logs a line whenever a frame exceeds the spike threshold. Includes
-/// FixedUpdate metrics so we can see whether the spike correlates
-/// with avian/cosim catchup ticks (the "1 slow frame breeds the next"
-/// cascade hypothesis).
-const SPIKE_THRESHOLD_MS: f32 = 20.0;
-
-fn log_frame_spikes(
-    settings: Res<PerfHudSettings>,
-    stats: Res<PerfStats>,
-    fixed_metrics: Res<FixedUpdateMetrics>,
-    phases: Res<PhaseTimers>,
-    windows: Query<&bevy::window::Window>,
-    // (frame_index, last_spike_frame)
-    mut state: Local<(u64, Option<u64>)>,
-) {
-    if !settings.enabled {
-        return;
-    }
-    state.0 += 1;
-    let Some(&latest_ms) = stats.frame_history.back() else { return };
-    if latest_ms < SPIKE_THRESHOLD_MS {
-        return;
-    }
-    // Skip the structural reactive-low-power tick — when no window has
-    // focus, `WinitSettings.unfocused_mode` parks the loop for ~1s, which
-    // shows up here as a 1000ms "frame". That's intentional idle, not a
-    // hitch worth logging.
-    let any_focused = windows.iter().any(|w| w.focused);
-    if !any_focused && latest_ms > 200.0 {
-        return;
-    }
-    let frame = state.0;
-    let since = state.1.map(|prev| frame - prev);
-    state.1 = Some(frame);
-    let ticks = fixed_metrics.ticks_last_frame;
-    let fixed_ms = fixed_metrics.fixed_ms_last_frame;
-    let main = phases.main_ms;
-    let render_etc = (latest_ms - main).max(0.0);
-    match since {
-        Some(dt) => info!(
-            "[spike] frame {} took {:.1}ms (main {:.1} [fixed {:.1}/{}t] + render+other {:.1}; +{}f)",
-            frame, latest_ms, main, fixed_ms, ticks, render_etc, dt
-        ),
-        None => info!(
-            "[spike] frame {} took {:.1}ms (main {:.1} [fixed {:.1}/{}t] + render+other {:.1}; first)",
-            frame, latest_ms, main, fixed_ms, ticks, render_etc
-        ),
-    }
-}
-
-/// FixedFirst → FixedLast bracketing needs to share state between
-/// two systems, which means a `Resource` (Locals are per-system).
-#[derive(Resource, Default)]
-struct FixedTickStart(Option<std::time::Instant>);
-
-/// Total main-schedule (First..Last) wall time per frame. Spike
-/// time minus this = render + extract + present time. Splits a
-/// frame spike into "main thread CPU work" vs "render pipeline /
-/// GPU sync". One bracket pair, no ordering tricks needed.
-#[derive(Resource, Default)]
-struct PhaseTimers {
-    main_start: Option<std::time::Instant>,
-    main_ms: f32,
-}
-
-fn main_start_marker(mut t: ResMut<PhaseTimers>) {
-    t.main_start = Some(std::time::Instant::now());
-}
-
-fn main_end_marker(mut t: ResMut<PhaseTimers>) {
-    if let Some(s) = t.main_start.take() {
-        t.main_ms = s.elapsed().as_secs_f32() * 1000.0;
-    }
-}
-
-/// FixedFirst: capture tick start.
-fn fixed_tick_start(mut start: ResMut<FixedTickStart>) {
-    start.0 = Some(std::time::Instant::now());
-}
-
-/// FixedLast: capture tick duration, accumulate into metrics.
-fn fixed_tick_end(start: Res<FixedTickStart>, mut metrics: ResMut<FixedUpdateMetrics>) {
-    let Some(t0) = start.0 else { return };
-    let elapsed = t0.elapsed().as_secs_f32() * 1000.0;
-    metrics.ticks_acc += 1;
-    metrics.ms_acc += elapsed;
-}
-
-/// Last (main schedule, end of frame): publish accumulated metrics
-/// then reset for the next frame.
-fn publish_fixed_metrics(mut metrics: ResMut<FixedUpdateMetrics>) {
-    metrics.ticks_last_frame = metrics.ticks_acc;
-    metrics.fixed_ms_last_frame = metrics.ms_acc;
-    metrics.ticks_acc = 0;
-    metrics.ms_acc = 0.0;
-}
-
 /// Push the perf HUD's row into the workbench Settings menu.
 fn register_settings_menu(world: &mut World) {
     use bevy_egui::egui;
@@ -282,27 +165,14 @@ impl Plugin for PerfHudPlugin {
     fn build(&self, app: &mut App) {
         app.register_settings_section::<PerfHudSettings>();
         app.init_resource::<PerfStats>();
-        app.init_resource::<FixedUpdateMetrics>();
-        app.init_resource::<FixedTickStart>();
-        app.init_resource::<PhaseTimers>();
-        // FrameTime diagnostics + frame sampler + spike logger are
-        // always registered — they're cheap (a few µs/frame), and
-        // toggling the HUD at runtime needs the data to be there
-        // already. Each system bails early when the HUD is off.
+        // FrameTime diagnostics + frame sampler are always registered
+        // — they're cheap (a few µs/frame), and toggling the HUD at
+        // runtime needs the data to be there already. The sampler
+        // bails early when the HUD is off.
         if !app.is_plugin_added::<FrameTimeDiagnosticsPlugin>() {
             app.add_plugins(FrameTimeDiagnosticsPlugin::default());
         }
         app.add_systems(Update, sample_frame_time);
-        app.add_systems(Update, log_frame_spikes.after(sample_frame_time));
-        app.add_systems(bevy::app::FixedFirst, fixed_tick_start);
-        app.add_systems(bevy::app::FixedLast, fixed_tick_end);
-        app.add_systems(Last, publish_fixed_metrics);
-        // Phase brackets: total main-schedule wall time per frame.
-        // Spike time minus this = render-pipeline / GPU sync /
-        // pipelined-rendering wait. One bracket; no schedule
-        // ordering tricks.
-        app.add_systems(First, main_start_marker);
-        app.add_systems(Last, main_end_marker.before(publish_fixed_metrics));
         app.add_systems(Startup, register_settings_menu);
         register_all_commands(app);
     }
