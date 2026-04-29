@@ -286,8 +286,12 @@ impl Panel for WelcomePanel {
             .get_resource::<lunco_theme::Theme>()
             .cloned()
             .unwrap_or_else(lunco_theme::Theme::dark);
-        let card_fill = theme.colors.surface0;
-        let card_stroke = theme.colors.surface2;
+        // Use semantic tokens so cards stay "raised" (lighter than
+        // panel) in both Dark and Light. Reading `surface0` directly
+        // gave dark cards on a light panel in Latte, where the
+        // surface scale is inverted.
+        let card_fill = theme.tokens.surface_raised;
+        let card_stroke = theme.tokens.surface_raised_border;
         let chip_fill_active = theme.tokens.accent;
         let chip_fill_idle = theme.colors.surface1;
         let chip_text_active = theme.colors.base;

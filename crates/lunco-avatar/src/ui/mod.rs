@@ -20,8 +20,11 @@ impl Panel for AvatarStatusPanel {
     fn default_slot(&self) -> PanelSlot { PanelSlot::RightInspector }
 
     fn render(&mut self, ui: &mut egui::Ui, world: &mut World) {
-        ui.style_mut().visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_rgba_unmultiplied(30, 30, 35, 230);
-        ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::from_rgba_unmultiplied(30, 30, 35, 230);
+        if let Some(theme) = world.get_resource::<lunco_theme::Theme>() {
+            let raised = theme.tokens.surface_raised;
+            ui.style_mut().visuals.widgets.inactive.weak_bg_fill = raised;
+            ui.style_mut().visuals.widgets.inactive.bg_fill = raised;
+        }
 
         ui.heading("Avatar Status");
         ui.separator();

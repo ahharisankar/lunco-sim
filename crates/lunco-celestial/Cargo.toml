@@ -7,6 +7,7 @@ edition = "2021"
 bevy = { workspace = true, features = ["bevy_pbr", "bevy_gltf", "bevy_scene", "bevy_mesh", "bevy_light", "bevy_post_process", "bevy_anti_alias", "mesh_picking"] }
 bevy_egui = { workspace = true }
 lunco-workbench = { path = "../lunco-workbench" }
+lunco-theme = { path = "../lunco-theme" }
 bevy_shader = "0.18.1"
 big_space = { workspace = true }
 celestial-ephemeris = "0.1.1-alpha.2"

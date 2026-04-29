@@ -107,12 +107,17 @@ impl Panel for DiagnosticsPanel {
         let snapshot: VecDeque<LogEntry> =
             world.resource::<DiagnosticsLog>().entries.clone();
 
+        let muted = world
+            .get_resource::<lunco_theme::Theme>()
+            .map(|t| t.tokens.text_subdued)
+            .unwrap_or(egui::Color32::DARK_GRAY);
         let mut clear_requested = false;
         render_log_view(
             ui,
             &snapshot,
             "(no diagnostics — model parses cleanly)",
             &mut clear_requested,
+            muted,
         );
         if clear_requested {
             world.resource_mut::<DiagnosticsLog>().clear();

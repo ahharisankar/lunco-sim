@@ -6032,6 +6032,7 @@ dependencies = [
  "lunco-core",
  "lunco-mobility",
  "lunco-terrain",
+ "lunco-theme",
  "lunco-workbench",
  "smallvec",
 ]
@@ -6077,6 +6078,7 @@ dependencies = [
  "lunco-core",
  "lunco-materials",
  "lunco-terrain",
+ "lunco-theme",
  "lunco-workbench",
  "serde",
  "serde_json",
@@ -6569,6 +6571,7 @@ dependencies = [
  "bevy_egui",
  "egui_plot",
  "lunco-canvas",
+ "lunco-theme",
  "lunco-workbench",
  "serde",
  "serde_json",

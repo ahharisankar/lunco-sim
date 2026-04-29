@@ -255,8 +255,12 @@ fn apply_theme(ui: &mut egui::Ui, theme: &lunco_theme::Theme) {
     style.visuals.panel_fill = bg;
     style.visuals.window_fill = bg;
     style.visuals.extreme_bg_color = theme.colors.crust;
-    style.visuals.widgets.inactive.weak_bg_fill = theme.colors.surface0.linear_multiply(0.8);
-    style.visuals.widgets.inactive.bg_fill = theme.colors.surface0.linear_multiply(0.8);
+    // `surface_raised` resolves to a "lighter than panel" tile in
+    // both modes; reading `surface0` directly gave dark widgets on a
+    // light panel in Latte.
+    let raised = t.surface_raised.linear_multiply(0.8);
+    style.visuals.widgets.inactive.weak_bg_fill = raised;
+    style.visuals.widgets.inactive.bg_fill = raised;
     style.visuals.override_text_color = Some(t.text);
     *ui.style_mut() = style;
 }

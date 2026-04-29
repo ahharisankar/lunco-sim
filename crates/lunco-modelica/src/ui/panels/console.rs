@@ -134,6 +134,11 @@ impl Panel for ConsolePanel {
             world.insert_resource(ConsoleLog::default());
         }
 
+        let muted = world
+            .get_resource::<lunco_theme::Theme>()
+            .map(|t| t.tokens.text_subdued)
+            .unwrap_or(egui::Color32::DARK_GRAY);
+
         // Header row: message count + Clear button.
         let mut clear_requested = false;
         let count = world.resource::<ConsoleLog>().messages.len();
@@ -141,7 +146,7 @@ impl Panel for ConsolePanel {
             ui.label(
                 egui::RichText::new(format!("{count} messages"))
                     .size(10.0)
-                    .color(egui::Color32::GRAY),
+                    .color(muted),
             );
             if ui
                 .small_button("🗑 Clear")
@@ -171,7 +176,7 @@ impl Panel for ConsolePanel {
                     )
                     .size(10.0)
                     .italics()
-                    .color(egui::Color32::DARK_GRAY),
+                    .color(muted),
                 );
             });
         } else {
@@ -202,7 +207,7 @@ impl Panel for ConsolePanel {
                                 egui::RichText::new(&ts)
                                     .monospace()
                                     .size(10.0)
-                                    .color(egui::Color32::DARK_GRAY),
+                                    .color(muted),
                             );
                             ui.label(
                                 egui::RichText::new(msg.level.tag())

@@ -525,7 +525,6 @@ impl Plugin for ModelicaUiPlugin {
             .init_resource::<panels::canvas_diagram::DuplicateLoads>()
             .add_systems(Update, panels::canvas_diagram::drive_drill_in_loads)
             .add_systems(Update, panels::canvas_diagram::drive_duplicate_loads)
-            .add_systems(bevy_egui::EguiPrimaryContextPass, alpha_banner)
             .register_panel(panels::inspector::InspectorPanel)
             .register_panel(panels::palette::ComponentPalettePanel)
             // Multi-instance: one tab per open document. Instances are
@@ -568,37 +567,6 @@ impl Plugin for ModelicaUiPlugin {
             true,
         )));
     }
-}
-
-/// Alpha-quality warning strip pinned to the top of the workbench.
-/// Many MSL examples still fail to compile/simulate — surface that up
-/// front so users don't assume a broken model is their fault.
-fn alpha_banner(mut contexts: bevy_egui::EguiContexts) {
-    use bevy_egui::egui;
-    let Ok(ctx) = contexts.ctx_mut() else { return };
-    egui::TopBottomPanel::top("modelica_alpha_banner")
-        .frame(
-            egui::Frame::none()
-                .fill(egui::Color32::from_rgb(120, 60, 0))
-                .inner_margin(egui::Margin::symmetric(8, 4)),
-        )
-        .show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    egui::RichText::new("⚠ Alpha")
-                        .strong()
-                        .color(egui::Color32::WHITE),
-                );
-                ui.label(
-                    egui::RichText::new(
-                        "— Modelica workbench is experimental. \
-                         Many MSL examples do not yet compile or simulate; \
-                         expect rough edges and missing features.",
-                    )
-                    .color(egui::Color32::WHITE),
-                );
-            });
-        });
 }
 
 /// Push Modelica editor preferences onto the application-wide

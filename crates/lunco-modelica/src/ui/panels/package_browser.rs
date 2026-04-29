@@ -554,6 +554,10 @@ impl Panel for PackageBrowserPanel {
             state.open_model.as_ref().map(|m| m.model_path.clone())
         };
         let active_path = active_path_str.as_deref();
+        let muted = world
+            .get_resource::<lunco_theme::Theme>()
+            .map(|t| t.tokens.text_subdued)
+            .unwrap_or(egui::Color32::DARK_GRAY);
         let mut to_open: Option<PackageAction> = None;
         let mut reopen_in_memory: Option<String> = None;
         let mut create_new = false;
@@ -698,7 +702,7 @@ impl Panel for PackageBrowserPanel {
                     ui.label(
                         egui::RichText::new(twin.root.display().to_string())
                             .size(9.0)
-                            .color(egui::Color32::DARK_GRAY),
+                            .color(muted),
                     );
                 } else if cache.in_memory_models.is_empty() {
                     // No Twin AND no scratch — show the real empty

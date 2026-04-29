@@ -110,10 +110,31 @@ pub struct DesignTokens {
     pub text: egui::Color32,
     /// Subdued/secondary text.
     pub text_subdued: egui::Color32,
+    /// Card / button background — always **lighter** than the panel
+    /// fill in both modes so "raised" tiles read as raised. Catppuccin
+    /// Latte inverts the surface scale (surface0 < mantle in lightness),
+    /// so a naive `surface0` here gives dark cards on a light panel.
+    pub surface_raised: egui::Color32,
+    /// Inset background (text inputs, code editor gutter) — always
+    /// **darker** than the panel fill in both modes for the opposite
+    /// "sunken" affordance.
+    pub surface_sunken: egui::Color32,
+    /// Border for raised tiles. Visible against both the panel and
+    /// the raised surface in both modes.
+    pub surface_raised_border: egui::Color32,
 }
 
 impl DesignTokens {
-    pub fn from_palette(p: &ColorPalette) -> Self {
+    pub fn from_palette(p: &ColorPalette, mode: ThemeMode) -> Self {
+        let (raised, sunken, raised_border) = match mode {
+            // Mocha: surface scale climbs *lighter* than mantle, so
+            // surface0 reads as raised and crust as sunken.
+            ThemeMode::Dark => (p.surface0, p.crust, p.surface2),
+            // Latte: surface scale climbs *darker* than mantle, so we
+            // pick `base` (lighter than mantle) for raised and stick
+            // with surface0 for sunken (darker than mantle).
+            ThemeMode::Light => (p.base, p.surface0, p.overlay0),
+        };
         Self {
             accent: p.mauve,
             success: p.green,
@@ -122,6 +143,9 @@ impl DesignTokens {
             success_subdued: p.green.linear_multiply(0.4),
             text: p.text,
             text_subdued: p.subtext0,
+            surface_raised: raised,
+            surface_sunken: sunken,
+            surface_raised_border: raised_border,
         }
     }
 }
@@ -468,7 +492,7 @@ impl Default for Theme {
 impl Theme {
     pub fn dark() -> Self {
         let colors = ColorPalette::from_catppuccin(catppuccin_egui::MOCHA);
-        let tokens = DesignTokens::from_palette(&colors);
+        let tokens = DesignTokens::from_palette(&colors, ThemeMode::Dark);
         let schematic = SchematicTokens::from_palette(&colors);
         let modelica_icons = ModelicaIconPalette::dark_default(&colors);
         Self {
@@ -485,7 +509,7 @@ impl Theme {
 
     pub fn light() -> Self {
         let colors = ColorPalette::from_catppuccin(catppuccin_egui::LATTE);
-        let tokens = DesignTokens::from_palette(&colors);
+        let tokens = DesignTokens::from_palette(&colors, ThemeMode::Light);
         let schematic = SchematicTokens::from_palette(&colors);
         Self {
             mode: ThemeMode::Light,
@@ -545,20 +569,53 @@ impl Theme {
         visuals.panel_fill = to_c32(f.mantle);
         visuals.extreme_bg_color = to_c32(f.base);
 
-        // Text colors
+        // Text colors. In light mode the Catppuccin Latte `subtext0`
+        // (~#6c6f85) sits at borderline contrast on the lighter
+        // surfaces and most secondary labels render gray-on-white. Use
+        // `text` for noninteractive and `subtext1` for inactive in
+        // light mode to keep button/tab labels legible; dark mode
+        // already has plenty of contrast so the original mapping
+        // stands.
         visuals.override_text_color = Some(to_c32(f.text));
-        visuals.widgets.noninteractive.fg_stroke.color = to_c32(f.subtext1);
-        visuals.widgets.inactive.fg_stroke.color = to_c32(f.subtext0);
+        let (noninteractive_fg, inactive_fg, hovered_fg, active_fg) = match self.mode {
+            ThemeMode::Dark => (f.subtext1, f.subtext0, f.text, f.text),
+            ThemeMode::Light => (f.text, f.subtext1, f.text, f.text),
+        };
+        visuals.widgets.noninteractive.fg_stroke.color = to_c32(noninteractive_fg);
+        visuals.widgets.inactive.fg_stroke.color = to_c32(inactive_fg);
+        visuals.widgets.hovered.fg_stroke.color = to_c32(hovered_fg);
+        visuals.widgets.active.fg_stroke.color = to_c32(active_fg);
 
-        // Widget fills
-        visuals.widgets.inactive.bg_fill = to_c32(f.surface0);
-        visuals.widgets.inactive.weak_bg_fill = to_c32(f.surface0);
-        visuals.widgets.hovered.bg_fill = to_c32(f.surface1);
-        visuals.widgets.active.bg_fill = to_c32(f.surface2);
+        // Widget fills. Use the semantic `surface_raised` token so
+        // buttons read as "raised" in both modes — in Latte the raw
+        // `surface0` is darker than `mantle` and produces dark
+        // buttons on a light panel.
+        let raised = self.tokens.surface_raised;
+        let raised_hover = match self.mode {
+            ThemeMode::Dark => f.surface1,
+            // Light: convention says hover gets *darker*; surface0
+            // is the closest darker step that still has contrast
+            // against the surrounding panel (mantle).
+            ThemeMode::Light => f.surface0,
+        };
+        let raised_active = match self.mode {
+            ThemeMode::Dark => f.surface2,
+            ThemeMode::Light => f.surface1,
+        };
+        visuals.widgets.inactive.bg_fill = to_c32(raised);
+        visuals.widgets.inactive.weak_bg_fill = to_c32(raised);
+        visuals.widgets.hovered.bg_fill = to_c32(raised_hover);
+        visuals.widgets.active.bg_fill = to_c32(raised_active);
 
-        // Borders
-        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, to_c32(f.surface1));
-        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, to_c32(f.surface1));
+        // Borders. In light mode `surface1` is barely distinct from
+        // `surface0`/`mantle` so widget outlines vanish — bump to
+        // `overlay0` for visible separation between adjacent buttons.
+        let border = match self.mode {
+            ThemeMode::Dark => f.surface1,
+            ThemeMode::Light => f.overlay0,
+        };
+        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, to_c32(border));
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, to_c32(border));
 
         // Selection / Accent
         visuals.selection.bg_fill = to_c32(f.mauve).linear_multiply(0.4);

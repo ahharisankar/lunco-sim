@@ -4814,11 +4814,11 @@ fn render_drill_in_loading_overlay(
         8.0,
         shadow,
     );
-    painter.rect_filled(card_rect, 8.0, theme.colors.surface0);
+    painter.rect_filled(card_rect, 8.0, theme.tokens.surface_raised);
     painter.rect_stroke(
         card_rect,
         8.0,
-        egui::Stroke::new(1.0, theme.colors.surface2),
+        egui::Stroke::new(1.0, theme.tokens.surface_raised_border),
         egui::StrokeKind::Outside,
     );
     let t = ui.ctx().input(|i| i.time) as f32;
@@ -4892,11 +4892,11 @@ fn render_projecting_overlay(ui: &mut egui::Ui, canvas_rect: egui::Rect, theme: 
         8.0,
         shadow,
     );
-    painter.rect_filled(card_rect, 8.0, theme.colors.surface0);
+    painter.rect_filled(card_rect, 8.0, theme.tokens.surface_raised);
     painter.rect_stroke(
         card_rect,
         8.0,
-        egui::Stroke::new(1.0, theme.colors.surface2),
+        egui::Stroke::new(1.0, theme.tokens.surface_raised_border),
         egui::StrokeKind::Outside,
     );
 

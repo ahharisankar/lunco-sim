@@ -118,11 +118,16 @@ impl Visualization for LinePlot {
             .collect();
 
         if y_bindings.is_empty() {
+            let (text, muted) = ctx
+                .world
+                .get_resource::<lunco_theme::Theme>()
+                .map(|t| (t.tokens.text, t.tokens.text_subdued))
+                .unwrap_or((egui::Color32::GRAY, egui::Color32::DARK_GRAY));
             ctx.ui.vertical_centered(|ui| {
                 ui.add_space(20.0);
                 ui.label(
                     egui::RichText::new("No signals bound.")
-                        .color(egui::Color32::GRAY),
+                        .color(text),
                 );
                 ui.label(
                     egui::RichText::new(
@@ -130,7 +135,7 @@ impl Visualization for LinePlot {
                          variable from Telemetry.",
                     )
                     .size(10.0)
-                    .color(egui::Color32::DARK_GRAY),
+                    .color(muted),
                 );
             });
             return;

@@ -17,8 +17,11 @@ impl Panel for CelestialTimePanel {
     fn default_slot(&self) -> PanelSlot { PanelSlot::Bottom }
 
     fn render(&mut self, ui: &mut egui::Ui, world: &mut World) {
-        ui.style_mut().visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_rgba_unmultiplied(30, 30, 35, 230);
-        ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::from_rgba_unmultiplied(30, 30, 35, 230);
+        if let Some(theme) = world.get_resource::<lunco_theme::Theme>() {
+            let raised = theme.tokens.surface_raised;
+            ui.style_mut().visuals.widgets.inactive.weak_bg_fill = raised;
+            ui.style_mut().visuals.widgets.inactive.bg_fill = raised;
+        }
 
         ui.heading("Epoch & UTC Time");
         if let Some(clock) = world.get_resource::<CelestialClock>() {
@@ -52,8 +55,11 @@ impl Panel for CelestialBodiesPanel {
     fn default_slot(&self) -> PanelSlot { PanelSlot::SideBrowser }
 
     fn render(&mut self, ui: &mut egui::Ui, world: &mut World) {
-        ui.style_mut().visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_rgba_unmultiplied(30, 30, 35, 230);
-        ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::from_rgba_unmultiplied(30, 30, 35, 230);
+        if let Some(theme) = world.get_resource::<lunco_theme::Theme>() {
+            let raised = theme.tokens.surface_raised;
+            ui.style_mut().visuals.widgets.inactive.weak_bg_fill = raised;
+            ui.style_mut().visuals.widgets.inactive.bg_fill = raised;
+        }
 
         let avatar_ent = {
             let mut q = world.query_filtered::<Entity, With<Avatar>>();

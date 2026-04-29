@@ -971,6 +971,13 @@ fn render_unified_toolbar(
 /// to a Markdown-converted render is a follow-up.
 fn render_docs_view(ui: &mut egui::Ui, world: &mut World) {
     use crate::ui::state::WorkbenchState;
+    let (heading_color, subtitle_color) = world
+        .get_resource::<lunco_theme::Theme>()
+        .map(|t| (t.tokens.text, t.tokens.text_subdued))
+        .unwrap_or((
+            egui::Color32::from_rgb(230, 235, 245),
+            egui::Color32::from_rgb(170, 180, 195),
+        ));
     let doc_id = world
         .get_resource::<lunco_workbench::WorkspaceResource>()
         .and_then(|ws| ws.active_document);
@@ -1061,7 +1068,7 @@ fn render_docs_view(ui: &mut egui::Ui, world: &mut World) {
                             egui::RichText::new(name)
                                 .size(22.0)
                                 .strong()
-                                .color(egui::Color32::from_rgb(230, 235, 245)),
+                                .color(heading_color),
                         );
                         // Class docstring as subtitle when present —
                         // Modelica's `model Foo "this is the doc"`
@@ -1077,7 +1084,7 @@ fn render_docs_view(ui: &mut egui::Ui, world: &mut World) {
                                 egui::RichText::new(desc)
                                     .size(13.0)
                                     .italics()
-                                    .color(egui::Color32::from_rgb(170, 180, 195)),
+                                    .color(subtitle_color),
                             );
                         }
                         ui.add_space(12.0);
@@ -1104,7 +1111,7 @@ fn render_docs_view(ui: &mut egui::Ui, world: &mut World) {
                             egui::RichText::new("Revisions")
                                 .strong()
                                 .size(15.0)
-                                .color(egui::Color32::from_rgb(200, 210, 225)),
+                                .color(subtitle_color),
                         );
                         ui.add_space(6.0);
                         render_html_as_markdown(ui, world, target_width, revs);

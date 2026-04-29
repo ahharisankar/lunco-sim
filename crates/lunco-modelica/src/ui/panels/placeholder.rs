@@ -48,8 +48,8 @@ pub fn render_centered_card(
     content: impl FnOnce(&mut egui::Ui),
 ) {
     let card_rect = egui::Rect::from_center_size(target_rect.center(), card_size);
-    let fill = theme.colors.surface0;
-    let stroke_color = theme.colors.surface2;
+    let fill = theme.tokens.surface_raised;
+    let stroke_color = theme.tokens.surface_raised_border;
     let shadow_src = theme.colors.base;
     let shadow = egui::Color32::from_rgba_unmultiplied(
         shadow_src.r(),

@@ -76,6 +76,7 @@ pub fn render_log_view(
     entries: &VecDeque<LogEntry>,
     empty_hint: &str,
     clear_requested: &mut bool,
+    muted: egui::Color32,
 ) {
     // Header row: count + Clear button.
     let count = entries.len();
@@ -83,7 +84,7 @@ pub fn render_log_view(
         ui.label(
             egui::RichText::new(format!("{count} messages"))
                 .size(10.0)
-                .color(egui::Color32::GRAY),
+                .color(muted),
         );
         if ui
             .small_button("🗑 Clear")
@@ -102,7 +103,7 @@ pub fn render_log_view(
                 egui::RichText::new(empty_hint)
                     .size(10.0)
                     .italics()
-                    .color(egui::Color32::DARK_GRAY),
+                    .color(muted),
             );
         });
         return;
@@ -142,7 +143,7 @@ pub fn render_log_view(
                         egui::RichText::new(&ts)
                             .monospace()
                             .size(10.0)
-                            .color(egui::Color32::DARK_GRAY),
+                            .color(muted),
                     );
                     ui.label(
                         egui::RichText::new(entry.level.tag())

@@ -58,6 +58,7 @@ pub mod files_panel;
 pub mod perf_hud;
 pub mod picker;
 pub mod status_bus;
+pub mod theme_command;
 pub mod twin_browser;
 pub mod uri;
 
@@ -153,6 +154,9 @@ impl Plugin for WorkbenchPlugin {
         // the `TogglePerfHud` typed command.
         if !app.is_plugin_added::<perf_hud::PerfHudPlugin>() {
             app.add_plugins(perf_hud::PerfHudPlugin);
+        }
+        if !app.is_plugin_added::<theme_command::ThemeCommandPlugin>() {
+            app.add_plugins(theme_command::ThemeCommandPlugin);
         }
         // Plugin-driven registry of `DocumentKind`s. Domain crates
         // (modelica, future julia/usd/sysml/...) register their kinds
@@ -678,6 +682,15 @@ fn render_workbench(world: &mut World) {
     };
 
     let theme = world.resource::<lunco_theme::Theme>().clone();
+
+    // Apply theme to the egui ctx itself (not just per-ui) — the
+    // menu bar, status bar, and any other `TopBottomPanel`/`SidePanel`
+    // paint their frame from `ctx.style().visuals.panel_fill`
+    // *before* running the user closure, so a per-ui
+    // `style_mut().visuals = …` assignment lands too late and leaves
+    // chrome panels unstyled (dark in Light mode, etc.). Setting
+    // visuals on the ctx fixes every chrome panel in one shot.
+    ctx.set_visuals(theme.to_visuals());
 
     render_layout(&ctx, &mut layout, world, &theme);
 
@@ -1249,15 +1262,8 @@ fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut 
         // Drop the per-tab body border (the rectangle around every
         // panel content area). This is the "border when unfolded".
         style.tab.tab_body.stroke = egui::Stroke::NONE;
-        // Opaque body fill matching the tab-header colour, so that
-        // panels with `transparent_background = false` (e.g. the
-        // Modelica workbench's panels) render on a solid tile rather
-        // than inheriting a theme-dependent colour that can look
-        // washed out over an empty central region. Panels that opt
-        // into `transparent_background = true` (e.g. the rover's
-        // side panels) cause `clear_background` to return false and
-        // this fill is skipped for them — 3D still shows through.
-        style.tab.tab_body.bg_fill = get_panel_backdrop(theme);
+        // Tab body fill is set further below alongside the
+        // per-state tab colours so the body matches the active tab.
         // Always opaque, in every app. Transparency on the bar made
         // the Modelica workbench look broken, and the rover sandbox's
         // centre is a transparent `ViewportPanel` anyway — a dark
@@ -1267,6 +1273,38 @@ fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut 
         // Drop the hairline under the active tab name too — same
         // visual-noise reason as the tab body stroke.
         style.tab_bar.hline_color = egui::Color32::TRANSPARENT;
+        // egui_dock's `Style::from_egui` defaults pull tab colours
+        // from `visuals.widgets`, but the result still doesn't track
+        // our Light/Dark palette cleanly: inactive tabs come out
+        // washed out and active tabs lose contrast against the bar.
+        // Bind every interaction state to the theme so tabs read
+        // consistently in both modes.
+        // Bar = `mantle`. Active tab = `surface0` so it visually
+        // joins the body area (which we also paint `surface0` below
+        // for the same reason). Inactive tab = `crust` (a step away
+        // from the bar) so the strip is legible in both modes —
+        // using `mantle` for inactive made every tab vanish into the
+        // bar in Light mode where mantle/bar contrast is minimal.
+        let palette = &theme.colors;
+        style.tab.tab_body.bg_fill = palette.surface0;
+        style.tab.active.bg_fill = palette.surface0;
+        style.tab.active.text_color = palette.text;
+        style.tab.active.outline_color = egui::Color32::TRANSPARENT;
+        style.tab.inactive.bg_fill = palette.crust;
+        style.tab.inactive.text_color = palette.subtext1;
+        style.tab.inactive.outline_color = egui::Color32::TRANSPARENT;
+        style.tab.hovered.bg_fill = palette.surface1;
+        style.tab.hovered.text_color = palette.text;
+        style.tab.hovered.outline_color = egui::Color32::TRANSPARENT;
+        style.tab.focused.bg_fill = palette.surface0;
+        style.tab.focused.text_color = palette.mauve;
+        style.tab.focused.outline_color = egui::Color32::TRANSPARENT;
+        style.tab.inactive_with_kb_focus.bg_fill = palette.crust;
+        style.tab.inactive_with_kb_focus.text_color = palette.text;
+        style.tab.active_with_kb_focus.bg_fill = palette.surface0;
+        style.tab.active_with_kb_focus.text_color = palette.mauve;
+        style.tab.focused_with_kb_focus.bg_fill = palette.surface0;
+        style.tab.focused_with_kb_focus.text_color = palette.mauve;
         DockArea::new(dock).style(style).show(ctx, &mut viewer);
     } else {
         // 3D-app mode — explicit side panels, transparent centre.
