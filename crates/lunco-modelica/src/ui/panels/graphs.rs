@@ -80,7 +80,7 @@ impl Panel for GraphsPanel {
             ui.label(
                 egui::RichText::new(format!("{bound_count} var"))
                     .size(10.0)
-                    .color(egui::Color32::GRAY),
+                    .color(muted),
             );
             if time_min.is_finite() && time_max.is_finite() {
                 ui.separator();
@@ -90,7 +90,7 @@ impl Panel for GraphsPanel {
                         time_max - time_min
                     ))
                     .size(10.0)
-                    .color(egui::Color32::GRAY),
+                    .color(muted),
                 );
                 ui.separator();
                 ui.label(

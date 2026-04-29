@@ -176,7 +176,7 @@ pub fn render_log_view(
                             egui::RichText::new(format!("[{pill}]"))
                                 .monospace()
                                 .size(10.0)
-                                .color(egui::Color32::from_rgb(140, 160, 200)),
+                                .color(theme.tokens.accent),
                         )
                         .on_hover_text(model.to_string());
                     }

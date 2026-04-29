@@ -592,6 +592,10 @@ fn render_unified_toolbar(
     ui: &mut egui::Ui,
     world: &mut World,
 ) -> ModelViewMode {
+    let tokens = world
+        .get_resource::<lunco_theme::Theme>()
+        .map(|t| t.tokens.clone())
+        .unwrap_or_else(|| lunco_theme::Theme::dark().tokens.clone());
     // Snapshot everything we need before the closure so we don't
     // fight the borrow checker mid-layout.
     let display_name = world
@@ -669,7 +673,7 @@ fn render_unified_toolbar(
         let _ = display_name;
         if is_read_only {
             ui.colored_label(
-                egui::Color32::from_rgb(200, 150, 50),
+                tokens.warning,
                 if compact { "👁" } else { "👁 read-only" },
             )
             .on_hover_text("Read-only — Duplicate to Workspace to edit");
@@ -730,28 +734,28 @@ fn render_unified_toolbar(
             match compile_state {
                 CompileState::Compiling => {
                     ui.colored_label(
-                        egui::Color32::from_rgb(220, 200, 80),
+                        tokens.warning,
                         if compact { "⏳" } else { "⏳ Compiling…" },
                     )
                     .on_hover_text("Compiling…");
                 }
                 CompileState::Ready => {
                     ui.colored_label(
-                        egui::Color32::GREEN,
+                        tokens.success,
                         if compact { "✓" } else { "✓ Ready" },
                     )
                     .on_hover_text("Ready");
                 }
                 CompileState::Error => {
                     ui.colored_label(
-                        egui::Color32::LIGHT_RED,
+                        tokens.error,
                         if compact { "⚠" } else { "⚠ Error" },
                     )
                     .on_hover_text("Compile error");
                 }
                 CompileState::Idle => {
                     ui.colored_label(
-                        egui::Color32::GRAY,
+                        tokens.text_subdued,
                         if compact { "◌" } else { "◌ Idle" },
                     )
                     .on_hover_text("Idle");

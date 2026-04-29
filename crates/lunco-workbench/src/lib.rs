@@ -1363,7 +1363,7 @@ fn render_status_bar_inner(
     ui: &mut egui::Ui,
     world: &mut World,
     layout: &WorkbenchLayout,
-    _theme: &lunco_theme::Theme,
+    theme: &lunco_theme::Theme,
 ) {
     use status_bus::{StatusBus, StatusLevel};
 
@@ -1400,11 +1400,9 @@ fn render_status_bar_inner(
                 ui.set_height(18.0);
                 if let Some(l) = latest.as_ref() {
                     let dot_color = match l.level {
-                        StatusLevel::Error => egui::Color32::from_rgb(244, 67, 54),
-                        StatusLevel::Warn => egui::Color32::from_rgb(255, 152, 0),
-                        StatusLevel::Progress | StatusLevel::Info => {
-                            egui::Color32::from_rgb(76, 175, 80)
-                        }
+                        StatusLevel::Error => theme.tokens.error,
+                        StatusLevel::Warn => theme.tokens.warning,
+                        StatusLevel::Progress | StatusLevel::Info => theme.tokens.success,
                     };
                     // Painted circle instead of `●` so we don't depend
                     // on a font that ships U+25CF (the wasm build's
@@ -1472,7 +1470,7 @@ fn render_status_bar_inner(
                     .small()
                     .monospace(),
                 );
-                draw_frame_time_sparkline(ui, &perf_stats);
+                draw_frame_time_sparkline(ui, &perf_stats, theme);
             });
         }
 
@@ -1501,16 +1499,16 @@ fn render_status_bar_inner(
                         let level_tag = match ev.level {
                             StatusLevel::Info => egui::RichText::new("INFO ")
                                 .small()
-                                .color(egui::Color32::from_rgb(160, 160, 160)),
+                                .color(theme.tokens.text_subdued),
                             StatusLevel::Warn => egui::RichText::new("WARN ")
                                 .small()
-                                .color(egui::Color32::from_rgb(255, 152, 0)),
+                                .color(theme.tokens.warning),
                             StatusLevel::Error => egui::RichText::new("ERR  ")
                                 .small()
-                                .color(egui::Color32::from_rgb(244, 67, 54)),
+                                .color(theme.tokens.error),
                             StatusLevel::Progress => egui::RichText::new("…    ")
                                 .small()
-                                .color(egui::Color32::from_rgb(120, 120, 120)),
+                                .color(theme.tokens.text_subdued),
                         };
                         ui.horizontal(|ui| {
                             ui.label(level_tag.monospace());
@@ -1531,7 +1529,11 @@ fn render_status_bar_inner(
 /// the smoothed `FPS` number hides become visible. Y axis auto-
 /// scales to whatever the worst recent sample was; a faint reference
 /// line at 16.67 ms (60 FPS) anchors the eye.
-fn draw_frame_time_sparkline(ui: &mut egui::Ui, stats: &perf_hud::PerfStats) {
+fn draw_frame_time_sparkline(
+    ui: &mut egui::Ui,
+    stats: &perf_hud::PerfStats,
+    theme: &lunco_theme::Theme,
+) {
     if stats.frame_history.is_empty() {
         return;
     }
@@ -1551,11 +1553,14 @@ fn draw_frame_time_sparkline(ui: &mut egui::Ui, stats: &perf_hud::PerfStats) {
         .fold(0.0_f32, f32::max)
         .max(25.0);
 
-    // 16.67 ms (60 FPS) reference line.
+    // 16.67 ms (60 FPS) reference line — pulls from `text_subdued`
+    // and softens with alpha so it doesn't compete with the trace.
+    let muted = theme.tokens.text_subdued;
+    let muted_soft = egui::Color32::from_rgba_unmultiplied(muted.r(), muted.g(), muted.b(), 80);
     let ref_y = rect.bottom() - rect.height() * (16.67 / max_ms).min(1.0);
     painter.line_segment(
         [egui::pos2(rect.left(), ref_y), egui::pos2(rect.right(), ref_y)],
-        egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(150, 150, 150, 80)),
+        egui::Stroke::new(0.5, muted_soft),
     );
 
     let n = stats.frame_history.len();
@@ -1565,13 +1570,13 @@ fn draw_frame_time_sparkline(ui: &mut egui::Ui, stats: &perf_hud::PerfStats) {
         let x = rect.left() + i as f32 * step;
         let y = rect.bottom() - rect.height() * (*ms / max_ms).clamp(0.0, 1.0);
         let here = egui::pos2(x, y);
-        // Per-sample colour: green ≤16.67 ms, yellow ≤33 ms, red above.
+        // Per-sample colour: success ≤16.67 ms, warning ≤33 ms, error above.
         let colour = if *ms <= 16.67 {
-            egui::Color32::from_rgb(120, 220, 120)
+            theme.tokens.success
         } else if *ms <= 33.34 {
-            egui::Color32::from_rgb(230, 200, 80)
+            theme.tokens.warning
         } else {
-            egui::Color32::from_rgb(230, 100, 90)
+            theme.tokens.error
         };
         if let Some(p) = prev {
             painter.line_segment([p, here], egui::Stroke::new(1.0, colour));
@@ -1579,10 +1584,11 @@ fn draw_frame_time_sparkline(ui: &mut egui::Ui, stats: &perf_hud::PerfStats) {
         prev = Some(here);
     }
     // Outline so the plot reads as a chart, not random pixels.
+    let outline = egui::Color32::from_rgba_unmultiplied(muted.r(), muted.g(), muted.b(), 100);
     painter.rect_stroke(
         rect,
         0.0,
-        egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(120, 120, 120, 100)),
+        egui::Stroke::new(0.5, outline),
         egui::StrokeKind::Inside,
     );
     let _ = n;

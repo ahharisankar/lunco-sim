@@ -124,12 +124,16 @@ impl Panel for CodeEditorPanel {
         };
 
         if is_loading {
+            let muted = world
+                .get_resource::<lunco_theme::Theme>()
+                .map(|t| t.tokens.text_subdued)
+                .unwrap_or(egui::Color32::GRAY);
             ui.vertical_centered(|ui| {
                 ui.add_space(100.0);
                 ui.spinner();
                 ui.add_space(10.0);
                 ui.heading("Opening model...");
-                ui.label(egui::RichText::new("Reading from disk and indexing...").size(10.0).color(egui::Color32::GRAY));
+                ui.label(egui::RichText::new("Reading from disk and indexing...").size(10.0).color(muted));
             });
             return;
         }

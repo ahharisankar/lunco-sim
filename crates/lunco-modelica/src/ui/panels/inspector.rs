@@ -49,10 +49,10 @@ impl Panel for InspectorPanel {
     }
 
     fn render(&mut self, ui: &mut egui::Ui, world: &mut World) {
-        let warning = world
+        let (warning, muted) = world
             .get_resource::<lunco_theme::Theme>()
-            .map(|t| t.tokens.warning)
-            .unwrap_or(egui::Color32::from_rgb(180, 150, 90));
+            .map(|t| (t.tokens.warning, t.tokens.text_subdued))
+            .unwrap_or((egui::Color32::from_rgb(180, 150, 90), egui::Color32::GRAY));
         // ── Resolve target doc ───────────────────────────────────
         let active_doc = world
             .get_resource::<lunco_workbench::WorkspaceResource>()
@@ -166,7 +166,7 @@ impl Panel for InspectorPanel {
         ui.label(
             egui::RichText::new(&component_info.type_name)
                 .size(11.0)
-                .color(egui::Color32::GRAY),
+                .color(muted),
         );
         if !component_info.description.is_empty() {
             ui.label(&component_info.description);
@@ -193,7 +193,7 @@ impl Panel for InspectorPanel {
             ui.label(
                 egui::RichText::new("No modifications declared. Edits will append new ones.")
                     .italics()
-                    .color(egui::Color32::GRAY),
+                    .color(muted),
             );
         }
         // Stable order: sort by name so the inspector layout doesn't
