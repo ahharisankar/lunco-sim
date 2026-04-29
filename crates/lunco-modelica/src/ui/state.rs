@@ -465,6 +465,12 @@ impl ModelicaDocumentRegistry {
         // signature is fallible so we swallow the Result rather than
         // propagate it. Callers don't care about the details.
         let _ = host.apply(ModelicaOp::ReplaceSource { new: source });
+        // API / structured edits are one-shot commits — bypass the
+        // typing-debounce so the next ast_refresh tick reparses
+        // immediately and the canvas updates without the 2.5 s wait
+        // (the debounce exists to coalesce keystroke bursts, which
+        // doesn't apply here).
+        host.document_mut().waive_ast_debounce();
         self.pending_changes.push(doc);
         true
     }

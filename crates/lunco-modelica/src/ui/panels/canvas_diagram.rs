@@ -6468,6 +6468,13 @@ fn apply_ops(world: &mut World, doc_id: lunco_doc::DocumentId, ops: Vec<Modelica
                 Err(e) => bevy::log::warn!("[CanvasDiagram] op failed: {}", e),
             }
         }
+        // Structured edit batch is one discrete commit — bypass the
+        // typing-debounce so the next ast_refresh tick reparses
+        // immediately. Otherwise canvas/diagnostics lag 2.5 s behind
+        // every API-driven or canvas-drag mutation.
+        if any_applied {
+            host.document_mut().waive_ast_debounce();
+        }
     }
     let apply_ms = t_apply_start.elapsed().as_secs_f64() * 1000.0;
 

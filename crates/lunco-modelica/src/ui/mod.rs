@@ -391,6 +391,7 @@ impl Perspective for AnalyzePerspective {
             PanelId("modelica_graphs"),
             PanelId("modelica_diagnostics"),
             PanelId("modelica_console"),
+            PanelId("modelica_journal"),
         ]);
     }
 }
@@ -451,6 +452,8 @@ impl Plugin for ModelicaUiPlugin {
             .init_resource::<panels::code_editor::EditorBufferState>()
             .init_resource::<panels::console::ConsoleLog>()
             .init_resource::<panels::diagnostics::DiagnosticsLog>()
+            .init_resource::<panels::journal::JournalLog>()
+            .add_systems(Update, panels::journal::poll_changes)
             // Forward StatusBus events to the Console panel so the
             // user has a chronological audit trail of every status
             // event from every subsystem (MSL, compile, sim, …).
@@ -515,6 +518,7 @@ impl Plugin for ModelicaUiPlugin {
             .register_panel(panels::graphs::GraphsPanel)
             .register_panel(panels::console::ConsolePanel)
             .register_panel(panels::diagnostics::DiagnosticsPanel)
+            .register_panel(panels::journal::JournalPanel)
             .register_panel(panels::canvas_diagram::CanvasDiagramPanel)
             .init_resource::<panels::canvas_diagram::CanvasDiagramState>()
             .init_resource::<panels::canvas_diagram::PaletteSettings>()

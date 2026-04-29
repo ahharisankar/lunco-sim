@@ -74,6 +74,30 @@ impl Plugin for ModelicaApiEditPlugin {
     }
 }
 
+/// Strip the enclosing-package prefix from `type_name` when it points
+/// at a sibling of `class` inside the same package. Modelica name
+/// resolution treats unqualified `Tank` and qualified `Foo.Tank` as
+/// equivalent inside `Foo`, but the canvas component-extractor only
+/// matches by simple identifier — a fully-qualified name produces a
+/// 0-component diagram even though the model parses and compiles fine.
+///
+/// `class` is the parent class path (e.g. `"Foo.Engine"`), `type_name`
+/// is the declared component type (e.g. `"Foo.Tank"`). Returns
+/// `"Tank"` here; returns `type_name` unchanged when it lives in a
+/// different package (`"Bar.Pump"`) or has no dot at all.
+fn strip_same_package_prefix(class: &str, type_name: &str) -> String {
+    let Some((class_pkg, _)) = class.rsplit_once('.') else {
+        return type_name.to_string();
+    };
+    let prefix = format!("{class_pkg}.");
+    if let Some(stripped) = type_name.strip_prefix(&prefix) {
+        if !stripped.contains('.') {
+            return stripped.to_string();
+        }
+    }
+    type_name.to_string()
+}
+
 // ─── SetDocumentSource ─────────────────────────────────────────────────
 
 /// Replace an open document's entire source text. Bypasses structured
@@ -157,8 +181,16 @@ fn on_add_modelica_component(
         } else {
             Placement::at(ev.x, ev.y)
         };
+        // Strip the enclosing-package prefix if `type_name` is fully
+        // qualified to a sibling inside the same package as `class`
+        // (e.g. class=`Foo.Engine`, type=`Foo.Tank` → emit `Tank`). The
+        // canvas component-extractor matches type_names by simple
+        // identifier when the type lives in the same package, so a
+        // fully-qualified name produces a 0-components diagram even
+        // though the model parses and compiles fine.
+        let normalized_type = strip_same_package_prefix(&ev.class, &ev.type_name);
         let decl = ComponentDecl {
-            type_name: ev.type_name.clone(),
+            type_name: normalized_type,
             name: ev.name.clone(),
             modifications: Vec::new(),
             placement: Some(placement),
@@ -171,13 +203,16 @@ fn on_add_modelica_component(
             class: ev.class.clone(),
             decl,
         }) {
-            Ok(_) => bevy::log::info!(
-                "[AddModelicaComponent] doc={} class={} {}={}",
-                doc.raw(),
-                ev.class,
-                ev.name,
-                ev.type_name
-            ),
+            Ok(_) => {
+                host.document_mut().waive_ast_debounce();
+                bevy::log::info!(
+                    "[AddModelicaComponent] doc={} class={} {}={}",
+                    doc.raw(),
+                    ev.class,
+                    ev.name,
+                    ev.type_name
+                );
+            }
             Err(e) => bevy::log::warn!(
                 "[AddModelicaComponent] doc={} {}: {:?}",
                 doc.raw(),
@@ -218,12 +253,15 @@ fn on_remove_modelica_component(
             class: ev.class.clone(),
             name: ev.name.clone(),
         }) {
-            Ok(_) => bevy::log::info!(
-                "[RemoveModelicaComponent] doc={} {}.{}",
-                doc.raw(),
-                ev.class,
-                ev.name
-            ),
+            Ok(_) => {
+                host.document_mut().waive_ast_debounce();
+                bevy::log::info!(
+                    "[RemoveModelicaComponent] doc={} {}.{}",
+                    doc.raw(),
+                    ev.class,
+                    ev.name
+                );
+            }
             Err(e) => bevy::log::warn!(
                 "[RemoveModelicaComponent] doc={} {}.{}: {:?}",
                 doc.raw(),
@@ -289,13 +327,16 @@ fn on_connect_components(
             class: ev.class.clone(),
             eq,
         }) {
-            Ok(_) => bevy::log::info!(
-                "[ConnectComponents] doc={} {}: {} -> {}",
-                doc.raw(),
-                ev.class,
-                ev.from,
-                ev.to
-            ),
+            Ok(_) => {
+                host.document_mut().waive_ast_debounce();
+                bevy::log::info!(
+                    "[ConnectComponents] doc={} {}: {} -> {}",
+                    doc.raw(),
+                    ev.class,
+                    ev.from,
+                    ev.to
+                );
+            }
             Err(e) => bevy::log::warn!(
                 "[ConnectComponents] doc={} failed: {:?}",
                 doc.raw(),
@@ -340,13 +381,16 @@ fn on_disconnect_components(
             from,
             to,
         }) {
-            Ok(_) => bevy::log::info!(
-                "[DisconnectComponents] doc={} {}: {} -/- {}",
-                doc.raw(),
-                ev.class,
-                ev.from,
-                ev.to
-            ),
+            Ok(_) => {
+                host.document_mut().waive_ast_debounce();
+                bevy::log::info!(
+                    "[DisconnectComponents] doc={} {}: {} -/- {}",
+                    doc.raw(),
+                    ev.class,
+                    ev.from,
+                    ev.to
+                );
+            }
             Err(e) => bevy::log::warn!(
                 "[DisconnectComponents] doc={} failed: {:?}",
                 doc.raw(),
@@ -526,7 +570,7 @@ fn api_op_to_internal(op: &ApiOp) -> Option<ModelicaOp> {
             Some(ModelicaOp::AddComponent {
                 class: class.clone(),
                 decl: ComponentDecl {
-                    type_name: type_name.clone(),
+                    type_name: strip_same_package_prefix(class, type_name),
                     name: name.clone(),
                     modifications: modifications
                         .iter()

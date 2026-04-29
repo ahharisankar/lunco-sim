@@ -156,6 +156,16 @@ pub fn drain_browser_actions(world: &mut World) {
                         crate::ui::panels::model_view::MODEL_VIEW_KIND,
                         doc.raw(),
                     );
+                // Make this doc the active workspace doc so the
+                // canvas (which reads `WorkspaceResource::active_document`
+                // to decide what to render) follows the click. Without
+                // this, clicking a class in the entity tree only sets
+                // `DrilledInClassNames[doc]` — but if the canvas was
+                // rendering a different doc, the new drill target is
+                // never observed and the diagram looks frozen.
+                world
+                    .resource_mut::<lunco_workbench::WorkspaceResource>()
+                    .active_document = Some(doc);
                 // Force a fresh projection on the next canvas tick —
                 // the doc may have been already open at the package
                 // (target=None) level, with a cached zero-node scene.
