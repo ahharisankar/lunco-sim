@@ -745,10 +745,10 @@ fn paint_text(
     // 0.7× and a [10, 48] clamp keep MSL %name labels readable at
     // fit-zoom without dwarfing the component icons.
     let font_size_px = if t.font_size > 0.0 {
-        (t.font_size as f32 * xf.scale).clamp(4.0, 256.0)
+        (t.font_size as f32 * xf.scale).clamp(11.0, 256.0)
     } else {
         let dim = rect.width().abs().min(rect.height().abs());
-        (dim * 0.7).clamp(4.0, 256.0)
+        (dim * 0.7).clamp(11.0, 256.0)
     };
     let color = color_or_default(t.text_color, egui::Color32::from_gray(20));
     painter.text(
