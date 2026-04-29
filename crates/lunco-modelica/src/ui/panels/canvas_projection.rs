@@ -692,6 +692,24 @@ pub fn import_model_to_diagram_from_ast(
         // `Modelica.Blocks.Math.Gain`).
         if component_def.is_none() && !type_name.is_empty() {
             let mut candidates: Vec<String> = Vec::new();
+            // MLS §5.3: walk the enclosing class scopes of the target
+            // outward. For target `Modelica.Blocks.Examples.PID_Controller`
+            // and a short ref `Sources.Sinc`, candidates include
+            // `Modelica.Blocks.Examples.Sources.Sinc`,
+            // `Modelica.Blocks.Sources.Sinc` (hits — Sources lives next
+            // to Examples), `Modelica.Sources.Sinc`. Without this, every
+            // short-form ref in an MSL example silently dropped at
+            // conversion (e.g. CompareSincExpSine projecting 0 nodes).
+            if let Some(target) = target_class {
+                let mut parts: Vec<&str> = target.split('.').collect();
+                // Drop the leaf (the target class itself) — scope walks
+                // start at its enclosing package.
+                parts.pop();
+                while !parts.is_empty() {
+                    candidates.push(format!("{}.{}", parts.join("."), type_name));
+                    parts.pop();
+                }
+            }
             if let Some(within) = ast.within.as_ref() {
                 let mut parts: Vec<String> = within
                     .name
