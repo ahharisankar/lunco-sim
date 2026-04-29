@@ -850,8 +850,18 @@ pub fn import_model_to_diagram_from_ast(
 
         if let (Some(src_id), Some(tgt_id)) = (src_diagram_id, tgt_diagram_id) {
             // Port names from graph node ports
-            let src_port = src_node.ports.get(edge.source_port).map(|p| p.name.clone()).unwrap_or_default();
-            let tgt_port = tgt_node.ports.get(edge.target_port).map(|p| p.name.clone()).unwrap_or_default();
+            let mut src_port = src_node.ports.get(edge.source_port).map(|p| p.name.clone()).unwrap_or_default();
+            let mut tgt_port = tgt_node.ports.get(edge.target_port).map(|p| p.name.clone()).unwrap_or_default();
+            // Top-level connector instances appear in the rumoca
+            // graph with a single port whose name equals the
+            // connector instance itself (rumoca treats the connector
+            // as a self-port). The diagram node has no such port —
+            // the wire should anchor on the node body. Empty out the
+            // port name in that case so the orthogonal router falls
+            // back to the node-body anchor and the wire actually
+            // renders.
+            if src_port == src_short { src_port = String::new(); }
+            if tgt_port == tgt_short { tgt_port = String::new(); }
             diagram.add_edge(src_id, src_port.clone(), tgt_id, tgt_port.clone());
             // Attach authored waypoints if the source had them.
             let key = canonical_edge_key(src_short, &src_port, tgt_short, &tgt_port);
@@ -873,6 +883,12 @@ pub fn import_model_to_diagram_from_ast(
     // endpoints carry empty `inst` and the connector name in
     // `port` — match the diagram node by `instance_name == port`
     // in that case.
+    // Two passes: (1) attach waypoints to existing edges that match
+    // by node-id pair, regardless of port-name shape — covers the
+    // first-pass loop above where `waypoint_map.get(&key)` missed
+    // because the rumoca-AST graph and the regex use different
+    // (inst, port) shapes for top-level connectors. (2) add any
+    // remaining waypoint_map entries that have no edge yet.
     let mut to_add: Vec<(
         crate::visual_diagram::DiagramNodeId,
         String,
@@ -887,15 +903,24 @@ pub fn import_model_to_diagram_from_ast(
         let a_id = diagram.nodes.iter().find(|n| n.instance_name == a_match).map(|n| n.id);
         let b_id = diagram.nodes.iter().find(|n| n.instance_name == b_match).map(|n| n.id);
         let (Some(a_id), Some(b_id)) = (a_id, b_id) else { continue };
-        // For bare-connector endpoints the "port" is the connector
-        // itself; route from the node body (empty port string).
+        // Find an existing edge connecting these two nodes (any
+        // port-shape). If found and missing waypoints, attach them.
+        let mut found = false;
+        for edge in diagram.edges.iter_mut() {
+            let same =
+                (edge.source_node == a_id && edge.target_node == b_id)
+                    || (edge.source_node == b_id && edge.target_node == a_id);
+            if same {
+                if edge.waypoints.is_empty() {
+                    edge.waypoints = waypoints.clone();
+                }
+                found = true;
+                break;
+            }
+        }
+        if found { continue; }
         let a_port_str = if a_inst.is_empty() { String::new() } else { a_port.clone() };
         let b_port_str = if b_inst.is_empty() { String::new() } else { b_port.clone() };
-        let already = diagram.edges.iter().any(|e| {
-            (e.source_node == a_id && e.target_node == b_id)
-                || (e.source_node == b_id && e.target_node == a_id)
-        });
-        if already { continue; }
         to_add.push((a_id, a_port_str, b_id, b_port_str, waypoints.clone()));
     }
     for (a_id, a_port, b_id, b_port, waypoints) in to_add {
@@ -904,6 +929,17 @@ pub fn import_model_to_diagram_from_ast(
             last.waypoints = waypoints;
         }
     }
+    // List ALL edges in the final diagram so we can see what's
+    // actually being rendered.
+    let mut all = Vec::new();
+    for e in &diagram.edges {
+        let src = diagram.nodes.iter().find(|n| n.id == e.source_node).map(|n| n.instance_name.as_str()).unwrap_or("?");
+        let tgt = diagram.nodes.iter().find(|n| n.id == e.target_node).map(|n| n.instance_name.as_str()).unwrap_or("?");
+        let wps = e.waypoints.len();
+        all.push(format!("{}.{} → {}.{} [wp={}]", src, e.source_port, tgt, e.target_port, wps));
+    }
+    eprintln!("[debug] ALL diagram edges ({}):", diagram.edges.len());
+    for line in &all { eprintln!("  {}", line); }
 
     if diagram.nodes.is_empty() {
         None

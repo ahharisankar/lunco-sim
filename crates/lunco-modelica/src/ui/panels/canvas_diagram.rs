@@ -1121,10 +1121,6 @@ impl EdgeVisual for OrthogonalEdgeVisual {
         } else {
             0.6
         };
-        // A *gentle* zoom influence on stroke for very high zoom-in
-        // (so wires don't look like floss next to a 1000-px-wide
-        // icon). sqrt damps the curve; at zoom=1 it's ~0.58, at
-        // zoom=10 it's ~1.83. Clamped 0.7..1.6 for sanity.
         let zoom_norm = (ctx.viewport.zoom / 3.0).sqrt().clamp(0.7, 1.6);
         let width = base_width * zoom_norm;
         // `scale` is exposed downstream for arrows / stubs / port
