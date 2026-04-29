@@ -269,6 +269,12 @@ pub struct DiagramNode {
     pub icon_transform: crate::icon_transform::IconTransform,
     /// Whether the node is selected.
     pub selected: bool,
+    /// True when the source declares the component with an `if <cond>`
+    /// clause — MSL convention is to render these dimmed/translucent
+    /// because they're "design-time visible, runtime-conditional"
+    /// (e.g. `Constant Dzero(k=0) if not with_D` in `LimPID`).
+    #[serde(default)]
+    pub is_conditional: bool,
 }
 
 impl DiagramNode {
@@ -356,6 +362,7 @@ impl VisualDiagram {
             position,
             icon_transform,
             selected: false,
+            is_conditional: false,
         });
         id
     }

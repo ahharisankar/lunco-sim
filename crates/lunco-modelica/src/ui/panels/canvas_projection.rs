@@ -817,6 +817,16 @@ pub fn import_model_to_diagram_from_ast(
                             .parameter_values
                             .insert(k.clone(), format_modifier_expr(v));
                     }
+                    // `Component X if <cond>` — only dim when the
+                    // condition evaluates FALSE against the parent's
+                    // Boolean parameter defaults. Active conditional
+                    // components (e.g. `addSat if with_I` with
+                    // `with_I=true`) render at full opacity, matching
+                    // OMEdit which only dims runtime-absent ones.
+                    if let Some(cond) = &comp.condition {
+                        let active = eval_condition(cond, &comp_by_short);
+                        diagram_node.is_conditional = !active;
+                    }
                 }
             }
         }
@@ -1236,6 +1246,58 @@ fn connector_icon_color(
 /// the canvas substitution is consistent regardless of source. Returns
 /// an empty string for expression shapes the icon-text path can't
 /// usefully render (function calls, complex matrix literals, etc.).
+/// Evaluate a Boolean component-condition expression against the
+/// parent class's component defaults. Handles the shapes MSL uses
+/// for `Component X if <cond>` declarations:
+///   - `Terminal{Bool, "true"|"false"}`            → literal
+///   - `ComponentReference(<param>)`               → resolve `param`
+///     in `params_map`, parse its default as Bool
+///   - `Unary{Not, inner}`                         → !eval(inner)
+///   - `Parenthesized{inner}`                      → eval(inner)
+///   - `Binary{And/Or, lhs, rhs}`                  → short-circuit
+///
+/// Anything we can't reason about returns `true` so we err on the
+/// side of NOT dimming an active component (over-dimming would hide
+/// real components from the user).
+fn eval_condition(
+    expr: &rumoca_session::parsing::ast::Expression,
+    params_map: &std::collections::HashMap<&str, &rumoca_session::parsing::ast::Component>,
+) -> bool {
+    use rumoca_session::parsing::ast::{Expression, OpBinary, OpUnary};
+    match expr {
+        Expression::Terminal { token, .. } => {
+            // Accept any terminal whose text reads "true"/"false"; the
+            // exact `TerminalType` variant rumoca chooses for boolean
+            // literals isn't reliably `Bool` (Identifier/Bool both
+            // appear in the wild).
+            match token.text.as_ref() {
+                "true" => true,
+                "false" => false,
+                _ => true,
+            }
+        }
+        Expression::ComponentReference(cref) => {
+            let leaf = cref.parts.last().map(|p| p.ident.text.as_ref()).unwrap_or("");
+            params_map
+                .get(leaf)
+                .and_then(|comp| comp.binding.as_ref())
+                .map(|d| eval_condition(d, params_map))
+                .unwrap_or(true)
+        }
+        Expression::Unary { op, rhs } => match op {
+            OpUnary::Not(_) => !eval_condition(rhs, params_map),
+            _ => true,
+        },
+        Expression::Parenthesized { inner } => eval_condition(inner, params_map),
+        Expression::Binary { op, lhs, rhs } => match op {
+            OpBinary::And(_) => eval_condition(lhs, params_map) && eval_condition(rhs, params_map),
+            OpBinary::Or(_) => eval_condition(lhs, params_map) || eval_condition(rhs, params_map),
+            _ => true,
+        },
+        _ => true,
+    }
+}
+
 fn format_modifier_expr(expr: &rumoca_session::parsing::ast::Expression) -> String {
     use rumoca_session::parsing::ast::{Expression, OpBinary, OpUnary, TerminalType};
     match expr {

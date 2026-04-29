@@ -199,6 +199,22 @@ pub struct FitCanvas {
     pub doc: DocumentId,
 }
 
+/// Pan + zoom the canvas to centre the named component instance and
+/// fill ~50% of the viewport. Use to inspect a single icon at a
+/// readable size without manual zoom-pan, e.g. for screenshot-based
+/// visual checks during automation.
+#[Command(default)]
+pub struct FocusComponent {
+    /// Doc id, or `0` for the active tab.
+    pub doc: DocumentId,
+    /// Instance name to focus (e.g. `"addSat"`).
+    pub name: String,
+    /// Optional padding factor — `0.5` (default when 0) leaves the
+    /// component at 50% of the viewport's smaller dim. Larger values
+    /// zoom out more.
+    pub padding: f32,
+}
+
 /// Open (or focus, if already open) an MSL class as a fresh editable
 /// copy. `qualified` is the full dot-path,
 /// e.g. `"Modelica.Electrical.Analog.Examples.ChuaCircuit"`.
@@ -400,6 +416,7 @@ register_commands!(
     on_duplicate_model_from_read_only,
     on_exit,
     on_fit_canvas,
+    on_focus_component,
     on_focus_document_by_name,
     on_format_document,
     on_get_file,
@@ -2349,6 +2366,49 @@ fn on_maximize_window(
             window.position = bevy::window::WindowPosition::At(bevy::math::IVec2::ZERO);
         }
     }
+}
+
+#[on_command(FocusComponent)]
+fn on_focus_component(trigger: On<FocusComponent>, mut commands: Commands) {
+    let raw = trigger.event().doc;
+    let name = trigger.event().name.clone();
+    let padding = if trigger.event().padding > 0.0 { trigger.event().padding } else { 0.5 };
+    commands.queue(move |world: &mut World| {
+        let doc = if raw.is_unassigned() {
+            resolve_active_doc(world)
+        } else {
+            Some(raw)
+        };
+        use crate::ui::panels::canvas_diagram::CanvasDiagramState;
+        let Some(mut state) = world.get_resource_mut::<CanvasDiagramState>() else {
+            return;
+        };
+        let docstate = state.get_mut(doc);
+        // Find the canvas node whose label matches `name`. Use the
+        // labelled node's rect as the focus target.
+        let target = docstate
+            .canvas
+            .scene
+            .nodes()
+            .find(|(_, n)| n.label == name)
+            .map(|(_, n)| n.rect);
+        let Some(rect) = target else {
+            bevy::log::warn!("[FocusComponent] no node named `{}` on canvas", name);
+            return;
+        };
+        // Centre on the rect; zoom so its longer dim takes `padding`
+        // of the smaller viewport dim. Approx screen rect — same
+        // helper Fit uses.
+        let sr = approx_screen_rect();
+        let viewport_dim = sr.width().min(sr.height());
+        let world_dim = rect.width().max(rect.height()).max(1e-3);
+        let zoom = (viewport_dim * padding) / world_dim;
+        let centre = lunco_canvas::Pos::new(
+            (rect.min.x + rect.max.x) * 0.5,
+            (rect.min.y + rect.max.y) * 0.5,
+        );
+        docstate.canvas.viewport.set_target(centre, zoom);
+    });
 }
 
 #[on_command(FitCanvas)]
