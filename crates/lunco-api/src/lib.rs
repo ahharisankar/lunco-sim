@@ -148,7 +148,18 @@ impl Plugin for LunCoApiPlugin {
 
             let bridge = {
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                let bridge = HttpBridge::new(tx);
+                let mut bridge = HttpBridge::new(tx);
+                // Hook the winit event loop so HTTP requests wake the
+                // app immediately instead of waiting for the next
+                // reactive tick. WinitPlugin runs first inside
+                // DefaultPlugins, so the proxy resource is already in
+                // place by the time we build here.
+                if let Some(proxy) = app.world().get_resource::<bevy::winit::EventLoopProxyWrapper>() {
+                    let proxy = (**proxy).clone();
+                    bridge = bridge.with_waker(std::sync::Arc::new(move || {
+                        let _ = proxy.send_event(bevy::winit::WinitUserEvent::WakeUp);
+                    }));
+                }
                 app.insert_resource(ApiHttpBridgeReceiver(rx))
                     .init_resource::<ApiHttpResponsePending>()
                     .add_observer(http_response_observer)

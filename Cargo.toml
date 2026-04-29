@@ -93,8 +93,10 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "bevy_core_pipeline",
     "bevy_image",                  # egui_extras image loaders + asset pipeline
     "webgl2",                      # wasm fallback when WebGPU unavailable
-    "x11",                         # Linux native window backend
+    "x11",                         # Linux X11 backend
+    "wayland",                     # Linux Wayland backend (avoids XWayland stalls on Wayland sessions)
     "bevy_picking",                # picking core (sub-backends are opt-in)
+    "trace_tracy",                 # Tracy profiler client — connect with tracy-profiler
 ] }
 lunco-assets = { path = "crates/lunco-assets" }
 avian3d = { version = "0.6.1", default-features = false, features = ["3d", "f64", "parry-f64", "parallel", "debug-plugin", "default-collider", "collider-from-mesh", "bevy_diagnostic"] }

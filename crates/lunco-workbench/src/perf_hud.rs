@@ -159,6 +159,7 @@ fn log_frame_spikes(
     stats: Res<PerfStats>,
     fixed_metrics: Res<FixedUpdateMetrics>,
     phases: Res<PhaseTimers>,
+    windows: Query<&bevy::window::Window>,
     // (frame_index, last_spike_frame)
     mut state: Local<(u64, Option<u64>)>,
 ) {
@@ -168,6 +169,14 @@ fn log_frame_spikes(
     state.0 += 1;
     let Some(&latest_ms) = stats.frame_history.back() else { return };
     if latest_ms < SPIKE_THRESHOLD_MS {
+        return;
+    }
+    // Skip the structural reactive-low-power tick — when no window has
+    // focus, `WinitSettings.unfocused_mode` parks the loop for ~1s, which
+    // shows up here as a 1000ms "frame". That's intentional idle, not a
+    // hitch worth logging.
+    let any_focused = windows.iter().any(|w| w.focused);
+    if !any_focused && latest_ms > 200.0 {
         return;
     }
     let frame = state.0;

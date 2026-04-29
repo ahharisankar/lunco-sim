@@ -16,21 +16,39 @@ pub struct BridgeMessage {
     pub reply: tokio::sync::oneshot::Sender<crate::schema::ApiResponse>,
 }
 
+/// Wakes the host event loop after pushing a message into the
+/// bridge's mpsc. Without this, an HTTP request handed to the bridge
+/// only gets drained on the next Bevy tick — which, in reactive
+/// `WinitSettings`, may not arrive for a full second. The waker is
+/// optional so headless tests / non-winit hosts can still use the
+/// bridge without paying for a winit dep.
 #[cfg(feature = "transport-http")]
-#[derive(Debug, Clone)]
+pub type ApiWaker = std::sync::Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(feature = "transport-http")]
+#[derive(Clone)]
 pub struct HttpBridge {
     pub tx: tokio::sync::mpsc::UnboundedSender<BridgeMessage>,
+    pub waker: Option<ApiWaker>,
 }
 
 #[cfg(feature = "transport-http")]
 impl HttpBridge {
     pub fn new(tx: tokio::sync::mpsc::UnboundedSender<BridgeMessage>) -> Self {
-        Self { tx }
+        Self { tx, waker: None }
     }
-    
+
+    pub fn with_waker(mut self, waker: ApiWaker) -> Self {
+        self.waker = Some(waker);
+        self
+    }
+
     pub async fn execute(&self, request: crate::schema::ApiRequest) -> Result<crate::schema::ApiResponse, ()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.tx.send(BridgeMessage { request, reply: tx }).map_err(|_| ())?;
+        if let Some(waker) = &self.waker {
+            waker();
+        }
         rx.await.map_err(|_| ())
     }
 }
