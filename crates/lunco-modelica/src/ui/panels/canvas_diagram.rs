@@ -628,8 +628,18 @@ impl NodeVisual for IconNodeVisual {
                         // which is equivalent to rotating CW in the
                         // visual frame. Negate so the visual outcome
                         // matches MLS / OMEdit.
+                        // Include the PARENT's rotation in the port
+                        // marker's orientation. Without this, when
+                        // the parent is rotated (e.g. addSat at
+                        // rotation=270), only the port POSITION is
+                        // rotated — the connector arrow keeps its
+                        // default orientation and ends up pointing
+                        // the wrong way relative to the rotated
+                        // icon. Adding the parent's rotation makes
+                        // the marker rotate WITH the icon body so
+                        // the arrow tip always points into the icon.
                         let port_orientation = crate::icon_paint::IconOrientation {
-                            rotation_deg: -port_rotation_deg,
+                            rotation_deg: self.rotation_deg - port_rotation_deg,
                             mirror_x: self.mirror_x,
                             mirror_y: self.mirror_y,
                         };

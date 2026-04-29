@@ -203,10 +203,14 @@ pub(crate) fn scan_connect_annotations(
         if pts.len() < 2 {
             continue;
         }
-        // Drop the two endpoints — they're redundant with the port
-        // positions the renderer already knows. Only the interior
-        // waypoints affect the path.
-        let interior: Vec<(f32, f32)> = pts[1..pts.len().saturating_sub(1)].to_vec();
+        // Keep ALL authored points including the endpoints — for
+        // top-level connectors the renderer anchors on the node's
+        // centre (it has no real port to anchor on), and dropping
+        // the first/last point made the wire zigzag from the centre
+        // diagonally to the authored entry point. With the endpoints
+        // preserved the polyline actually traces the route the
+        // model author drew.
+        let interior: Vec<(f32, f32)> = pts.clone();
         let key = canonical_edge_key(&a_inst, &a_port, &b_inst, &b_port);
         out.entry(key).or_insert(interior);
     }
@@ -929,17 +933,6 @@ pub fn import_model_to_diagram_from_ast(
             last.waypoints = waypoints;
         }
     }
-    // List ALL edges in the final diagram so we can see what's
-    // actually being rendered.
-    let mut all = Vec::new();
-    for e in &diagram.edges {
-        let src = diagram.nodes.iter().find(|n| n.id == e.source_node).map(|n| n.instance_name.as_str()).unwrap_or("?");
-        let tgt = diagram.nodes.iter().find(|n| n.id == e.target_node).map(|n| n.instance_name.as_str()).unwrap_or("?");
-        let wps = e.waypoints.len();
-        all.push(format!("{}.{} → {}.{} [wp={}]", src, e.source_port, tgt, e.target_port, wps));
-    }
-    eprintln!("[debug] ALL diagram edges ({}):", diagram.edges.len());
-    for line in &all { eprintln!("  {}", line); }
 
     if diagram.nodes.is_empty() {
         None
