@@ -84,10 +84,6 @@ rayon = "1"
 # Required because `std::time::Instant::now()` panics with
 # "time not implemented on this platform" on wasm32-unknown-unknown.
 web-time = { workspace = true }
-# Wall-clock local time for console / diagnostics entry timestamps.
-# `clock` brings in `chrono::Local`; `wasmbind` makes `Local::now()`
-# work on `wasm32-unknown-unknown` via `js_sys::Date`.
-chrono = { workspace = true, default-features = false, features = ["clock", "std", "wasmbind"] }
 # Pre-parsed MSL bundle deserialiser. Same encoding as rumoca's
 # on-disk artifact cache — the wasm fetcher decodes a Vec of
 # (uri, StoredDefinition) shipped at build time, skipping a ~27-min

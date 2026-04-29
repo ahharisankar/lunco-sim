@@ -1125,11 +1125,11 @@ impl EdgeVisual for OrthogonalEdgeVisual {
         // wires at typical fit zoom). Arrows + port markers still
         // scale gently below.
         let base_width = if selected {
-            if self.is_causal { 1.4 } else { 1.0 }
+            if self.is_causal { 2.2 } else { 1.7 }
         } else if self.is_causal {
-            1.0
+            1.6
         } else {
-            0.6
+            1.1
         };
         let zoom_norm = (ctx.viewport.zoom / 3.0).sqrt().clamp(0.7, 1.6);
         let width = base_width * zoom_norm;

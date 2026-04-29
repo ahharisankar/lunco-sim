@@ -66,8 +66,6 @@ impl ConsoleLevel {
 #[derive(Debug, Clone)]
 pub struct ConsoleMessage {
     pub at: Instant,
-    /// Wall-clock local time captured at emit. Rendered as HH:MM:SS.
-    pub wall: chrono::DateTime<chrono::Local>,
     pub level: ConsoleLevel,
     pub text: String,
 }
@@ -90,7 +88,6 @@ impl ConsoleLog {
         }
         self.messages.push_back(ConsoleMessage {
             at: now,
-            wall: chrono::Local::now(),
             level,
             text: text.into(),
         });
@@ -191,10 +188,17 @@ impl Panel for ConsolePanel {
                     // Monospaced, timestamp-prefixed rows — one per
                     // message. Keep render cost O(N) without any
                     // per-frame regex or parsing.
+                    let session_start = SESSION_START
+                        .get()
+                        .copied()
+                        .or_else(|| snapshot.first().map(|m| m.at));
                     for msg in &snapshot {
                         let color = msg.level.color(&theme);
-                        // Wall-clock local time captured at emit.
-                        let ts = msg.wall.format("[%H:%M:%S]").to_string();
+                        let offset = session_start
+                            .and_then(|s| msg.at.checked_duration_since(s))
+                            .map(|d| d.as_secs_f32())
+                            .unwrap_or(0.0);
+                        let ts = format!("[+{offset:>6.2}s]");
                         ui.horizontal(|ui| {
                             ui.label(
                                 egui::RichText::new(&ts)

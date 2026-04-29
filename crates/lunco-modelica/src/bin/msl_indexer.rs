@@ -362,6 +362,12 @@ struct MSLIndexer {
     bytes_scanned: usize,
     scan_started: Option<Instant>,
     last_progress_print: Option<Instant>,
+    /// Bundle of every parsed `.mo` collected during the scan. Written
+    /// at the end of `main()` to `.cache/msl/parsed-msl.bin` so the
+    /// workbench can install pre-parsed `StoredDefinition`s in ~1s
+    /// via `Session::replace_parsed_source_set` — mirrors the wasm
+    /// runtime's `parsed-*.bin.zst` strategy on native.
+    parsed_bundle: Vec<(String, StoredDefinition)>,
 }
 
 /// Scan a Modelica source buffer and map each class's simple name to
@@ -575,6 +581,7 @@ impl MSLIndexer {
             bytes_scanned: 0,
             scan_started: None,
             last_progress_print: None,
+            parsed_bundle: Vec::with_capacity(2700),
         }
     }
 
@@ -683,6 +690,14 @@ impl MSLIndexer {
                             // an MSL-shaped source layout. Going through
                             // rumoca makes the same path work for any
                             // library rumoca can parse.
+                            // Capture for the parsed-MSL bundle written
+                            // at the end of main(). One clone here is
+                            // ~free relative to the parse cost and
+                            // avoids a second pass over MSL.
+                            self.parsed_bundle.push((
+                                path.to_string_lossy().to_string(),
+                                ast.clone(),
+                            ));
                             self.add_stored_definition(ast, package_prefix, is_package_file);
                         }
                         // source is dropped here — no long-term storage of .mo text
@@ -1121,6 +1136,30 @@ fn main() {
     let json = serde_json::to_string_pretty(&components).unwrap();
     fs::write(&output_path, json).unwrap();
     println!("[indexer] wrote {} → {}", components.len(), output_path.display());
+
+    // Pre-parsed bundle for the workbench's fast path. Native mirror
+    // of the wasm `parsed-*.bin.zst` artifact: bincode-serialised
+    // `Vec<(uri, StoredDefinition)>` that the workbench installs
+    // directly via `Session::replace_parsed_source_set`, bypassing
+    // every per-file cache key concern.
+    let bundle_path = lunco_assets::msl_dir().join("parsed-msl.bin");
+    let t_bundle = Instant::now();
+    match bincode::serialize(&indexer.parsed_bundle) {
+        Ok(bytes) => match fs::write(&bundle_path, &bytes) {
+            Ok(()) => println!(
+                "[indexer] wrote parsed bundle: {} docs, {:.1} MB in {:.1}s → {}",
+                indexer.parsed_bundle.len(),
+                bytes.len() as f64 / (1024.0 * 1024.0),
+                t_bundle.elapsed().as_secs_f64(),
+                bundle_path.display()
+            ),
+            Err(e) => eprintln!(
+                "[indexer] WARN: failed to write parsed bundle to {}: {e}",
+                bundle_path.display()
+            ),
+        },
+        Err(e) => eprintln!("[indexer] WARN: failed to serialise parsed bundle: {e}"),
+    }
 
     if opts.warm {
         println!();

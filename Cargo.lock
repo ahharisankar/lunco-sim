@@ -6265,7 +6265,6 @@ dependencies = [
  "bevy_egui",
  "bevy_vello",
  "bincode",
- "chrono",
  "console_error_panic_hook",
  "crossbeam-channel",
  "egui_commonmark",
