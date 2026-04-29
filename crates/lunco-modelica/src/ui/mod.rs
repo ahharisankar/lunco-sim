@@ -172,6 +172,39 @@ fn drop_workspace_class_on_doc_closed(
 /// 5b.1 migration. Once step 5c retires the legacy `ModelicaDocumentRegistry`
 /// / `ModelTabs` / `WorkbenchState.open_model` triad, this observer
 /// becomes the sole population point for the Workspace's document list.
+/// Observer: a Modelica doc was mutated → re-mirror the post-edit
+/// source into `WorkbenchState::open_model` so the code editor (which
+/// reads `open_model.source`, not the registry) shows the change
+/// immediately. Covers every edit path uniformly: SetDocumentSource,
+/// Add/RemoveComponent, Connect/Disconnect, undo/redo, canvas drag,
+/// scripted batches.
+fn mirror_open_model_on_doc_changed(
+    trigger: On<lunco_doc_bevy::DocumentChanged>,
+    registry: Res<ModelicaDocumentRegistry>,
+    workspace: Res<lunco_workbench::WorkspaceResource>,
+    mut state: ResMut<crate::ui::state::WorkbenchState>,
+) {
+    let doc = trigger.event().doc;
+    // Only mirror when the active doc changed — `open_model` tracks
+    // the foreground doc only. A background-doc edit (rare today, but
+    // possible via API) shouldn't displace what the user is editing.
+    if workspace.active_document != Some(doc) {
+        return;
+    }
+    let Some(host) = registry.host(doc) else { return };
+    let Some(open) = state.open_model.as_mut() else { return };
+    let src = host.document().source();
+    let mut line_starts = vec![0usize];
+    for (i, b) in src.as_bytes().iter().enumerate() {
+        if *b == b'\n' {
+            line_starts.push(i + 1);
+        }
+    }
+    open.source = std::sync::Arc::from(src);
+    open.line_starts = line_starts.into();
+    open.cached_galley = None;
+}
+
 fn sync_workspace_on_doc_opened(
     trigger: On<lunco_doc_bevy::DocumentOpened>,
     registry: Res<ModelicaDocumentRegistry>,
@@ -473,6 +506,15 @@ impl Plugin for ModelicaUiPlugin {
             .add_observer(sync_workspace_on_doc_opened)
             .add_observer(sync_workspace_on_doc_closed)
             .add_observer(sync_workspace_on_doc_saved)
+            // Mirror the post-edit source from the registry into
+            // `WorkbenchState::open_model` whenever any mutation lands —
+            // structured ops via API, canvas drag, code-editor keystroke.
+            // The code editor reads `open_model.source` (Arc<str>), not
+            // the registry directly, so without this fan-out
+            // SetDocumentSource / Add* / Connect* edits update the
+            // canvas (which reads the registry) but leave the text
+            // editor stuck on the old source.
+            .add_observer(mirror_open_model_on_doc_changed)
             // Twin-panel: keep the loaded-classes list in sync with
             // the document registry. One `WorkspaceClass` per
             // writable / Untitled Modelica doc, dropped on close.
