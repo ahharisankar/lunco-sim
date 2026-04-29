@@ -220,6 +220,7 @@ pub fn refresh_diagnostics(
     if let Err(msg) = &host.document().ast().result {
         entries.push(LogEntry {
             at: web_time::Instant::now(),
+            wall: chrono::Local::now(),
             level: LogLevel::Error,
             text: msg.clone(),
             model: model_tag.clone(),
@@ -234,6 +235,7 @@ pub fn refresh_diagnostics(
     if let Some(msg) = workbench.compilation_error.as_ref() {
         entries.push(LogEntry {
             at: web_time::Instant::now(),
+            wall: chrono::Local::now(),
             level: LogLevel::Error,
             text: msg.clone(),
             model: model_tag.clone(),
@@ -301,6 +303,7 @@ pub fn refresh_diagnostics(
                     };
                     LogEntry {
                         at: web_time::Instant::now(),
+                        wall: chrono::Local::now(),
                         level,
                         text: format!(
                             "{}:{}:{}  [{}] {}",

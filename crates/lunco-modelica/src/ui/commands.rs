@@ -1330,6 +1330,7 @@ fn on_compile_model(
     if let Some(diag) = diagnostics.as_mut() {
         diag.append(vec![crate::ui::panels::log::LogEntry {
             at: web_time::Instant::now(),
+            wall: chrono::Local::now(),
             level: crate::ui::panels::log::LogLevel::Info,
             text: format!("⏵ Compile started: '{model_name}'"),
             model: Some(model_name.clone()),

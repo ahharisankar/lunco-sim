@@ -66,6 +66,8 @@ impl ConsoleLevel {
 #[derive(Debug, Clone)]
 pub struct ConsoleMessage {
     pub at: Instant,
+    /// Wall-clock local time captured at emit. Rendered as HH:MM:SS.
+    pub wall: chrono::DateTime<chrono::Local>,
     pub level: ConsoleLevel,
     pub text: String,
 }
@@ -88,6 +90,7 @@ impl ConsoleLog {
         }
         self.messages.push_back(ConsoleMessage {
             at: now,
+            wall: chrono::Local::now(),
             level,
             text: text.into(),
         });
@@ -181,28 +184,17 @@ impl Panel for ConsolePanel {
                 );
             });
         } else {
-            egui::ScrollArea::vertical()
+            egui::ScrollArea::both()
                 .stick_to_bottom(true)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     // Monospaced, timestamp-prefixed rows — one per
                     // message. Keep render cost O(N) without any
                     // per-frame regex or parsing.
-                    let session_start = SESSION_START
-                        .get()
-                        .copied()
-                        .or_else(|| snapshot.first().map(|m| m.at));
                     for msg in &snapshot {
                         let color = msg.level.color(&theme);
-                        // Stable [+T.TTs] anchored at the first message
-                        // (or the SESSION_START captured at first push).
-                        // Captured at push time — does not tick while
-                        // the panel is open.
-                        let offset = session_start
-                            .and_then(|s| msg.at.checked_duration_since(s))
-                            .map(|d| d.as_secs_f32())
-                            .unwrap_or(0.0);
-                        let ts = format!("[+{offset:>6.2}s]");
+                        // Wall-clock local time captured at emit.
+                        let ts = msg.wall.format("[%H:%M:%S]").to_string();
                         ui.horizontal(|ui| {
                             ui.label(
                                 egui::RichText::new(&ts)

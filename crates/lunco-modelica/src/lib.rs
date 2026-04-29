@@ -237,6 +237,31 @@ impl ModelicaCompiler {
             );
             return true;
         }
+        if let Some(lunco_assets::msl::MslAssetSource::Filesystem(root)) =
+            lunco_assets::msl::global_msl_source()
+        {
+            let report = session.load_source_root_tolerant(
+                "msl",
+                rumoca_session::compile::SourceRootKind::DurableExternal,
+                root,
+                None,
+            );
+            log::info!(
+                "[ModelicaCompiler] preloaded MSL from `{}` in {:.2}s: \
+                 {} parsed / {} inserted (cache {:?}); diagnostics: {}",
+                root.display(),
+                t_total.elapsed().as_secs_f64(),
+                report.parsed_file_count,
+                report.inserted_file_count,
+                report.cache_status,
+                if report.diagnostics.is_empty() {
+                    "none".to_string()
+                } else {
+                    format!("{} lines", report.diagnostics.len())
+                },
+            );
+            return true;
+        }
         false
     }
 

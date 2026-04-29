@@ -58,6 +58,10 @@ impl LogLevel {
 #[derive(Debug, Clone)]
 pub struct LogEntry {
     pub at: Instant,
+    /// Wall-clock local time captured at emit. Rendered as HH:MM:SS in
+    /// the panel — users want "when did this happen" in calendar time,
+    /// not seconds-since-app-start.
+    pub wall: chrono::DateTime<chrono::Local>,
     pub level: LogLevel,
     pub text: String,
     /// Model this entry belongs to (display name — file stem or
@@ -114,35 +118,17 @@ pub fn render_log_view(
         return;
     }
 
-    egui::ScrollArea::vertical()
+    egui::ScrollArea::both()
         .stick_to_bottom(true)
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            // Fix a session-start instant the first time any log
-            // entry is rendered. `entry.at.elapsed()` was growing
-            // every frame (because it measures time-since-creation
-            // at render time, not at emit time), which made the
-            // whole column appear to tick forward like a
-            // stopwatch. Pinning to a session start gives us a
-            // stable "when did this happen" timestamp that doesn't
-            // move between redraws. Lazily initialised so the
-            // first entry anchors t=0 rather than some arbitrary
-            // app-boot moment.
-            use std::sync::OnceLock;
-            static SESSION_START: OnceLock<web_time::Instant> =
-                OnceLock::new();
-            let session_start = *SESSION_START
-                .get_or_init(|| entries.front().map(|e| e.at).unwrap_or_else(web_time::Instant::now));
             for entry in entries {
                 let color = entry.level.color(theme);
-                // Fixed offset from session start → same string
-                // every frame, regardless of how long ago the
-                // entry was emitted.
-                let offset = entry
-                    .at
-                    .saturating_duration_since(session_start)
-                    .as_secs_f32();
-                let ts = format!("[{:>6.2}s]", offset);
+                // Wall-clock local time captured at emit — calendar
+                // "when did this happen" rather than session-relative
+                // seconds. Stable across redraws because `entry.wall`
+                // is fixed at the moment of emission.
+                let ts = entry.wall.format("[%H:%M:%S]").to_string();
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(&ts)

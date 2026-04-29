@@ -73,7 +73,17 @@ impl Plugin for MslRemotePlugin {
             if let Some(root) = lunco_assets::msl_source_root_path() {
                 let count = count_mo_files(&root);
                 info!("[MSL] using on-disk root {} ({count} .mo files)", root.display());
-                app.insert_resource(MslAssetSource::Filesystem(root));
+                let source = MslAssetSource::Filesystem(root);
+                // Publish to the process-wide handle so
+                // `ModelicaCompiler::new()` preloads MSL into every
+                // freshly-built session. Without this the native
+                // workbench used to fall through to the env-gated
+                // `LUNCO_MODELICA_PRELOAD_MSL` path and silently start
+                // sessions with zero MSL classes — every model that
+                // touched `Modelica.Blocks.Interfaces.RealOutput` etc.
+                // failed to resolve.
+                lunco_assets::msl::install_global_msl_source(source.clone());
+                app.insert_resource(source);
                 app.insert_resource(MslLoadState::Ready {
                     file_count: count,
                     compressed_bytes: 0,
