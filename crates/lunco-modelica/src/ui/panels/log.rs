@@ -33,11 +33,15 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
-    pub fn color(self) -> egui::Color32 {
+    /// Theme-driven colour. Info reads as plain text; warn/error use
+    /// the semantic warn/error tokens so both Light and Dark stay
+    /// legible (the previous hardcoded RGB pinned light-grey Info on
+    /// a white background → invisible).
+    pub fn color(self, theme: &lunco_theme::Theme) -> egui::Color32 {
         match self {
-            Self::Info => egui::Color32::from_rgb(200, 200, 210),
-            Self::Warn => egui::Color32::from_rgb(230, 190, 100),
-            Self::Error => egui::Color32::from_rgb(230, 120, 110),
+            Self::Info => theme.tokens.text,
+            Self::Warn => theme.tokens.warning,
+            Self::Error => theme.tokens.error,
         }
     }
 
@@ -77,6 +81,7 @@ pub fn render_log_view(
     empty_hint: &str,
     clear_requested: &mut bool,
     muted: egui::Color32,
+    theme: &lunco_theme::Theme,
 ) {
     // Header row: count + Clear button.
     let count = entries.len();
@@ -129,7 +134,7 @@ pub fn render_log_view(
             let session_start = *SESSION_START
                 .get_or_init(|| entries.front().map(|e| e.at).unwrap_or_else(web_time::Instant::now));
             for entry in entries {
-                let color = entry.level.color();
+                let color = entry.level.color(theme);
                 // Fixed offset from session start → same string
                 // every frame, regardless of how long ago the
                 // entry was emitted.

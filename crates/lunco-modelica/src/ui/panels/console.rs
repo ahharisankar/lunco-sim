@@ -46,11 +46,11 @@ pub enum ConsoleLevel {
 }
 
 impl ConsoleLevel {
-    fn color(self) -> egui::Color32 {
+    fn color(self, theme: &lunco_theme::Theme) -> egui::Color32 {
         match self {
-            Self::Info => egui::Color32::from_rgb(200, 200, 210),
-            Self::Warn => egui::Color32::from_rgb(230, 190, 100),
-            Self::Error => egui::Color32::from_rgb(230, 120, 110),
+            Self::Info => theme.tokens.text,
+            Self::Warn => theme.tokens.warning,
+            Self::Error => theme.tokens.error,
         }
     }
 
@@ -134,10 +134,11 @@ impl Panel for ConsolePanel {
             world.insert_resource(ConsoleLog::default());
         }
 
-        let muted = world
+        let theme = world
             .get_resource::<lunco_theme::Theme>()
-            .map(|t| t.tokens.text_subdued)
-            .unwrap_or(egui::Color32::DARK_GRAY);
+            .cloned()
+            .unwrap_or_else(lunco_theme::Theme::dark);
+        let muted = theme.tokens.text_subdued;
 
         // Header row: message count + Clear button.
         let mut clear_requested = false;
@@ -192,7 +193,7 @@ impl Panel for ConsolePanel {
                         .copied()
                         .or_else(|| snapshot.first().map(|m| m.at));
                     for msg in &snapshot {
-                        let color = msg.level.color();
+                        let color = msg.level.color(&theme);
                         // Stable [+T.TTs] anchored at the first message
                         // (or the SESSION_START captured at first push).
                         // Captured at push time — does not tick while

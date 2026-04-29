@@ -33,6 +33,10 @@ impl Panel for GraphsPanel {
     fn default_slot(&self) -> PanelSlot { PanelSlot::Bottom }
 
     fn render(&mut self, ui: &mut egui::Ui, world: &mut World) {
+        let muted = world
+            .get_resource::<lunco_theme::Theme>()
+            .map(|t| t.tokens.text_subdued)
+            .unwrap_or(egui::Color32::DARK_GRAY);
         // Take a cheap snapshot of everything the toolbar needs so we
         // can also render the plot in the same frame without
         // re-borrowing resources.
@@ -92,7 +96,7 @@ impl Panel for GraphsPanel {
                 ui.label(
                     egui::RichText::new(format!("{sample_total} samples"))
                         .size(10.0)
-                        .color(egui::Color32::DARK_GRAY),
+                        .color(muted),
                 );
             }
 

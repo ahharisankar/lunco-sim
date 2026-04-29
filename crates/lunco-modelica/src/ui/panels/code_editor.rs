@@ -536,22 +536,76 @@ const BUILTIN_TYPES: &[&str] = &[
     "Real", "Integer", "Boolean", "String", "enum",
 ];
 
-fn keyword_color(word: &str) -> Option<egui::Color32> {
+/// Mode-aware syntax-highlight palette. Both rows hand-tuned for
+/// readable contrast on their respective surfaces (`mantle`/`base`
+/// in dark Mocha vs light Latte). `style.visuals.dark_mode` is the
+/// switch — set by `Visuals::dark()` / `Visuals::light()`, which
+/// `Theme::to_visuals` derives from.
+struct SyntaxPalette {
+    modifier: egui::Color32,    // parameter, input, output, constant…
+    structural: egui::Color32,  // model, equation, end, package…
+    control: egui::Color32,     // if, then, else, for, when…
+    operator: egui::Color32,    // and, or, not, der, time…
+    builtin_type: egui::Color32,// Real, Integer, Boolean, String…
+    comment: egui::Color32,
+    string: egui::Color32,
+    number: egui::Color32,
+    op: egui::Color32,          // punctuation: =, +, *, …
+    upper_ident: egui::Color32, // SomeType-style identifiers
+    ident: egui::Color32,
+    default: egui::Color32,
+}
+
+impl SyntaxPalette {
+    fn for_style(style: &egui::Style) -> Self {
+        if style.visuals.dark_mode {
+            Self {
+                modifier:     egui::Color32::from_rgb(240, 180, 80),
+                structural:   egui::Color32::from_rgb(255, 120, 120),
+                control:      egui::Color32::from_rgb(200, 150, 230),
+                operator:     egui::Color32::from_rgb(120, 200, 200),
+                builtin_type: egui::Color32::from_rgb(120, 200, 255),
+                comment:      egui::Color32::from_rgb(110, 150, 110),
+                string:       egui::Color32::from_rgb(200, 220, 140),
+                number:       egui::Color32::from_rgb(150, 200, 255),
+                op:           egui::Color32::from_rgb(230, 200, 120),
+                upper_ident:  egui::Color32::from_rgb(150, 200, 255),
+                ident:        egui::Color32::from_rgb(230, 230, 230),
+                default:      egui::Color32::from_rgb(180, 180, 180),
+            }
+        } else {
+            // Light: darker / more saturated variants of the same
+            // hues so contrast against `base`/`mantle` (≈ #eff1f5)
+            // stays readable. Roughly Latte-aligned.
+            Self {
+                modifier:     egui::Color32::from_rgb(150, 100, 0),
+                structural:   egui::Color32::from_rgb(170, 35, 35),
+                control:      egui::Color32::from_rgb(120, 60, 180),
+                operator:     egui::Color32::from_rgb(30, 120, 120),
+                builtin_type: egui::Color32::from_rgb(20, 90, 180),
+                comment:      egui::Color32::from_rgb(80, 130, 80),
+                string:       egui::Color32::from_rgb(110, 130, 30),
+                number:       egui::Color32::from_rgb(20, 90, 180),
+                op:           egui::Color32::from_rgb(150, 100, 20),
+                upper_ident:  egui::Color32::from_rgb(20, 90, 180),
+                ident:        egui::Color32::from_rgb(35, 35, 40),
+                default:      egui::Color32::from_rgb(80, 80, 90),
+            }
+        }
+    }
+}
+
+fn keyword_color(word: &str, p: &SyntaxPalette) -> Option<egui::Color32> {
     if MODIFIER_KEYWORDS.contains(&word) {
-        // Amber — declaration modifiers (parameter, input, output, …).
-        Some(egui::Color32::from_rgb(240, 180, 80))
+        Some(p.modifier)
     } else if STRUCTURAL_KEYWORDS.contains(&word) {
-        // Coral — class / section structure (model, equation, end, …).
-        Some(egui::Color32::from_rgb(255, 120, 120))
+        Some(p.structural)
     } else if CONTROL_KEYWORDS.contains(&word) {
-        // Violet — control flow (if/then/else, for, when, …).
-        Some(egui::Color32::from_rgb(200, 150, 230))
+        Some(p.control)
     } else if OPERATOR_KEYWORDS.contains(&word) {
-        // Teal — builtin operators / named ops (and, or, not, der, …).
-        Some(egui::Color32::from_rgb(120, 200, 200))
+        Some(p.operator)
     } else if BUILTIN_TYPES.contains(&word) {
-        // Cyan — primitive types (Real, Integer, Boolean, String).
-        Some(egui::Color32::from_rgb(120, 200, 255))
+        Some(p.builtin_type)
     } else {
         None
     }
@@ -561,13 +615,14 @@ pub fn modelica_layouter(style: &egui::Style, src: &str) -> egui::text::LayoutJo
     let mut job = egui::text::LayoutJob::default();
     let font_id = egui::TextStyle::Monospace.resolve(style);
 
-    let comment_color = egui::Color32::from_rgb(110, 150, 110);
-    let string_color = egui::Color32::from_rgb(200, 220, 140);
-    let number_color = egui::Color32::from_rgb(150, 200, 255);
-    let op_color = egui::Color32::from_rgb(230, 200, 120);
-    let upper_ident_color = egui::Color32::from_rgb(150, 200, 255);
-    let ident_color = egui::Color32::from_rgb(230, 230, 230);
-    let default_color = egui::Color32::from_rgb(180, 180, 180);
+    let palette = SyntaxPalette::for_style(style);
+    let comment_color = palette.comment;
+    let string_color = palette.string;
+    let number_color = palette.number;
+    let op_color = palette.op;
+    let upper_ident_color = palette.upper_ident;
+    let ident_color = palette.ident;
+    let default_color = palette.default;
 
     let mut push = |job: &mut egui::text::LayoutJob, text: &str, color: egui::Color32| {
         job.append(text, 0.0, egui::TextFormat {
@@ -622,7 +677,7 @@ pub fn modelica_layouter(style: &egui::Style, src: &str) -> egui::text::LayoutJo
                 .unwrap_or(remaining.len());
             let word = &remaining[..word_end];
 
-            let color = keyword_color(word).unwrap_or_else(|| {
+            let color = keyword_color(word, &palette).unwrap_or_else(|| {
                 if word.chars().next().map_or(false, |c| c.is_uppercase()) {
                     upper_ident_color
                 } else {

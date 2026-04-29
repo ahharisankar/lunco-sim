@@ -49,6 +49,10 @@ impl Panel for InspectorPanel {
     }
 
     fn render(&mut self, ui: &mut egui::Ui, world: &mut World) {
+        let warning = world
+            .get_resource::<lunco_theme::Theme>()
+            .map(|t| t.tokens.warning)
+            .unwrap_or(egui::Color32::from_rgb(180, 150, 90));
         // ── Resolve target doc ───────────────────────────────────
         let active_doc = world
             .get_resource::<lunco_workbench::WorkspaceResource>()
@@ -173,7 +177,7 @@ impl Panel for InspectorPanel {
                     "🔒 Read-only library tab — duplicate to workspace to edit.",
                 )
                 .italics()
-                .color(egui::Color32::from_rgb(180, 150, 90)),
+                .color(warning),
             );
         }
         ui.separator();

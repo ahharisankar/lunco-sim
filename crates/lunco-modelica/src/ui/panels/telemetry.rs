@@ -64,6 +64,10 @@ impl Panel for TelemetryPanel {
     fn render(&mut self, ui: &mut egui::Ui, world: &mut World) {
         // Fix selection leakage
         ui.style_mut().interaction.selectable_labels = false;
+        let muted = world
+            .get_resource::<lunco_theme::Theme>()
+            .map(|t| t.tokens.text_subdued)
+            .unwrap_or(egui::Color32::from_rgb(140, 140, 160));
 
         // Resolve the entity to display: explicit pin (`selected_entity`)
         // wins so the future "Pin to a specific model" UX stays
@@ -340,7 +344,7 @@ impl Panel for TelemetryPanel {
                         ui.label(
                             egui::RichText::new(desc.trim())
                                 .italics()
-                                .color(egui::Color32::from_rgb(140, 140, 160))
+                                .color(muted)
                                 .size(11.0),
                         )
                         .on_hover_text(desc);
