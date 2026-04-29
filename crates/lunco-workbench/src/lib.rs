@@ -242,6 +242,12 @@ pub struct WorkbenchLayout {
 
     pub(crate) status: Option<StatusContent>,
 
+    /// Local toggle tracking maximize state. Bevy's `Window` has
+    /// `set_maximized(bool)` but no symmetric reader, so we mirror the
+    /// last-requested state here. Used by the title-bar double-click
+    /// handler and the maximize button to decide which way to flip.
+    pub(crate) window_maximized: bool,
+
     /// App-wide Settings menu contributions. Domain plugins push a
     /// closure via [`WorkbenchLayout::register_settings`] at Startup;
     /// the closure is invoked each time the user opens the Settings
@@ -301,6 +307,7 @@ impl Default for WorkbenchLayout {
             right_inspector: Vec::new(),
             bottom: Vec::new(),
             status: None,
+            window_maximized: false,
             settings_menu: Vec::new(),
             dock: DockState::new(Vec::new()),
         }
@@ -898,9 +905,76 @@ fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut 
     }
 
     // ── Menu bar ────────────────────────────────────────────────────
-    egui::TopBottomPanel::top("lunco_workbench_menu_bar").show(ctx, |ui| {
+    // Doubles as the OS title bar (window chrome is disabled in the
+    // binary's `Window` setup — see `modelica_workbench.rs`). Bare
+    // areas of the row drag the window; double-click toggles maximize;
+    // window control buttons (─ ▢ ✕) sit on the far right on
+    // Linux/Windows. macOS keeps native traffic lights — we just inset
+    // the menu past them.
+    egui::TopBottomPanel::top("lunco_workbench_menu_bar")
+        // Match the dock tab-bar height so the merged title-bar
+        // doesn't read as a thin sliver above thicker rows below.
+        // 30px is roughly egui_dock's default tab strip height with
+        // our font scale.
+        .exact_height(30.0)
+        .show(ctx, |ui| {
         ui.style_mut().visuals = theme.to_visuals();
-        ui.horizontal(|ui| {
+
+        // Drag region must be registered BEFORE the menu buttons so
+        // egui's last-wins hit-testing lets buttons capture clicks
+        // over their own area while bare gaps drag the OS window.
+        let drag_resp = ui.interact(
+            ui.max_rect(),
+            ui.id().with("titlebar_drag"),
+            egui::Sense::click_and_drag(),
+        );
+        if drag_resp.drag_started() {
+            if let Ok(mut w) = world
+                .query_filtered::<&mut bevy::window::Window, bevy::prelude::With<bevy::window::PrimaryWindow>>()
+                .single_mut(world)
+            {
+                w.start_drag_move();
+            }
+        }
+        if drag_resp.double_clicked() {
+            layout.window_maximized = !layout.window_maximized;
+            if let Ok(mut w) = world
+                .query_filtered::<&mut bevy::window::Window, bevy::prelude::With<bevy::window::PrimaryWindow>>()
+                .single_mut(world)
+            {
+                w.set_maximized(layout.window_maximized);
+            }
+        }
+
+        // Window title — painted centered behind the menu/control rows
+        // (purely visual, doesn't intercept clicks). Read straight off
+        // the primary Bevy window so the binary stays the source of
+        // truth for what the bar advertises (e.g. listening port).
+        let title = world
+            .query_filtered::<&bevy::window::Window, bevy::prelude::With<bevy::window::PrimaryWindow>>()
+            .single(world)
+            .ok()
+            .map(|w| w.title.clone())
+            .unwrap_or_default();
+        if !title.is_empty() {
+            ui.painter().text(
+                ui.max_rect().center(),
+                egui::Align2::CENTER_CENTER,
+                &title,
+                egui::FontId::proportional(12.0),
+                theme.tokens.text_subdued,
+            );
+        }
+
+        // `ui.horizontal` defaults to top-aligned cross-axis; with the
+        // menu bar bumped to 30px the buttons would stick to the top
+        // edge. Explicit `Align::Center` keeps them vertically centred
+        // in the bar.
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            // macOS: leave room for the native traffic lights that
+            // float over our content because of `fullsize_content_view`.
+            #[cfg(target_os = "macos")]
+            ui.add_space(78.0);
             ui.menu_button("File", |ui| {
                 // Active doc gates Save / Save As / Close — there's
                 // nothing to save when no document is focused.
@@ -1180,6 +1254,43 @@ fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut 
             // Perspective tabs live in the menu bar (right-aligned).
             // No separate transport bar — saves a row of vertical space.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Window controls — far right on Linux/Windows where
+                // the OS chrome is gone. macOS keeps the native traffic
+                // lights, so we don't draw our own.
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let close = ui.small_button("✕").on_hover_text("Close");
+                    if close.clicked() {
+                        if let Some(mut messages) = world
+                            .get_resource_mut::<bevy::ecs::message::Messages<bevy::app::AppExit>>()
+                        {
+                            messages.write(bevy::app::AppExit::Success);
+                        }
+                    }
+                    let max_label = if layout.window_maximized { "🗗" } else { "🗖" };
+                    let max = ui.small_button(max_label).on_hover_text(
+                        if layout.window_maximized { "Restore" } else { "Maximize" },
+                    );
+                    if max.clicked() {
+                        layout.window_maximized = !layout.window_maximized;
+                        if let Ok(mut w) = world
+                            .query_filtered::<&mut bevy::window::Window, bevy::prelude::With<bevy::window::PrimaryWindow>>()
+                            .single_mut(world)
+                        {
+                            w.set_maximized(layout.window_maximized);
+                        }
+                    }
+                    let min = ui.small_button("─").on_hover_text("Minimize");
+                    if min.clicked() {
+                        if let Ok(mut w) = world
+                            .query_filtered::<&mut bevy::window::Window, bevy::prelude::With<bevy::window::PrimaryWindow>>()
+                            .single_mut(world)
+                        {
+                            w.set_minimized(true);
+                        }
+                    }
+                    ui.separator();
+                }
                 let active = layout.active_perspective;
                 let tabs: Vec<(PerspectiveId, String, bool)> = layout
                     .perspectives

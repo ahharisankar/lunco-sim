@@ -68,11 +68,24 @@ fn main() {
     };
 
     let mut app = App::new();
+    // Custom title bar: hide OS chrome (Linux/Windows) or merge with
+    // content (macOS) so the egui menu bar doubles as the title bar —
+    // same idea as Antigravity / VS Code's CSD. Drag + min/max/close
+    // are wired up in `lunco-workbench`'s menu bar renderer.
+    let primary_window = Window {
+        title: window_title,
+        #[cfg(not(target_os = "macos"))]
+        decorations: false,
+        #[cfg(target_os = "macos")]
+        titlebar_transparent: true,
+        #[cfg(target_os = "macos")]
+        titlebar_show_title: false,
+        #[cfg(target_os = "macos")]
+        fullsize_content_view: true,
+        ..default()
+    };
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: window_title,
-                ..default()
-            }),
+            primary_window: Some(primary_window),
             ..default()
         }))
         .add_plugins(EguiPlugin::default())
