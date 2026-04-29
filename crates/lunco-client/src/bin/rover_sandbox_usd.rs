@@ -110,11 +110,10 @@ fn main() {
             })
             .set(WindowPlugin {
                 primary_window: Some(Window {
-                    title: window_title,
                     resolution: bevy::window::WindowResolution::new(1600, 1000),
                     position: WindowPosition::Centered(MonitorSelection::Primary),
                     present_mode,
-                    ..default()
+                    ..lunco_workbench::merged_titlebar_window(window_title)
                 }),
                 ..default()
             })

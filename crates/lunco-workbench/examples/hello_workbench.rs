@@ -20,9 +20,8 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "hello_workbench — lunco-workbench v0.1".into(),
                 resolution: bevy::window::WindowResolution::new(1280, 800),
-                ..default()
+                ..lunco_workbench::merged_titlebar_window("hello_workbench — lunco-workbench v0.1")
             }),
             ..default()
         }))

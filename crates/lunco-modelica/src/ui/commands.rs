@@ -2319,38 +2319,6 @@ fn on_set_zoom(trigger: On<SetZoom>, mut commands: Commands) {
     });
 }
 
-/// Maximize the primary OS window. Useful for automation when the
-/// app launches at a small default size and labels become too small
-/// to read at fit-zoom — sending this once at session start makes
-/// subsequent screenshots usable without manual intervention.
-#[Command(default)]
-pub struct MaximizeWindow {}
-
-#[on_command(MaximizeWindow)]
-fn on_maximize_window(
-    _trigger: On<MaximizeWindow>,
-    mut q_window: Query<&mut bevy::window::Window, With<bevy::window::PrimaryWindow>>,
-    primary_monitor: Query<&bevy::window::Monitor, With<bevy::window::PrimaryMonitor>>,
-    any_monitor: Query<&bevy::window::Monitor>,
-) {
-    if let Ok(mut window) = q_window.single_mut() {
-        // The standard winit/Bevy way: ask the WM to maximize. Some
-        // Linux compositors (sway, i3, several tiling WMs) ignore the
-        // request. The fallback below resizes to the primary monitor
-        // — same end-result on uncooperative WMs without hardcoding.
-        window.set_maximized(true);
-        let monitor = primary_monitor.single().ok().or_else(|| any_monitor.iter().next());
-        if let Some(monitor) = monitor {
-            let scale = monitor.scale_factor as f32;
-            window.resolution.set(
-                monitor.physical_width as f32 / scale,
-                monitor.physical_height as f32 / scale,
-            );
-            window.position = bevy::window::WindowPosition::At(bevy::math::IVec2::ZERO);
-        }
-    }
-}
-
 #[on_command(FitCanvas)]
 fn on_fit_canvas(trigger: On<FitCanvas>, mut commands: Commands) {
     let raw = trigger.event().doc;

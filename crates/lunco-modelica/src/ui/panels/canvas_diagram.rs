@@ -4079,17 +4079,25 @@ impl CanvasDiagramPanel {
         let mut suppress_menu = tab_read_only;
 
         if tab_read_only {
-            // Belt-and-braces: if egui has a popup cached from a
-            // previous (editable) tab, close it so switching tabs
-            // doesn't leave an orphan menu around. Cheap no-op when
-            // nothing is open.
-            if popup_was_open_before {
+            // Stale-menu cleanup when switching to a read-only tab —
+            // only fire if WE actually have a cached context menu for
+            // this tab. `popup_was_open_before` alone is too broad:
+            // egui's any_popup_open() flag also covers the workbench
+            // Settings/Help dropdowns, and `close_all_popups` would
+            // dismiss those every frame, making them un-clickable
+            // whenever a read-only canvas tab is in front.
+            let our_menu_cached = world
+                .resource::<CanvasDiagramState>()
+                .get(active_doc)
+                .context_menu
+                .is_some();
+            if our_menu_cached {
                 ui.ctx().memory_mut(|m| m.close_all_popups());
+                world
+                    .resource_mut::<CanvasDiagramState>()
+                    .get_mut(active_doc)
+                    .context_menu = None;
             }
-            world
-                .resource_mut::<CanvasDiagramState>()
-                .get_mut(active_doc)
-                .context_menu = None;
         }
 
         if !tab_read_only && response.secondary_clicked() {

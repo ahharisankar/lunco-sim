@@ -61,6 +61,9 @@ pub mod status_bus;
 pub mod theme_command;
 pub mod twin_browser;
 pub mod uri;
+pub mod window_command;
+
+pub use window_command::{merged_titlebar_window, MaximizeWindow, MinimizeWindow, CloseWindow, WindowMaximized};
 
 pub use panel::{InstancePanel, Panel, PanelId, PanelSlot, TabId};
 pub use files_panel::{FilesPanel, FILES_PANEL_ID};
@@ -158,6 +161,9 @@ impl Plugin for WorkbenchPlugin {
         if !app.is_plugin_added::<theme_command::ThemeCommandPlugin>() {
             app.add_plugins(theme_command::ThemeCommandPlugin);
         }
+        if !app.is_plugin_added::<window_command::WindowCommandPlugin>() {
+            app.add_plugins(window_command::WindowCommandPlugin);
+        }
         // Plugin-driven registry of `DocumentKind`s. Domain crates
         // (modelica, future julia/usd/sysml/...) register their kinds
         // here; consumers iterate the registry rather than matching
@@ -242,12 +248,6 @@ pub struct WorkbenchLayout {
 
     pub(crate) status: Option<StatusContent>,
 
-    /// Local toggle tracking maximize state. Bevy's `Window` has
-    /// `set_maximized(bool)` but no symmetric reader, so we mirror the
-    /// last-requested state here. Used by the title-bar double-click
-    /// handler and the maximize button to decide which way to flip.
-    pub(crate) window_maximized: bool,
-
     /// App-wide Settings menu contributions. Domain plugins push a
     /// closure via [`WorkbenchLayout::register_settings`] at Startup;
     /// the closure is invoked each time the user opens the Settings
@@ -307,7 +307,6 @@ impl Default for WorkbenchLayout {
             right_inspector: Vec::new(),
             bottom: Vec::new(),
             status: None,
-            window_maximized: false,
             settings_menu: Vec::new(),
             dock: DockState::new(Vec::new()),
         }
@@ -887,6 +886,57 @@ impl<'a> TabViewer for PanelTabViewer<'a> {
 }
 
 fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut World, theme: &lunco_theme::Theme) {
+    // ── Edge resize (custom-decorations only) ───────────────────────
+    // Bevy's `decorations: false` strips the WM resize handles too, so
+    // we re-implement them: when the pointer hovers an N-pixel border,
+    // swap the cursor to the right resize icon and forward press to
+    // winit's `start_drag_resize`. Skipped on macOS, where the OS
+    // titlebar still owns the window frame.
+    #[cfg(not(target_os = "macos"))]
+    {
+        const RESIZE_BORDER: f32 = 6.0;
+        let screen = ctx.screen_rect();
+        let pointer = ctx.input(|i| i.pointer.hover_pos());
+        if let Some(p) = pointer {
+            let dx = if p.x < screen.left() + RESIZE_BORDER { -1 }
+                else if p.x > screen.right() - RESIZE_BORDER { 1 } else { 0 };
+            let dy = if p.y < screen.top() + RESIZE_BORDER { -1 }
+                else if p.y > screen.bottom() - RESIZE_BORDER { 1 } else { 0 };
+            use bevy::math::CompassOctant;
+            let dir = match (dx, dy) {
+                (-1, -1) => Some(CompassOctant::NorthWest),
+                ( 0, -1) => Some(CompassOctant::North),
+                ( 1, -1) => Some(CompassOctant::NorthEast),
+                ( 1,  0) => Some(CompassOctant::East),
+                ( 1,  1) => Some(CompassOctant::SouthEast),
+                ( 0,  1) => Some(CompassOctant::South),
+                (-1,  1) => Some(CompassOctant::SouthWest),
+                (-1,  0) => Some(CompassOctant::West),
+                _ => None,
+            };
+            if let Some(dir) = dir {
+                ctx.set_cursor_icon(match dir {
+                    CompassOctant::North => egui::CursorIcon::ResizeNorth,
+                    CompassOctant::South => egui::CursorIcon::ResizeSouth,
+                    CompassOctant::East => egui::CursorIcon::ResizeEast,
+                    CompassOctant::West => egui::CursorIcon::ResizeWest,
+                    CompassOctant::NorthEast => egui::CursorIcon::ResizeNorthEast,
+                    CompassOctant::NorthWest => egui::CursorIcon::ResizeNorthWest,
+                    CompassOctant::SouthEast => egui::CursorIcon::ResizeSouthEast,
+                    CompassOctant::SouthWest => egui::CursorIcon::ResizeSouthWest,
+                });
+                if ctx.input(|i| i.pointer.primary_pressed()) {
+                    if let Ok(mut w) = world
+                        .query_filtered::<&mut bevy::window::Window, bevy::prelude::With<bevy::window::PrimaryWindow>>()
+                        .single_mut(world)
+                    {
+                        w.start_drag_resize(dir);
+                    }
+                }
+            }
+        }
+    }
+
     // ── Opaque-mode backdrop (must run first) ───────────────────────
     // In apps where every panel is opaque (no 3D viewport showing
     // through), paint `get_panel_backdrop(theme)` on the background layer BEFORE
@@ -929,6 +979,11 @@ fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut 
             egui::Sense::click_and_drag(),
         );
         if drag_resp.drag_started() {
+            // start_drag_move() must be called on the live Window
+            // component synchronously with the press event — routing
+            // through a command would defer it past the press and
+            // winit would refuse the drag. Direct mutation is the
+            // right call here.
             if let Ok(mut w) = world
                 .query_filtered::<&mut bevy::window::Window, bevy::prelude::With<bevy::window::PrimaryWindow>>()
                 .single_mut(world)
@@ -937,13 +992,7 @@ fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut 
             }
         }
         if drag_resp.double_clicked() {
-            layout.window_maximized = !layout.window_maximized;
-            if let Ok(mut w) = world
-                .query_filtered::<&mut bevy::window::Window, bevy::prelude::With<bevy::window::PrimaryWindow>>()
-                .single_mut(world)
-            {
-                w.set_maximized(layout.window_maximized);
-            }
+            world.trigger(window_command::MaximizeWindow { maximized: None });
         }
 
         // Window title — painted centered behind the menu/control rows
@@ -1259,35 +1308,20 @@ fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut 
                 // lights, so we don't draw our own.
                 #[cfg(not(target_os = "macos"))]
                 {
-                    let close = ui.small_button("✕").on_hover_text("Close");
-                    if close.clicked() {
-                        if let Some(mut messages) = world
-                            .get_resource_mut::<bevy::ecs::message::Messages<bevy::app::AppExit>>()
-                        {
-                            messages.write(bevy::app::AppExit::Success);
-                        }
+                    let is_max = world
+                        .get_resource::<window_command::WindowMaximized>()
+                        .map(|s| s.0)
+                        .unwrap_or(false);
+                    if ui.small_button("✕").on_hover_text("Close").clicked() {
+                        world.trigger(window_command::CloseWindow {});
                     }
-                    let max_label = if layout.window_maximized { "🗗" } else { "🗖" };
-                    let max = ui.small_button(max_label).on_hover_text(
-                        if layout.window_maximized { "Restore" } else { "Maximize" },
-                    );
-                    if max.clicked() {
-                        layout.window_maximized = !layout.window_maximized;
-                        if let Ok(mut w) = world
-                            .query_filtered::<&mut bevy::window::Window, bevy::prelude::With<bevy::window::PrimaryWindow>>()
-                            .single_mut(world)
-                        {
-                            w.set_maximized(layout.window_maximized);
-                        }
+                    let max_label = if is_max { "🗗" } else { "🗖" };
+                    let max_hover = if is_max { "Restore" } else { "Maximize" };
+                    if ui.small_button(max_label).on_hover_text(max_hover).clicked() {
+                        world.trigger(window_command::MaximizeWindow { maximized: None });
                     }
-                    let min = ui.small_button("─").on_hover_text("Minimize");
-                    if min.clicked() {
-                        if let Ok(mut w) = world
-                            .query_filtered::<&mut bevy::window::Window, bevy::prelude::With<bevy::window::PrimaryWindow>>()
-                            .single_mut(world)
-                        {
-                            w.set_minimized(true);
-                        }
+                    if ui.small_button("─").on_hover_text("Minimize").clicked() {
+                        world.trigger(window_command::MinimizeWindow {});
                     }
                     ui.separator();
                 }

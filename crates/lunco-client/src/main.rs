@@ -44,7 +44,10 @@ fn main() {
             "cached_textures",
             AssetSourceBuilder::platform_default(&textures_dir().to_string_lossy(), None),
         )
-        .add_plugins(DefaultPlugins.build().disable::<TransformPlugin>())
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(lunco_workbench::merged_titlebar_window("LunCo")),
+            ..default()
+        }).build().disable::<TransformPlugin>())
         .add_plugins(big_space::prelude::BigSpaceDefaultPlugins.build().disable::<big_space::validation::BigSpaceValidationPlugin>())
         .add_plugins(lunco_core::LunCoCorePlugin)
         .insert_resource(lunco_core::DragModeActive { active: false })
