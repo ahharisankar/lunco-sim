@@ -1720,6 +1720,7 @@ fn instantiate_on_active_canvas(
             y: 0.0,
             width: 20.0,
             height: 20.0,
+            animation_ms: 0,
         });
     #[cfg(not(feature = "lunco-api"))]
     {

@@ -552,6 +552,29 @@ impl Plugin for ModelicaUiPlugin {
             .init_resource::<panels::diagnostics::DiagnosticsLog>()
             .init_resource::<panels::journal::JournalLog>()
             .add_systems(Update, panels::journal::poll_changes)
+            // Canvas animation: API-driven AddComponent calls queue a
+            // pending camera focus; this system applies it via
+            // `viewport.set_target` (which auto-eases) once the new
+            // node has landed in the projected scene. See
+            // `docs/architecture/20-domain-modelica.md` § 9c.
+            .init_resource::<panels::canvas_diagram::PendingApiFocusQueue>()
+            .init_resource::<panels::canvas_diagram::PendingApiConnectionQueue>()
+            .init_resource::<panels::canvas_diagram::CinematicCamera>()
+            .add_systems(
+                Update,
+                (
+                    panels::canvas_diagram::drive_pending_api_focus,
+                    // Tick must run AFTER the focus driver so a move
+                    // queued this frame gets sampled the same frame
+                    // it's planned (saves one frame of "stuck" feel).
+                    panels::canvas_diagram::tick_cinematic_camera,
+                    // Connections fire alongside node adds and use
+                    // the same `EdgePulseLayer` to flash; ordering
+                    // doesn't matter relative to the camera tick.
+                    panels::canvas_diagram::drive_pending_api_connections,
+                )
+                    .chain(),
+            )
             // Forward StatusBus events to the Console panel so the
             // user has a chronological audit trail of every status
             // event from every subsystem (MSL, compile, sim, …).
