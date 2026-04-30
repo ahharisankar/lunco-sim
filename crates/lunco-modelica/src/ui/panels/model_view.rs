@@ -381,6 +381,16 @@ pub(crate) fn sync_active_tab_to_doc(world: &mut World, doc: DocumentId) {
         .get_resource::<lunco_workbench::WorkspaceResource>()
         .and_then(|ws| ws.active_document)
         == Some(doc);
+    let cached_source_len = world
+        .resource::<WorkbenchState>()
+        .open_model
+        .as_ref()
+        .map(|o| o.source.len());
+    let live_source_len = world
+        .resource::<ModelicaDocumentRegistry>()
+        .host(doc)
+        .map(|h| h.document().source().len());
+    let source_matches = cached_source_len == live_source_len;
     let (already_active, source_is_placeholder) = {
         let ws = world.resource::<WorkbenchState>();
         match ws.open_model.as_ref() {
@@ -388,7 +398,7 @@ pub(crate) fn sync_active_tab_to_doc(world: &mut World, doc: DocumentId) {
             None => (false, false),
         }
     };
-    if already_active && !source_is_placeholder {
+    if already_active && !source_is_placeholder && source_matches {
         // Still refresh selected_entity in case an entity linked to
         // this doc was spawned since the last switch.
         refresh_selected_entity_for(world, doc);
