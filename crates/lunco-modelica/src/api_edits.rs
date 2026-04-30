@@ -203,26 +203,25 @@ fn on_rename_modelica_class(
         let mut registry = world.resource_mut::<ModelicaDocumentRegistry>();
         registry.checkpoint_source(doc, new_source);
 
-        let mut updated_origin = false;
         if let Some(host) = registry.host_mut(doc) {
             let doc_obj = host.document_mut();
             if doc_obj.origin().is_untitled() {
                 doc_obj.set_origin(lunco_doc::DocumentOrigin::untitled(ev.new_name.clone()));
-                updated_origin = true;
             }
             doc_obj.waive_ast_debounce();
         }
-        // Mirror the renamed Untitled origin into WorkspaceResource so
-        // the tab title + Files browser pick up the new name. The doc
-        // and the workspace entry hold separate origin/title caches —
-        // keep them in lock-step or the tab still says `Untitled1`.
-        if updated_origin {
-            let mut ws = world.resource_mut::<lunco_workbench::WorkspaceResource>();
-            if let Some(entry) = ws.document_mut(doc) {
-                entry.origin = lunco_doc::DocumentOrigin::untitled(ev.new_name.clone());
-                entry.title = ev.new_name.clone();
-            }
-        }
+        // The `derive_doc_title` system in `ui::mod` picks up the new
+        // class name on the next frame and updates
+        // `WorkspaceResource.DocumentEntry.title` (+ origin for Untitled
+        // docs) — no manual workspace write here. See
+        // `docs/architecture/20-domain-modelica.md` § 7a.
+        //
+        // TODO(modelica.naming.rename_class_renames_file): when the doc
+        // is File-backed, this command should also rename the `.mo`
+        // file according to the user setting (Always | Ask | Never).
+        // The setting lives in a `ModelicaNamingSettings` section
+        // (`lunco-settings`) — not yet wired. For now, File-backed
+        // docs keep their old path; user must Save-As to align them.
         bevy::log::info!(
             "[RenameModelicaClass] doc={} {} → {}",
             doc.raw(),

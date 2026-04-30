@@ -290,6 +290,71 @@ fn sync_workspace_on_doc_saved(
     }
 }
 
+/// Derive `WorkspaceResource.DocumentEntry.title` from the AST's
+/// first top-level class name. Modelica's class-first identity model
+/// (Dymola / OMEdit) means the tab label should follow the class, not
+/// the original Untitled-N or filename — see
+/// `docs/architecture/20-domain-modelica.md` § 7a.
+///
+/// Fallback ladder: AST first-class name → `origin.display_name()`
+/// (file stem or `Untitled-N`).
+///
+/// Untitled docs also get their `origin.name` rewritten to match the
+/// class name, so subsequent Save-As prompts default to
+/// `<class>.mo` and the Files browser groups consistently.
+///
+/// TODO(modelica.naming.tab_title_source) — make the choice between
+/// "ClassName" (current behaviour) vs "FileName" (VS Code) settings-
+/// driven. Today the rule is hardcoded to ClassName.
+///
+/// TODO(ui.italic_for_unsaved) — italic styling on the tab label is
+/// the renderer's job (lunco-workbench tab widget); not implemented
+/// yet. Dirty-dot `●` likewise.
+///
+/// TODO(multi-class breadcrumb) — for `package P; model A; model B; end P;`
+/// docs, this currently shows `P` (the first top-level class). Once
+/// drilled-in tracking is per-doc-tab (it's per-canvas today), the
+/// derived title should become `P.<drilled>` to match Dymola.
+fn derive_doc_title(
+    registry: Res<ModelicaDocumentRegistry>,
+    mut ws: ResMut<lunco_workbench::WorkspaceResource>,
+) {
+    // Cheap when nothing changed: each iteration is a HashMap lookup +
+    // a string compare, write only on diff. No per-doc generation
+    // tracking yet — add one if profiling shows this in a hot frame.
+    for (doc_id, host) in registry.docs() {
+        let document = host.document();
+        let derived = derive_title_from_doc(document);
+        let Some(entry) = ws.document_mut(doc_id) else {
+            continue;
+        };
+        if entry.title != derived {
+            entry.title = derived.clone();
+        }
+        // For Untitled docs, also keep the origin in sync so Save-As
+        // suggestions and other origin-readers see the new identity.
+        if let lunco_doc::DocumentOrigin::Untitled { name } = &entry.origin {
+            if name.as_str() != derived.as_str() {
+                entry.origin = lunco_doc::DocumentOrigin::untitled(derived);
+            }
+        }
+    }
+}
+
+/// Pure helper: read the first AST class name out of a Modelica doc,
+/// fall back to the origin's display name. Kept separate so future
+/// drilled-in / multi-class logic plugs in without re-deriving the
+/// fallback chain.
+fn derive_title_from_doc(doc: &crate::document::ModelicaDocument) -> String {
+    let syntax = doc.syntax();
+    if let Some((name, _)) = syntax.ast().classes.iter().next() {
+        if !name.is_empty() {
+            return name.clone();
+        }
+    }
+    doc.origin().display_name()
+}
+
 /// React to a Twin being added (Open Folder / Open Twin / promotion)
 /// by spawning a background scan task that builds the package-browser
 /// tree for that Twin's `.mo` content.
@@ -515,6 +580,7 @@ impl Plugin for ModelicaUiPlugin {
             // canvas (which reads the registry) but leave the text
             // editor stuck on the old source.
             .add_observer(mirror_open_model_on_doc_changed)
+            .add_systems(Update, derive_doc_title)
             // Twin-panel: keep the loaded-classes list in sync with
             // the document registry. One `WorkspaceClass` per
             // writable / Untitled Modelica doc, dropped on close.
@@ -609,8 +675,8 @@ impl Plugin for ModelicaUiPlugin {
         )));
         loaded.register(Box::new(loaded_classes::SystemLibraryClass::new(
             "bundled_root",
-            "Bundled Examples",
-            true,
+            "LunCo Examples",
+            false,
         )));
     }
 }

@@ -1380,24 +1380,20 @@ fn on_create_new_scratch_model(
         n += 1;
     };
 
-    // OMEdit's "secret weapon": auto-insert a default Icon
-    // annotation so a fresh class isn't a blank rectangle on the
-    // canvas. Mirrors what OMEdit's "File → New Modelica Class"
-    // wizard adds — a blue outlined rectangle plus a `%name`
-    // label above. The user can edit the icon graphics later;
-    // until then the class renders through the same path as MSL
-    // components (no special "user class" branch in the renderer).
-    let source = format!(
-        "model {name}\n\
-         \n\
-         annotation(Icon(coordinateSystem(extent={{{{-100,-100}},{{100,100}}}}),\n\
-        \x20   graphics={{\n\
-        \x20       Rectangle(extent={{{{-100,-100}},{{100,100}}}}, lineColor={{0,0,255}}),\n\
-        \x20       Text(extent={{{{-150,150}},{{150,110}}}},\n\
-        \x20            textString=\"%name\",\n\
-        \x20            textColor={{0,0,255}})}}));\n\
-         end {name};\n"
-    );
+    // Minimal parse-clean template. We previously emitted a default
+    // `annotation(Icon(...));` (OMEdit-style) so a fresh class showed
+    // a coloured rectangle on the canvas — but a *trailing* class-level
+    // annotation poisons the pretty-printer's insertion point: every
+    // subsequent `AddComponent` lands AFTER the annotation, which
+    // violates the Modelica grammar (annotation must be the last
+    // element in a class) and the strict parser then rejects the
+    // whole document.
+    //
+    // TODO(scratch-icon): re-introduce the default Icon annotation by
+    // wiring `SetClassAnnotation` (not yet implemented) so the icon
+    // can be added through the same insertion machinery that respects
+    // ordering, instead of being baked into the template text.
+    let source = format!("model {name}\nend {name};\n");
     let mem_id = format!("mem://{name}");
     let doc_id = registry.allocate_with_origin(
         source.clone(),
