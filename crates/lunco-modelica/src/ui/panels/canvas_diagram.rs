@@ -1,8 +1,7 @@
 //! Modelica diagram, rendered via `lunco-canvas`.
 //!
-//! A parallel path to the egui-snarl-backed `diagram.rs`, kept
-//! alongside until the canvas version covers every snarl feature
-//! we actually use. Users see both as tabs and can compare.
+//! Sole diagram path. The previous egui-snarl-backed `diagram.rs`
+//! has been removed — `lunco-canvas` covers every feature we use.
 //!
 //! # Pipeline
 //!
@@ -6039,8 +6038,8 @@ fn open_drill_in_tab(
 // ─── Doc-op translation ─────────────────────────────────────────────
 
 /// Resolve `(document id, editing class name)` for the current tab.
-/// Mirrors the snarl panel's logic so both panels target the same
-/// class when `open_model` is bound.
+/// Used by the canvas + neighbours so they target the same class when
+/// `open_model` is bound.
 fn resolve_doc_context(world: &World) -> (Option<lunco_doc::DocumentId>, Option<String>) {
     // Active doc from the Workspace session; `open_model.detected_name`
     // is read as a display-cache fallback when the registry AST hasn't
@@ -6507,8 +6506,7 @@ fn apply_ops(world: &mut World, doc_id: lunco_doc::DocumentId, ops: Vec<Modelica
     // so every other panel (code editor, breadcrumb, inspector)
     // that reads the cached source sees the update immediately —
     // the code editor doesn't watch the registry directly; it
-    // reads the `Arc<str>` on `open_model`. Matches the snarl
-    // panel's write-back path.
+    // reads the `Arc<str>` on `open_model`.
     let fresh = world
         .get_resource::<ModelicaDocumentRegistry>()
         .and_then(|r| r.host(doc_id))

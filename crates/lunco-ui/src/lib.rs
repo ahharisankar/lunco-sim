@@ -20,7 +20,6 @@
 //!           │
 //!           ▼
 //!   lunco-ui
-//!     ├── Re-exports egui-snarl types for node graphs
 //!     ├── Provides WidgetSystem for cached widget rendering
 //!     └── Provides WorldPanel for 3D space panels
 //! ```

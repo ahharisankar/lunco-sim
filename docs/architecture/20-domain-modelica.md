@@ -36,7 +36,7 @@ The Modelica runtime is **rumoca**, our fork:
        │
        ▼
   Views  (Tier 3: panels)
-    - DiagramPanel (egui-snarl)
+    - DiagramPanel (lunco-canvas)
     - CodeEditorPanel (text view)
     - ModelicaInspectorPanel (params + live variables)
     - GraphsPanel (time-series plots)
@@ -275,7 +275,7 @@ their render state incrementally rather than rebuild on every frame.
 
 Modelica's type lookup follows the rules in
 [Modelica Language Spec §5.3 — Static Name Lookup](https://specification.modelica.org/maint/3.7/class-predefined-types-and-declarations.html#static-name-lookup).
-Our implementation (used by the diagram panel's AST→snarl rebuild and
+Our implementation (used by the diagram panel's AST→canvas rebuild and
 by the class resolver on AST-level ops) follows a subset of those
 rules:
 
@@ -464,10 +464,11 @@ Today (pre-Document-System) the workflow is rougher:
 
 ## 9. The Modelica diagram editor
 
-The diagram panel (`lunco-modelica/src/ui/panels/diagram.rs`) is an
-**egui-snarl-based** visual editor. Under Phase α the panel is a thin
-*view* over a `ModelicaDocument` — the document is the authoritative
-state, snarl is a rendered projection.
+The diagram panel (`lunco-modelica/src/ui/panels/canvas_diagram.rs`)
+renders on top of `lunco-canvas` — the workbench's own canvas
+substrate. The panel is a thin *view* over a `ModelicaDocument`: the
+document is the authoritative state, the canvas scene is a rendered
+projection.
 
 ```
          ModelicaDocument (source + cached AST)
@@ -476,10 +477,11 @@ state, snarl is a rendered projection.
   (drag, connect,  │             │  (TextReplaced,
    delete, move,   │             │   ComponentAdded, …)
    paramedit)      │             ▼
-                  DiagramPanel ◀──── sync_from_document()
+                  CanvasDiagramPanel ◀──── canvas_projection
                    │
                    ▼
-                  Snarl<DiagramNode>  (rendered, snarl owns pan/zoom/selection)
+                  lunco-canvas Scene  (renders nodes / wires;
+                                       owns pan/zoom/selection)
 ```
 
 ### 9.1 Sync flow
@@ -487,21 +489,20 @@ state, snarl is a rendered projection.
 Each frame:
 
 1. **Open-model rebind** — if `WorkbenchState.open_model.doc` changed,
-   `DiagramState::bind_document` resets the change-stream cursor so
-   the next sync does a clean rebuild.
-2. **Document → snarl sync** — if `doc.generation() != last_seen_gen`,
-   re-parse the source and rebuild snarl (synchronous — parse of a
-   typical Modelica model is sub-millisecond). No more async
-   `AsyncComputeTaskPool` / "Analyzing…" spinner.
-3. **Snarl render** — user interaction happens in snarl; it owns
-   pan/zoom/selection/drag state between frames.
+   the panel resets the change-stream cursor so the next sync does a
+   clean rebuild.
+2. **Document → scene projection** — if `doc.generation() !=
+   last_seen_gen`, re-parse the source and rebuild the canvas scene
+   (synchronous — parse of a typical Modelica model is
+   sub-millisecond).
+3. **Canvas render** — user interaction happens in `lunco-canvas`; it
+   owns pan/zoom/selection/drag state between frames.
 4. **User action → op emission** —
    - Right-click Add Component → `AddComponent`
    - Right-click Delete → `RemoveComponent`
-   - Wire draw/disconnect → detected via frame-to-frame wire-set
-     diff → `AddConnection` / `RemoveConnection`
-   - Drag-to-move → detected via frame-to-frame position diff →
-     `SetPlacement`
+   - Wire draw/disconnect → frame-to-frame wire-set diff →
+     `AddConnection` / `RemoveConnection`
+   - Drag-to-move → frame-to-frame position diff → `SetPlacement`
 5. **Apply + echo suppression** — pending ops are applied to the
    `DocumentHost`, `last_seen_gen` is advanced past our own
    generations so step 2 doesn't rebuild in response to edits we
@@ -515,43 +516,41 @@ editor's debounced commit (≈ 350 ms idle or focus-loss) calls
 ### 9.2 Visual details
 
 - MSL palette on the left (right-click menu adds components)
-- Custom component body rendering in `show_body()` — zigzag for resistor,
-  parallel plates for capacitor, blue circles for electrical pins
+- Custom component body rendering — zigzag for resistor, parallel
+  plates for capacitor, blue circles for electrical pins
 - Small port dots rather than labeled rectangles
 - Dot-grid background
 - Borderless node frames to reduce chrome
 
-### egui-snarl pros and cons
+### 9.3 Why our own canvas
 
-**What snarl gives us for free:**
-- Pan / zoom via `egui::Scene`
-- Bezier wires between pins
-- Wire hit detection and drag
-- Node selection, drag, resize, multi-select
-- Right-click context menus
+The diagram panel originally rode on `egui-snarl` (see git history
+prior to the canvas migration). `lunco-canvas` replaced it because we
+needed:
 
-**What snarl cannot do without a fork:**
+- **Ports on every side** — schematic-style placement (top, bottom,
+  left, right), not just left/right inputs/outputs.
+- **Acausal connectors** — Modelica electrical / fluid ports are
+  bidirectional; node-graph libraries built around `OutPin → InPin`
+  edge direction don't fit.
+- **Animation hooks** (see § 9c) — render-side tweens, glow,
+  per-origin policies need access to the draw loop, which a
+  third-party node-graph crate doesn't expose.
+- **Grid snapping, custom shapes, multi-domain reuse** —
+  `lunco-canvas` is the substrate for non-Modelica diagrams too
+  (mission planner, cosim graphs).
 
-| Limitation | Impact |
-|-----------|--------|
-| Pins forced to node edges (left/right only) | Can't place ports on Top/Bottom |
-| Strict `OutPin → InPin` wires | Acausal connectors (Modelica electrical) need bidirectional |
-| No grid snapping | Minor UX issue |
-| Node shapes are always rectangular | Can draw inside the body, but outer hit-area is a rect |
-
-The acausal-connector limitation is the main one. Current workaround:
-treat every port as both input and output. Real fix: fork egui-snarl to
-add bidirectional pins. Tracked as Phase 2 work.
-
-### What we evaluated and rejected
+Alternatives we evaluated and rejected for the workbench-wide
+canvas substrate:
 
 | Alternative | Verdict |
 |-------------|---------|
-| `egui_node_graph` | Not suitable — still node-graph oriented, not schematic |
-| `egui_node_editor` | Less documented, smaller community |
-| `egui_graph` | Too new, less battle-tested |
-| Custom `egui::Scene` implementation | ~2000 LOC to rebuild from scratch |
-| **Fork egui-snarl** | Best option (~50–200 LOC patch for pin sides + acausal) |
+| `egui_node_graph` | Node-graph oriented, not schematic |
+| `egui_node_editor` | Less documented |
+| `egui_graph` | New, less battle-tested |
+| `egui-snarl` | What we started on; lacks port-side and acausal wires; no animation hook surface |
+| Forking `egui-snarl` | ~50–200 LOC patch but ties us to upstream forever |
+| **Custom `lunco-canvas`** | Picked — owned, extensible, animation-ready, no upstream coupling |
 
 ## 9c. Canvas animation + multi-user roadmap
 
@@ -795,7 +794,7 @@ sprint with the journal subsystem.
 
 | Panel | Current | Notes |
 |-------|---------|-------|
-| **Diagram** | ✅ Working, generic rectangles, Dymola-style shapes in progress | 1701 LOC, egui-snarl |
+| **Diagram** | ✅ Working, generic rectangles, Dymola-style shapes in progress | `canvas_diagram.rs`, on `lunco-canvas` |
 | **Code Editor** | ✅ Working | 423 LOC, plain egui TextEdit |
 | **MSL Palette** | ✅ Working | ~20 MSL components |
 | **Library Browser** | ✅ Working | File tree of `.mo` files |
@@ -823,10 +822,11 @@ in either panel flow through the document and update the other on
 the next frame. Opening a file from the Library Browser populates
 both views from the same source. See § 5 and § 9 above.
 
-**Diagram edges are directional** (acausal broken): egui-snarl enforces
-`OutPin → InPin`. Modelica electrical connectors are acausal. Current
-workaround — every port is both input and output — is confusing. Needs
-egui-snarl fork.
+**Acausal connector visual** (in progress on `lunco-canvas`):
+Modelica electrical / fluid connectors are acausal — wires shouldn't
+have an arrow direction. The migration off egui-snarl unblocks this;
+the rendering work to drop the directional arrow on connector wires
+is tracked separately on the canvas crate.
 
 ### P1 — Degrading workflow
 
@@ -872,8 +872,8 @@ Feature parity snapshot:
 
 Rough **80 %** feature parity on the core loop. The gaps are solvable
 within 2–3 months of focused work; the biggest wins come from the
-Document System migration (unlocks live diagram↔code sync) and egui-snarl
-fork (unlocks acausal connectors).
+Document System migration (unlocks live diagram↔code sync) and
+finishing the acausal-connector visuals on `lunco-canvas`.
 
 ## 13. See also
 

@@ -122,7 +122,7 @@ Apps
    ├── lunco-core         ← pause, time warp, SelectableRoot, fundamentals
    │
    └── External
-         bevy · bevy_egui · egui_tiles · egui-snarl · egui_plot · avian3d · rumoca
+         bevy · bevy_egui · egui_tiles · egui_plot · avian3d · rumoca
 ```
 
 Layers go strictly downward. A crate only depends on crates in its own layer

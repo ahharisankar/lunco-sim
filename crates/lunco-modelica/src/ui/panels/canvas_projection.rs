@@ -1,9 +1,8 @@
 //! Canvas projection — convert a Modelica AST into the [`VisualDiagram`]
 //! the canvas panel renders.
 //!
-//! Inherited from the now-removed snarl viewer (`panels/diagram.rs`),
-//! this module owns the shared projection helpers + auto-layout
-//! settings the canvas reads. It does **not** render anything itself —
+//! Owns the projection helpers + auto-layout settings the canvas
+//! reads. Does **not** render anything itself —
 //! [`crate::ui::panels::canvas_diagram::CanvasDiagramPanel`] is the
 //! rendering panel; this module just produces the data model it
 //! consumes.

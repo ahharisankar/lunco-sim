@@ -120,7 +120,7 @@ All UI panels are **entity viewers** — they watch a selected entity and render
            ┌──────────────────┼──────────────────┐
            ▼                  ▼                  ▼
      DiagramPanel      CodeEditorPanel    TelemetryPanel
-     (egui-snarl)      (text editor)      (params/inputs)
+     (lunco-canvas)    (text editor)      (params/inputs)
 ```
 
 `WorkbenchState.selected_entity` is the **selection bridge** — any context (library browser, 3D viewport click, colony tree) can set it to open the editor for any entity.
@@ -133,7 +133,7 @@ Panels are dockable, tabbable, resizable, and persist across sessions:
 |-------|----------|---------|
 | Library Browser | Left dock | File navigation, drag `.mo` files |
 | Code Editor | Center tab | Source code editing, compile & run |
-| Diagram | Center tab | Component block diagram (egui-snarl) |
+| Diagram | Center tab | Component block diagram (`lunco-canvas`) |
 | Telemetry | Right dock | Parameters, inputs, variable toggles |
 | Graphs | Bottom dock | Time-series plots |
 

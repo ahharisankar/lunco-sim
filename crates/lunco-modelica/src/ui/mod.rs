@@ -14,7 +14,7 @@
 //!           ┌──────────────────┼──────────────────┐
 //!           ▼                  ▼                  ▼
 //!     DiagramPanel      CodeEditorPanel    TelemetryPanel
-//!     (egui-snarl)      (text editor)      (params/inputs)
+//!     (lunco-canvas)    (text editor)      (params/inputs)
 //! ```
 //!
 //! ## Selection Bridge
@@ -53,7 +53,7 @@
 //!
 //! - **Package Browser** (left dock) — Dymola-style library tree, click to open
 //! - **Code Editor** (center tab) — source code editing, compile & run
-//! - **Diagram** (center tab) — component block diagram via egui-snarl
+//! - **Diagram** (center tab) — component block diagram on `lunco-canvas`
 //! - **Telemetry** (right dock) — parameters, inputs, variable toggles
 //! - **Graphs** (bottom dock) — time-series plots of simulation variables
 

@@ -493,8 +493,9 @@ no novel design.
    ├── lunco-ui  (widget toolkit)
    │     - WidgetSystem (cached widgets)
    │     - Entity-viewer trait
-   │     - Shared widgets: TimeSeries, NodeGraph base, InspectorField
-   │     - Re-exports: egui-snarl, egui_plot
+   │     - Shared widgets: TimeSeries, InspectorField
+   │     - Re-exports: egui_plot
+   │     (Node graphs / diagrams render on `lunco-canvas`)
    │         │
    │         ▼
    └── egui + bevy_egui + egui_tiles (inside side panels only)

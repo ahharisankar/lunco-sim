@@ -1279,9 +1279,7 @@ fn on_compile_model(
         // entities bump their own `session_id` on recompile (see
         // the "updated-in-place" branch above); this starting value
         // matters only for the very first compile of a doc, after
-        // which the per-entity counter takes over. Hardcoded `1`
-        // since the previous source (`DiagramState.model_counter`)
-        // was a snarl-side counter that has been removed.
+        // which the per-entity counter takes over.
         let session_id: u64 = 1;
         let entity = commands
             .spawn((

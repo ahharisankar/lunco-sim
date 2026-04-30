@@ -39,8 +39,7 @@ pub enum ModelViewMode {
     /// Raw Modelica source (egui TextEdit).
     #[default]
     Text,
-    /// Block-diagram canvas (lunco-canvas). Replaced the old
-    /// egui-snarl-based variant.
+    /// Block-diagram canvas, rendered on `lunco-canvas`.
     Canvas,
     /// The class's own `Icon` annotation rendering — what the
     /// component looks like when instantiated in a parent diagram.
@@ -557,12 +556,11 @@ pub(crate) fn sync_active_tab_to_doc(world: &mut World, doc: DocumentId) {
         buf.model_path = model_path;
     }
 
-    // The legacy snarl viewer's `DiagramState` reset used to live here
-    // (clear `diagram`/`snarl`/`compile_status`). Snarl is gone; the
-    // canvas viewer reprojects from the document AST every frame
+    // The canvas viewer reprojects from the document AST every frame
     // when the generation advances, so there is no per-tab cache to
-    // wipe. Compile-status comes from `WorkbenchState.compilation_error`
-    // and is reset when the next compile starts.
+    // wipe on doc switch. Compile-status comes from
+    // `WorkbenchState.compilation_error` and is reset when the next
+    // compile starts.
     refresh_selected_entity_for(world, doc);
 }
 

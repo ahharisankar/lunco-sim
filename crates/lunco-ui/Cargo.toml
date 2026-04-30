@@ -15,5 +15,4 @@ lunco-terrain = { path = "../lunco-terrain" }
 lunco-avatar = { path = "../lunco-avatar" }
 smallvec = { workspace = true }
 chrono = { workspace = true }
-egui-snarl = "0.9"
 egui_plot = "0.34"

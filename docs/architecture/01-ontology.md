@@ -197,7 +197,7 @@ The canonical, persistent, serialized representation of a user-editable artifact
 A typed, serializable, reversible mutation of a Document. Examples: `AddComponent`, `RemoveConnection`, `SetParameter`, `MoveComponent`. Every op carries its inverse (for undo). Op streams are the unit of collaboration (future) and replay.
 
 ### DocumentView
-A panel that observes a Document and renders a projection of it. The same document may have many views — e.g., a `ModelicaDocument` is viewed by DiagramPanel (egui-snarl), CodeEditorPanel (text), ParameterInspectorPanel (form), PlotPanel (time series). Views emit ops; they never mutate the document directly.
+A panel that observes a Document and renders a projection of it. The same document may have many views — e.g., a `ModelicaDocument` is viewed by DiagramPanel (`lunco-canvas`), CodeEditorPanel (text), ParameterInspectorPanel (form), PlotPanel (time series). Views emit ops; they never mutate the document directly.
 
 ### DocumentHost
 Runtime plumbing that owns a Document, routes ops from views, records undo history, and broadcasts change notifications to other views.
