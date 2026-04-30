@@ -1,6 +1,8 @@
 #usda 1.0
 (
     defaultPrim = "AckermannRover"
+    upAxis = "Y"
+    metersPerUnit = 1
 )
 
 # Base Ackermann-Steer Rover — reusable component definition.
@@ -9,8 +11,12 @@
 #   - double3 xformOp:translate      → set position
 #   - string lunco:wheelType = "physical" → switch to physical wheels (default: "raycast")
 #
-# Chassis: 2.0m x 0.3m x 3.5m, Mass: 1000kg
-
+# Chassis: 2.0m × 0.3m × 3.5m, Mass: 1000kg
+#
+# Uses legacy `width/height/depth` (not spec `size + xformOp:scale`)
+# because xformOp:scale on a parent propagates to wheel children's
+# transforms, breaking Avian's raycaster `Dir3` normalization. See
+# the longer comment in `skid_rover.usda`.
 def Cube "AckermannRover" (
     prepend apiSchemas = ["PhysxVehicleContextAPI", "PhysxVehicleDrive4WAPI"]
 )
@@ -20,8 +26,6 @@ def Cube "AckermannRover" (
     double depth = 3.5
     color3f primvars:displayColor = (0.8, 0.8, 0.8)
 
-    # Wheel type: "raycast" (suspension simulation) or "physical" (rigid body collision)
-    # Default is "raycast" — override in scene for physical variant.
     string lunco:wheelType = "raycast"
 
     bool physics:rigidBodyEnabled = true
@@ -30,15 +34,15 @@ def Cube "AckermannRover" (
     float physics:linearDamping = 0.5
     float physics:angularDamping = 2.0
 
-    # --- Wheels (reference the reusable mobility component) ---
     def Cylinder "Wheel_FL" (
-        prepend references = @/components/mobility/wheel.usda@</Wheel>
+        prepend references = @../../components/mobility/wheel.usda@</Wheel>
     )
     {
         double radius = 0.4
         double height = 0.3
         double3 xformOp:translate = (-1.0, -0.15, 1.225)
         float3 xformOp:rotateXYZ = (0, 0, 90)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
         color3f primvars:displayColor = (1.0, 0.0, 0.0)
 
         int physxVehicleWheel:index = 0
@@ -52,13 +56,14 @@ def Cube "AckermannRover" (
     }
 
     def Cylinder "Wheel_FR" (
-        prepend references = @/components/mobility/wheel.usda@</Wheel>
+        prepend references = @../../components/mobility/wheel.usda@</Wheel>
     )
     {
         double radius = 0.4
         double height = 0.3
         double3 xformOp:translate = (1.0, -0.15, 1.225)
         float3 xformOp:rotateXYZ = (0, 0, 90)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
         color3f primvars:displayColor = (1.0, 0.0, 0.0)
 
         int physxVehicleWheel:index = 1
@@ -72,13 +77,14 @@ def Cube "AckermannRover" (
     }
 
     def Cylinder "Wheel_RL" (
-        prepend references = @/components/mobility/wheel.usda@</Wheel>
+        prepend references = @../../components/mobility/wheel.usda@</Wheel>
     )
     {
         double radius = 0.4
         double height = 0.3
         double3 xformOp:translate = (-1.0, -0.15, -1.225)
         float3 xformOp:rotateXYZ = (0, 0, 90)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
         color3f primvars:displayColor = (0.0, 0.0, 1.0)
 
         int physxVehicleWheel:index = 2
@@ -92,13 +98,14 @@ def Cube "AckermannRover" (
     }
 
     def Cylinder "Wheel_RR" (
-        prepend references = @/components/mobility/wheel.usda@</Wheel>
+        prepend references = @../../components/mobility/wheel.usda@</Wheel>
     )
     {
         double radius = 0.4
         double height = 0.3
         double3 xformOp:translate = (1.0, -0.15, -1.225)
         float3 xformOp:rotateXYZ = (0, 0, 90)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
         color3f primvars:displayColor = (0.0, 0.0, 1.0)
 
         int physxVehicleWheel:index = 3

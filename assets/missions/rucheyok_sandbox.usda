@@ -2,15 +2,17 @@
 (
     defaultPrim = "RucheyokSandbox"
     upAxis = "Y"
+    metersPerUnit = 1
 )
 
 def Xform "RucheyokSandbox"
 {
-    def "Rucheyok" (
+    def Xform "Rucheyok" (
         prepend references = @../vessels/rovers/rucheyok/rucheyok.usda@
     )
     {
         custom string lunco:name = "Rucheyok Rover"
         double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
     }
 }

@@ -44,11 +44,18 @@ fn main() {
             "cached_textures",
             AssetSourceBuilder::platform_default(&textures_dir().to_string_lossy(), None),
         )
-        // `lunco-lib://` — workspace-shipped fixture library (analog to
-        // Unreal's `/Engine/`, Blender's "Essentials"). Resolves to the
-        // shared cache root populated by `lunco-assets -- download`.
-        // Separate from the reserved-for-future-use `lunco://` scheme,
-        // which will hold the multi-user / collaborative protocol.
+        // `lunco-lib://` — workspace-shipped fixture library (analog
+        // to Unreal's `/Engine/`, Blender's "Essentials"). Bound to
+        // the shared cache root populated by
+        // `cargo run -p lunco-assets -- download / process`.
+        //
+        // Authors pair `payload = @lunco-lib://...@` with a `def Cube`
+        // placeholder so third-party USD tools (Blender, usdview)
+        // render the Cube while our pipeline loads the actual glTF
+        // through this AssetSource. See `docs/USD_SYSTEM.md`.
+        //
+        // Reserved scheme `lunco://` is *not* registered here — it's
+        // earmarked for the future multi-user / Nucleus-like protocol.
         .register_asset_source(
             "lunco-lib",
             AssetSourceBuilder::platform_default(&cache_dir().to_string_lossy(), None),

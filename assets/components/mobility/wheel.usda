@@ -1,6 +1,8 @@
 #usda 1.0
 (
     defaultPrim = "Wheel"
+    upAxis = "Y"
+    metersPerUnit = 1
 )
 
 # Reusable motorized wheel component for mobility.
@@ -14,6 +16,7 @@ def Cylinder "Wheel" (
     double radius = 2.0
     double height = 4.0
     double3 xformOp:translate = (0, 0, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
     color3f primvars:displayColor = (0.3, 0.3, 0.3)
 
     # --- Modelica model ---

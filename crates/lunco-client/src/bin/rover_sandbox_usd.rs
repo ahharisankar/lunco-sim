@@ -103,9 +103,8 @@ fn main() {
         // `lunco-lib://` shipped-fixture asset source — must be
         // registered *before* `DefaultPlugins`/`AssetPlugin` builds the
         // server. Mirrors the registration in `lunco-client`'s main
-        // binary; without it, payloads referencing
-        // `lunco-lib://models/...` (e.g. the Perseverance rover in
-        // sandbox_scene.usda) fail to resolve.
+        // binary; without it, `def Cube` placeholders with
+        // `payload = @lunco-lib://...@` only render their Cube fallback.
         .register_asset_source(
             "lunco-lib",
             AssetSourceBuilder::platform_default(&cache_dir().to_string_lossy(), None),

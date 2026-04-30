@@ -218,15 +218,34 @@ composer recognises non-USD extensions (`glb`, `gltf`, `obj`, `stl`) on
 | `"mesh"` | `Handle<Mesh>` from `<uri>#Mesh0/Primitive0` (or `lunco:assetLabel`), attached as `Mesh3d`. Single-mesh path stays compatible with `lunco-usd-avian` collider construction. |
 | `"scene"` (default) | `Handle<Scene>` from `<uri>#Scene0`, attached as a child `SceneRoot`. Preserves multi-mesh hierarchy, materials, and lights. |
 
-Example (sandbox uses this for the NASA Mars 2020 Perseverance rover):
+### Placeholder pattern (downloaded glTF)
+
+For glTFs that ship via the `Assets.toml` download/process pipeline
+(NASA Perseverance and similar), pair the `lunco-lib://` payload with
+a **`def Cube` of approximate bbox dimensions**. Third-party USD tools
+(Blender, usdview, Houdini) cannot resolve the `lunco-lib://` scheme
+and fall back to the prim's local Cube definition — so the scene
+opens cleanly anywhere, with a tan placeholder box where the rover
+should be. Our pipeline overlays the photoreal glTF on top, then a
+small `hide_glb_placeholder_meshes` system removes the Cube once the
+Scene asset finishes loading. On asset failure (file missing, fresh
+clone with no `download` run yet) the Cube stays — that's the design.
+
+Authors size the Cube ≈ glTF bbox so the fallback occupies the right
+space. Color it something distinctive (`(0.6, 0.4, 0.2)` for Mars-tan)
+to make "this is a placeholder" obvious.
 
 ```usda
-def Xform "Perseverance" (
+def Cube "Perseverance" (
     prepend payload = @lunco-lib://models/perseverance.glb@
 )
 {
-    string lunco:assetMode = "scene"
+    double size = 1.0
     double3 xformOp:translate = (5.0, 0.5, 25.0)
+    double3 xformOp:scale = (2.7, 1.85, 3.1)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    color3f primvars:displayColor = (0.6, 0.4, 0.2)
+    string lunco:assetMode = "scene"
 }
 ```
 

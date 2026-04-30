@@ -150,25 +150,54 @@ fn collect_child_colliders_from_usd(
 }
 
 /// Builds a Collider from a USD prim's geometry type and dimensions.
+///
+/// Spec-compliant shape attributes (UsdGeomCube/Sphere/Cylinder):
+/// - **Cube**: `double size` (default 2.0). Non-uniform extents come
+///   from `xformOp:scale` and are multiplied in here.
+/// - **Sphere**: `double radius` (default 1.0). Honoured uniformly
+///   from the largest `xformOp:scale` component (Avian's `sphere`
+///   collider is uniform).
+/// - **Cylinder**: `double radius`, `double height` (defaults 1, 2).
+///   Scale: X/Z components apply to radius (max), Y to height.
+///
+/// **Legacy fallback for `Cube`**: `width`/`height`/`depth` still
+/// accepted so unmigrated `.usda` files keep working.
 fn build_collider_from_usd(reader: &TextReader, sdf_path: &SdfPath) -> Option<Collider> {
     let Ok(val) = reader.get(sdf_path, "typeName") else { return None; };
     let Value::Token(ty) = &*val else { return None; };
 
+    let scale = read_vec3_attribute(reader, sdf_path, "xformOp:scale")
+        .map(|v| (v.x, v.y, v.z))
+        .unwrap_or((1.0, 1.0, 1.0));
+
     match ty.as_str() {
         "Cube" => {
-            let width = reader.prim_attribute_value::<f64>(sdf_path, "width")?;
-            let height = reader.prim_attribute_value::<f64>(sdf_path, "height")?;
-            let depth = reader.prim_attribute_value::<f64>(sdf_path, "depth")?;
-            Some(Collider::cuboid(width, height, depth))
+            if let (Some(width), Some(height), Some(depth)) = (
+                reader.prim_attribute_value::<f64>(sdf_path, "width"),
+                reader.prim_attribute_value::<f64>(sdf_path, "height"),
+                reader.prim_attribute_value::<f64>(sdf_path, "depth"),
+            ) {
+                Some(Collider::cuboid(width, height, depth))
+            } else {
+                let size = reader.prim_attribute_value::<f64>(sdf_path, "size").unwrap_or(2.0);
+                Some(Collider::cuboid(size * scale.0, size * scale.1, size * scale.2))
+            }
         }
         "Sphere" => {
-            let radius = reader.prim_attribute_value::<f64>(sdf_path, "radius")?;
-            Some(Collider::sphere(radius))
+            let radius = reader.prim_attribute_value::<f64>(sdf_path, "radius").unwrap_or(1.0);
+            // Avian's sphere is uniform — pick the max axis scale so a
+            // user-authored bigger scale doesn't shrink the collider.
+            let s = scale.0.max(scale.1).max(scale.2);
+            Some(Collider::sphere(radius * s))
         }
         "Cylinder" => {
-            let radius = reader.prim_attribute_value::<f64>(sdf_path, "radius")?;
-            let height = reader.prim_attribute_value::<f64>(sdf_path, "height")?;
-            Some(Collider::cylinder(radius, height))
+            let radius = reader.prim_attribute_value::<f64>(sdf_path, "radius").unwrap_or(1.0);
+            let height = reader.prim_attribute_value::<f64>(sdf_path, "height").unwrap_or(2.0);
+            // USD cylinder default axis = Z; in our usage we lay them
+            // along Y (Bevy default) via xformOp:rotateXYZ. Treat
+            // X/Z scale as radial, Y as height.
+            let radial = scale.0.max(scale.2);
+            Some(Collider::cylinder(radius * radial, height * scale.1))
         }
         _ => None,
     }

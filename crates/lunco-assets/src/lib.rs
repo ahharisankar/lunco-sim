@@ -284,9 +284,8 @@ pub fn assets_dir() -> PathBuf {
 /// Cache `models/` directory — where `lunco-assets -- download`
 /// materialises 3D model binaries declared in per-crate `Assets.toml`
 /// (`.glb`, `.gltf`, `.obj`, `.stl`). Served at runtime via the
-/// `lunco-lib://` asset source registered in `lunco-client`. Shared
-/// across all worktrees — one `cargo run -p lunco-assets -- download`
-/// populates every git worktree at once. Mirrors [`textures_dir`].
+/// `lunco-lib://` Bevy `AssetSource` registered in `lunco-client`.
+/// Mirrors [`textures_dir`] for textures.
 pub fn models_dir() -> PathBuf {
     cache_subdir("models")
 }
@@ -294,30 +293,33 @@ pub fn models_dir() -> PathBuf {
 /// Constructs a `lunco-lib://` asset path from a relative path inside
 /// the LunCoSim shipped library.
 ///
-/// `lunco-lib://` is the LunCoSim equivalent of Unreal's `/Engine/`
-/// or Blender's "Essentials" asset library — it resolves to
-/// workspace-shipped fixtures that ship with LunCoSim itself
-/// (declared in per-crate `Assets.toml`, downloaded into [`cache_dir`]
-/// by `cargo run -p lunco-assets -- download`).
+/// `lunco-lib://` resolves through a Bevy `AssetSource` bound to the
+/// shared cache root. It's the equivalent of Unreal's `/Engine/`
+/// content namespace or Blender's "Essentials" library — the URI
+/// makes the "this asset ships with LunCoSim" intent explicit at
+/// every call site.
 ///
-/// **Distinct from `lunco://`.** The `lunco://` scheme is reserved
-/// for the future LunCoSim asset/scene service (multi-user,
-/// collaborative, network-backed — analogous to Omniverse's Nucleus).
-/// `lunco-lib://` is purely local: shipped binaries served from the
-/// shared cache. Keeping the two schemes separate lets the future
-/// protocol design `lunco://` from a blank slate.
+/// **`.usda` placeholder pattern**: when this URI is used in a USD
+/// `payload`, third-party tools (Blender, usdview, Houdini) cannot
+/// resolve it and fall back to the prim's local definition. Authors
+/// pair it with a `def Cube` of approximate bbox dimensions — that
+/// Cube is the placeholder you'd see in those tools, while our
+/// pipeline overlays the real glTF SceneRoot on top.
 ///
-/// **Distinct from user content.** A user-authored `.usda` referencing
-/// `@./my_robot.glb@` resolves relative to its own layer — there's no
-/// fallback into `lunco-lib://`, no risk of a stray cache hit shadowing
-/// a user file with the same name. The scheme makes ownership explicit.
+/// **Distinct from `lunco://`** — that scheme is reserved for the
+/// future LunCoSim asset/scene service (multi-user, collaborative,
+/// network-backed — analogous to Omniverse's Nucleus). Keeping the
+/// two separate lets the future protocol design `lunco://` from a
+/// blank slate.
 ///
 /// # Example
 ///
 /// ```
 /// use lunco_assets::lunco_lib_path;
-/// let path = lunco_lib_path("models/perseverance.glb");
-/// assert_eq!(path, "lunco-lib://models/perseverance.glb");
+/// assert_eq!(
+///     lunco_lib_path("models/perseverance.glb"),
+///     "lunco-lib://models/perseverance.glb"
+/// );
 /// ```
 pub fn lunco_lib_path(relative: &str) -> String {
     format!("lunco-lib://{relative}")
@@ -463,6 +465,7 @@ mod tests {
             "lunco-lib://models/perseverance.glb"
         );
     }
+
 
     #[test]
     fn ephemeris_path_format() {

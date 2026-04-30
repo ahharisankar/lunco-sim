@@ -1,6 +1,8 @@
 #usda 1.0
 (
     defaultPrim = "Battery"
+    upAxis = "Y"
+    metersPerUnit = 1
 )
 
 # Reusable battery component for power storage.
@@ -10,11 +12,11 @@ def Cube "Battery" (
     prepend apiSchemas = ["LunCoPowerComponentAPI"]
 )
 {
-    # --- Geometry ---
-    double width = 2.0
-    double height = 0.5
-    double depth = 3.0
+    # --- Geometry (spec-compliant: size × xformOp:scale) ---
+    double size = 1.0
     double3 xformOp:translate = (0, 0, 0)
+    double3 xformOp:scale = (2.0, 0.5, 3.0)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     color3f primvars:displayColor = (0.8, 0.2, 0.2)
 
     # --- Modelica model ---

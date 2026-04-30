@@ -1,6 +1,8 @@
 #usda 1.0
 (
     defaultPrim = "SkidRover"
+    upAxis = "Y"
+    metersPerUnit = 1
 )
 
 # Base Skid-Steer Rover — reusable component definition.
@@ -9,8 +11,18 @@
 #   - double3 xformOp:translate      → set position
 #   - string lunco:wheelType = "physical" → switch to physical wheels (default: "raycast")
 #
-# Chassis: 2.0m x 0.3m x 3.5m, Mass: 1000kg
-
+# Chassis: 2.0m × 0.3m × 3.5m, Mass: 1000kg.
+#
+# **Why `width/height/depth` and not spec `size + xformOp:scale`**:
+# this prim has wheel children, and `xformOp:scale` would propagate to
+# them through Bevy's Transform hierarchy — non-uniform scale on a
+# wheel's raycaster direction violates `Dir3` normalization and panics
+# Avian. The proper Pixar form is an `Xform` root + child `Cube`
+# collider; that refactor is filed as a follow-up. Until then, the
+# legacy `width/height/depth` form (still accepted by `lunco-usd-bevy`
+# and `lunco-usd-avian` readers) keeps the chassis dimensions in the
+# mesh data without polluting child transforms. Blender renders this
+# prim as the default 2×2×2 Cube.
 def Cube "SkidRover" (
     prepend apiSchemas = ["PhysxVehicleContextAPI", "PhysxVehicleDriveSkidAPI"]
 )
@@ -32,13 +44,14 @@ def Cube "SkidRover" (
 
     # --- Wheels (reference the reusable mobility component) ---
     def Cylinder "Wheel_FL" (
-        prepend references = @/components/mobility/wheel.usda@</Wheel>
+        prepend references = @../../components/mobility/wheel.usda@</Wheel>
     )
     {
         double radius = 0.4
         double height = 0.3
         double3 xformOp:translate = (-1.0, -0.15, 1.225)
         float3 xformOp:rotateXYZ = (0, 0, 90)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
         color3f primvars:displayColor = (1.0, 0.0, 0.0)
 
         int physxVehicleWheel:index = 0
@@ -52,13 +65,14 @@ def Cube "SkidRover" (
     }
 
     def Cylinder "Wheel_FR" (
-        prepend references = @/components/mobility/wheel.usda@</Wheel>
+        prepend references = @../../components/mobility/wheel.usda@</Wheel>
     )
     {
         double radius = 0.4
         double height = 0.3
         double3 xformOp:translate = (1.0, -0.15, 1.225)
         float3 xformOp:rotateXYZ = (0, 0, 90)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
         color3f primvars:displayColor = (1.0, 0.0, 0.0)
 
         int physxVehicleWheel:index = 1
@@ -72,13 +86,14 @@ def Cube "SkidRover" (
     }
 
     def Cylinder "Wheel_RL" (
-        prepend references = @/components/mobility/wheel.usda@</Wheel>
+        prepend references = @../../components/mobility/wheel.usda@</Wheel>
     )
     {
         double radius = 0.4
         double height = 0.3
         double3 xformOp:translate = (-1.0, -0.15, -1.225)
         float3 xformOp:rotateXYZ = (0, 0, 90)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
         color3f primvars:displayColor = (0.0, 0.0, 1.0)
 
         int physxVehicleWheel:index = 2
@@ -92,13 +107,14 @@ def Cube "SkidRover" (
     }
 
     def Cylinder "Wheel_RR" (
-        prepend references = @/components/mobility/wheel.usda@</Wheel>
+        prepend references = @../../components/mobility/wheel.usda@</Wheel>
     )
     {
         double radius = 0.4
         double height = 0.3
         double3 xformOp:translate = (1.0, -0.15, -1.225)
         float3 xformOp:rotateXYZ = (0, 0, 90)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
         color3f primvars:displayColor = (0.0, 0.0, 1.0)
 
         int physxVehicleWheel:index = 3

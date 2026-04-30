@@ -1,6 +1,8 @@
 #usda 1.0
 (
     defaultPrim = "Rucheyok"
+    upAxis = "Y"
+    metersPerUnit = 1
 )
 
 # Rucheyok Lunar Rover
@@ -12,6 +14,10 @@ def Xform "Rucheyok" (
 )
 {
     # --- Chassis (custom, not reusable) ---
+    # Legacy width/height/depth form because the chassis hosts the
+    # `PhysxVehicleDriveSkidAPI` schema and therefore implicitly
+    # parents wheel raycasters in our pipeline. Scale propagation
+    # breaks Avian. Same reasoning as `skid_rover.usda`.
     def Cube "Chassis" (
         prepend apiSchemas = ["PhysxVehicleDriveSkidAPI"]
     )
@@ -20,6 +26,7 @@ def Xform "Rucheyok" (
         double height = 4.0
         double depth = 20.0
         double3 xformOp:translate = (0, 2.0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
         color3f primvars:displayColor = (0.2, 0.5, 0.8)
 
         bool physics:rigidBodyEnabled = true
@@ -29,13 +36,12 @@ def Xform "Rucheyok" (
 
     # --- Solar Panel (from component, with rover-specific parameters) ---
     def Xform "SolarPanel" (
-        prepend references = @/components/power/solar_panel.usda@</SolarPanel>
+        prepend references = @../../../components/power/solar_panel.usda@</SolarPanel>
     )
     {
-        double width = 12.0
-        double height = 0.2
-        double depth = 6.0
         double3 xformOp:translate = (0, 4.5, 0)
+        double3 xformOp:scale = (12.0, 0.2, 6.0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
         color3f primvars:displayColor = (0.05, 0.05, 0.5)
 
         bool physics:rigidBodyEnabled = true
@@ -53,13 +59,12 @@ def Xform "Rucheyok" (
 
     # --- Battery (from component, with rover-specific parameters) ---
     def Xform "Battery" (
-        prepend references = @/components/power/battery.usda@</Battery>
+        prepend references = @../../../components/power/battery.usda@</Battery>
     )
     {
-        double width = 4.0
-        double height = 0.8
-        double depth = 6.0
         double3 xformOp:translate = (0, 0.8, 0)
+        double3 xformOp:scale = (4.0, 0.8, 6.0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
         color3f primvars:displayColor = (0.8, 0.2, 0.2)
 
         bool physics:rigidBodyEnabled = true
@@ -67,9 +72,9 @@ def Xform "Rucheyok" (
         bool physics:collisionEnabled = true
 
         # Override Modelica parameters for this specific rover
-        double lunco:capacity = 15000.0          # Larger battery for long missions
-        double lunco:maxDischargeRate = 10000.0  # Higher discharge for steep terrain
-        double lunco:initialCharge = 0.95        # Start fully charged
+        double lunco:capacity = 15000.0
+        double lunco:maxDischargeRate = 10000.0
+        double lunco:initialCharge = 0.95
 
         # Battery connects to EPS bus
         rel lunco:epsBus = [
@@ -83,13 +88,14 @@ def Xform "Rucheyok" (
 
     # --- Wheels (from component) ---
     def Cylinder "Wheel_FL" (
-        prepend references = @/components/mobility/wheel.usda@</Wheel>
+        prepend references = @../../../components/mobility/wheel.usda@</Wheel>
     )
     {
         double radius = 2.0
         double height = 1.5
         double3 xformOp:translate = (-8.5, 0, 10.5)
         float3 xformOp:rotateXYZ = (90, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
         color3f primvars:displayColor = (0.2, 0.8, 0.2)
 
         int physxVehicleWheel:index = 0
@@ -102,7 +108,6 @@ def Xform "Rucheyok" (
         float physics:mass = 25.0
         bool physics:collisionEnabled = true
 
-        # Override Modelica parameters
         double lunco:motorPower = 2000.0
         double lunco:motorEfficiency = 0.88
 
@@ -110,13 +115,14 @@ def Xform "Rucheyok" (
     }
 
     def Cylinder "Wheel_FR" (
-        prepend references = @/components/mobility/wheel.usda@</Wheel>
+        prepend references = @../../../components/mobility/wheel.usda@</Wheel>
     )
     {
         double radius = 2.0
         double height = 1.5
         double3 xformOp:translate = (8.5, 0, 10.5)
         float3 xformOp:rotateXYZ = (90, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
         color3f primvars:displayColor = (0.2, 0.8, 0.2)
 
         int physxVehicleWheel:index = 1
@@ -134,13 +140,14 @@ def Xform "Rucheyok" (
     }
 
     def Cylinder "Wheel_RL" (
-        prepend references = @/components/mobility/wheel.usda@</Wheel>
+        prepend references = @../../../components/mobility/wheel.usda@</Wheel>
     )
     {
         double radius = 2.0
         double height = 1.5
         double3 xformOp:translate = (-8.5, 0, -10.5)
         float3 xformOp:rotateXYZ = (90, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
         color3f primvars:displayColor = (0.8, 0.2, 0.2)
 
         int physxVehicleWheel:index = 2
@@ -158,13 +165,14 @@ def Xform "Rucheyok" (
     }
 
     def Cylinder "Wheel_RR" (
-        prepend references = @/components/mobility/wheel.usda@</Wheel>
+        prepend references = @../../../components/mobility/wheel.usda@</Wheel>
     )
     {
         double radius = 2.0
         double height = 1.5
         double3 xformOp:translate = (8.5, 0, -10.5)
         float3 xformOp:rotateXYZ = (90, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
         color3f primvars:displayColor = (0.8, 0.2, 0.2)
 
         int physxVehicleWheel:index = 3

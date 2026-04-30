@@ -41,13 +41,29 @@ pub struct ProcessConfig {
     /// Target [width, height] in pixels (texture pipeline only).
     #[serde(default)]
     pub target_resolution: Option<[u32; 2]>,
-    /// Output path relative to the cache root (e.g., "textures/earth.png"
-    /// or "models/perseverance.glb").
+    /// Output path **relative to** [`ProcessConfig::output_root`].
+    /// Examples: `"textures/earth.png"`, `"models/perseverance.glb"`.
     pub output: String,
+    /// Where to write the processed file. Two values today:
+    /// - `"cache"` (default) — writes under the shared cache root
+    ///   (`<LUNCOSIM_CACHE>/...`). Used by Earth/Moon textures and
+    ///   other regeneratable artifacts that don't need to live in
+    ///   the source tree.
+    /// - `"assets"` — writes under the workspace `assets/` directory
+    ///   (gitignored if the path matches a `.gitignore` rule). Used
+    ///   for files USD `payload`/`references` need to find via
+    ///   layer-relative paths — Bevy's default `assets://` source
+    ///   resolves them, and so does Blender / usdview / Houdini.
+    #[serde(default = "default_output_root")]
+    pub output_root: String,
 }
 
 fn default_kind() -> String {
     "texture".to_string()
+}
+
+fn default_output_root() -> String {
+    "cache".to_string()
 }
 
 /// Processes a single source asset according to `process.kind`.
@@ -64,7 +80,33 @@ pub fn process_texture(
     source_path: &Path,
     process: &ProcessConfig,
 ) -> Result<(), std::io::Error> {
-    let output_path = cache_dir().join(&process.output);
+    // Resolve the output path against the configured root.
+    let output_path = match process.output_root.as_str() {
+        "assets" => {
+            // Workspace-rooted: writes under <workspace>/assets/<output>.
+            // We resolve the workspace root by walking up from the
+            // crate manifest dir (set at compile time) — same heuristic
+            // as `cache_dir`'s fallback walk. Falls back to a CWD-relative
+            // `assets/` if the manifest dir isn't useful.
+            let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let mut current = Some(manifest.clone());
+            let mut ws_root = None;
+            for _ in 0..10 {
+                if let Some(dir) = &current {
+                    if dir.join("assets").is_dir() && dir.join("Cargo.toml").is_file() {
+                        ws_root = Some(dir.clone());
+                        break;
+                    }
+                    current = dir.parent().map(std::path::PathBuf::from);
+                }
+            }
+            ws_root
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("assets")
+                .join(&process.output)
+        }
+        _ => cache_dir().join(&process.output),
+    };
 
     // Create output directory if needed
     if let Some(parent) = output_path.parent() {

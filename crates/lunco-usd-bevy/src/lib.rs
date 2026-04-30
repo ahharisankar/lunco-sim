@@ -53,7 +53,7 @@ impl Plugin for UsdBevyPlugin {
         app.init_asset::<UsdStageAsset>()
             .register_asset_loader(UsdLoader)
             .register_type::<UsdPrimPath>()
-            .add_systems(Update, sync_usd_visuals);
+            .add_systems(Update, (sync_usd_visuals, hide_glb_placeholder_meshes));
     }
 }
 
@@ -91,13 +91,23 @@ impl AssetLoader for UsdLoader {
         let data_map = parser.parse().map_err(|e| anyhow::anyhow!("USD Parse Error: {}", e))?;
         let reader = TextReader::from_data(data_map);
 
-        // Resolve external references (e.g., @/components/mobility/wheel.usda@)
-        // The composer walks the directory tree to find the assets/ root and resolves
-        // "/"-prefixed paths against it.
+        // Resolve external references. Two conventions are supported:
+        //  * `/`-prefixed (legacy): composer walks up to the `assets/`
+        //    root and resolves the path against it.
+        //  * Layer-relative `@../../foo.usda@` (USD-spec / Pixar form,
+        //    portable to Blender / usdview / Houdini): resolved against
+        //    the `.usda`'s **own parent directory**.
+        //
+        // Both forms need `base_dir` to be the layer's parent directory
+        // — the composer's `flatten_recursive` joins relative paths
+        // against it. Earlier this passed just `assets/`, which made
+        // `../../vessels/...` resolve to `assets/../../vessels/...`
+        // (out of the workspace). Joining the load-context-relative
+        // parent onto `assets/` fixes it.
         let reader = if let Some(parent) = load_context.path().path().parent() {
             let asset_root = std::path::Path::new("assets");
             let base_dir = if asset_root.exists() {
-                asset_root.to_path_buf()
+                asset_root.join(parent)
             } else {
                 parent.to_path_buf()
             };
@@ -204,32 +214,74 @@ pub fn sync_usd_visuals(
             None
         };
 
-        // Create mesh based on prim type and explicit dimensions.
-        // Use explicit mesh builders to ensure mesh creation succeeds.
-        let mesh_handle: Option<Handle<Mesh>> = match prim_type.as_deref() {
-            Some("Cube") => {
-                if let (Some(width), Some(height), Some(depth)) = (
-                    reader.prim_attribute_value::<f64>(&sdf_path, "width"),
-                    reader.prim_attribute_value::<f64>(&sdf_path, "height"),
-                    reader.prim_attribute_value::<f64>(&sdf_path, "depth"),
-                ) {
-                    Some(meshes.add(Cuboid::new(width as f32, height as f32, depth as f32)))
-                } else { None }
+        // Visibility — honour standard USD `token visibility`.
+        // `invisible` suppresses mesh creation entirely (used for
+        // collider-only Cube prims hidden behind a glTF visual, and
+        // raycast wheel cylinders that have no visible representation).
+        let invisible = matches!(
+            get_attribute_as_string(&reader, &sdf_path, "visibility").as_deref(),
+            Some("invisible")
+        );
+
+        // **Placeholder + payload pattern**: when `lunco:resolvedAsset`
+        // is present, we still build the primitive Cube/Sphere/Cylinder
+        // mesh so the prim has a fallback visual until the glTF Scene
+        // finishes loading. Once Bevy reports the Scene asset loaded,
+        // `hide_glb_placeholder_meshes` (below) hides the primitive
+        // Mesh3d so the photoreal glTF replaces it cleanly.
+        //
+        // Authors size the placeholder Cube ≈ glTF bbox; mismatched
+        // scales briefly show a tan border around the rover during
+        // loading and as fallback when the asset is missing.
+
+        // Create mesh based on prim type and **spec-compliant** USD
+        // attributes:
+        //   * `Cube`     : `double size` (default 2.0) — UsdGeomCube
+        //   * `Sphere`   : `double radius` (default 1.0) — UsdGeomSphere
+        //   * `Cylinder` : `double radius`, `double height` — UsdGeomCylinder
+        // Authors compose non-uniform dimensions via `xformOp:scale`
+        // — exactly how Pixar USD / Houdini / Blender expect it.
+        //
+        // **Legacy fallback**: `width`/`height`/`depth` on Cube prims is
+        // still accepted so older `.usda` files keep working during the
+        // migration. New authoring should use `size` + `xformOp:scale`.
+        let mesh_handle: Option<Handle<Mesh>> = if invisible {
+            None
+        } else {
+            match prim_type.as_deref() {
+                Some("Cube") => {
+                    let size = reader.prim_attribute_value::<f64>(&sdf_path, "size").unwrap_or(2.0) as f32;
+                    if let (Some(width), Some(height), Some(depth)) = (
+                        reader.prim_attribute_value::<f64>(&sdf_path, "width"),
+                        reader.prim_attribute_value::<f64>(&sdf_path, "height"),
+                        reader.prim_attribute_value::<f64>(&sdf_path, "depth"),
+                    ) {
+                        // Legacy form — width/height/depth are *full*
+                        // extents and bake into the mesh directly.
+                        Some(meshes.add(Cuboid::new(width as f32, height as f32, depth as f32)))
+                    } else {
+                        // Spec form: unit-ish Cube; xformOp:scale handles
+                        // non-uniform dimensions (set on Transform below).
+                        Some(meshes.add(Cuboid::new(size, size, size)))
+                    }
+                }
+                Some("Sphere") => {
+                    let radius = reader
+                        .prim_attribute_value::<f64>(&sdf_path, "radius")
+                        .unwrap_or(1.0) as f32;
+                    Some(meshes.add(Sphere::new(radius).mesh().ico(32).unwrap()))
+                }
+                Some("Cylinder") => {
+                    let radius = reader
+                        .prim_attribute_value::<f64>(&sdf_path, "radius")
+                        .unwrap_or(1.0) as f32;
+                    let height = reader
+                        .prim_attribute_value::<f64>(&sdf_path, "height")
+                        .unwrap_or(2.0) as f32;
+                    Some(meshes.add(Cylinder::new(radius, height)))
+                }
+                _ => None,
             }
-            Some("Sphere") => {
-                if let Some(radius) = reader.prim_attribute_value::<f64>(&sdf_path, "radius") {
-                    Some(meshes.add(Sphere::new(radius as f32).mesh().ico(32).unwrap()))
-                } else { None }
-            }
-            Some("Cylinder") => {
-                if let (Some(radius), Some(height)) = (
-                    reader.prim_attribute_value::<f64>(&sdf_path, "radius"),
-                    reader.prim_attribute_value::<f64>(&sdf_path, "height"),
-                ) {
-                    Some(meshes.add(Cylinder::new(radius as f32, height as f32)))
-                } else { None }
-            }
-            _ => None,
         };
 
         // Apply standard PBR material with USD color
@@ -280,7 +332,14 @@ pub fn sync_usd_visuals(
                     let label = label.unwrap_or_else(|| "Scene0".to_string());
                     let path = format!("{asset_uri}#{label}");
                     let scene_h: Handle<Scene> = asset_server.load(&path);
-                    commands.entity(entity).insert(SceneRoot(scene_h));
+                    // Mark the entity so `hide_glb_placeholder_meshes`
+                    // can drop the placeholder Mesh3d once this Scene
+                    // finishes loading. The marker is harmless if the
+                    // entity has no Mesh3d (e.g. `def Xform` without a
+                    // primitive fallback).
+                    commands.entity(entity)
+                        .insert(SceneRoot(scene_h))
+                        .insert(GlbPlaceholder);
                 }
             }
         }
@@ -307,8 +366,25 @@ pub fn sync_usd_visuals(
                 transform.rotation = Quat::from_euler(EulerRot::XYZ, rx, ry, rz);
             }
         }
+        // `xformOp:scale` (UsdGeomXformable) — non-uniform scaling
+        // composed with translate + rotate. Spec-compliant `Cube`
+        // prims rely on this to express width/height/depth without
+        // the legacy `width`/`height`/`depth` attributes.
+        if let Some(v) = get_attribute_as_vec3(&reader, &sdf_path, "xformOp:scale") {
+            let nonzero = v.x.abs() > 1e-6 || v.y.abs() > 1e-6 || v.z.abs() > 1e-6;
+            if nonzero {
+                transform.scale = v;
+            }
+        }
 
-        let final_vis = existing_vis.cloned().unwrap_or(Visibility::Inherited);
+        // Honour `token visibility = "invisible"` — applied as a
+        // Bevy `Visibility::Hidden`. Children inherit unless they
+        // override their own visibility.
+        let final_vis = if invisible {
+            Visibility::Hidden
+        } else {
+            existing_vis.cloned().unwrap_or(Visibility::Inherited)
+        };
 
         commands.entity(entity).insert((
             transform,
@@ -428,4 +504,78 @@ fn get_attribute_as_vec3(reader: &TextReader, path: &SdfPath, attr: &str) -> Opt
         if v.len() >= 3 { return Some(Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32)); }
     }
     None
+}
+
+/// Marker inserted on prim entities that own both a primitive Cube
+/// fallback mesh **and** a glTF [`SceneRoot`]. Used by
+/// [`hide_glb_placeholder_meshes`] to find these entities cheaply.
+#[derive(Component)]
+pub struct GlbPlaceholder;
+
+/// Removes the primitive Cube/Sphere/Cylinder fallback mesh once its
+/// sibling [`SceneRoot`] reports its glTF [`Scene`] asset fully loaded.
+///
+/// **Pattern**: a USD prim authored as `def Cube "Foo" (payload =
+/// @lunco-lib://...@)` carries two visuals — a placeholder Cuboid
+/// (always built) and a `SceneRoot` for the glTF (set when the
+/// composer synthesises `lunco:resolvedAsset`). Rendering both during
+/// the async load gives a smooth "placeholder → photoreal" transition.
+/// Once the Scene asset is `LoadedWithDependencies`, we drop the
+/// `Mesh3d` + material so only the glTF remains.
+///
+/// **Why remove rather than hide**: setting `Visibility::Hidden` on
+/// the parent entity propagates to descendants — including the
+/// SceneRoot's spawned children — and would hide the glTF too.
+/// Removing only the `Mesh3d` / `MeshMaterial3d` components leaves
+/// the parent's transform and SceneRoot intact.
+///
+/// On asset failure (file missing, network error) Bevy never emits
+/// `LoadedWithDependencies`, so the placeholder stays — the
+/// no-glTF fallback case the pattern was designed for.
+fn hide_glb_placeholder_meshes(
+    mut commands: Commands,
+    mut events: MessageReader<AssetEvent<Scene>>,
+    scene_roots: Query<(Entity, &SceneRoot, Option<&ChildOf>), With<GlbPlaceholder>>,
+    children: Query<&Children>,
+    has_mesh: Query<(), With<Mesh3d>>,
+) {
+    // Bevy 0.18 renamed events to messages — `MessageReader` reads
+    // `AssetEvent`s the same way `EventReader` did in earlier
+    // versions.
+    //
+    // The placeholder pattern lays out two distinct USD authorings,
+    // both supported here:
+    //   1. **Same-entity** — `def Cube` with a `lunco-lib://` payload.
+    //      Mesh3d (Cuboid) and SceneRoot live on the same entity.
+    //   2. **Sibling** — `def Xform { def Cube "Placeholder"; def Xform
+    //      "Visual" (payload = ...); }`. Recommended for prims whose
+    //      parent scale must not propagate to the glTF children. Mesh3d
+    //      is on a sibling under the same parent Xform.
+    //
+    // Both shapes are handled: drop Mesh3d on the SceneRoot entity
+    // itself (no-op if absent) **and** on any sibling that has one.
+    for ev in events.read() {
+        for (e, root, parent) in scene_roots.iter() {
+            if !ev.is_loaded_with_dependencies(root.0.id()) { continue; }
+
+            // Same-entity placeholder
+            commands.entity(e)
+                .remove::<Mesh3d>()
+                .remove::<MeshMaterial3d<StandardMaterial>>();
+
+            // Sibling placeholder. `Children::iter()` yields `Entity`
+            // by value via the relationship-target trait — not `&Entity`.
+            if let Some(parent) = parent {
+                if let Ok(siblings) = children.get(parent.0) {
+                    for sib in siblings.iter() {
+                        if sib != e && has_mesh.get(sib).is_ok() {
+                            commands.entity(sib)
+                                .remove::<Mesh3d>()
+                                .remove::<MeshMaterial3d<StandardMaterial>>();
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

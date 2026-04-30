@@ -1,20 +1,24 @@
 #usda 1.0
 (
     defaultPrim = "SandboxScene"
+    upAxis = "Y"
+    metersPerUnit = 1
 )
 
 def Xform "SandboxScene"
 {
     # --- Ground plane (static terrain surface) ---
+    # Spec-compliant Cube: `double size = 1` + `xformOp:scale` for
+    # non-uniform extents. The ground is a 4 km × 0.2 m × 4 km slab.
     def Cube "Ground"
     (
         prepend apiSchemas = ["PhysicsCollisionAPI", "PhysxTerrainAPI"]
     )
     {
-        double width = 4000.0
-        double height = 0.2
-        double depth = 4000.0
+        double size = 1.0
         double3 xformOp:translate = (0, -0.1, 0)
+        double3 xformOp:scale = (4000.0, 0.2, 4000.0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
         string primvars:materialType = "BlueprintGrid"
         double primvars:gridMajorSpacing = 1.0
         double primvars:gridMinorSpacing = 0.5
@@ -27,17 +31,17 @@ def Xform "SandboxScene"
         float physics:friction = 1.0
     }
 
-    # --- Ramp obstacle (static terrain obstacle) ---
+    # --- Ramp obstacles (static terrain) ---
     def Cube "Ramp"
     (
         prepend apiSchemas = ["PhysicsCollisionAPI", "PhysxTerrainAPI"]
     )
     {
-        double width = 60.0
-        double height = 2.0
-        double depth = 80.0
+        double size = 1.0
         double3 xformOp:translate = (25, 4, 0)
         double3 xformOp:rotateXYZ = (0, 0, 17.1887)
+        double3 xformOp:scale = (60.0, 2.0, 80.0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
         string primvars:materialType = "BlueprintGrid"
         double primvars:gridMajorSpacing = 1.0
         double primvars:gridMinorSpacing = 0.5
@@ -56,11 +60,11 @@ def Xform "SandboxScene"
         prepend apiSchemas = ["PhysicsCollisionAPI", "PhysxTerrainAPI"]
     )
     {
-        double width = 60.0
-        double height = 2.0
-        double depth = 80.0
+        double size = 1.0
         double3 xformOp:translate = (25, 4, 80)
         double3 xformOp:rotateXYZ = (0, 0, 17.1887)
+        double3 xformOp:scale = (60.0, 2.0, 80.0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
         string primvars:materialType = "BlueprintGrid"
         double primvars:gridMajorSpacing = 1.0
         double primvars:gridMinorSpacing = 0.5
@@ -84,103 +88,142 @@ def Xform "SandboxScene"
         float lunco:cameraYaw = -2.245559
         float lunco:cameraPitch = -0.303039
         double3 xformOp:translate = (-30.0, 15.0, -20.0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
     }
 
     # --- Rovers ---
-    # Only 2 base rover files exist. Each instance below references a base file
-    # and overrides color, position, and optionally wheel type.
+    # External references use **layer-relative paths** so any
+    # USD-spec-compliant tool (usdview, Blender, Houdini) resolves
+    # them against the file on disk. Two base rover files exist;
+    # each instance overrides color, position, and optionally
+    # wheel type.
     #
     # Matrix: 2 steering types × 2 wheel types = 4 variants
     #   - skid_rover.usda       → PhysxVehicleDriveSkidAPI
     #   - ackermann_rover.usda  → PhysxVehicleDrive4WAPI
-    #   - lunco:wheelType = "physical" → override for physical wheels (default: "raycast")
+    #   - lunco:wheelType = "physical" → physical-wheel override
+
+    # Note: instances mirror the base prim's typeName (`Cube` for
+    # rovers, `Sphere` for balloons) — Pixar USD composition rule is
+    # "local opinion wins for typeName", so an `Xform` instance would
+    # mask the chassis geometry. Migrating bases to Xform-root +
+    # child collider is a separate refactor.
 
     # === Skid-Steer, Raycast Wheels ===
 
-    # Skid 1: Red, raycast — right side, near ramp
     def Cube "Skid_Raycast_1" (
-        prepend references = @/vessels/rovers/skid_rover.usda@</SkidRover>
+        prepend references = @../../vessels/rovers/skid_rover.usda@</SkidRover>
     )
     {
         color3f primvars:displayColor = (0.8, 0.2, 0.2)
         double3 xformOp:translate = (15.0, 5.0, -10.0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     }
 
-    # Skid 2: Green, raycast — right side
     def Cube "Skid_Raycast_2" (
-        prepend references = @/vessels/rovers/skid_rover.usda@</SkidRover>
+        prepend references = @../../vessels/rovers/skid_rover.usda@</SkidRover>
     )
     {
         color3f primvars:displayColor = (0.2, 0.8, 0.2)
         double3 xformOp:translate = (15.0, 5.0, 10.0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     }
 
     # === Skid-Steer, Physical Wheels ===
 
-    # Skid 3: Blue, physical — left side, far from ramp
     def Cube "Skid_Physical_1" (
-        prepend references = @/vessels/rovers/skid_rover.usda@</SkidRover>
+        prepend references = @../../vessels/rovers/skid_rover.usda@</SkidRover>
     )
     {
         color3f primvars:displayColor = (0.2, 0.2, 0.8)
         double3 xformOp:translate = (-15.0, 5.0, -10.0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
         string lunco:wheelType = "physical"
     }
 
     # === Ackermann, Raycast Wheels ===
 
-    # Ackermann 1: Yellow, raycast — left side
     def Cube "Ackermann_Raycast_1" (
-        prepend references = @/vessels/rovers/ackermann_rover.usda@</AckermannRover>
+        prepend references = @../../vessels/rovers/ackermann_rover.usda@</AckermannRover>
     )
     {
         color3f primvars:displayColor = (0.8, 0.8, 0.2)
         double3 xformOp:translate = (-15.0, 5.0, 10.0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     }
 
     # === Ackermann, Physical Wheels ===
 
-    # Ackermann 2: Orange, physical — far left
     def Cube "Ackermann_Physical_1" (
-        prepend references = @/vessels/rovers/ackermann_rover.usda@</AckermannRover>
+        prepend references = @../../vessels/rovers/ackermann_rover.usda@</AckermannRover>
     )
     {
         color3f primvars:displayColor = (0.8, 0.5, 0.1)
         double3 xformOp:translate = (-25.0, 5.0, 0.0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
         string lunco:wheelType = "physical"
     }
 
-    # --- glTF rover (NASA Mars 2020 Perseverance, shipped via lunco-lib://) ---
-    # Reference resolves through the `lunco-lib://` Bevy asset source
-    # (registered in `lunco-client/src/main.rs`) → `<cache>/models/perseverance.glb`,
-    # populated by `cargo run -p lunco-assets -- download`. The composer
-    # detects the `.glb` extension on the payload, skips USD-text parse,
-    # and writes `lunco:resolvedAsset` for `sync_usd_visuals` to pick up.
-    # `lunco:assetMode = "scene"` (the default) loads the full glTF
-    # hierarchy as a child SceneRoot — preserves materials, multi-mesh,
-    # lights — which is what we want for a visual-only fixture.
-    def Xform "Perseverance" (
-        prepend payload = @lunco-lib://models/perseverance.glb@
-    )
+    # --- glTF rover (NASA Mars 2020 Perseverance) ---
+    #
+    # **USD placeholder + payload pattern**: an `Xform` root holds the
+    # spawn transform (translate/rotate); the placeholder Cube and the
+    # glTF-loading Xform are siblings underneath.
+    #
+    #   * Blender / usdview / Houdini  →  `lunco-lib://` payload fails
+    #     to resolve, the placeholder Cube renders → tan box at the
+    #     correct location and bbox dimensions.
+    #   * LunCoSim                     →  composer detects `.glb`
+    #     extension, the registered `lunco-lib://` AssetSource resolves
+    #     to `<cache>/models/perseverance.glb`, glTF SceneRoot spawns
+    #     under `Visual`. The `hide_glb_placeholder_meshes` observer
+    #     drops the Cube `Mesh3d` once the Scene asset is loaded.
+    #
+    # Fresh clone (no `cargo run -p lunco-assets -- download` yet) →
+    # AssetServer fails, Cube stays as the visible fallback.
+    #
+    # Why the Xform-root split: `xformOp:scale` on a parent prim
+    # propagates to children through Bevy's Transform hierarchy.
+    # Putting the placeholder's bbox-scale on the Xform root would
+    # also stretch the glTF rover when it loaded. Keeping the scale
+    # on the leaf `Placeholder` Cube isolates it.
+    def Xform "Perseverance"
     {
-        string lunco:assetMode = "scene"
         double3 xformOp:translate = (5.0, 0.5, 25.0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cube "Placeholder"
+        {
+            double size = 1.0
+            double3 xformOp:scale = (2.7, 1.85, 3.1)
+            uniform token[] xformOpOrder = ["xformOp:scale"]
+            color3f primvars:displayColor = (0.6, 0.4, 0.2)   # Mars-tan
+        }
+
+        def Xform "Visual" (
+            prepend payload = @lunco-lib://models/perseverance.glb@
+        )
+        {
+            string lunco:assetMode = "scene"
+        }
     }
 
     # --- Balloons (cosim entities — geometry/physics + Modelica/Python wiring all in USD) ---
 
     def Sphere "RedBalloon" (
-        prepend references = @/vessels/balloons/modelica_balloon.usda@</ModelicaBalloon>
+        prepend references = @../../vessels/balloons/modelica_balloon.usda@</ModelicaBalloon>
     )
     {
         double3 xformOp:translate = (10.0, 5.0, 0.0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
     }
 
     def Sphere "GreenBalloon" (
-        prepend references = @/vessels/balloons/python_balloon.usda@</PythonBalloon>
+        prepend references = @../../vessels/balloons/python_balloon.usda@</PythonBalloon>
     )
     {
         double3 xformOp:translate = (-10.0, 5.0, 0.0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
     }
 
     # --- Cosim chain demo: Modelica → Python → Avian, cross-entity wires ---
@@ -214,6 +257,7 @@ def Xform "SandboxScene"
         double radius = 0.5
         color3f primvars:displayColor = (0.9, 0.7, 0.2)
         double3 xformOp:translate = (-30.0, 5.0, 10.0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
         bool physics:rigidBodyEnabled = true
         bool physics:collisionEnabled = true
         float physics:mass = 1.0

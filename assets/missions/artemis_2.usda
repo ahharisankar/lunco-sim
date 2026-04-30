@@ -2,15 +2,17 @@
 (
     defaultPrim = "Artemis2"
     upAxis = "Y"
+    metersPerUnit = 1
 )
 
 def Xform "Artemis2"
 {
-    def "Orion" (
+    def Xform "Orion" (
         prepend references = @../vessels/spacecrafts/orion/orion.usda@
     )
     {
         custom string lunco:name = "Artemis 2 Orion"
         double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
     }
 }
