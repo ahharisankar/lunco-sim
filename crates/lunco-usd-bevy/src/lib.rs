@@ -223,6 +223,19 @@ pub fn sync_usd_visuals(
             Some("invisible")
         );
 
+        // Placeholder for an async-loading glTF payload. Authors set
+        // `bool lunco:placeholder = true` on a Cube prim that lives as
+        // a sibling of an `Xform "Visual" (payload = @lunco-lib://...@)`.
+        // Third-party USD tools render it (they don't know our
+        // attribute or the `lunco-lib://` scheme); our pipeline starts
+        // it `Visibility::Hidden` so the user doesn't see a brief
+        // tan-cube flash before the photoreal glTF replaces it. Mesh
+        // is still built — visibility is the toggle. (Future: reveal
+        // on `AssetServer::load_state(...).is_failed()`.)
+        let is_placeholder = reader
+            .prim_attribute_value::<bool>(&sdf_path, "lunco:placeholder")
+            .unwrap_or(false);
+
         // **Placeholder + payload pattern**: when `lunco:resolvedAsset`
         // is present, we still build the primitive Cube/Sphere/Cylinder
         // mesh so the prim has a fallback visual until the glTF Scene
@@ -377,10 +390,12 @@ pub fn sync_usd_visuals(
             }
         }
 
-        // Honour `token visibility = "invisible"` — applied as a
-        // Bevy `Visibility::Hidden`. Children inherit unless they
-        // override their own visibility.
-        let final_vis = if invisible {
+        // Honour `token visibility = "invisible"` and the
+        // `lunco:placeholder = true` author flag — both apply as
+        // `Visibility::Hidden`. Children inherit unless they
+        // override their own visibility (Placeholder Cubes have no
+        // children, so propagation is a no-op).
+        let final_vis = if invisible || is_placeholder {
             Visibility::Hidden
         } else {
             existing_vis.cloned().unwrap_or(Visibility::Inherited)

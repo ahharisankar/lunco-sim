@@ -235,17 +235,34 @@ Authors size the Cube ≈ glTF bbox so the fallback occupies the right
 space. Color it something distinctive (`(0.6, 0.4, 0.2)` for Mars-tan)
 to make "this is a placeholder" obvious.
 
+The recommended structure is an **Xform root + sibling Placeholder + sibling
+Visual** (Pixar-style decomposition that keeps `xformOp:scale` on a leaf so it
+doesn't propagate to glTF children):
+
 ```usda
-def Cube "Perseverance" (
-    prepend payload = @lunco-lib://models/perseverance.glb@
-)
+def Xform "Perseverance"
 {
-    double size = 1.0
     double3 xformOp:translate = (5.0, 0.5, 25.0)
-    double3 xformOp:scale = (2.7, 1.85, 3.1)
-    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
-    color3f primvars:displayColor = (0.6, 0.4, 0.2)
-    string lunco:assetMode = "scene"
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+
+    def Cube "Placeholder"
+    {
+        double size = 1.0
+        double3 xformOp:scale = (2.7, 1.85, 3.1)
+        uniform token[] xformOpOrder = ["xformOp:scale"]
+        color3f primvars:displayColor = (0.6, 0.4, 0.2)
+        # Hidden in our pipeline; visible everywhere else (third-party
+        # tools ignore the custom attribute). Prevents a brief Cube
+        # flash while the glTF Scene async-loads.
+        bool lunco:placeholder = true
+    }
+
+    def Xform "Visual" (
+        prepend payload = @lunco-lib://models/perseverance.glb@
+    )
+    {
+        string lunco:assetMode = "scene"
+    }
 }
 ```
 
