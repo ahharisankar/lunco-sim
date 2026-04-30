@@ -362,6 +362,12 @@ struct MSLIndexer {
     bytes_scanned: usize,
     scan_started: Option<Instant>,
     last_progress_print: Option<Instant>,
+    /// Bundle of every parsed `.mo` collected during the scan. Written
+    /// at the end of `main()` to `.cache/msl/parsed-msl.bin` so the
+    /// workbench can install pre-parsed `StoredDefinition`s in ~1s
+    /// via `Session::replace_parsed_source_set` — mirrors the wasm
+    /// runtime's `parsed-*.bin.zst` strategy on native.
+    parsed_bundle: Vec<(String, StoredDefinition)>,
 }
 
 /// Scan a Modelica source buffer and map each class's simple name to
@@ -575,6 +581,7 @@ impl MSLIndexer {
             bytes_scanned: 0,
             scan_started: None,
             last_progress_print: None,
+            parsed_bundle: Vec::with_capacity(2700),
         }
     }
 
@@ -634,62 +641,61 @@ impl MSLIndexer {
                             .to_str()
                             .unwrap()
                             .to_string();
-                        // `package.mo` declares `package <FolderName> …
-                        // end <FolderName>` per MLS — the class inside
-                        // IS the package, so we must collapse rather
-                        // than prefix. Track the file role so both the
-                        // placement mapping below and
-                        // `add_stored_definition` treat the class name
-                        // correctly.
-                        let is_package_file = file_name == "package.mo";
-                        // Parse through rumoca-session's cache. A
-                        // content-hash-matching entry at
-                        // `.cache/rumoca/parsed-files/` deserializes
-                        // from bincode in ~ms; a miss pays the full
-                        // rumoca parse once and writes the bincode so
-                        // the NEXT indexer run and the workbench's
-                        // first drill-in are both instant.
-                        // `parse_files_parallel` with one path is the
-                        // public entry point that exercises the cache;
-                        // rayon overhead is negligible for length-1.
-                        let ast_opt = rumoca_session::parsing::parse_files_parallel(
-                            &[path.clone()],
-                        )
-                        .ok()
-                        .and_then(|mut pairs| pairs.pop().map(|(_, ast)| ast));
-                        if let Some(ast) = ast_opt {
-                            // Extract Documentation info text while the
-                            // `.mo` source is still in memory. Merged
-                            // into the indexer-wide map keyed by simple
-                            // class name. `extend` is safe: MSL file
-                            // scopes rarely collide at simple-name
-                            // level (each Examples file owns its
-                            // class name), and when they do, the
-                            // first writer wins, which matches the
-                            // "top-level class is authoritative"
-                            // convention.
-                            for (k, v) in extract_documentation_infos(&source) {
-                                self.doc_infos.entry(k).or_insert(v);
-                            }
-                            // Port placements come from rumoca's typed
-                            // annotation tree at port-build time
-                            // (see `resolve_inheritance` →
-                            // `extract_placement(&comp.annotation)`),
-                            // so no separate text-regex scan is needed
-                            // here. That scan was the source of three
-                            // independent bugs (variable-name capture,
-                            // origin-before-extent ordering, nested-
-                            // class scoping) and locked the indexer to
-                            // an MSL-shaped source layout. Going through
-                            // rumoca makes the same path work for any
-                            // library rumoca can parse.
-                            self.add_stored_definition(ast, package_prefix, is_package_file);
-                        }
-                        // source is dropped here — no long-term storage of .mo text
+                        self.ingest_file(&path, &source, &file_name, package_prefix);
                     }
                 }
             }
         }
+    }
+
+    /// Parse and index a single `.mo` file. Extracted from the file
+    /// branch of [`scan_dir`] so we can also ingest top-level companion
+    /// files (e.g. `Complex.mo`) that live next to `Modelica/` rather
+    /// than inside it.
+    fn ingest_file(
+        &mut self,
+        path: &Path,
+        source: &str,
+        file_name: &str,
+        package_prefix: &str,
+    ) {
+        // `package.mo` declares `package <FolderName> …
+        // end <FolderName>` per MLS — the class inside IS the package,
+        // so we must collapse rather than prefix. Track the file role so
+        // both the placement mapping below and `add_stored_definition`
+        // treat the class name correctly.
+        let is_package_file = file_name == "package.mo";
+        // Parse through rumoca-session's cache. A content-hash-matching
+        // entry at `.cache/rumoca/parsed-files/` deserialises from
+        // bincode in ~ms; a miss pays the full rumoca parse once and
+        // writes the bincode so the NEXT indexer run and the workbench's
+        // first drill-in are both instant. `parse_files_parallel` with
+        // one path is the public entry point that exercises the cache;
+        // rayon overhead is negligible for length-1.
+        let ast_opt =
+            rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()])
+                .ok()
+                .and_then(|mut pairs| pairs.pop().map(|(_, ast)| ast));
+        if let Some(ast) = ast_opt {
+            for (k, v) in extract_documentation_infos(source) {
+                self.doc_infos.entry(k).or_insert(v);
+            }
+            self.parsed_bundle
+                .push((path.to_string_lossy().to_string(), ast.clone()));
+            self.add_stored_definition(ast, package_prefix, is_package_file);
+        }
+    }
+
+    /// Top-level companion-file shorthand: load a flat `.mo` at the
+    /// MSL cache root with no package prefix. Used for `Complex.mo`
+    /// and similar siblings of the main `Modelica/` tree.
+    fn ingest_root_file(&mut self, path: &Path, source: &str) {
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        self.ingest_file(path, source, &file_name, "");
     }
 
     fn add_stored_definition(
@@ -1085,7 +1091,8 @@ fn main() {
 
     let opts = Options::parse();
 
-    let msl_path = lunco_assets::msl_dir().join("Modelica");
+    let msl_root = lunco_assets::msl_dir();
+    let msl_path = msl_root.join("Modelica");
     if !msl_path.exists() {
         println!("[indexer] MSL not found at {:?}", msl_path);
         return;
@@ -1097,6 +1104,43 @@ fn main() {
     let mut indexer = MSLIndexer::new();
     indexer.verbose = opts.verbose;
     indexer.scan_dir(&msl_path, "Modelica");
+    // Top-level companion libraries that ship alongside `Modelica/` and
+    // are required by it — `Complex.mo` is referenced by Modelica.Fluid
+    // (medium models) and Modelica.ComplexBlocks; `ModelicaServices/`
+    // carries device animation helpers that several MSL examples extend.
+    // Without them, every model touching `Modelica.Fluid.*` fails
+    // resolution with `base class not found: Complex does not exist`
+    // even though the file is on disk — the in-memory bundle simply
+    // never had it.
+    //
+    // Each entry is loaded independently (top-level package_prefix is
+    // empty, so the indexer keys flat files by their declared class
+    // name and folder packages by their package.mo `within ;` shape).
+    for sibling_dir in ["ModelicaServices"] {
+        let p = msl_root.join(sibling_dir);
+        if p.exists() {
+            indexer.scan_dir(&p, sibling_dir);
+        } else {
+            println!("[indexer] (skipping absent companion `{}`)", sibling_dir);
+        }
+    }
+    for sibling_file in ["Complex.mo"] {
+        let p = msl_root.join(sibling_file);
+        if p.exists() {
+            // scan_dir handles the file branch when called against its
+            // parent dir, but here we want a single file. The cleanest
+            // re-use is to scan the parent with an empty prefix — but
+            // that pulls in *every* root file. Inline the file branch
+            // instead.
+            if let Ok(source) = fs::read_to_string(&p) {
+                indexer.files_scanned += 1;
+                indexer.bytes_scanned += source.len();
+                indexer.ingest_root_file(&p, &source);
+            }
+        } else {
+            println!("[indexer] (skipping absent companion `{}`)", sibling_file);
+        }
+    }
 
     let scan_secs = indexer
         .scan_started
@@ -1121,6 +1165,30 @@ fn main() {
     let json = serde_json::to_string_pretty(&components).unwrap();
     fs::write(&output_path, json).unwrap();
     println!("[indexer] wrote {} → {}", components.len(), output_path.display());
+
+    // Pre-parsed bundle for the workbench's fast path. Native mirror
+    // of the wasm `parsed-*.bin.zst` artifact: bincode-serialised
+    // `Vec<(uri, StoredDefinition)>` that the workbench installs
+    // directly via `Session::replace_parsed_source_set`, bypassing
+    // every per-file cache key concern.
+    let bundle_path = lunco_assets::msl_dir().join("parsed-msl.bin");
+    let t_bundle = Instant::now();
+    match bincode::serialize(&indexer.parsed_bundle) {
+        Ok(bytes) => match fs::write(&bundle_path, &bytes) {
+            Ok(()) => println!(
+                "[indexer] wrote parsed bundle: {} docs, {:.1} MB in {:.1}s → {}",
+                indexer.parsed_bundle.len(),
+                bytes.len() as f64 / (1024.0 * 1024.0),
+                t_bundle.elapsed().as_secs_f64(),
+                bundle_path.display()
+            ),
+            Err(e) => eprintln!(
+                "[indexer] WARN: failed to write parsed bundle to {}: {e}",
+                bundle_path.display()
+            ),
+        },
+        Err(e) => eprintln!("[indexer] WARN: failed to serialise parsed bundle: {e}"),
+    }
 
     if opts.warm {
         println!();

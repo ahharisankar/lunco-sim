@@ -237,6 +237,111 @@ impl ModelicaCompiler {
             );
             return true;
         }
+        if let Some(lunco_assets::msl::MslAssetSource::Filesystem(root)) =
+            lunco_assets::msl::global_msl_source()
+        {
+            // Native fast-path: a single pre-parsed bundle on disk that
+            // mirrors the wasm runtime's `parsed-*.bin.zst` strategy.
+            // No per-file rumoca cache key — just bytes. Produced on
+            // the first successful cold parse below; consumed by every
+            // subsequent launch in ~1s.
+            //
+            // Bundle invalidation is implicit: if the rumoca version
+            // changes its `StoredDefinition` layout, `bincode::deserialize`
+            // fails and we fall through to the slow source-root parse,
+            // which then rewrites the bundle.
+            let bundle_path = lunco_assets::msl_dir().join("parsed-msl.bin");
+            if let Ok(bytes) = std::fs::read(&bundle_path) {
+                match bincode::deserialize::<
+                    Vec<(String, rumoca_session::parsing::StoredDefinition)>,
+                >(&bytes)
+                {
+                    Ok(docs) => {
+                        let pair_count = docs.len();
+                        let inserted = session.replace_parsed_source_set(
+                            "msl",
+                            rumoca_session::compile::SourceRootKind::DurableExternal,
+                            docs,
+                            None,
+                        );
+                        log::info!(
+                            "[ModelicaCompiler] loaded pre-parsed MSL bundle from `{}` \
+                             in {:.2}s: {} inserted (of {} docs)",
+                            bundle_path.display(),
+                            t_total.elapsed().as_secs_f64(),
+                            inserted,
+                            pair_count,
+                        );
+                        return true;
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "[ModelicaCompiler] parsed bundle decode failed ({e}) — \
+                             falling back to source-root parse"
+                        );
+                    }
+                }
+            }
+
+            // Slow path: parse the source root from disk. Goes through
+            // rumoca's per-file artifact cache, but that cache is
+            // fingerprint-keyed and easily invalidates — we treat this
+            // as a one-time cost and write the bundle below so the
+            // next launch hits the fast path above.
+            let parsed = match rumoca_session::source_roots::parse_source_root_with_cache_in(
+                root,
+                rumoca_session::source_roots::resolve_source_root_cache_dir().as_deref(),
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    log::warn!(
+                        "[ModelicaCompiler] failed to parse MSL source root `{}`: {e}",
+                        root.display()
+                    );
+                    return false;
+                }
+            };
+            let parsed_count = parsed.file_count;
+            // Serialise BEFORE moving documents into the session so we
+            // don't pay a clone of ~30 MB of StoredDefinitions.
+            match bincode::serialize(&parsed.documents) {
+                Ok(bytes) => {
+                    if let Some(parent) = bundle_path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    match std::fs::write(&bundle_path, &bytes) {
+                        Ok(()) => log::info!(
+                            "[ModelicaCompiler] wrote MSL bundle ({} MB) to `{}` — next launch will be ~1s",
+                            bytes.len() / (1024 * 1024),
+                            bundle_path.display()
+                        ),
+                        Err(e) => log::warn!(
+                            "[ModelicaCompiler] failed to write MSL bundle to `{}`: {e}",
+                            bundle_path.display()
+                        ),
+                    }
+                }
+                Err(e) => log::warn!(
+                    "[ModelicaCompiler] failed to serialise MSL bundle: {e}"
+                ),
+            }
+            let inserted = session.replace_parsed_source_set(
+                "msl",
+                rumoca_session::compile::SourceRootKind::DurableExternal,
+                parsed.documents,
+                None,
+            );
+            log::info!(
+                "[ModelicaCompiler] preloaded MSL from `{}` in {:.2}s: \
+                 {} parsed / {} inserted (cache {:?})",
+                root.display(),
+                t_total.elapsed().as_secs_f64(),
+                parsed_count,
+                inserted,
+                parsed.cache_status,
+            );
+            return true;
+        }
         false
     }
 

@@ -8,6 +8,7 @@ pub mod canvas_projection;
 pub mod canvas_diagram;
 pub mod console;
 pub mod diagnostics;
+pub mod journal;
 pub mod log;
 pub mod model_view;
 pub mod inspector;

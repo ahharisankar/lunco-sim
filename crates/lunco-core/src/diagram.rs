@@ -17,8 +17,8 @@
 //!   │   │GraphBld │   │WireGraph│
 //!   │   └─────────┘   └─────────┘
 //!   │
-//!   ▼ (converted to)
-//!   egui-snarl Snarl (rendered in lunco-ui)
+//!   ▼ (rendered by)
+//!   lunco-canvas (per-domain projectors live in domain crates)
 //! ```
 //!
 //! ## Ontology Alignment (specs/ontology.md, Article IX)

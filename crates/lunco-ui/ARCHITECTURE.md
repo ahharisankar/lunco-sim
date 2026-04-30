@@ -100,7 +100,7 @@ let series: Vec<ChartSeries> = plotted.names.iter()
 time_series_plot(ui, "modelica_plot", &series);
 ```
 
-**Node graphs** — re-exports `egui-snarl` types. Domain crates define their own node type and `SnarlViewer`, then call `snarl.show()`.
+**Node graphs / diagrams** — render on `lunco-canvas`. Domain crates own their node-type enum and projector; `lunco-canvas` handles pan/zoom/selection/draw and the workbench's animation hooks.
 
 ## Design Decisions
 

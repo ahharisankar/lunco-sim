@@ -367,6 +367,21 @@ impl ModelicaDocument {
         self.last_source_edit_at
     }
 
+    /// Backdate `last_source_edit_at` past the debounce window so the
+    /// next [`crate::ui::ast_refresh`] tick spawns an AST parse
+    /// immediately, without waiting for the typing-debounce. Use this
+    /// after a structured / API edit (one discrete commit) where the
+    /// debounce — which exists to coalesce keystroke bursts — only
+    /// adds latency. Has no effect when the AST is already fresh.
+    pub fn waive_ast_debounce(&mut self) {
+        if self.last_source_edit_at.is_some() {
+            let backdate_ms = (crate::ui::ast_refresh::AST_DEBOUNCE_MS as u64).saturating_add(1);
+            self.last_source_edit_at = Some(
+                web_time::Instant::now() - std::time::Duration::from_millis(backdate_ms),
+            );
+        }
+    }
+
     /// The cached lenient parse. Always present, may be stale —
     /// same staleness contract as [`Self::ast`]. Browser, outline,
     /// and any panel that must keep rendering through partial-parse

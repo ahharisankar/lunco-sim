@@ -1,9 +1,8 @@
 //! Canvas projection — convert a Modelica AST into the [`VisualDiagram`]
 //! the canvas panel renders.
 //!
-//! Inherited from the now-removed snarl viewer (`panels/diagram.rs`),
-//! this module owns the shared projection helpers + auto-layout
-//! settings the canvas reads. It does **not** render anything itself —
+//! Owns the projection helpers + auto-layout settings the canvas
+//! reads. Does **not** render anything itself —
 //! [`crate::ui::panels::canvas_diagram::CanvasDiagramPanel`] is the
 //! rendering panel; this module just produces the data model it
 //! consumes.
@@ -203,10 +202,14 @@ pub(crate) fn scan_connect_annotations(
         if pts.len() < 2 {
             continue;
         }
-        // Drop the two endpoints — they're redundant with the port
-        // positions the renderer already knows. Only the interior
-        // waypoints affect the path.
-        let interior: Vec<(f32, f32)> = pts[1..pts.len().saturating_sub(1)].to_vec();
+        // Keep ALL authored points including the endpoints — for
+        // top-level connectors the renderer anchors on the node's
+        // centre (it has no real port to anchor on), and dropping
+        // the first/last point made the wire zigzag from the centre
+        // diagonally to the authored entry point. With the endpoints
+        // preserved the polyline actually traces the route the
+        // model author drew.
+        let interior: Vec<(f32, f32)> = pts.clone();
         let key = canonical_edge_key(&a_inst, &a_port, &b_inst, &b_port);
         out.entry(key).or_insert(interior);
     }
@@ -688,6 +691,24 @@ pub fn import_model_to_diagram_from_ast(
         // `Modelica.Blocks.Math.Gain`).
         if component_def.is_none() && !type_name.is_empty() {
             let mut candidates: Vec<String> = Vec::new();
+            // MLS §5.3: walk the enclosing class scopes of the target
+            // outward. For target `Modelica.Blocks.Examples.PID_Controller`
+            // and a short ref `Sources.Sinc`, candidates include
+            // `Modelica.Blocks.Examples.Sources.Sinc`,
+            // `Modelica.Blocks.Sources.Sinc` (hits — Sources lives next
+            // to Examples), `Modelica.Sources.Sinc`. Without this, every
+            // short-form ref in an MSL example silently dropped at
+            // conversion (e.g. CompareSincExpSine projecting 0 nodes).
+            if let Some(target) = target_class {
+                let mut parts: Vec<&str> = target.split('.').collect();
+                // Drop the leaf (the target class itself) — scope walks
+                // start at its enclosing package.
+                parts.pop();
+                while !parts.is_empty() {
+                    candidates.push(format!("{}.{}", parts.join("."), type_name));
+                    parts.pop();
+                }
+            }
             if let Some(within) = ast.within.as_ref() {
                 let mut parts: Vec<String> = within
                     .name
@@ -817,6 +838,16 @@ pub fn import_model_to_diagram_from_ast(
                             .parameter_values
                             .insert(k.clone(), format_modifier_expr(v));
                     }
+                    // `Component X if <cond>` — only dim when the
+                    // condition evaluates FALSE against the parent's
+                    // Boolean parameter defaults. Active conditional
+                    // components (e.g. `addSat if with_I` with
+                    // `with_I=true`) render at full opacity, matching
+                    // OMEdit which only dims runtime-absent ones.
+                    if let Some(cond) = &comp.condition {
+                        let active = eval_condition(cond, &comp_by_short);
+                        diagram_node.is_conditional = !active;
+                    }
                 }
             }
         }
@@ -840,8 +871,18 @@ pub fn import_model_to_diagram_from_ast(
 
         if let (Some(src_id), Some(tgt_id)) = (src_diagram_id, tgt_diagram_id) {
             // Port names from graph node ports
-            let src_port = src_node.ports.get(edge.source_port).map(|p| p.name.clone()).unwrap_or_default();
-            let tgt_port = tgt_node.ports.get(edge.target_port).map(|p| p.name.clone()).unwrap_or_default();
+            let mut src_port = src_node.ports.get(edge.source_port).map(|p| p.name.clone()).unwrap_or_default();
+            let mut tgt_port = tgt_node.ports.get(edge.target_port).map(|p| p.name.clone()).unwrap_or_default();
+            // Top-level connector instances appear in the rumoca
+            // graph with a single port whose name equals the
+            // connector instance itself (rumoca treats the connector
+            // as a self-port). The diagram node has no such port —
+            // the wire should anchor on the node body. Empty out the
+            // port name in that case so the orthogonal router falls
+            // back to the node-body anchor and the wire actually
+            // renders.
+            if src_port == src_short { src_port = String::new(); }
+            if tgt_port == tgt_short { tgt_port = String::new(); }
             diagram.add_edge(src_id, src_port.clone(), tgt_id, tgt_port.clone());
             // Attach authored waypoints if the source had them.
             let key = canonical_edge_key(src_short, &src_port, tgt_short, &tgt_port);
@@ -863,6 +904,12 @@ pub fn import_model_to_diagram_from_ast(
     // endpoints carry empty `inst` and the connector name in
     // `port` — match the diagram node by `instance_name == port`
     // in that case.
+    // Two passes: (1) attach waypoints to existing edges that match
+    // by node-id pair, regardless of port-name shape — covers the
+    // first-pass loop above where `waypoint_map.get(&key)` missed
+    // because the rumoca-AST graph and the regex use different
+    // (inst, port) shapes for top-level connectors. (2) add any
+    // remaining waypoint_map entries that have no edge yet.
     let mut to_add: Vec<(
         crate::visual_diagram::DiagramNodeId,
         String,
@@ -877,15 +924,24 @@ pub fn import_model_to_diagram_from_ast(
         let a_id = diagram.nodes.iter().find(|n| n.instance_name == a_match).map(|n| n.id);
         let b_id = diagram.nodes.iter().find(|n| n.instance_name == b_match).map(|n| n.id);
         let (Some(a_id), Some(b_id)) = (a_id, b_id) else { continue };
-        // For bare-connector endpoints the "port" is the connector
-        // itself; route from the node body (empty port string).
+        // Find an existing edge connecting these two nodes (any
+        // port-shape). If found and missing waypoints, attach them.
+        let mut found = false;
+        for edge in diagram.edges.iter_mut() {
+            let same =
+                (edge.source_node == a_id && edge.target_node == b_id)
+                    || (edge.source_node == b_id && edge.target_node == a_id);
+            if same {
+                if edge.waypoints.is_empty() {
+                    edge.waypoints = waypoints.clone();
+                }
+                found = true;
+                break;
+            }
+        }
+        if found { continue; }
         let a_port_str = if a_inst.is_empty() { String::new() } else { a_port.clone() };
         let b_port_str = if b_inst.is_empty() { String::new() } else { b_port.clone() };
-        let already = diagram.edges.iter().any(|e| {
-            (e.source_node == a_id && e.target_node == b_id)
-                || (e.source_node == b_id && e.target_node == a_id)
-        });
-        if already { continue; }
         to_add.push((a_id, a_port_str, b_id, b_port_str, waypoints.clone()));
     }
     for (a_id, a_port, b_id, b_port, waypoints) in to_add {
@@ -1236,6 +1292,58 @@ fn connector_icon_color(
 /// the canvas substitution is consistent regardless of source. Returns
 /// an empty string for expression shapes the icon-text path can't
 /// usefully render (function calls, complex matrix literals, etc.).
+/// Evaluate a Boolean component-condition expression against the
+/// parent class's component defaults. Handles the shapes MSL uses
+/// for `Component X if <cond>` declarations:
+///   - `Terminal{Bool, "true"|"false"}`            → literal
+///   - `ComponentReference(<param>)`               → resolve `param`
+///     in `params_map`, parse its default as Bool
+///   - `Unary{Not, inner}`                         → !eval(inner)
+///   - `Parenthesized{inner}`                      → eval(inner)
+///   - `Binary{And/Or, lhs, rhs}`                  → short-circuit
+///
+/// Anything we can't reason about returns `true` so we err on the
+/// side of NOT dimming an active component (over-dimming would hide
+/// real components from the user).
+fn eval_condition(
+    expr: &rumoca_session::parsing::ast::Expression,
+    params_map: &std::collections::HashMap<&str, &rumoca_session::parsing::ast::Component>,
+) -> bool {
+    use rumoca_session::parsing::ast::{Expression, OpBinary, OpUnary};
+    match expr {
+        Expression::Terminal { token, .. } => {
+            // Accept any terminal whose text reads "true"/"false"; the
+            // exact `TerminalType` variant rumoca chooses for boolean
+            // literals isn't reliably `Bool` (Identifier/Bool both
+            // appear in the wild).
+            match token.text.as_ref() {
+                "true" => true,
+                "false" => false,
+                _ => true,
+            }
+        }
+        Expression::ComponentReference(cref) => {
+            let leaf = cref.parts.last().map(|p| p.ident.text.as_ref()).unwrap_or("");
+            params_map
+                .get(leaf)
+                .and_then(|comp| comp.binding.as_ref())
+                .map(|d| eval_condition(d, params_map))
+                .unwrap_or(true)
+        }
+        Expression::Unary { op, rhs } => match op {
+            OpUnary::Not(_) => !eval_condition(rhs, params_map),
+            _ => true,
+        },
+        Expression::Parenthesized { inner } => eval_condition(inner, params_map),
+        Expression::Binary { op, lhs, rhs } => match op {
+            OpBinary::And(_) => eval_condition(lhs, params_map) && eval_condition(rhs, params_map),
+            OpBinary::Or(_) => eval_condition(lhs, params_map) || eval_condition(rhs, params_map),
+            _ => true,
+        },
+        _ => true,
+    }
+}
+
 fn format_modifier_expr(expr: &rumoca_session::parsing::ast::Expression) -> String {
     use rumoca_session::parsing::ast::{Expression, OpBinary, OpUnary, TerminalType};
     match expr {

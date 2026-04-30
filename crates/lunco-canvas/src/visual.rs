@@ -14,8 +14,8 @@
 //!
 //! # What's NOT in this module
 //!
-//! Concrete visuals (Modelica icon, Bezier edge, snarl-style port
-//! block, animated wire, widget-in-node) all live in domain crates.
+//! Concrete visuals (Modelica icon, Bezier edge, port-block,
+//! animated wire, widget-in-node) all live in domain crates.
 //! `lunco-canvas` ships only the traits and the registry.
 //!
 //! # `DrawCtx` design

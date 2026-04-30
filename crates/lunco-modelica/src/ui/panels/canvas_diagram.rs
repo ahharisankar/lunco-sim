@@ -1,8 +1,7 @@
 //! Modelica diagram, rendered via `lunco-canvas`.
 //!
-//! A parallel path to the egui-snarl-backed `diagram.rs`, kept
-//! alongside until the canvas version covers every snarl feature
-//! we actually use. Users see both as tabs and can compare.
+//! Sole diagram path. The previous egui-snarl-backed `diagram.rs`
+//! has been removed — `lunco-canvas` covers every feature we use.
 //!
 //! # Pipeline
 //!
@@ -233,6 +232,10 @@ pub struct IconNodeData {
     /// `Placement(transformation(extent=..., rotation=...))`. Empty
     /// path falls back to the generic per-shape marker.
     pub port_connector_paths: Vec<(String, String, f32, f32, f32)>,
+    /// Conditional component (`Component X if <cond>`). Renderer
+    /// halves opacity so users can see it's design-time visible but
+    /// runtime-conditional — matches OMEdit/Dymola convention.
+    pub is_conditional: bool,
 }
 
 /// Typed payload for `"modelica.connection"` edges. Same purpose as
@@ -286,6 +289,8 @@ struct IconNodeVisual {
     /// top-level on a parent diagram. Preferred over `icon_graphics`
     /// when present.
     diagram_graphics: Option<crate::annotations::Diagram>,
+    /// Conditional component flag — render dimmed.
+    is_conditional: bool,
     /// Pre-formatted `(parameter_name, value)` pairs for `%paramName`
     /// text substitution. Carries class defaults from
     /// `MSLComponentDef.parameters` (instance-modification overlay
@@ -330,6 +335,20 @@ impl NodeVisual for IconNodeVisual {
         );
         let painter = ctx.ui.painter();
         let theme_snap = canvas_theme_from_ctx(ctx.ui.ctx());
+        // Conditional components (`Component X if cond`) — render at
+        // reduced opacity so every primitive (icon shapes, text,
+        // port markers) inherits the dimming. Matches OMEdit/Dymola
+        // convention for "design-time visible, runtime-conditional"
+        // components.
+        let _dimmed_painter;
+        let painter: &egui::Painter = if self.is_conditional {
+            let mut p = painter.clone();
+            p.set_opacity(0.4);
+            _dimmed_painter = p;
+            &_dimmed_painter
+        } else {
+            painter
+        };
 
         // No always-on card fill. Icons that need a body (Resistor's
         // white rectangle, Inertia's gray cylinder, …) author it
@@ -608,8 +627,18 @@ impl NodeVisual for IconNodeVisual {
                         // which is equivalent to rotating CW in the
                         // visual frame. Negate so the visual outcome
                         // matches MLS / OMEdit.
+                        // Include the PARENT's rotation in the port
+                        // marker's orientation. Without this, when
+                        // the parent is rotated (e.g. addSat at
+                        // rotation=270), only the port POSITION is
+                        // rotated — the connector arrow keeps its
+                        // default orientation and ends up pointing
+                        // the wrong way relative to the rotated
+                        // icon. Adding the parent's rotation makes
+                        // the marker rotate WITH the icon body so
+                        // the arrow tip always points into the icon.
                         let port_orientation = crate::icon_paint::IconOrientation {
-                            rotation_deg: -port_rotation_deg,
+                            rotation_deg: self.rotation_deg - port_rotation_deg,
                             mirror_x: self.mirror_x,
                             mirror_y: self.mirror_y,
                         };
@@ -1095,16 +1124,12 @@ impl EdgeVisual for OrthogonalEdgeVisual {
         // wires at typical fit zoom). Arrows + port markers still
         // scale gently below.
         let base_width = if selected {
-            if self.is_causal { 1.4 } else { 1.0 }
+            if self.is_causal { 2.2 } else { 1.7 }
         } else if self.is_causal {
-            1.0
+            1.6
         } else {
-            0.6
+            1.1
         };
-        // A *gentle* zoom influence on stroke for very high zoom-in
-        // (so wires don't look like floss next to a 1000-px-wide
-        // icon). sqrt damps the curve; at zoom=1 it's ~0.58, at
-        // zoom=10 it's ~1.83. Clamped 0.7..1.6 for sanity.
         let zoom_norm = (ctx.viewport.zoom / 3.0).sqrt().clamp(0.7, 1.6);
         let width = base_width * zoom_norm;
         // `scale` is exposed downstream for arrows / stubs / port
@@ -1949,6 +1974,7 @@ fn build_registry() -> VisualRegistry {
             mirror_y: d.mirror_y,
             instance_name: d.instance_name.clone(),
             port_connector_paths: d.port_connector_paths.clone(),
+            is_conditional: d.is_conditional,
             parent_qualified_type: d.qualified_type.clone(),
         }
     });
@@ -2302,6 +2328,7 @@ fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramNodeId, Canv
                     .iter()
                     .map(|p| (p.name.clone(), p.msl_path.clone(), p.size_x, p.size_y, p.rotation_deg))
                     .collect(),
+                is_conditional: node.is_conditional,
             }),
             ports,
             label: node.instance_name.clone(),
@@ -6019,8 +6046,8 @@ fn open_drill_in_tab(
 // ─── Doc-op translation ─────────────────────────────────────────────
 
 /// Resolve `(document id, editing class name)` for the current tab.
-/// Mirrors the snarl panel's logic so both panels target the same
-/// class when `open_model` is bound.
+/// Used by the canvas + neighbours so they target the same class when
+/// `open_model` is bound.
 fn resolve_doc_context(world: &World) -> (Option<lunco_doc::DocumentId>, Option<String>) {
     // Active doc from the Workspace session; `open_model.detected_name`
     // is read as a display-cache fallback when the registry AST hasn't
@@ -6308,6 +6335,7 @@ fn synthesize_msl_node(
                 .iter()
                 .map(|p| (p.name.clone(), p.msl_path.clone(), p.size_x, p.size_y, p.rotation_deg))
                 .collect(),
+            is_conditional: false,
         }),
         ports,
         label: instance_name.to_string(),
@@ -6447,6 +6475,13 @@ fn apply_ops(world: &mut World, doc_id: lunco_doc::DocumentId, ops: Vec<Modelica
                 Err(e) => bevy::log::warn!("[CanvasDiagram] op failed: {}", e),
             }
         }
+        // Structured edit batch is one discrete commit — bypass the
+        // typing-debounce so the next ast_refresh tick reparses
+        // immediately. Otherwise canvas/diagnostics lag 2.5 s behind
+        // every API-driven or canvas-drag mutation.
+        if any_applied {
+            host.document_mut().waive_ast_debounce();
+        }
     }
     let apply_ms = t_apply_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -6479,8 +6514,7 @@ fn apply_ops(world: &mut World, doc_id: lunco_doc::DocumentId, ops: Vec<Modelica
     // so every other panel (code editor, breadcrumb, inspector)
     // that reads the cached source sees the update immediately —
     // the code editor doesn't watch the registry directly; it
-    // reads the `Arc<str>` on `open_model`. Matches the snarl
-    // panel's write-back path.
+    // reads the `Arc<str>` on `open_model`.
     let fresh = world
         .get_resource::<ModelicaDocumentRegistry>()
         .and_then(|r| r.host(doc_id))

@@ -316,6 +316,254 @@ can commit `.lunco/` or author layout defaults in `twin.toml`.
 
 Closing and reopening the app restores the session exactly.
 
+## 5a. Journal — `lunco-twin-journal` subsystem
+
+The Twin's journal is a **dedicated subsystem**, not an in-memory side
+effect of the UI. It lives in its own crate, `lunco-twin-journal`, and
+captures *every observable event* in the Twin's lifecycle: structured
+edits, compiles, simulation runs, parameter scans, bookmarks, agent
+queries, comments, screenshots, file imports — anything a future
+reviewer might want to replay or audit.
+
+The journal is not "edit history" in disguise. It's the engineering
+record of the Twin — closer in spirit to a flight recorder or a
+laboratory notebook than to git. Documents are *what* the Twin
+contains; the journal is *what happened to it*.
+
+### Why a separate crate
+
+| Responsibility | Crate |
+|----------------|-------|
+| `twin.toml`, document set, file references, paths | `lunco-twin` |
+| Append-only event log: storage, schema, query, replay | `lunco-twin-journal` |
+| Per-domain ops (`ModelicaOp`, `UsdOp`, …) | domain crates |
+| UI panel that *displays* the journal | `lunco-modelica` (and per-domain UI) |
+
+Splitting the journal out keeps `lunco-twin` focused on file-set
+management and lets headless tooling (CLI exporters, CI pipelines,
+audit scripts) depend on the journal without pulling in the Bevy /
+egui surface area. Domain crates **never write directly to journal
+files** — they emit `JournalEvent`s through a Bevy observer chain;
+`lunco-twin-journal` owns the only writer.
+
+### Storage
+
+```
+my_twin/
+├─ twin.toml
+├─ models/Engine.mo
+└─ .lunco/
+   └─ journal/
+      ├─ index.toml          # active segment, schema version, retention
+      ├─ 00000-2026-04-29.ndjson   # append-only segments
+      ├─ 00001-2026-04-30.ndjson
+      └─ blobs/                    # large payloads (screenshots, sim
+          └─ d3a7c…/                # results, plot exports) keyed by hash;
+              └─ 00.png             # entry references via "blob": "d3a7c…"
+```
+
+- **Append-only NDJSON segments**, one event per line. Segments rotate
+  by date or by size cap (default ~1 MB) to stay git-friendly. Old
+  segments are never rewritten.
+- **Blob sidecar** holds anything too big or too binary for NDJSON —
+  screenshots, FMU result CSVs, exported plots. Entries reference
+  blobs by content hash; deduplication is automatic.
+- **VCS by default**: `journal/index.toml` and `journal/*.ndjson` are
+  committed; `journal/blobs/` is opt-in via
+  `twin.toml [journal] commit_blobs = true` (most teams want LFS or
+  out-of-tree storage for binary payloads).
+- Retention defaults to "keep all"; explicit prune via
+  `twin.toml [journal] retain_days = N`.
+
+### Schema — one event
+
+```rust
+pub struct JournalEvent {
+    pub ts: DateTime<Utc>,            // monotonic in segment order
+    pub session: SessionId,           // opaque per-app-launch id
+    pub actor: ActorId,               // git user.name | env | "agent:<name>"
+    pub source: EventSource,          // canvas | editor | api | undo | redo
+                                      //  | compile | sim | import | comment
+    pub kind: EventKind,              // (typed enum, see below)
+    pub payload: serde_json::Value,   // domain-specific, schema'd per kind
+    pub blob: Option<BlobRef>,        // optional content-hash reference
+    pub note: Option<String>,         // optional human-authored reason
+}
+
+pub enum EventKind {
+    // Document mutations (covers all `ModelicaChange` etc.)
+    DocumentEdited { doc: TwinPath, gen: u64, op: String },
+    // Compile / simulate lifecycle
+    CompileStarted { doc: TwinPath, class: String },
+    CompileSucceeded { doc: TwinPath, class: String, duration_ms: u64 },
+    CompileFailed   { doc: TwinPath, class: String, error: String },
+    SimRunStarted   { doc: TwinPath, class: String, params: BTreeMap<String, f64> },
+    SimRunFinished  { doc: TwinPath, blob: BlobRef /* result CSV */ },
+    // Curation
+    Bookmark        { label: String, target: TwinTarget },
+    Comment         { target: TwinTarget, body: String },
+    Screenshot      { blob: BlobRef, target: TwinTarget },
+    // External
+    FileImported    { doc: TwinPath, source_uri: String },
+    AgentQueried    { agent: String, query: String, response: String },
+}
+```
+
+`EventKind` is a typed Rust enum with `serde` (un)tagged JSON
+representation. New variants are additive — older readers fall
+through to a `JournalEvent::Unknown` branch and preserve the row
+on rewrite, so a Twin opened in an old client can still be saved.
+
+`TwinPath` is the Twin-relative path. `TwinTarget` carries enough
+context to re-open exactly the same view (`{doc, class, component?,
+range?}`).
+
+### What the journal is **not**
+
+- **Not the AST history.** The current AST lives in the Document file.
+  The journal records the deltas; replay reconstructs them.
+- **Not the undo stack.** Undo is bounded ring-buffer state in the
+  open Document. The journal logs the original op AND its undo / redo
+  as separate entries (with `source = undo|redo`) so a reviewer can
+  audit *why* state moved backward.
+- **Not session state.** Tab switches, panel resizes, scroll
+  positions belong in `session.toml`.
+- **Not telemetry to a vendor.** All journal data stays in the Twin.
+  Anonymous telemetry, if it ever exists, is a separate opt-in
+  channel.
+
+### Crate surface (`lunco-twin-journal`)
+
+```rust
+// Storage
+pub trait JournalStore {
+    fn append(&mut self, event: JournalEvent) -> Result<()>;
+    fn query(&self, q: &JournalQuery) -> Result<Vec<JournalEvent>>;
+    fn store_blob(&mut self, bytes: &[u8]) -> Result<BlobRef>;
+    fn read_blob(&self, blob: &BlobRef) -> Result<Vec<u8>>;
+}
+pub struct FsJournalStore { /* default impl over `<twin>/.lunco/journal/` */ }
+
+// Bevy integration (behind a `bevy` feature flag)
+pub struct JournalPlugin;          // wires the writer + observer fan-in
+pub struct JournalAppend(pub JournalEvent);   // event/observer trigger
+pub struct JournalQuery { /* doc? actor? kind? since? limit? */ }
+
+// Replay / revert
+pub trait JournalReplay {
+    fn replay_to(&self, store: &dyn JournalStore, target: &JournalCursor)
+        -> Result<TwinSnapshot>;
+}
+```
+
+Domain crates fire `JournalAppend` events; the `JournalPlugin`
+observer drains them through `JournalStore::append`. The store is
+swappable — `FsJournalStore` for normal use, an in-memory store for
+tests, an HTTP store for hosted Twins down the road.
+
+### UI surface
+
+The bottom-dock Journal panel is a *view* over `JournalStore::query`.
+It filters by doc / actor / kind / source / time window, clicks an
+entry to open the corresponding Twin target, and exposes
+"Revert to here" (replay inverse edits onto a scratch copy) and
+"Compare with file" (diff journal-implied state against the current
+Document source — catches out-of-band edits).
+
+### API surface
+
+External agents (MCP, HTTP API) read the journal to ground their
+work in prior context. They cannot append directly — only the Bevy
+observer chain may write, ensuring journal ↔ document consistency.
+
+```
+journal.query     { doc?, kind?, actor?, since?, limit? } → Vec<JournalEvent>
+journal.snapshot  { at: JournalCursor }                   → TwinSnapshot
+journal.blob      { ref: BlobRef }                        → bytes
+```
+
+### Why this design
+
+- **Reproducibility.** A reviewer six months later replays the
+  journal to see exactly how the rocket model came to be: which
+  parameters were swept, which compile errors were hit and how they
+  were resolved, which simulation runs informed which design
+  decisions.
+- **AI-assisted workflows.** Agents read the journal to understand
+  intent before mutating; their own actions are tagged
+  `actor = "agent:<name>"` so humans can audit agent contributions
+  separately.
+- **Twin handoff.** Cloning a Twin clones its history. Merging two
+  Twin branches merges NDJSON segments as plain text — monotonic
+  timestamps make conflicts rare and resolvable.
+- **Hardware-in-the-loop / ops integration.** Sim runs, telemetry
+  snapshots, and live-feed events all land in the journal as first-
+  class entries — the same surface that records "user added a wire"
+  records "FMU run completed at t=45.2s with thrust=12.4kN".
+
+The journal is conceptually a flight recorder for a digital twin —
+flat, append-only, content-addressed, queryable. LunCoSim doesn't
+reconstruct documents from the journal; the journal records what
+happened so anyone (human or agent, today or later) can answer
+*why is this Twin in the state it's in?*
+
+### Forward path: SysML v2 REST API backbone
+
+`lunco-twin-journal` is also the substrate on which we'll mount a
+**SysML v2 REST API** (OMG SysML v2 / KerML services spec). The
+v2 spec is built around commits, branches, projects, elements, and
+queries — exactly the abstractions the journal already supplies, just
+under different names:
+
+| SysML v2 concept | LunCoSim mapping |
+|------------------|------------------|
+| `Project` | a Twin |
+| `Branch` | a git branch over the Twin (or a journal cursor range) |
+| `Commit` | a `JournalCursor` — append-only, content-hashed range of events terminated at a logical boundary (compile success, save-all, explicit "Tag commit") |
+| `Element` (`Part`, `Connection`, `Action`, …) | a Twin target (`TwinPath` + class + component path) |
+| `RecordedRelationship` / `RelationshipUsage` | `EventKind::DocumentEdited { op: AddConnection }` and friends |
+| `Query` over commit / element | `JournalStore::query` + `JournalReplay::replay_to` |
+| Element-level provenance (`createdBy`, `modifiedBy`) | `JournalEvent.{actor, ts, source}` |
+
+Concretely:
+
+- The trait `JournalStore` is shaped to satisfy SysML v2's `commits`
+  / `elements` endpoint contracts: an immutable, content-addressed
+  store with key-by-hash retrieval, append-only writes, range queries.
+- `JournalReplay::replay_to(JournalCursor)` is the engine behind
+  SysML v2 `GET /projects/{id}/commits/{commit}/elements` — it
+  produces the element graph at the named commit by replaying events.
+- `BlobRef` is content-addressed exactly like SysML v2's element
+  identifiers (`@id` is hash-derivable from canonical event sequence).
+- `EventKind` variants slot into the v2 metamodel:
+  `DocumentEdited` → `RecordedChange`, `Comment` → `Comment`,
+  `SimRunFinished` → `AnalysisCaseUsage` result attachment, etc.
+
+This isn't a v1 deliverable — the SysML v2 REST spec is still
+stabilising, and we're not chasing OMG conformance until it does.
+But the journal's data model is **deliberately a strict superset**
+of what SysML v2 requires. When we bolt on the REST adapter
+(`lunco-twin-journal-sysml-v2` crate, target ~M3), it becomes a
+translator from SysML v2 paths/verbs onto `JournalStore` + replay —
+no new persistence layer, no schema migration, no forked domain
+model.
+
+The pragmatic order:
+
+1. **Now** — `lunco-twin-journal` lands with `FsJournalStore`,
+   `JournalPlugin`, the existing UI panel.
+2. **Next** — domain crates fan their existing `*Change` events into
+   `JournalAppend`; `JournalReplay` lands so "Revert to here" works.
+3. **Later** — `lunco-twin-journal-sysml-v2` adds the OMG REST
+   surface: `/projects`, `/commits`, `/branches`, `/elements`,
+   `/queries`. Multi-Twin backends (cloud, hosted) plug in here as
+   alternate `JournalStore` impls (S3, Postgres, KerML server).
+
+The journal stops being a "nice audit log" and becomes the protocol
+boundary — every external integration (a v2-conformant tool, a
+Modelica master, an external sim runner, a downstream PLM/MBSE
+system) reads and writes through it.
+
 ## 6. Startup flow
 
 All three apps (`rover_sandbox_usd`, `lunco_client`, `modelica_workbench`)

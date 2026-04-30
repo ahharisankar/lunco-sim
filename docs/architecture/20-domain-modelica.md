@@ -36,7 +36,7 @@ The Modelica runtime is **rumoca**, our fork:
        │
        ▼
   Views  (Tier 3: panels)
-    - DiagramPanel (egui-snarl)
+    - DiagramPanel (lunco-canvas)
     - CodeEditorPanel (text view)
     - ModelicaInspectorPanel (params + live variables)
     - GraphsPanel (time-series plots)
@@ -208,6 +208,45 @@ continuation line so generated source stays readable:
 		annotation(Line(points={{0,0},{10,10}}));
 ```
 
+### 5.4a External API surface (`api_edits.rs`)
+
+Each `ModelicaOp` variant has a Reflect-registered command wrapper so
+external callers (HTTP / MCP / agent SDK) hit the same code path as the
+GUI panels (per AGENTS.md §4.1):
+
+| API command | Wraps | Purpose |
+|-------------|-------|---------|
+| `SetDocumentSource { doc, source }` | `ReplaceSource` | Whole-buffer rewrite — agent batch edits, lint apply, source import |
+| `AddModelicaComponent { doc, class, type_name, name, x, y, w, h }` | `AddComponent` | Drop a component into a class with a placement |
+| `RemoveModelicaComponent { doc, class, name }` | `RemoveComponent` | Delete a component declaration |
+| `ConnectComponents { doc, class, from, to }` | `AddConnection` | Add a `connect(a.p, b.q);` equation; `from`/`to` are dot-paths |
+| `DisconnectComponents { doc, class, from, to }` | `RemoveConnection` | Drop the matching connect equation |
+| `ApplyModelicaOps { doc, ops: Vec<ApiOp> }` | All structural variants | Batch fan-out: `AddComponent / RemoveComponent / AddConnection / RemoveConnection / SetPlacement / SetParameter` in order |
+| `RenameModelicaClass { doc, old_name, new_name }` | string-level rewrite | Rename a top-level class declaration + its `end OLD;` closer; if the doc origin is `Untitled`, the origin name is updated too so the tab title follows |
+
+`ApplyModelicaOps` is the primary path for agent / canvas drag-drop —
+each op in the batch becomes its own undoable step, but the caller
+gets a single round-trip and a guaranteed ordering. The single-op
+wrappers exist because hand-written agent code reads cleaner with
+named commands than with a flat `ApiOp::AddComponent { ... }` payload.
+
+API edits backdate the AST debounce timer (`waive_ast_debounce`), so
+the canvas + text editor refresh inside the same frame instead of
+waiting out the keystroke debounce window — see § 5.7.
+
+**Gaps as of Phase α** — typed wrappers we don't expose yet, available
+via `ApplyModelicaOps` or planned as standalones:
+
+- `SetPlacement` / `SetParameter` — only via `ApplyModelicaOps`
+- `EditText { range, replacement }` — no API surface (use
+  `SetDocumentSource` for now); needed for granular LSP-style edits
+- `RenameModelicaComponent`, `RenameModelicaPort` — not implemented
+- `AddClass` / `RemoveClass` / `MoveClass` (between packages) — not
+  implemented; `RenameModelicaClass` covers in-place rename only
+- `SetClassAnnotation` (Icon, Diagram graphics) — not implemented;
+  whole-source replace is the workaround
+- `AddImport`, `AddExtends`, `SetDocumentation` — not implemented
+
 ### 5.5 Structured change events
 
 After every successful mutation the document pushes a
@@ -236,7 +275,7 @@ their render state incrementally rather than rebuild on every frame.
 
 Modelica's type lookup follows the rules in
 [Modelica Language Spec §5.3 — Static Name Lookup](https://specification.modelica.org/maint/3.7/class-predefined-types-and-declarations.html#static-name-lookup).
-Our implementation (used by the diagram panel's AST→snarl rebuild and
+Our implementation (used by the diagram panel's AST→canvas rebuild and
 by the class resolver on AST-level ops) follows a subset of those
 rules:
 
@@ -319,6 +358,91 @@ Dymola has the same distinction. Our UI should keep it visible — a
 parameter edit in the Inspector is instance-level unless the user
 explicitly promotes it ("save as default in model").
 
+## 7a. Document identity — three tiers, one truth
+
+A Modelica document has three identity caches that historically drift:
+
+| Tier | Source of truth | Used by |
+|------|-----------------|---------|
+| **File** | `Document::origin` (`Untitled{name}` or `File{path, writable}`) | Save logic, dirty check, Files browser |
+| **Workspace entry** | `WorkspaceResource.DocumentEntry.title` | Tab label, Recents |
+| **Modelica class** | AST top-level class name (in source) | Compile, references, drill-in, Class browser, journal entries |
+
+**Modelica's class-first identity is authoritative** — same as Dymola
+and OMEdit, where the class name is what you see in tabs and the
+file is filesystem implementation detail. Workbench follows this
+convention with VS Code's untitled handling for the unsaved case.
+
+### 7a.1 Title derivation
+
+`DocumentEntry.title` is **derived**, not stored. A `Last`-schedule
+system recomputes it whenever `(origin, ast_first_class,
+drilled_in_class, dirty)` changes:
+
+```
+title = derive(origin, ast_first_class, drilled_in_class, dirty)
+
+  primary  = ast_first_class            (Modelica name lookup wins)
+           | drilled_in_class           (multi-class file → focused class)
+           | origin.display_name()      (parse failed → fall back)
+           | "Untitled-N"               (no source yet)
+
+  prefix   = drilled_pkg.drilled_class  (if drilled into a sub-class)
+
+  postfix  = "●"                        (dirty)
+
+  style    = italic                     (origin.is_untitled || dirty)
+```
+
+Multi-class file shows `Pkg.Active` on the tab plus a
+breadcrumb above the active editor (Dymola-style: `Pkg ▸ Active`,
+each segment clickable to drill out). Switching drilled class flips
+the tab label without remounting the document.
+
+### 7a.2 Rename behaviour
+
+`RenameModelicaClass`:
+1. Rewrites the source declaration + `end OLD;` closer (string-level,
+   first match only — multi-class files require explicit
+   class-targeted renames in v1).
+2. If the doc origin is `Untitled`, updates `origin.name` to match.
+   Title derivation picks up the new class name automatically next
+   frame.
+3. **If the doc is File-backed**, behaviour is governed by the
+   `modelica.naming.rename_class_renames_file` setting:
+   - `Always` — rename the `.mo` file in lock-step (Dymola default).
+   - `Ask` — prompt the user; default for the workbench.
+   - `Never` — file stays at its old path; class name and filename
+     diverge until the user does a Save-As (VS Code default).
+
+The setting lives in the `modelica.naming` section of
+`settings.json` (see `11-workbench.md` § 9b.2). Per-twin overrides
+let library projects pin `Always` while sandbox twins keep `Never`.
+
+### 7a.3 Save-As default
+
+When an Untitled doc transitions to File via Save-As, the suggested
+filename is `<ast_first_class>.mo` in the active Twin's models
+folder, governed by `modelica.naming.save_as_default_uses_class_name`
+(default `true`). Users can override the suggested name; the setting
+just controls the default.
+
+### 7a.4 Implementation notes
+
+- `WorkspaceResource.DocumentEntry.title` becomes a derived field —
+  the system that maintains it reads from
+  `(ModelicaDocumentRegistry, drilled_in_class, dirty)` and writes
+  the entry. No call site sets `entry.title` directly any more; that
+  was the source of the drift.
+- The italic + dirty-dot styling is handled by the tab renderer
+  (`lunco-workbench`) reading `UiSettings + DocumentEntry.origin +
+  dirty`. No per-domain logic in the renderer.
+- `RenameModelicaClass` no longer needs to touch
+  `WorkspaceResource` directly — the title-derive system picks up
+  the AST change. (Today's implementation does write the entry
+  manually as a compatibility shim; remove once the derive system
+  lands.)
+
 ## 8. New-model workflow (target)
 
 1. **File → New Modelica Model** (or Ctrl+Shift+N in Analyze workspace)
@@ -340,10 +464,11 @@ Today (pre-Document-System) the workflow is rougher:
 
 ## 9. The Modelica diagram editor
 
-The diagram panel (`lunco-modelica/src/ui/panels/diagram.rs`) is an
-**egui-snarl-based** visual editor. Under Phase α the panel is a thin
-*view* over a `ModelicaDocument` — the document is the authoritative
-state, snarl is a rendered projection.
+The diagram panel (`lunco-modelica/src/ui/panels/canvas_diagram.rs`)
+renders on top of `lunco-canvas` — the workbench's own canvas
+substrate. The panel is a thin *view* over a `ModelicaDocument`: the
+document is the authoritative state, the canvas scene is a rendered
+projection.
 
 ```
          ModelicaDocument (source + cached AST)
@@ -352,10 +477,11 @@ state, snarl is a rendered projection.
   (drag, connect,  │             │  (TextReplaced,
    delete, move,   │             │   ComponentAdded, …)
    paramedit)      │             ▼
-                  DiagramPanel ◀──── sync_from_document()
+                  CanvasDiagramPanel ◀──── canvas_projection
                    │
                    ▼
-                  Snarl<DiagramNode>  (rendered, snarl owns pan/zoom/selection)
+                  lunco-canvas Scene  (renders nodes / wires;
+                                       owns pan/zoom/selection)
 ```
 
 ### 9.1 Sync flow
@@ -363,21 +489,20 @@ state, snarl is a rendered projection.
 Each frame:
 
 1. **Open-model rebind** — if `WorkbenchState.open_model.doc` changed,
-   `DiagramState::bind_document` resets the change-stream cursor so
-   the next sync does a clean rebuild.
-2. **Document → snarl sync** — if `doc.generation() != last_seen_gen`,
-   re-parse the source and rebuild snarl (synchronous — parse of a
-   typical Modelica model is sub-millisecond). No more async
-   `AsyncComputeTaskPool` / "Analyzing…" spinner.
-3. **Snarl render** — user interaction happens in snarl; it owns
-   pan/zoom/selection/drag state between frames.
+   the panel resets the change-stream cursor so the next sync does a
+   clean rebuild.
+2. **Document → scene projection** — if `doc.generation() !=
+   last_seen_gen`, re-parse the source and rebuild the canvas scene
+   (synchronous — parse of a typical Modelica model is
+   sub-millisecond).
+3. **Canvas render** — user interaction happens in `lunco-canvas`; it
+   owns pan/zoom/selection/drag state between frames.
 4. **User action → op emission** —
    - Right-click Add Component → `AddComponent`
    - Right-click Delete → `RemoveComponent`
-   - Wire draw/disconnect → detected via frame-to-frame wire-set
-     diff → `AddConnection` / `RemoveConnection`
-   - Drag-to-move → detected via frame-to-frame position diff →
-     `SetPlacement`
+   - Wire draw/disconnect → frame-to-frame wire-set diff →
+     `AddConnection` / `RemoveConnection`
+   - Drag-to-move → frame-to-frame position diff → `SetPlacement`
 5. **Apply + echo suppression** — pending ops are applied to the
    `DocumentHost`, `last_seen_gen` is advanced past our own
    generations so step 2 doesn't rebuild in response to edits we
@@ -391,49 +516,285 @@ editor's debounced commit (≈ 350 ms idle or focus-loss) calls
 ### 9.2 Visual details
 
 - MSL palette on the left (right-click menu adds components)
-- Custom component body rendering in `show_body()` — zigzag for resistor,
-  parallel plates for capacitor, blue circles for electrical pins
+- Custom component body rendering — zigzag for resistor, parallel
+  plates for capacitor, blue circles for electrical pins
 - Small port dots rather than labeled rectangles
 - Dot-grid background
 - Borderless node frames to reduce chrome
 
-### egui-snarl pros and cons
+### 9.3 Why our own canvas
 
-**What snarl gives us for free:**
-- Pan / zoom via `egui::Scene`
-- Bezier wires between pins
-- Wire hit detection and drag
-- Node selection, drag, resize, multi-select
-- Right-click context menus
+The diagram panel originally rode on `egui-snarl` (see git history
+prior to the canvas migration). `lunco-canvas` replaced it because we
+needed:
 
-**What snarl cannot do without a fork:**
+- **Ports on every side** — schematic-style placement (top, bottom,
+  left, right), not just left/right inputs/outputs.
+- **Acausal connectors** — Modelica electrical / fluid ports are
+  bidirectional; node-graph libraries built around `OutPin → InPin`
+  edge direction don't fit.
+- **Animation hooks** (see § 9c) — render-side tweens, glow,
+  per-origin policies need access to the draw loop, which a
+  third-party node-graph crate doesn't expose.
+- **Grid snapping, custom shapes, multi-domain reuse** —
+  `lunco-canvas` is the substrate for non-Modelica diagrams too
+  (mission planner, cosim graphs).
 
-| Limitation | Impact |
-|-----------|--------|
-| Pins forced to node edges (left/right only) | Can't place ports on Top/Bottom |
-| Strict `OutPin → InPin` wires | Acausal connectors (Modelica electrical) need bidirectional |
-| No grid snapping | Minor UX issue |
-| Node shapes are always rectangular | Can draw inside the body, but outer hit-area is a rect |
-
-The acausal-connector limitation is the main one. Current workaround:
-treat every port as both input and output. Real fix: fork egui-snarl to
-add bidirectional pins. Tracked as Phase 2 work.
-
-### What we evaluated and rejected
+Alternatives we evaluated and rejected for the workbench-wide
+canvas substrate:
 
 | Alternative | Verdict |
 |-------------|---------|
-| `egui_node_graph` | Not suitable — still node-graph oriented, not schematic |
-| `egui_node_editor` | Less documented, smaller community |
-| `egui_graph` | Too new, less battle-tested |
-| Custom `egui::Scene` implementation | ~2000 LOC to rebuild from scratch |
-| **Fork egui-snarl** | Best option (~50–200 LOC patch for pin sides + acausal) |
+| `egui_node_graph` | Node-graph oriented, not schematic |
+| `egui_node_editor` | Less documented |
+| `egui_graph` | New, less battle-tested |
+| `egui-snarl` | What we started on; lacks port-side and acausal wires; no animation hook surface |
+| Forking `egui-snarl` | ~50–200 LOC patch but ties us to upstream forever |
+| **Custom `lunco-canvas`** | Picked — owned, extensible, animation-ready, no upstream coupling |
+
+## 9c. Canvas animation + multi-user roadmap
+
+The Modelica canvas is a Miro-style diagram surface — components,
+connections, free placement. This section captures how we want it to
+*feel* (animated, alive) and how that scales to multi-user later. The
+guiding principle is Figma's: **animate the change, not the state.**
+
+### 9c.1 Op origin tag
+
+Every structural mutation funnels through `apply_ops_public` and
+arrives carrying an origin:
+
+```rust
+pub enum OpOrigin {
+    /// Mouse drag, keyboard, paste — user already saw the action,
+    /// no animation needed.
+    Local,
+    /// API / agent / test script — animate so the viewer can follow
+    /// what's happening.
+    Api,
+    /// Future: incoming op from a collaborator. Animated, with that
+    /// user's color.
+    Remote { user_id: UserId },
+}
+```
+
+Origin is threaded through `apply_ops_public(world, doc, ops, origin)`
+and recorded alongside the op in a `RecentChanges` ring buffer:
+
+```rust
+#[derive(Resource, Default)]
+struct RecentChanges {
+    entries: VecDeque<RecentChange>,  // bounded ~256
+}
+struct RecentChange {
+    doc:    DocumentId,
+    op:     ModelicaChange,            // structural summary
+    origin: OpOrigin,
+    at:     Instant,
+}
+```
+
+Render-side systems read `RecentChanges` to decide what to animate.
+The journal subsystem already records the same op surface — origin is
+an extra annotation, not a separate event channel.
+
+### 9c.2 Tween primitive
+
+Animation is **render-only**. The source AST `Placement` is the truth
+the moment the op applies; the renderer interpolates between *previous
+rendered position* and *new placement* over a short window. Source
+mutation already happens in one frame — animating the source itself
+would corrupt undo, journal, and AST refresh.
+
+```rust
+#[derive(Component)]
+struct CanvasTween {
+    from:     Placement,        // last-rendered pre-op
+    to:       Placement,        // post-op (matches AST)
+    start:    Instant,
+    duration: Duration,         // 0 ⇒ skip / instant
+    ease:     EaseKind,         // EaseOutCubic | Spring | Linear
+}
+```
+
+The render system reads `lerp(from, to, ease(t))` instead of the raw
+placement when a tween is active; despawns the tween at `t ≥ 1`.
+
+### 9c.3 Per-origin animation policy
+
+| Origin | Tween | Pulse | Camera focus |
+|---|---|---|---|
+| `Local` | 0 ms (instant) | none | none — user has the cursor |
+| `Api` | `tween_ms` (default 250) | `pulse_ms` (default 1000) | per `add.focus_behavior` |
+| `Remote { user }` | same as Api but pulse colored from `user`'s presence color | yes | optional ("follow user") |
+
+The user can override per-call: `AddModelicaComponent { animate: false }`
+forces an instant local-style apply even for an API caller, and
+`ApplyModelicaOps { animate: true }` forces animation for what would
+otherwise be a `Local` mouse-drag batch (e.g. an "import diagram"
+scripted action).
+
+### 9c.4 Pulse glow
+
+Figma-style outer glow on newly-added components — a soft ring
+around the node that fades to transparent over `pulse_ms`. Implemented
+as a transient `PulseGlow { until: Instant, color: Color32 }`
+component on the canvas node; renderer adds the glow at draw time and
+the system despawns the component when `now > until`.
+
+Color: theme-driven for `Api` origin, user-presence-color for
+`Remote`. Pulse style is fixed (outer glow) but `pulse_ms` is
+settings-driven, so users can tune intensity / duration or disable
+(0 ms).
+
+### 9c.5 Batch focus debounce
+
+A scripted `AddComponent × N` (the rocket-build flow) shouldn't
+ping-pong the camera. Strategy:
+
+1. Each `AddComponent` with `Api` origin schedules a single-component
+   `Center` focus.
+2. If another `AddComponent` arrives within
+   `add.batch_debounce_ms` (default 200), cancel the per-component
+   focus.
+3. After `batch_debounce_ms` of idle, fire one `FitVisible` over the
+   accumulated set.
+
+So a 10-component build animates each spawn (with pulse) but only
+runs one camera move at the end — frames the whole diagram for the
+viewer.
+
+### 9c.6 Camera tween
+
+The per-component `Center` and end-of-batch `FitVisible` use a
+camera tween that interpolates `(pan, zoom)` toward the target over
+`tween_ms`. Same ease curve as node tweens for consistency. The
+existing `SetZoom` / `PanCanvas` commands set the camera directly;
+the animation system layers a smooth-pan above them so manual
+`SetZoom` from a script also has the option to animate.
+
+### 9c.7 Settings tree
+
+Following the `11-workbench.md` § 9b multi-level convention. Defaults
+shown.
+
+```
+modelica.canvas.animation.tween_ms          u32   250
+modelica.canvas.animation.ease              enum  ease_out_cubic | spring | linear   default ease_out_cubic
+modelica.canvas.animation.pulse_ms          u32   1000
+modelica.canvas.animation.local_origin      enum  Instant | Animated  default Instant   (you already see it)
+modelica.canvas.animation.api_origin        enum  Instant | Animated  default Animated  (script readability)
+modelica.canvas.animation.remote_origin     enum  Instant | Animated  default Animated  (future, multi-user)
+
+modelica.canvas.add.focus_behavior          enum  None | Center | FitVisible   default Center
+modelica.canvas.add.batch_debounce_ms       u32   200
+
+ui.reduce_motion                            bool  false
+                                            (when true, all tween_ms → 0; honours OS prefers-reduced-motion)
+```
+
+`ui.reduce_motion` is the global override — accessibility +
+matches macOS/iOS conventions. Mirror it from the OS preference at
+startup, allow user override in the Settings panel.
+
+Per-call API override: every structural-edit command (`AddComponent`,
+`ConnectComponents`, `ApplyModelicaOps`) gains an optional `animate:
+Option<bool>` field. `None` ⇒ read from settings; `Some(true)` /
+`Some(false)` ⇒ override.
+
+### 9c.8 Presence (deferred — multi-user precursor)
+
+Pre-CRDT, but useful even single-user (paired with an agent
+co-pilot):
+
+```rust
+struct CanvasPresence {
+    user_id: UserId,
+    color:   Color32,                   // stable hash of user_id
+    cursor:  Option<CanvasPos>,
+    selection: HashSet<ComponentName>,
+    drilled_in_class: Option<String>,   // they're focused on Pkg.Sub
+}
+```
+
+Broadcast over a presence channel separate from doc state — matches
+Yjs's `awareness` separation. Each remote presence renders as a
+colored cursor + ghost-selection rectangle. Stale entries decay
+after 30 s without ping. `OpOrigin::Remote` reuses the same color.
+
+Settings:
+
+```
+modelica.canvas.collab.show_remote_cursors   bool   true
+modelica.canvas.collab.show_remote_selection bool   true
+modelica.canvas.collab.user_color            "auto" | "#RRGGBB"   "auto"
+modelica.canvas.collab.follow_user           Option<UserId>       (camera follows that user)
+```
+
+Status: **deferred**. Lives in this spec for shape; not yet built.
+
+### 9c.9 CRDT-backed source (deferred — full multi-user)
+
+Two approaches were evaluated:
+
+**(a) Text CRDT on the `.mo` source (Yjs `Y.Text` / `yrs`)**
+- Pro: works for any future text-shaped doc kind with no domain
+  changes.
+- Con: structural ops (`AddComponent`, `ConnectComponents`) become
+  bursts of character inserts on the wire; the journal loses its
+  "Alice added a Pump" granularity unless we re-derive from a diff.
+
+**(b) Structural CRDT over the AST (preferred)**
+- Each top-level class is a `Y.Map`. Components a `Y.Map<name,
+  ComponentDecl>`. Connections a `Y.Array<ConnectEq>`. Annotations
+  stay text-CRDT'd internally.
+- Render → text via the existing pretty-printer; persist that text
+  on disk so non-collaborating users still get readable `.mo`.
+- Pro: structural ops stay structural across the wire. Remote
+  `AddComponent` becomes a single "Alice added Pump" event with the
+  same animation path as `OpOrigin::Api`.
+- Con: more upfront work, but aligns with the existing `ModelicaOp`
+  vocabulary.
+
+**Decision: (b)** when the work lands. `OpOrigin::Remote` plugs in
+directly — same animation code, different origin tag. The journal
+becomes a shared event log: each user's edits flow into a single
+ordered history (Lamport timestamps), which dovetails with the
+Twin-journal subsystem in `13-twin-and-workflow.md` § 5a and the
+SysML v2 REST API path in that same doc.
+
+**Library choice (deferred):** `yrs` (Rust port of Yjs, same wire
+format) — picking it later means a future web-collab room "just
+works" against a JS Yjs server. Automerge is the alternative but
+slower in our shape.
+
+**Server (deferred):** WebSocket relay snapshotting to the Twin's
+`.lunco/journal/` is the leading option; simpler to persist than
+WebRTC P2P and reuses the journal store. Spec lives in the
+twin-journal doc; not in scope here.
+
+### 9c.10 Implementation order
+
+1. **Layer 0 — Tween primitive.** `CanvasTween` component, render
+   interpolation. Single-user, no behavioural change for `Local`
+   origin yet.
+2. **Layer 1 — Op origin tag.** Thread `OpOrigin` through
+   `apply_ops_public`, populate `RecentChanges`.
+3. **Layer 2 — Pulse + auto-focus.** `PulseGlow` component, camera
+   tween, batch debounce. This is the demo-worthy quick win — turns
+   a scripted rocket build into something visually beautiful.
+4. **Layer 3 — Presence.** Cursors + selections over a websocket
+   channel.
+5. **Layer 4 — CRDT.** `yrs`-backed structural CRDT, journal merge.
+
+Layers 0–2 are days; 3 is days; 4 is weeks and warrants its own
+sprint with the journal subsystem.
 
 ## 10. Panels (current + planned)
 
 | Panel | Current | Notes |
 |-------|---------|-------|
-| **Diagram** | ✅ Working, generic rectangles, Dymola-style shapes in progress | 1701 LOC, egui-snarl |
+| **Diagram** | ✅ Working, generic rectangles, Dymola-style shapes in progress | `canvas_diagram.rs`, on `lunco-canvas` |
 | **Code Editor** | ✅ Working | 423 LOC, plain egui TextEdit |
 | **MSL Palette** | ✅ Working | ~20 MSL components |
 | **Library Browser** | ✅ Working | File tree of `.mo` files |
@@ -461,10 +822,11 @@ in either panel flow through the document and update the other on
 the next frame. Opening a file from the Library Browser populates
 both views from the same source. See § 5 and § 9 above.
 
-**Diagram edges are directional** (acausal broken): egui-snarl enforces
-`OutPin → InPin`. Modelica electrical connectors are acausal. Current
-workaround — every port is both input and output — is confusing. Needs
-egui-snarl fork.
+**Acausal connector visual** (in progress on `lunco-canvas`):
+Modelica electrical / fluid connectors are acausal — wires shouldn't
+have an arrow direction. The migration off egui-snarl unblocks this;
+the rendering work to drop the directional arrow on connector wires
+is tracked separately on the canvas crate.
 
 ### P1 — Degrading workflow
 
@@ -510,8 +872,8 @@ Feature parity snapshot:
 
 Rough **80 %** feature parity on the core loop. The gaps are solvable
 within 2–3 months of focused work; the biggest wins come from the
-Document System migration (unlocks live diagram↔code sync) and egui-snarl
-fork (unlocks acausal connectors).
+Document System migration (unlocks live diagram↔code sync) and
+finishing the acausal-connector visuals on `lunco-canvas`.
 
 ## 13. See also
 

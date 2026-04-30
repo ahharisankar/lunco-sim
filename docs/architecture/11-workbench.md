@@ -393,6 +393,76 @@ three converge on the same persisted resource.
 keep `recents.json` separate (different lifetime / churn) and
 `layouts.toml` separate (TOML schema, structural).
 
+#### 9b.1 Multi-level namespacing
+
+Sections own a top-level `KEY` (e.g. `"perf_hud"`); any nested
+structure happens inside the section's typed struct. To group
+per-domain settings under a common prefix, use **dotted keys**:
+
+```rust
+impl SettingsSection for ModelicaNamingSettings {
+    const KEY: &'static str = "modelica.naming";
+}
+impl SettingsSection for ModelicaCanvasSettings {
+    const KEY: &'static str = "modelica.canvas";
+}
+```
+
+On disk this is still a flat top-level map (`{"modelica.naming": {...},
+"modelica.canvas": {...}}`) but the dotted convention groups related
+sections in the Settings UI and matches VS Code's `editor.fontSize`
+shape. No registry coordination — the dotted key is purely a naming
+convention enforced by code review.
+
+Each subsystem registers its own slice in its own `Plugin::build`
+(domain crate, panel crate, even an external plugin). Adding a new
+setting is one struct + one `register_settings_section` call; no
+central allowlist to update.
+
+#### 9b.2 Concrete sections
+
+Domain examples (canonical KEYs to keep things consistent across
+crates):
+
+| KEY | Owner crate | Purpose |
+|-----|-------------|---------|
+| `ui` | `lunco-workbench` | Tab styling (italic for unsaved/Untitled, dirty-dot glyph), font sizes |
+| `modelica.naming` | `lunco-modelica` | Class↔file rename behaviour (`Always`/`Ask`/`Never`), default-filename-from-class, tab-title source (class vs filename) |
+| `modelica.canvas` | `lunco-modelica` | Diagram defaults (grid snap, default port side, auto-layout) |
+| `modelica.canvas.animation` | `lunco-modelica` | Tween/pulse durations, ease curve, per-origin animation policy (Local / Api / Remote — see `20-domain-modelica.md` § 9c) |
+| `modelica.canvas.add` | `lunco-modelica` | Auto-focus behaviour on AddComponent (None / Center / FitVisible), batch debounce window |
+| `modelica.canvas.collab` | `lunco-modelica` | Remote cursor + selection visibility, user color, follow-user camera (multi-user precursor; deferred) |
+| `modelica.editor` | `lunco-modelica` | Source editor word-wrap, tab width, auto-format-on-save |
+| `perf_hud` | `lunco-workbench` | Spike threshold, plot rolling window, Twin overlay toggles |
+| `journal` | `lunco-twin-journal` | Retention, blob commit policy (`twin.toml` may override) |
+
+#### 9b.3 Per-Twin overrides (planned)
+
+User-global `~/.lunco/settings.json` is the baseline. A per-Twin
+`<twin>/.lunco/settings.json` layered on top would let projects
+enforce conventions (e.g. a library Twin might pin
+`modelica.naming.rename_class_renames_file = "Always"` while a
+sandbox Twin keeps `"Never"`). Resolution order:
+
+```
+defaults  ←  ~/.lunco/settings.json  ←  <active_twin>/.lunco/settings.json
+```
+
+The active-Twin layer would be writable from the UI's "Workspace
+settings" toggle (VS Code's pattern). Until implemented, only the
+user-global file exists.
+
+#### 9b.4 Settings UI gap
+
+Today the only way to mutate `settings.json` is hand-editing the
+file or wiring a typed `#[Command]` per knob. Schema-driven panels
+(VS Code's "Settings" UI, Blender's Preferences window) are out of
+scope for Phase α but slot in cleanly: each `SettingsSection`
+implementation gains an optional `schema() -> SettingsSchema` method
+returning `Vec<FieldDescriptor>` (label, doc-comment, default,
+control kind), and a single panel walks all registered sections via
+`Settings::iter()`. Hand-editing remains the escape hatch.
+
 ## 10. Theming and keybinds
 
 - Theming via egui's visuals system. Shipped themes: Dark, Light, High
@@ -423,8 +493,9 @@ no novel design.
    ├── lunco-ui  (widget toolkit)
    │     - WidgetSystem (cached widgets)
    │     - Entity-viewer trait
-   │     - Shared widgets: TimeSeries, NodeGraph base, InspectorField
-   │     - Re-exports: egui-snarl, egui_plot
+   │     - Shared widgets: TimeSeries, InspectorField
+   │     - Re-exports: egui_plot
+   │     (Node graphs / diagrams render on `lunco-canvas`)
    │         │
    │         ▼
    └── egui + bevy_egui + egui_tiles (inside side panels only)

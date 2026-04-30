@@ -114,30 +114,20 @@ pub fn render_log_view(
         return;
     }
 
-    egui::ScrollArea::vertical()
+    egui::ScrollArea::both()
         .stick_to_bottom(true)
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            // Fix a session-start instant the first time any log
-            // entry is rendered. `entry.at.elapsed()` was growing
-            // every frame (because it measures time-since-creation
-            // at render time, not at emit time), which made the
-            // whole column appear to tick forward like a
-            // stopwatch. Pinning to a session start gives us a
-            // stable "when did this happen" timestamp that doesn't
-            // move between redraws. Lazily initialised so the
-            // first entry anchors t=0 rather than some arbitrary
-            // app-boot moment.
+            // Fix a session-start instant the first time any log entry
+            // is rendered — pinned so timestamps don't tick across
+            // frames. Lazily initialised so the first entry anchors
+            // t=0 rather than some arbitrary app-boot moment.
             use std::sync::OnceLock;
-            static SESSION_START: OnceLock<web_time::Instant> =
-                OnceLock::new();
+            static SESSION_START: OnceLock<web_time::Instant> = OnceLock::new();
             let session_start = *SESSION_START
                 .get_or_init(|| entries.front().map(|e| e.at).unwrap_or_else(web_time::Instant::now));
             for entry in entries {
                 let color = entry.level.color(theme);
-                // Fixed offset from session start → same string
-                // every frame, regardless of how long ago the
-                // entry was emitted.
                 let offset = entry
                     .at
                     .saturating_duration_since(session_start)

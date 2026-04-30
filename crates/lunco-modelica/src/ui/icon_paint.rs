@@ -753,21 +753,63 @@ fn paint_text(
     } else {
         // 0.95× of the shorter extent dim — close to MLS Annex D's
         // implicit "fit the extent box" intent and matches what
-        // OMEdit/Dymola render at the same zoom. 0.7 read as too
-        // small relative to OMEdit reference screenshots.
-        rect.width().abs().min(rect.height().abs()) * 0.95
+        // OMEdit/Dymola render at the same zoom. MSL connectors
+        // (RealInput/RealOutput) declare degenerate Text extents
+        // like `extent={{-10,85},{-10,60}}` (zero width) for the
+        // `%name` label — fall back to the non-zero dimension so
+        // those labels render at all instead of being culled.
+        let w = rect.width().abs();
+        let h = rect.height().abs();
+        let dim = if w < 0.5 { h } else if h < 0.5 { w } else { w.min(h) };
+        dim * 0.95
     };
     if font_size_px < 1.0 {
         return;
     }
     let color = color_or_default(t.text_color, egui::Color32::from_gray(20));
-    painter.text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        &rendered,
-        egui::FontId::proportional(font_size_px),
-        color,
-    );
+    // Total rotation = primitive's own `rotation` + the parent
+    // instance's orientation (carried on `xf.rotation_deg`). Modelica
+    // and screen Y are flipped, so the screen-space angle is the
+    // negative of the Modelica CCW angle. Snap multiples of 90° to
+    // exact PI/2 so rotated labels look crisp (no sub-pixel jitter
+    // from float trig).
+    let total_rot_modelica = t.rotation as f32 + xf.rotation_deg;
+    let mut angle_screen = -total_rot_modelica.to_radians();
+    let snapped = (angle_screen / std::f32::consts::FRAC_PI_2).round();
+    if (angle_screen - snapped * std::f32::consts::FRAC_PI_2).abs() < 1e-3 {
+        angle_screen = snapped * std::f32::consts::FRAC_PI_2;
+    }
+    if angle_screen.abs() < 1e-4 {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            &rendered,
+            egui::FontId::proportional(font_size_px),
+            color,
+        );
+    } else {
+        // Build a Galley and emit a rotated TextShape — egui's
+        // higher-level `painter.text` fixes angle to 0.
+        let galley = painter.layout_no_wrap(
+            rendered,
+            egui::FontId::proportional(font_size_px),
+            color,
+        );
+        // TextShape rotates around `pos` (top-left). To centre the
+        // rotated label on `rect.center()`, push `pos` back by the
+        // rotated half-size vector — places the post-rotation centre
+        // exactly on rect.center.
+        let half = galley.size() * 0.5;
+        let (sin, cos) = angle_screen.sin_cos();
+        let rotated_half = egui::vec2(
+            cos * half.x - sin * half.y,
+            sin * half.x + cos * half.y,
+        );
+        let pos = rect.center() - rotated_half;
+        let mut shape = egui::epaint::TextShape::new(pos, galley, color);
+        shape.angle = angle_screen;
+        painter.add(egui::Shape::Text(shape));
+    }
 }
 
 /// Paint an Ellipse fitted to `e.extent`. Honours partial-arc

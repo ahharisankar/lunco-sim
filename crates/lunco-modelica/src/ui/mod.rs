@@ -14,7 +14,7 @@
 //!           ┌──────────────────┼──────────────────┐
 //!           ▼                  ▼                  ▼
 //!     DiagramPanel      CodeEditorPanel    TelemetryPanel
-//!     (egui-snarl)      (text editor)      (params/inputs)
+//!     (lunco-canvas)    (text editor)      (params/inputs)
 //! ```
 //!
 //! ## Selection Bridge
@@ -53,7 +53,7 @@
 //!
 //! - **Package Browser** (left dock) — Dymola-style library tree, click to open
 //! - **Code Editor** (center tab) — source code editing, compile & run
-//! - **Diagram** (center tab) — component block diagram via egui-snarl
+//! - **Diagram** (center tab) — component block diagram on `lunco-canvas`
 //! - **Telemetry** (right dock) — parameters, inputs, variable toggles
 //! - **Graphs** (bottom dock) — time-series plots of simulation variables
 
@@ -172,6 +172,39 @@ fn drop_workspace_class_on_doc_closed(
 /// 5b.1 migration. Once step 5c retires the legacy `ModelicaDocumentRegistry`
 /// / `ModelTabs` / `WorkbenchState.open_model` triad, this observer
 /// becomes the sole population point for the Workspace's document list.
+/// Observer: a Modelica doc was mutated → re-mirror the post-edit
+/// source into `WorkbenchState::open_model` so the code editor (which
+/// reads `open_model.source`, not the registry) shows the change
+/// immediately. Covers every edit path uniformly: SetDocumentSource,
+/// Add/RemoveComponent, Connect/Disconnect, undo/redo, canvas drag,
+/// scripted batches.
+fn mirror_open_model_on_doc_changed(
+    trigger: On<lunco_doc_bevy::DocumentChanged>,
+    registry: Res<ModelicaDocumentRegistry>,
+    workspace: Res<lunco_workbench::WorkspaceResource>,
+    mut state: ResMut<crate::ui::state::WorkbenchState>,
+) {
+    let doc = trigger.event().doc;
+    // Only mirror when the active doc changed — `open_model` tracks
+    // the foreground doc only. A background-doc edit (rare today, but
+    // possible via API) shouldn't displace what the user is editing.
+    if workspace.active_document != Some(doc) {
+        return;
+    }
+    let Some(host) = registry.host(doc) else { return };
+    let Some(open) = state.open_model.as_mut() else { return };
+    let src = host.document().source();
+    let mut line_starts = vec![0usize];
+    for (i, b) in src.as_bytes().iter().enumerate() {
+        if *b == b'\n' {
+            line_starts.push(i + 1);
+        }
+    }
+    open.source = std::sync::Arc::from(src);
+    open.line_starts = line_starts.into();
+    open.cached_galley = None;
+}
+
 fn sync_workspace_on_doc_opened(
     trigger: On<lunco_doc_bevy::DocumentOpened>,
     registry: Res<ModelicaDocumentRegistry>,
@@ -255,6 +288,71 @@ fn sync_workspace_on_doc_saved(
         entry.origin = new_origin;
         entry.title = new_title;
     }
+}
+
+/// Derive `WorkspaceResource.DocumentEntry.title` from the AST's
+/// first top-level class name. Modelica's class-first identity model
+/// (Dymola / OMEdit) means the tab label should follow the class, not
+/// the original Untitled-N or filename — see
+/// `docs/architecture/20-domain-modelica.md` § 7a.
+///
+/// Fallback ladder: AST first-class name → `origin.display_name()`
+/// (file stem or `Untitled-N`).
+///
+/// Untitled docs also get their `origin.name` rewritten to match the
+/// class name, so subsequent Save-As prompts default to
+/// `<class>.mo` and the Files browser groups consistently.
+///
+/// TODO(modelica.naming.tab_title_source) — make the choice between
+/// "ClassName" (current behaviour) vs "FileName" (VS Code) settings-
+/// driven. Today the rule is hardcoded to ClassName.
+///
+/// TODO(ui.italic_for_unsaved) — italic styling on the tab label is
+/// the renderer's job (lunco-workbench tab widget); not implemented
+/// yet. Dirty-dot `●` likewise.
+///
+/// TODO(multi-class breadcrumb) — for `package P; model A; model B; end P;`
+/// docs, this currently shows `P` (the first top-level class). Once
+/// drilled-in tracking is per-doc-tab (it's per-canvas today), the
+/// derived title should become `P.<drilled>` to match Dymola.
+fn derive_doc_title(
+    registry: Res<ModelicaDocumentRegistry>,
+    mut ws: ResMut<lunco_workbench::WorkspaceResource>,
+) {
+    // Cheap when nothing changed: each iteration is a HashMap lookup +
+    // a string compare, write only on diff. No per-doc generation
+    // tracking yet — add one if profiling shows this in a hot frame.
+    for (doc_id, host) in registry.docs() {
+        let document = host.document();
+        let derived = derive_title_from_doc(document);
+        let Some(entry) = ws.document_mut(doc_id) else {
+            continue;
+        };
+        if entry.title != derived {
+            entry.title = derived.clone();
+        }
+        // For Untitled docs, also keep the origin in sync so Save-As
+        // suggestions and other origin-readers see the new identity.
+        if let lunco_doc::DocumentOrigin::Untitled { name } = &entry.origin {
+            if name.as_str() != derived.as_str() {
+                entry.origin = lunco_doc::DocumentOrigin::untitled(derived);
+            }
+        }
+    }
+}
+
+/// Pure helper: read the first AST class name out of a Modelica doc,
+/// fall back to the origin's display name. Kept separate so future
+/// drilled-in / multi-class logic plugs in without re-deriving the
+/// fallback chain.
+fn derive_title_from_doc(doc: &crate::document::ModelicaDocument) -> String {
+    let syntax = doc.syntax();
+    if let Some((name, _)) = syntax.ast().classes.iter().next() {
+        if !name.is_empty() {
+            return name.clone();
+        }
+    }
+    doc.origin().display_name()
 }
 
 /// React to a Twin being added (Open Folder / Open Twin / promotion)
@@ -391,6 +489,7 @@ impl Perspective for AnalyzePerspective {
             PanelId("modelica_graphs"),
             PanelId("modelica_diagnostics"),
             PanelId("modelica_console"),
+            PanelId("modelica_journal"),
         ]);
     }
 }
@@ -451,6 +550,8 @@ impl Plugin for ModelicaUiPlugin {
             .init_resource::<panels::code_editor::EditorBufferState>()
             .init_resource::<panels::console::ConsoleLog>()
             .init_resource::<panels::diagnostics::DiagnosticsLog>()
+            .init_resource::<panels::journal::JournalLog>()
+            .add_systems(Update, panels::journal::poll_changes)
             // Forward StatusBus events to the Console panel so the
             // user has a chronological audit trail of every status
             // event from every subsystem (MSL, compile, sim, …).
@@ -470,6 +571,16 @@ impl Plugin for ModelicaUiPlugin {
             .add_observer(sync_workspace_on_doc_opened)
             .add_observer(sync_workspace_on_doc_closed)
             .add_observer(sync_workspace_on_doc_saved)
+            // Mirror the post-edit source from the registry into
+            // `WorkbenchState::open_model` whenever any mutation lands —
+            // structured ops via API, canvas drag, code-editor keystroke.
+            // The code editor reads `open_model.source` (Arc<str>), not
+            // the registry directly, so without this fan-out
+            // SetDocumentSource / Add* / Connect* edits update the
+            // canvas (which reads the registry) but leave the text
+            // editor stuck on the old source.
+            .add_observer(mirror_open_model_on_doc_changed)
+            .add_systems(Update, derive_doc_title)
             // Twin-panel: keep the loaded-classes list in sync with
             // the document registry. One `WorkspaceClass` per
             // writable / Untitled Modelica doc, dropped on close.
@@ -515,6 +626,7 @@ impl Plugin for ModelicaUiPlugin {
             .register_panel(panels::graphs::GraphsPanel)
             .register_panel(panels::console::ConsolePanel)
             .register_panel(panels::diagnostics::DiagnosticsPanel)
+            .register_panel(panels::journal::JournalPanel)
             .register_panel(panels::canvas_diagram::CanvasDiagramPanel)
             .init_resource::<panels::canvas_diagram::CanvasDiagramState>()
             .init_resource::<panels::canvas_diagram::PaletteSettings>()
@@ -563,8 +675,8 @@ impl Plugin for ModelicaUiPlugin {
         )));
         loaded.register(Box::new(loaded_classes::SystemLibraryClass::new(
             "bundled_root",
-            "Bundled Examples",
-            true,
+            "LunCo Examples",
+            false,
         )));
     }
 }

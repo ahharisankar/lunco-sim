@@ -264,7 +264,7 @@ package — none of these belong on the UI thread every frame. Patterns:
   system yields the result when ready without blocking. Reference:
   the Package Browser's `handle_package_loading_tasks`.
 - **Generation-gated recompute**: the canvas diagram only
-  reprojects when the document generation moves; snarl advances
+  reprojects when the document generation moves; the panel advances
   its `last_seen_gen` to skip echo rebuilds of its own ops.
 
 ### 7.4 How to decide

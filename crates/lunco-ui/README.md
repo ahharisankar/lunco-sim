@@ -18,7 +18,6 @@ All panels are **entity viewers** — they watch a selected entity and render it
            │
            ▼
    lunco-ui
-     ├── Re-exports egui-snarl types for node graphs
      ├── Provides WidgetSystem for cached widget rendering
      └── Provides WorldPanel for 3D space panels
 ```
@@ -34,7 +33,7 @@ See `docs/research-ui-ux-architecture.md` in the workspace root for full archite
 | **WorldPanel** | 3D in-scene UI panels attached to entities |
 | **Label3D** | Floating labels over 3D objects with LOD fade |
 | **Time-series plots** | Zero-copy chart rendering via `egui_plot` |
-| **Node graph types** | Re-exports `egui-snarl` (InPin, OutPin, Snarl, SnarlViewer) |
+| **Node graphs / diagrams** | Render via `lunco-canvas`; domain crates own their projector |
 
 ### What's NOT Here
 

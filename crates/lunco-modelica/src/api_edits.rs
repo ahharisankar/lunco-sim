@@ -61,6 +61,7 @@ register_commands!(
     on_connect_components,
     on_disconnect_components,
     on_apply_modelica_ops,
+    on_rename_modelica_class,
 );
 
 impl Plugin for ModelicaApiEditPlugin {
@@ -72,6 +73,30 @@ impl Plugin for ModelicaApiEditPlugin {
             .register_type::<ApiModification>();
         register_all_commands(app);
     }
+}
+
+/// Strip the enclosing-package prefix from `type_name` when it points
+/// at a sibling of `class` inside the same package. Modelica name
+/// resolution treats unqualified `Tank` and qualified `Foo.Tank` as
+/// equivalent inside `Foo`, but the canvas component-extractor only
+/// matches by simple identifier — a fully-qualified name produces a
+/// 0-component diagram even though the model parses and compiles fine.
+///
+/// `class` is the parent class path (e.g. `"Foo.Engine"`), `type_name`
+/// is the declared component type (e.g. `"Foo.Tank"`). Returns
+/// `"Tank"` here; returns `type_name` unchanged when it lives in a
+/// different package (`"Bar.Pump"`) or has no dot at all.
+fn strip_same_package_prefix(class: &str, type_name: &str) -> String {
+    let Some((class_pkg, _)) = class.rsplit_once('.') else {
+        return type_name.to_string();
+    };
+    let prefix = format!("{class_pkg}.");
+    if let Some(stripped) = type_name.strip_prefix(&prefix) {
+        if !stripped.contains('.') {
+            return stripped.to_string();
+        }
+    }
+    type_name.to_string()
 }
 
 // ─── SetDocumentSource ─────────────────────────────────────────────────
@@ -107,6 +132,154 @@ fn on_set_document_source(
         registry.checkpoint_source(doc, source);
         bevy::log::info!("[SetDocumentSource] doc={} replaced", doc.raw());
     });
+}
+
+// ─── RenameModelicaClass ──────────────────────────────────────────────
+
+/// Rename a top-level class within an open Modelica document.
+///
+/// Rewrites the `<keyword> OLD` declaration line and the matching
+/// `end OLD;` closer. When the document's origin is `Untitled`, the
+/// origin display name is also updated so the tab title follows the
+/// class — Untitled scratch docs have no other authoritative name.
+///
+/// String-level replace, not AST: scans for the keyword + identifier
+/// pair and the closing `end` line. Multi-class files are supported
+/// because each declaration carries its own keyword. The implementation
+/// is conservative: it only renames the first matching declaration and
+/// its single closer, leaving any usages of OLD as a *type* name (e.g.
+/// `OLD instance;` elsewhere) untouched — those are component-decl
+/// references that an external rename refactor should be explicit
+/// about, not silently rewritten.
+#[Command(default)]
+pub struct RenameModelicaClass {
+    pub doc: DocumentId,
+    pub old_name: String,
+    pub new_name: String,
+}
+
+#[on_command(RenameModelicaClass)]
+fn on_rename_modelica_class(
+    trigger: On<RenameModelicaClass>,
+    mut commands: Commands,
+) {
+    let ev = trigger.event().clone();
+    commands.queue(move |world: &mut World| {
+        let Some(doc) = resolve_doc(world, ev.doc) else {
+            bevy::log::warn!("[RenameModelicaClass] no doc for id {}", ev.doc);
+            return;
+        };
+        if ev.old_name.is_empty() || ev.new_name.is_empty() {
+            bevy::log::warn!("[RenameModelicaClass] old/new must be non-empty");
+            return;
+        }
+        if !ev.new_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            bevy::log::warn!(
+                "[RenameModelicaClass] new_name `{}` must be a valid identifier",
+                ev.new_name
+            );
+            return;
+        }
+
+        let mut registry = world.resource_mut::<ModelicaDocumentRegistry>();
+        let Some(host) = registry.host(doc) else {
+            return;
+        };
+        let source = host.document().source().to_string();
+        let new_source = match rewrite_class_name(&source, &ev.old_name, &ev.new_name) {
+            Some(s) => s,
+            None => {
+                bevy::log::warn!(
+                    "[RenameModelicaClass] no `<keyword> {}` declaration found in doc {}",
+                    ev.old_name,
+                    doc.raw()
+                );
+                return;
+            }
+        };
+        // Drop the immutable borrow before taking the mut one.
+        drop(registry);
+
+        let mut registry = world.resource_mut::<ModelicaDocumentRegistry>();
+        registry.checkpoint_source(doc, new_source);
+
+        if let Some(host) = registry.host_mut(doc) {
+            let doc_obj = host.document_mut();
+            if doc_obj.origin().is_untitled() {
+                doc_obj.set_origin(lunco_doc::DocumentOrigin::untitled(ev.new_name.clone()));
+            }
+            doc_obj.waive_ast_debounce();
+        }
+        // The `derive_doc_title` system in `ui::mod` picks up the new
+        // class name on the next frame and updates
+        // `WorkspaceResource.DocumentEntry.title` (+ origin for Untitled
+        // docs) — no manual workspace write here. See
+        // `docs/architecture/20-domain-modelica.md` § 7a.
+        //
+        // TODO(modelica.naming.rename_class_renames_file): when the doc
+        // is File-backed, this command should also rename the `.mo`
+        // file according to the user setting (Always | Ask | Never).
+        // The setting lives in a `ModelicaNamingSettings` section
+        // (`lunco-settings`) — not yet wired. For now, File-backed
+        // docs keep their old path; user must Save-As to align them.
+        bevy::log::info!(
+            "[RenameModelicaClass] doc={} {} → {}",
+            doc.raw(),
+            ev.old_name,
+            ev.new_name
+        );
+    });
+}
+
+/// Replace `<keyword> OLD` and the matching `end OLD;` once each.
+/// Returns `None` if no class declaration was found.
+fn rewrite_class_name(source: &str, old: &str, new: &str) -> Option<String> {
+    const KEYWORDS: &[&str] = &[
+        "model", "class", "package", "connector", "record", "block", "type", "function",
+    ];
+    // Find the first `<keyword> OLD` with word boundaries.
+    let bytes = source.as_bytes();
+    let mut decl_pos = None;
+    let mut decl_len = 0;
+    let mut decl_kw = "";
+    'outer: for (i, _) in source.char_indices() {
+        for kw in KEYWORDS {
+            let pat_len = kw.len() + 1 + old.len();
+            if i + pat_len > source.len() {
+                continue;
+            }
+            if !source[i..].starts_with(kw) {
+                continue;
+            }
+            if bytes[i + kw.len()] != b' ' {
+                continue;
+            }
+            if !source[i + kw.len() + 1..].starts_with(old) {
+                continue;
+            }
+            let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+            let after = i + pat_len;
+            let after_ok = after >= bytes.len() || !is_ident_byte(bytes[after]);
+            if before_ok && after_ok {
+                decl_pos = Some(i);
+                decl_len = pat_len;
+                decl_kw = kw;
+                break 'outer;
+            }
+        }
+    }
+    let pos = decl_pos?;
+    let mut out = String::with_capacity(source.len() + new.len());
+    out.push_str(&source[..pos]);
+    out.push_str(&format!("{decl_kw} {new}"));
+    out.push_str(&source[pos + decl_len..]);
+    let end_pat = format!("end {old};");
+    let new_end = format!("end {new};");
+    Some(out.replacen(&end_pat, &new_end, 1))
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 // ─── AddModelicaComponent ──────────────────────────────────────────────
@@ -157,8 +330,16 @@ fn on_add_modelica_component(
         } else {
             Placement::at(ev.x, ev.y)
         };
+        // Strip the enclosing-package prefix if `type_name` is fully
+        // qualified to a sibling inside the same package as `class`
+        // (e.g. class=`Foo.Engine`, type=`Foo.Tank` → emit `Tank`). The
+        // canvas component-extractor matches type_names by simple
+        // identifier when the type lives in the same package, so a
+        // fully-qualified name produces a 0-components diagram even
+        // though the model parses and compiles fine.
+        let normalized_type = strip_same_package_prefix(&ev.class, &ev.type_name);
         let decl = ComponentDecl {
-            type_name: ev.type_name.clone(),
+            type_name: normalized_type,
             name: ev.name.clone(),
             modifications: Vec::new(),
             placement: Some(placement),
@@ -171,13 +352,16 @@ fn on_add_modelica_component(
             class: ev.class.clone(),
             decl,
         }) {
-            Ok(_) => bevy::log::info!(
-                "[AddModelicaComponent] doc={} class={} {}={}",
-                doc.raw(),
-                ev.class,
-                ev.name,
-                ev.type_name
-            ),
+            Ok(_) => {
+                host.document_mut().waive_ast_debounce();
+                bevy::log::info!(
+                    "[AddModelicaComponent] doc={} class={} {}={}",
+                    doc.raw(),
+                    ev.class,
+                    ev.name,
+                    ev.type_name
+                );
+            }
             Err(e) => bevy::log::warn!(
                 "[AddModelicaComponent] doc={} {}: {:?}",
                 doc.raw(),
@@ -218,12 +402,15 @@ fn on_remove_modelica_component(
             class: ev.class.clone(),
             name: ev.name.clone(),
         }) {
-            Ok(_) => bevy::log::info!(
-                "[RemoveModelicaComponent] doc={} {}.{}",
-                doc.raw(),
-                ev.class,
-                ev.name
-            ),
+            Ok(_) => {
+                host.document_mut().waive_ast_debounce();
+                bevy::log::info!(
+                    "[RemoveModelicaComponent] doc={} {}.{}",
+                    doc.raw(),
+                    ev.class,
+                    ev.name
+                );
+            }
             Err(e) => bevy::log::warn!(
                 "[RemoveModelicaComponent] doc={} {}.{}: {:?}",
                 doc.raw(),
@@ -289,13 +476,16 @@ fn on_connect_components(
             class: ev.class.clone(),
             eq,
         }) {
-            Ok(_) => bevy::log::info!(
-                "[ConnectComponents] doc={} {}: {} -> {}",
-                doc.raw(),
-                ev.class,
-                ev.from,
-                ev.to
-            ),
+            Ok(_) => {
+                host.document_mut().waive_ast_debounce();
+                bevy::log::info!(
+                    "[ConnectComponents] doc={} {}: {} -> {}",
+                    doc.raw(),
+                    ev.class,
+                    ev.from,
+                    ev.to
+                );
+            }
             Err(e) => bevy::log::warn!(
                 "[ConnectComponents] doc={} failed: {:?}",
                 doc.raw(),
@@ -340,13 +530,16 @@ fn on_disconnect_components(
             from,
             to,
         }) {
-            Ok(_) => bevy::log::info!(
-                "[DisconnectComponents] doc={} {}: {} -/- {}",
-                doc.raw(),
-                ev.class,
-                ev.from,
-                ev.to
-            ),
+            Ok(_) => {
+                host.document_mut().waive_ast_debounce();
+                bevy::log::info!(
+                    "[DisconnectComponents] doc={} {}: {} -/- {}",
+                    doc.raw(),
+                    ev.class,
+                    ev.from,
+                    ev.to
+                );
+            }
             Err(e) => bevy::log::warn!(
                 "[DisconnectComponents] doc={} failed: {:?}",
                 doc.raw(),
@@ -526,7 +719,7 @@ fn api_op_to_internal(op: &ApiOp) -> Option<ModelicaOp> {
             Some(ModelicaOp::AddComponent {
                 class: class.clone(),
                 decl: ComponentDecl {
-                    type_name: type_name.clone(),
+                    type_name: strip_same_package_prefix(class, type_name),
                     name: name.clone(),
                     modifications: modifications
                         .iter()

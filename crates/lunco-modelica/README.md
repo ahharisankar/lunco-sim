@@ -44,7 +44,7 @@ document via `DocumentId`) and render from the shared document:
        ┌───────────┼──────────────┐
        ▼           ▼              ▼
   DiagramPanel  CodeEditor    InspectorPanel
-  (snarl as     (text editor  (params, inputs,
+  (canvas       (text editor  (params, inputs,
    view over     with debounced  live variables)
    document)     commit → doc)
 ```
@@ -55,10 +55,10 @@ it to open the Modelica editor for any entity.
 
 ### Diagram panel
 
-The diagram panel is an **egui-snarl view over the document**:
+The diagram panel is a **`lunco-canvas` view over the document**:
 
 - On every frame, if `doc.generation()` advanced past `last_seen_gen`,
-  rebuild snarl from the cached AST (synchronous — sub-millisecond).
+  rebuild the canvas scene from the cached AST (synchronous — sub-millisecond).
 - User actions (drag from palette, draw wire, drag to move, right-click
   delete) emit AST ops. The outer render loop drains them and applies
   to the document.
@@ -83,7 +83,7 @@ lines scroll horizontally, matching VS Code's default).
 |-------|-----------|----------|---------|
 | Library Browser | `library_browser` | Left dock | File navigation, drag `.mo` files |
 | Code Editor | `modelica_preview` | Center tab | Source code editing, compile & run |
-| Diagram | `modelica_diagram_preview` | Center tab | Component block diagram (egui-snarl) |
+| Diagram | `modelica_diagram_preview` | Center tab | Component block diagram (`lunco-canvas`) |
 | Telemetry | `modelica_inspector` | Right dock | Parameters, inputs, variable toggles |
 | Graphs | `modelica_console` | Bottom dock | Time-series plots |
 
@@ -144,7 +144,7 @@ no silent stall regardless of model size.
 
 - `rumoca-session`, `rumoca-phase-parse` — Modelica compilation (LunCoSim/rumoca fork)
 - `bevy_workbench` — docking, persistence, panel system
-- `egui-snarl` — interactive node graph rendering
+- `lunco-canvas` — interactive diagram rendering substrate
 - `egui_plot` — time-series charts
 
 ## See Also

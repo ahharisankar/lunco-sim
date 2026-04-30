@@ -31,7 +31,7 @@ The canonical graph representation for all diagram visualization across the proj
 ComponentGraph (pure Rust, no Bevy dependency)
   ├── Nodes with typed ports (named, typed connection points)
   ├── Edges with semantic kinds (Connect, Wire, Signal, Extends, etc.)
-  └── Convertible to: egui-snarl (rendering), petgraph (analysis)
+  └── Convertible to: lunco-canvas (rendering), petgraph (analysis)
 ```
 
 Built by domain-specific builders:

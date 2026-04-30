@@ -181,7 +181,7 @@ impl Panel for ConsolePanel {
                 );
             });
         } else {
-            egui::ScrollArea::vertical()
+            egui::ScrollArea::both()
                 .stick_to_bottom(true)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
@@ -194,10 +194,6 @@ impl Panel for ConsolePanel {
                         .or_else(|| snapshot.first().map(|m| m.at));
                     for msg in &snapshot {
                         let color = msg.level.color(&theme);
-                        // Stable [+T.TTs] anchored at the first message
-                        // (or the SESSION_START captured at first push).
-                        // Captured at push time — does not tick while
-                        // the panel is open.
                         let offset = session_start
                             .and_then(|s| msg.at.checked_duration_since(s))
                             .map(|d| d.as_secs_f32())

@@ -30,7 +30,7 @@
 //! tests for hit-testing and coordinate round-trips. [`Canvas::ui`]
 //! walks its layer pipeline but does **not** yet route input —
 //! pan/zoom/drag/connect land in B2 alongside the Modelica projector
-//! that replaces the egui-snarl-based diagram panel.
+//! used by `canvas_diagram`.
 //!
 //! # Minimum up-front choices (so later cases slot in)
 //!

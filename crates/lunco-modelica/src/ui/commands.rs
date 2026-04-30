@@ -199,6 +199,22 @@ pub struct FitCanvas {
     pub doc: DocumentId,
 }
 
+/// Pan + zoom the canvas to centre the named component instance and
+/// fill ~50% of the viewport. Use to inspect a single icon at a
+/// readable size without manual zoom-pan, e.g. for screenshot-based
+/// visual checks during automation.
+#[Command(default)]
+pub struct FocusComponent {
+    /// Doc id, or `0` for the active tab.
+    pub doc: DocumentId,
+    /// Instance name to focus (e.g. `"addSat"`).
+    pub name: String,
+    /// Optional padding factor — `0.5` (default when 0) leaves the
+    /// component at 50% of the viewport's smaller dim. Larger values
+    /// zoom out more.
+    pub padding: f32,
+}
+
 /// Open (or focus, if already open) an MSL class as a fresh editable
 /// copy. `qualified` is the full dot-path,
 /// e.g. `"Modelica.Electrical.Analog.Examples.ChuaCircuit"`.
@@ -400,6 +416,7 @@ register_commands!(
     on_duplicate_model_from_read_only,
     on_exit,
     on_fit_canvas,
+    on_focus_component,
     on_focus_document_by_name,
     on_format_document,
     on_get_file,
@@ -1262,9 +1279,7 @@ fn on_compile_model(
         // entities bump their own `session_id` on recompile (see
         // the "updated-in-place" branch above); this starting value
         // matters only for the very first compile of a doc, after
-        // which the per-entity counter takes over. Hardcoded `1`
-        // since the previous source (`DiagramState.model_counter`)
-        // was a snarl-side counter that has been removed.
+        // which the per-entity counter takes over.
         let session_id: u64 = 1;
         let entity = commands
             .spawn((
@@ -1363,24 +1378,20 @@ fn on_create_new_scratch_model(
         n += 1;
     };
 
-    // OMEdit's "secret weapon": auto-insert a default Icon
-    // annotation so a fresh class isn't a blank rectangle on the
-    // canvas. Mirrors what OMEdit's "File → New Modelica Class"
-    // wizard adds — a blue outlined rectangle plus a `%name`
-    // label above. The user can edit the icon graphics later;
-    // until then the class renders through the same path as MSL
-    // components (no special "user class" branch in the renderer).
-    let source = format!(
-        "model {name}\n\
-         \n\
-         annotation(Icon(coordinateSystem(extent={{{{-100,-100}},{{100,100}}}}),\n\
-        \x20   graphics={{\n\
-        \x20       Rectangle(extent={{{{-100,-100}},{{100,100}}}}, lineColor={{0,0,255}}),\n\
-        \x20       Text(extent={{{{-150,150}},{{150,110}}}},\n\
-        \x20            textString=\"%name\",\n\
-        \x20            textColor={{0,0,255}})}}));\n\
-         end {name};\n"
-    );
+    // Minimal parse-clean template. We previously emitted a default
+    // `annotation(Icon(...));` (OMEdit-style) so a fresh class showed
+    // a coloured rectangle on the canvas — but a *trailing* class-level
+    // annotation poisons the pretty-printer's insertion point: every
+    // subsequent `AddComponent` lands AFTER the annotation, which
+    // violates the Modelica grammar (annotation must be the last
+    // element in a class) and the strict parser then rejects the
+    // whole document.
+    //
+    // TODO(scratch-icon): re-introduce the default Icon annotation by
+    // wiring `SetClassAnnotation` (not yet implemented) so the icon
+    // can be added through the same insertion machinery that respects
+    // ordering, instead of being baked into the template text.
+    let source = format!("model {name}\nend {name};\n");
     let mem_id = format!("mem://{name}");
     let doc_id = registry.allocate_with_origin(
         source.clone(),
@@ -2316,6 +2327,49 @@ fn on_set_zoom(trigger: On<SetZoom>, mut commands: Commands) {
             let c = vp.center;
             vp.set_target(c, zoom);
         }
+    });
+}
+
+#[on_command(FocusComponent)]
+fn on_focus_component(trigger: On<FocusComponent>, mut commands: Commands) {
+    let raw = trigger.event().doc;
+    let name = trigger.event().name.clone();
+    let padding = if trigger.event().padding > 0.0 { trigger.event().padding } else { 0.5 };
+    commands.queue(move |world: &mut World| {
+        let doc = if raw.is_unassigned() {
+            resolve_active_doc(world)
+        } else {
+            Some(raw)
+        };
+        use crate::ui::panels::canvas_diagram::CanvasDiagramState;
+        let Some(mut state) = world.get_resource_mut::<CanvasDiagramState>() else {
+            return;
+        };
+        let docstate = state.get_mut(doc);
+        // Find the canvas node whose label matches `name`. Use the
+        // labelled node's rect as the focus target.
+        let target = docstate
+            .canvas
+            .scene
+            .nodes()
+            .find(|(_, n)| n.label == name)
+            .map(|(_, n)| n.rect);
+        let Some(rect) = target else {
+            bevy::log::warn!("[FocusComponent] no node named `{}` on canvas", name);
+            return;
+        };
+        // Centre on the rect; zoom so its longer dim takes `padding`
+        // of the smaller viewport dim. Approx screen rect — same
+        // helper Fit uses.
+        let sr = approx_screen_rect();
+        let viewport_dim = sr.width().min(sr.height());
+        let world_dim = rect.width().max(rect.height()).max(1e-3);
+        let zoom = (viewport_dim * padding) / world_dim;
+        let centre = lunco_canvas::Pos::new(
+            (rect.min.x + rect.max.x) * 0.5,
+            (rect.min.y + rect.max.y) * 0.5,
+        );
+        docstate.canvas.viewport.set_target(centre, zoom);
     });
 }
 

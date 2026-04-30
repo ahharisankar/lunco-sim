@@ -163,24 +163,39 @@ impl Layer for EdgesLayer {
         for (eid, edge) in scene.edges() {
             let Some(from_node) = scene.node(edge.from.node) else { continue };
             let Some(to_node) = scene.node(edge.to.node) else { continue };
-            let Some(from_port) = from_node
-                .ports
-                .iter()
-                .find(|p| p.id == edge.from.port)
-            else {
-                continue;
+            // Port lookup: when the edge endpoint references a port
+            // that doesn't exist on the node (typical for top-level
+            // connector instances — they ARE the connector and have
+            // no sub-ports), fall back to the node's centre. Skipping
+            // the edge entirely (the previous behaviour) made every
+            // wire from `u_s`/`u_m`/`u_ff`/`y` invisible because
+            // those nodes carry no port that matches the connector's
+            // own name. Anchoring on the centre lets the orthogonal
+            // router still draw a stub-then-waypoint polyline.
+            let from_port = from_node.ports.iter().find(|p| p.id == edge.from.port);
+            let to_port = to_node.ports.iter().find(|p| p.id == edge.to.port);
+            let from_w = if let Some(p) = from_port {
+                crate::scene::Pos::new(
+                    from_node.rect.min.x + p.local_offset.x,
+                    from_node.rect.min.y + p.local_offset.y,
+                )
+            } else {
+                crate::scene::Pos::new(
+                    (from_node.rect.min.x + from_node.rect.max.x) * 0.5,
+                    (from_node.rect.min.y + from_node.rect.max.y) * 0.5,
+                )
             };
-            let Some(to_port) = to_node.ports.iter().find(|p| p.id == edge.to.port) else {
-                continue;
+            let to_w = if let Some(p) = to_port {
+                crate::scene::Pos::new(
+                    to_node.rect.min.x + p.local_offset.x,
+                    to_node.rect.min.y + p.local_offset.y,
+                )
+            } else {
+                crate::scene::Pos::new(
+                    (to_node.rect.min.x + to_node.rect.max.x) * 0.5,
+                    (to_node.rect.min.y + to_node.rect.max.y) * 0.5,
+                )
             };
-            let from_w = crate::scene::Pos::new(
-                from_node.rect.min.x + from_port.local_offset.x,
-                from_node.rect.min.y + from_port.local_offset.y,
-            );
-            let to_w = crate::scene::Pos::new(
-                to_node.rect.min.x + to_port.local_offset.x,
-                to_node.rect.min.y + to_port.local_offset.y,
-            );
             // Snap endpoints to integer pixels. Without this, the
             // floating-point world→screen transform produces sub-
             // pixel endpoint coordinates that egui anti-aliases at
