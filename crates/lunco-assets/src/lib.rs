@@ -281,6 +281,48 @@ pub fn assets_dir() -> PathBuf {
     PathBuf::from("assets")
 }
 
+/// Cache `models/` directory — where `lunco-assets -- download`
+/// materialises 3D model binaries declared in per-crate `Assets.toml`
+/// (`.glb`, `.gltf`, `.obj`, `.stl`). Served at runtime via the
+/// `lunco-lib://` asset source registered in `lunco-client`. Shared
+/// across all worktrees — one `cargo run -p lunco-assets -- download`
+/// populates every git worktree at once. Mirrors [`textures_dir`].
+pub fn models_dir() -> PathBuf {
+    cache_subdir("models")
+}
+
+/// Constructs a `lunco-lib://` asset path from a relative path inside
+/// the LunCoSim shipped library.
+///
+/// `lunco-lib://` is the LunCoSim equivalent of Unreal's `/Engine/`
+/// or Blender's "Essentials" asset library — it resolves to
+/// workspace-shipped fixtures that ship with LunCoSim itself
+/// (declared in per-crate `Assets.toml`, downloaded into [`cache_dir`]
+/// by `cargo run -p lunco-assets -- download`).
+///
+/// **Distinct from `lunco://`.** The `lunco://` scheme is reserved
+/// for the future LunCoSim asset/scene service (multi-user,
+/// collaborative, network-backed — analogous to Omniverse's Nucleus).
+/// `lunco-lib://` is purely local: shipped binaries served from the
+/// shared cache. Keeping the two schemes separate lets the future
+/// protocol design `lunco://` from a blank slate.
+///
+/// **Distinct from user content.** A user-authored `.usda` referencing
+/// `@./my_robot.glb@` resolves relative to its own layer — there's no
+/// fallback into `lunco-lib://`, no risk of a stray cache hit shadowing
+/// a user file with the same name. The scheme makes ownership explicit.
+///
+/// # Example
+///
+/// ```
+/// use lunco_assets::lunco_lib_path;
+/// let path = lunco_lib_path("models/perseverance.glb");
+/// assert_eq!(path, "lunco-lib://models/perseverance.glb");
+/// ```
+pub fn lunco_lib_path(relative: &str) -> String {
+    format!("lunco-lib://{relative}")
+}
+
 /// Cache `fonts/` directory — where `lunco-assets -- download`
 /// materialises font files declared in per-crate `Assets.toml`. Lives
 /// under [`cache_dir`] because these are downloaded artifacts, not
@@ -412,6 +454,14 @@ mod tests {
     fn cached_texture_path_format() {
         assert_eq!(cached_texture_path("earth.png"), "cached_textures://earth.png");
         assert_eq!(cached_texture_path("moon.png"), "cached_textures://moon.png");
+    }
+
+    #[test]
+    fn lunco_lib_path_format() {
+        assert_eq!(
+            lunco_lib_path("models/perseverance.glb"),
+            "lunco-lib://models/perseverance.glb"
+        );
     }
 
     #[test]

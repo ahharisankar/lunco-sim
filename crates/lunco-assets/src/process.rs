@@ -21,48 +21,152 @@ use usvg::{Tree, Options};
 use crate::cache_dir;
 
 /// Processing configuration from `Assets.toml`.
+///
+/// `kind` selects the pipeline (default `"texture"`); other fields apply
+/// per pipeline:
+///
+/// - `kind = "texture"` (default): resize an image to `target_resolution`
+///   and re-encode as PNG. Used by Earth/Moon textures.
+/// - `kind = "gltf"`: run a fixed `gltf-transform` cleanup pipeline on a
+///   downloaded `.glb` to strip extensions Bevy 0.18's `bevy_gltf` doesn't
+///   support. Currently: `KHR_draco_mesh_compression` (geometry) and
+///   `EXT_texture_webp` (textures, re-encoded as PNG). Requires `npx`
+///   (Node.js) on PATH; the CLI is fetched on demand.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ProcessConfig {
-    /// Target [width, height] in pixels.
-    pub target_resolution: [u32; 2],
-    /// Output path relative to the cache root (e.g., "textures/earth.png").
+    /// Pipeline selector. Defaults to `"texture"` for backwards
+    /// compatibility with Earth/Moon entries.
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    /// Target [width, height] in pixels (texture pipeline only).
+    #[serde(default)]
+    pub target_resolution: Option<[u32; 2]>,
+    /// Output path relative to the cache root (e.g., "textures/earth.png"
+    /// or "models/perseverance.glb").
     pub output: String,
 }
 
-/// Processes a single source image → output texture.
+fn default_kind() -> String {
+    "texture".to_string()
+}
+
+/// Processes a single source asset according to `process.kind`.
 ///
-/// Supports: JPEG, PNG, TIFF, SVG
-/// Output: PNG
+/// - `"texture"` (default): resize an image to `target_resolution` and
+///   save as PNG. Supports JPEG, PNG, TIFF, BMP, WebP, SVG inputs.
+/// - `"gltf"`: clean a `.glb` for Bevy 0.18 — decode Draco geometry,
+///   re-encode WebP textures as PNG. Shells out to `npx
+///   @gltf-transform/cli`; the function name `process_texture` is a
+///   historical accident at this point but kept to avoid churning the
+///   call site.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn process_texture(
     source_path: &Path,
     process: &ProcessConfig,
 ) -> Result<(), std::io::Error> {
     let output_path = cache_dir().join(&process.output);
-    let [tw, th] = process.target_resolution;
 
     // Create output directory if needed
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let ext = source_path
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-
-    match ext {
-        "svg" => process_svg(source_path, &output_path, tw, th),
-        "jpg" | "jpeg" | "png" | "tiff" | "tif" | "bmp" | "webp" => {
-            process_image(source_path, &output_path, tw, th)
+    match process.kind.as_str() {
+        "gltf" => process_gltf(source_path, &output_path)?,
+        "texture" => {
+            let [tw, th] = process.target_resolution.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "texture pipeline requires `target_resolution = [w, h]`",
+                )
+            })?;
+            let ext = source_path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            match ext {
+                "svg" => process_svg(source_path, &output_path, tw, th)?,
+                "jpg" | "jpeg" | "png" | "tiff" | "tif" | "bmp" | "webp" => {
+                    process_image(source_path, &output_path, tw, th)?
+                }
+                _ => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("Unsupported source format: .{}", ext),
+                    ))
+                }
+            }
         }
-        _ => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("Unsupported source format: .{}", ext),
-        )),
-    }?;
+        other => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Unknown process kind `{}` (expected \"texture\" or \"gltf\")", other),
+            ))
+        }
+    }
 
     println!("  ✓ processed → {}", output_path.display());
+    Ok(())
+}
+
+/// glb cleanup pipeline. Runs `gltf-transform` twice in series:
+///
+/// 1. **`copy`** — re-emits the file, decoding `KHR_draco_mesh_compression`
+///    transparently along the way. Bevy 0.18's `bevy_gltf` has no Draco
+///    decoder; this strips the extension.
+/// 2. **`png --formats "*"`** — re-encodes every embedded texture as PNG,
+///    irrespective of source format (WebP, JPEG, PNG). Drops
+///    `EXT_texture_webp` since none of the resulting textures need it.
+///
+/// Shells out to `npx --yes @gltf-transform/cli`. Node.js / `npx` must be
+/// on `PATH`; the gltf-transform CLI itself is fetched by `npx` on first
+/// run and cached. Native-only — wasm builds skip this whole module.
+#[cfg(not(target_arch = "wasm32"))]
+fn process_gltf(source: &Path, output: &Path) -> std::io::Result<()> {
+    use std::process::Command;
+
+    if which::which("npx").is_err() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "gltf process step requires Node.js / `npx` on PATH (install Node 18+, then re-run)",
+        ));
+    }
+
+    // Stage 1 → temp file. We deliberately use a temp intermediate
+    // rather than rewriting `source` so a failed second stage doesn't
+    // leave the source corrupted, and so re-running `process` is
+    // idempotent (the source is the immutable Assets.toml-pinned blob).
+    let tmp = std::env::temp_dir().join(format!(
+        "lunco_gltf_decoded_{}.glb",
+        std::process::id()
+    ));
+
+    let s1 = Command::new("npx")
+        .args(["--yes", "@gltf-transform/cli", "copy"])
+        .arg(source)
+        .arg(&tmp)
+        .status()?;
+    if !s1.success() {
+        return Err(std::io::Error::other(format!(
+            "gltf-transform copy failed: exit {:?}",
+            s1.code()
+        )));
+    }
+
+    let s2 = Command::new("npx")
+        .args(["--yes", "@gltf-transform/cli", "png"])
+        .arg(&tmp)
+        .arg(output)
+        .args(["--formats", "*"])
+        .status()?;
+    let _ = std::fs::remove_file(&tmp);
+    if !s2.success() {
+        return Err(std::io::Error::other(format!(
+            "gltf-transform png failed: exit {:?}",
+            s2.code()
+        )));
+    }
+
     Ok(())
 }
 

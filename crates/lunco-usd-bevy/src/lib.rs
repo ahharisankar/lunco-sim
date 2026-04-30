@@ -173,6 +173,7 @@ pub fn sync_usd_visuals(
     mut commands: Commands,
     query: Query<(Entity, &UsdPrimPath, Option<&Visibility>, Option<&Transform>), Without<UsdVisualSynced>>,
     stages: Res<Assets<UsdStageAsset>>,
+    asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -234,6 +235,54 @@ pub fn sync_usd_visuals(
         // Apply standard PBR material with USD color
         if let Some(ref m) = mesh_handle {
             apply_standard_material(&reader, &sdf_path, m, &mut materials, &mut commands.entity(entity));
+        }
+
+        // glTF / external-mesh branch.
+        //
+        // The composer writes `lunco:resolvedAsset` onto any prim whose
+        // `payload`/`references` point at a non-USD binary (`.glb`,
+        // `.gltf`, `.obj`, `.stl`). We hand the URI to Bevy's
+        // `AssetServer` directly — the registered asset sources
+        // (`lunco-lib://` for shipped fixtures, default `assets://` for
+        // in-tree paths) handle the lookup.
+        //
+        // - `lunco:assetMode = "mesh"` (default `"scene"`): pull a
+        //   single primitive out of the glTF and attach as `Mesh3d`.
+        //   Used when the prim should also drive a physics collider —
+        //   stays compatible with `lunco-usd-avian` mesh-collider
+        //   pipelines.
+        // - `lunco:assetMode = "scene"`: load the full glTF scene and
+        //   attach as a `SceneRoot` child. Preserves hierarchy,
+        //   materials, and lights at the cost of being opaque to the
+        //   USD prim-path tree.
+        if let Some(asset_uri) = get_attribute_as_string(&reader, &sdf_path, "lunco:resolvedAsset") {
+            let mode = get_attribute_as_string(&reader, &sdf_path, "lunco:assetMode")
+                .unwrap_or_else(|| "scene".to_string());
+            let label = get_attribute_as_string(&reader, &sdf_path, "lunco:assetLabel");
+
+            match mode.as_str() {
+                "mesh" => {
+                    let label = label.unwrap_or_else(|| "Mesh0/Primitive0".to_string());
+                    let path = format!("{asset_uri}#{label}");
+                    let mesh_h: Handle<Mesh> = asset_server.load(&path);
+                    // Single-mesh path keeps `lunco-usd-avian` collider
+                    // construction unchanged — the entity ends up with
+                    // a `Mesh3d` exactly like the Cube/Sphere branches.
+                    apply_standard_material(
+                        &reader,
+                        &sdf_path,
+                        &mesh_h,
+                        &mut materials,
+                        &mut commands.entity(entity),
+                    );
+                }
+                _ => {
+                    let label = label.unwrap_or_else(|| "Scene0".to_string());
+                    let path = format!("{asset_uri}#{label}");
+                    let scene_h: Handle<Scene> = asset_server.load(&path);
+                    commands.entity(entity).insert(SceneRoot(scene_h));
+                }
+            }
         }
 
         // Transform (position and rotation)
@@ -340,6 +389,29 @@ fn apply_standard_material(
 /// - `Vec<f32>` / `Vec<f64>` array forms
 ///
 /// Returns `None` if the attribute doesn't exist or can't be converted.
+/// Reads a string-typed attribute from a USD prim.
+///
+/// Accepts every reasonable string-shaped USD value:
+/// - `Value::String` — authored as `string foo = "..."`.
+/// - `Value::Token` — authored as `token foo = "..."` (also the
+///   parser's choice for several `lunco:*` attributes).
+/// - `Value::AssetPath` — authored as `asset foo = @...@`. This
+///   is what the composer emits for the synthesised
+///   `lunco:resolvedAsset` so user-facing attributes carry the
+///   correct USD type.
+///
+/// `prim_attribute_value::<String>` covers `String`/`Token` only,
+/// so we go through `reader.get` for the attribute path directly
+/// to also catch `AssetPath`.
+fn get_attribute_as_string(reader: &TextReader, path: &SdfPath, attr: &str) -> Option<String> {
+    let attr_path = path.append_property(attr).ok()?;
+    let val = reader.get(&attr_path, "default").ok()?;
+    match &*val {
+        Value::String(s) | Value::Token(s) | Value::AssetPath(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
 fn get_attribute_as_vec3(reader: &TextReader, path: &SdfPath, attr: &str) -> Option<Vec3> {
     // Handle fixed-size array types first (Vec3f, Vec3d)
     if let Some(v) = reader.prim_attribute_value::<[f32; 3]>(path, attr) {

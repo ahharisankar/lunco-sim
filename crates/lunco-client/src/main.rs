@@ -20,7 +20,7 @@ use avian3d::prelude::PhysicsPlugins;
 use lunco_materials::BlueprintMaterial;
 use lunco_ui::LuncoUiPlugin;
 use lunco_workbench::WorkbenchAppExt;
-use lunco_assets::textures_dir;
+use lunco_assets::{cache_dir, textures_dir};
 use bevy_egui::{EguiPrimaryContextPass, EguiContexts};
 
 /// Collects egui scroll input and feeds it to the camera zoom system.
@@ -43,6 +43,15 @@ fn main() {
         .register_asset_source(
             "cached_textures",
             AssetSourceBuilder::platform_default(&textures_dir().to_string_lossy(), None),
+        )
+        // `lunco-lib://` — workspace-shipped fixture library (analog to
+        // Unreal's `/Engine/`, Blender's "Essentials"). Resolves to the
+        // shared cache root populated by `lunco-assets -- download`.
+        // Separate from the reserved-for-future-use `lunco://` scheme,
+        // which will hold the multi-user / collaborative protocol.
+        .register_asset_source(
+            "lunco-lib",
+            AssetSourceBuilder::platform_default(&cache_dir().to_string_lossy(), None),
         )
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(lunco_workbench::merged_titlebar_window("LunCo")),

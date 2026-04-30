@@ -1,0 +1,27 @@
+# lunco-usd Assets
+#
+# 3D models and other USD-side assets shipped as part of the
+# LunCoSim library. Two-step install:
+#
+#   cargo run -p lunco-assets -- download   # fetches the raw `_source` glb
+#   cargo run -p lunco-assets -- process    # writes the Bevy-friendly glb
+#
+# The `process` step strips glTF extensions Bevy 0.18 doesn't support
+# (`KHR_draco_mesh_compression`, `EXT_texture_webp`) by re-emitting the
+# file via `npx @gltf-transform/cli`. Node.js must be on PATH for the
+# process step. The processed `.glb` is what the `lunco-lib://`
+# AssetSource serves at runtime — `.usda` payloads reference it as
+# e.g. `prepend payload = @lunco-lib://models/perseverance.glb@`.
+
+[perseverance]
+name = "NASA Mars 2020 Perseverance Rover (glTF)"
+url = "https://assets.science.nasa.gov/content/dam/science/cds/3d/resources/model/mars-2020-perseverance-rover/Mars%202020%20Perseverance%20Rover.glb?emrc=69f2a834c1972"
+# Raw download — keeps Draco geometry + WebP textures verbatim.
+# `process` reads this file and writes the Bevy-friendly version
+# alongside it under `output`.
+dest = "models/perseverance_source.glb"
+sha256 = "10db7c03a5e63a5a3b3e7baa6243aa4918ba045fa8ff0a731d0217491adc727f"
+
+[perseverance.process]
+kind = "gltf"
+output = "models/perseverance.glb"

@@ -65,10 +65,7 @@ pub mod prelude {
     pub use crate::WorldPanel;
     pub use crate::Label3D;
     pub use lunco_theme::{Theme, ThemeMode, ThemePlugin};
-    pub use crate::diagrams::{
-        time_series_plot, ChartSeries,
-        Snarl, SnarlViewer, NodeId, InPin, InPinId, OutPin, OutPinId,
-    };
+    pub use crate::diagrams::{time_series_plot, ChartSeries};
 }
 
 /// Minimal plugin that initializes LunCoSim-specific UI resources.

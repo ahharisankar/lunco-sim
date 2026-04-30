@@ -196,6 +196,54 @@ USD references (e.g., `@/components/mobility/wheel.usda@`) are resolved relative
 **USD asset root** (`assets/`). The `UsdComposer::flatten()` function walks the directory
 tree to find the `assets/` directory and resolves `/`-prefixed absolute paths against it.
 
+## glTF Payloads
+
+Pixar's USD distribution loads `.gltf` / `.glb` through the `UsdGltf`
+SdfFileFormat plugin, so a payload like `prepend payload = @./body.glb@` parses
+glTF as if it were USD. Our minimal `openusd-rs` has no plugin system, so the
+composer recognises non-USD extensions (`glb`, `gltf`, `obj`, `stl`) on
+`payload`/`references` and:
+
+1. Skips the USD-text read.
+2. Resolves the asset path string per the same rules as USD references — URI
+   schemes (`lunco-lib://...`) pass through; `/`-prefixed paths anchor at the
+   asset root; plain relatives go against the layer's directory.
+3. Synthesises an attribute `lunco:resolvedAsset` on the referencing prim with
+   the resolved URI.
+
+`sync_usd_visuals` then reads `lunco:resolvedAsset` and dispatches:
+
+| Mode (`lunco:assetMode`) | Result |
+|---|---|
+| `"mesh"` | `Handle<Mesh>` from `<uri>#Mesh0/Primitive0` (or `lunco:assetLabel`), attached as `Mesh3d`. Single-mesh path stays compatible with `lunco-usd-avian` collider construction. |
+| `"scene"` (default) | `Handle<Scene>` from `<uri>#Scene0`, attached as a child `SceneRoot`. Preserves multi-mesh hierarchy, materials, and lights. |
+
+Example (sandbox uses this for the NASA Mars 2020 Perseverance rover):
+
+```usda
+def Xform "Perseverance" (
+    prepend payload = @lunco-lib://models/perseverance.glb@
+)
+{
+    string lunco:assetMode = "scene"
+    double3 xformOp:translate = (5.0, 0.5, 25.0)
+}
+```
+
+### Asset URI schemes
+
+| Scheme | Purpose | Resolves to |
+|---|---|---|
+| (no scheme, relative or `/abs`) | In-tree authored content (default Bevy `assets://`) | `assets/...` |
+| `lunco-lib://` | **Workspace-shipped library** — analog to Unreal's `/Engine/`, Blender's "Essentials". Declared in per-crate `Assets.toml`, fetched into the shared cache by `cargo run -p lunco-assets -- download`. Registered as an `AssetSource` in `lunco-client/src/main.rs`. | `<cache>/...` |
+| `lunco://` | **Reserved**. Earmarked for the future LunCoSim asset/scene service (multi-user, collaborative, network-backed — analogous to Omniverse's Nucleus). Not registered today; do not use. | — |
+
+The split between `lunco-lib://` (local cache, today) and `lunco://` (future
+network protocol) is intentional. Mirrors the way Omniverse keeps shipped
+content namespaces distinct from the Nucleus protocol's URI grammar — it lets
+the future protocol design `lunco://` from a blank slate without legacy
+carve-outs from today's caching needs.
+
 ## Coordinate Systems
 
 | System | Up Axis | Forward Axis | Notes |

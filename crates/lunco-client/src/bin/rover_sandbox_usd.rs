@@ -15,7 +15,8 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use bevy::prelude::*;
-use bevy::asset::AssetPlugin;
+use bevy::asset::{AssetPlugin, io::AssetSourceBuilder};
+use lunco_assets::cache_dir;
 use bevy::pbr::wireframe::WireframePlugin;
 use big_space::prelude::*;
 use avian3d::prelude::PhysicsPlugins;
@@ -99,6 +100,16 @@ fn main() {
     let mut virtual_time = Time::<Virtual>::default();
     virtual_time.set_max_delta(std::time::Duration::from_millis(33));
     app.insert_resource(virtual_time)
+        // `lunco-lib://` shipped-fixture asset source — must be
+        // registered *before* `DefaultPlugins`/`AssetPlugin` builds the
+        // server. Mirrors the registration in `lunco-client`'s main
+        // binary; without it, payloads referencing
+        // `lunco-lib://models/...` (e.g. the Perseverance rover in
+        // sandbox_scene.usda) fail to resolve.
+        .register_asset_source(
+            "lunco-lib",
+            AssetSourceBuilder::platform_default(&cache_dir().to_string_lossy(), None),
+        )
         .insert_resource(Time::<Fixed>::from_hz(60.0))
         .insert_resource(lunco_core::TimeWarpState { physics_enabled: true, ..default() })
         .insert_resource(avian3d::prelude::Gravity::ZERO)

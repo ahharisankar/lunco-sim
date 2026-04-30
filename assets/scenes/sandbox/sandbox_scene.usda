@@ -150,6 +150,23 @@ def Xform "SandboxScene"
         string lunco:wheelType = "physical"
     }
 
+    # --- glTF rover (NASA Mars 2020 Perseverance, shipped via lunco-lib://) ---
+    # Reference resolves through the `lunco-lib://` Bevy asset source
+    # (registered in `lunco-client/src/main.rs`) → `<cache>/models/perseverance.glb`,
+    # populated by `cargo run -p lunco-assets -- download`. The composer
+    # detects the `.glb` extension on the payload, skips USD-text parse,
+    # and writes `lunco:resolvedAsset` for `sync_usd_visuals` to pick up.
+    # `lunco:assetMode = "scene"` (the default) loads the full glTF
+    # hierarchy as a child SceneRoot — preserves materials, multi-mesh,
+    # lights — which is what we want for a visual-only fixture.
+    def Xform "Perseverance" (
+        prepend payload = @lunco-lib://models/perseverance.glb@
+    )
+    {
+        string lunco:assetMode = "scene"
+        double3 xformOp:translate = (5.0, 0.5, 25.0)
+    }
+
     # --- Balloons (cosim entities — geometry/physics + Modelica/Python wiring all in USD) ---
 
     def Sphere "RedBalloon" (

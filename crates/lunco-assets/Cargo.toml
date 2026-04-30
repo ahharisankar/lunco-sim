@@ -26,6 +26,10 @@ path = "src/bin/build_msl_assets.rs"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ureq = { version = "2.9", features = ["tls"] }
 sha2 = "0.10"
+# `which` is used by the glb process step to verify that `npx`
+# (Node.js) is on PATH before shelling out to gltf-transform. Native
+# only — the wasm path doesn't run process steps.
+which = "6"
 chrono = "0.4"
 flate2 = "1.0"
 bzip2 = "0.4"

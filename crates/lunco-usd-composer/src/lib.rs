@@ -1,8 +1,66 @@
 use openusd::usda::TextReader;
-use openusd::sdf::{self, Value};
+use openusd::sdf::{self, SpecType, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
+
+/// File extensions the composer recognises as **non-USD binary assets**
+/// referenced through `payload`/`references`.
+///
+/// Pixar's USD distribution handles these via the `UsdGltf` /
+/// `UsdObj` SdfFileFormat plugins — when a reference points at a
+/// `.glb`, the plugin transparently parses the glTF and exposes it as
+/// a USD prim subtree. We don't have a plugin system in
+/// `openusd-rs 0.2`, so the composer instead **detects** the
+/// extension, skips the "read as USD text" path, and synthesises a
+/// `lunco:resolvedAsset` attribute on the referencing prim. The Bevy
+/// side (`sync_usd_visuals`) reads that attribute and loads the
+/// binary through `AssetServer` — Mesh3d for `mesh` mode, SceneRoot
+/// for `scene` mode.
+///
+/// Order doesn't matter; matched case-insensitively.
+const BINARY_ASSET_EXTENSIONS: &[&str] = &["glb", "gltf", "obj", "stl"];
+
+/// Returns `true` if `asset_path` ends in one of the
+/// [`BINARY_ASSET_EXTENSIONS`]. Strips off URL query strings (`?…`)
+/// and fragments (`#…`) before testing — the NASA Perseverance URL
+/// for example carries an `?emrc=…` query that would otherwise
+/// shadow the `.glb` extension.
+fn is_binary_asset(asset_path: &str) -> bool {
+    let stem = asset_path
+        .split('?').next().unwrap_or(asset_path)
+        .split('#').next().unwrap_or(asset_path);
+    if let Some(dot) = stem.rfind('.') {
+        let ext = &stem[dot + 1..];
+        BINARY_ASSET_EXTENSIONS.iter().any(|known| known.eq_ignore_ascii_case(ext))
+    } else {
+        false
+    }
+}
+
+/// Resolves an asset_path string per LunCoSim USD conventions.
+///
+/// - **URI scheme** (`lunco-lib://...`, `http://...`): pass through
+///   verbatim — the resolver registered with Bevy's `AssetServer`
+///   handles it. This is the shape recommended for shipped fixtures.
+/// - **`/`-prefixed**: absolute from the workspace `assets/` root
+///   (matches existing `lunco-usd-composer` reference resolution).
+///   Returned as a leading-slash string so `Bevy`'s default `assets://`
+///   source resolves it.
+/// - **plain relative**: relative to the layer's parent directory,
+///   joined and converted to a string.
+fn resolve_asset_uri(asset_path: &str, asset_root: &Path, current_dir: &Path) -> String {
+    if asset_path.contains("://") {
+        return asset_path.to_string();
+    }
+    if let Some(rest) = asset_path.strip_prefix('/') {
+        // Absolute-from-asset-root: stay as a workspace-relative path
+        // string. The Bevy default source roots at `assets/`, so a
+        // leading-slash form matches existing USD references.
+        return asset_root.join(rest).to_string_lossy().to_string();
+    }
+    current_dir.join(asset_path).to_string_lossy().to_string()
+}
 
 /// Find the assets root by walking up from the starting directory
 /// until we find a directory containing an "assets" subdirectory.
@@ -54,56 +112,111 @@ impl UsdComposer {
         // Collect all prim paths and prepare merges
         let prim_paths: Vec<sdf::Path> = data_map.keys().cloned().collect();
         let mut pending_merges: Vec<(sdf::Path, sdf::Path, HashMap<sdf::Path, sdf::Spec>)> = Vec::new();
+        // Binary-asset payloads/references that bypass USD-text composition
+        // and instead surface as `lunco:resolvedAsset` attributes for the
+        // Bevy side to load through `AssetServer`. Pixar's USD does this
+        // via SdfFileFormat plugins (`UsdGltf` etc.); we approximate.
+        let mut binary_assets: Vec<(sdf::Path, String)> = Vec::new();
 
         for path in prim_paths {
             let spec = data_map.get(&path);
-            if let Some(spec) = spec {
-                if let Some(Value::ReferenceListOp(list_op)) = spec.fields.get(sdf::schema::FieldKey::References.as_str()) {
-                    let mut refs = list_op.explicit_items.clone();
-                    refs.extend(list_op.added_items.clone());
-                    refs.extend(list_op.prepended_items.clone());
-                    refs.extend(list_op.appended_items.clone());
+            let Some(spec) = spec else { continue; };
 
-                    for reference in refs {
-                        let (ref_data, source_root) = if reference.asset_path.is_empty() {
-                            // INTERNAL REFERENCE
-                            if reference.prim_path.is_empty() { continue; }
-                            (data_map.clone(), reference.prim_path.clone())
-                        } else {
-                            // EXTERNAL REFERENCE
-                            // "/"-prefixed paths are absolute from USD assets root
-                            let ref_path = if reference.asset_path.starts_with('/') {
-                                let asset_path = reference.asset_path.strip_prefix('/').unwrap();
-                                asset_root.join(asset_path)
-                            } else {
-                                current_dir.join(&reference.asset_path)
-                            };
-
-                            let sub_reader = TextReader::read(&ref_path)?;
-                            let ref_current_dir = ref_path.parent().unwrap_or(Path::new("."));
-                            let mut sub_data: HashMap<sdf::Path, sdf::Spec> = sub_reader.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-
-                            // Only recurse into referenced file's own refs if not already processed
-                            // (prevents infinite loops from circular references)
-                            if !processed.contains(&ref_path) {
-                                processed.insert(ref_path.clone());
-                                Self::flatten_recursive(&mut sub_data, asset_root, ref_current_dir, processed)?;
-                            }
-
-                            let root = if reference.prim_path.is_empty() {
-                                Self::get_default_prim_from_data(&sub_data).ok_or_else(|| {
-                                    anyhow::anyhow!("No defaultPrim in referenced file {}", reference.asset_path)
-                                })?
-                            } else {
-                                reference.prim_path.clone()
-                            };
-                            (sub_data, root)
-                        };
-
-                        pending_merges.push((path.clone(), source_root, ref_data));
-                    }
+            // Collect every external-asset string from both the
+            // `references` and `payload` fields. References compose
+            // eagerly; payloads compose lazily in real USD, but for
+            // our purposes (no payload mask, single load step) the
+            // distinction collapses — both feed the same merge path.
+            let mut asset_paths: Vec<(String, sdf::Path)> = Vec::new();
+            if let Some(Value::ReferenceListOp(list_op)) = spec.fields.get(sdf::schema::FieldKey::References.as_str()) {
+                let mut refs = list_op.explicit_items.clone();
+                refs.extend(list_op.added_items.clone());
+                refs.extend(list_op.prepended_items.clone());
+                refs.extend(list_op.appended_items.clone());
+                for r in refs {
+                    asset_paths.push((r.asset_path, r.prim_path));
                 }
             }
+            if let Some(Value::PayloadListOp(list_op)) = spec.fields.get(sdf::schema::FieldKey::Payload.as_str()) {
+                let mut pls = list_op.explicit_items.clone();
+                pls.extend(list_op.added_items.clone());
+                pls.extend(list_op.prepended_items.clone());
+                pls.extend(list_op.appended_items.clone());
+                for p in pls {
+                    asset_paths.push((p.asset_path, p.prim_path));
+                }
+            }
+
+            for (asset_path, ref_prim_path) in asset_paths {
+                // Binary asset path: skip the USD-text read entirely
+                // and stash the resolved URI on the prim. The Bevy
+                // side reads it from `lunco:resolvedAsset` and loads
+                // the file via `AssetServer`.
+                if !asset_path.is_empty() && is_binary_asset(&asset_path) {
+                    let resolved = resolve_asset_uri(&asset_path, asset_root, current_dir);
+                    binary_assets.push((path.clone(), resolved));
+                    continue;
+                }
+
+                let (ref_data, source_root) = if asset_path.is_empty() {
+                    // INTERNAL REFERENCE
+                    if ref_prim_path.is_empty() { continue; }
+                    (data_map.clone(), ref_prim_path.clone())
+                } else {
+                    // EXTERNAL USD REFERENCE
+                    // "/"-prefixed paths are absolute from USD assets root
+                    let ref_path = if asset_path.starts_with('/') {
+                        let stripped = asset_path.strip_prefix('/').unwrap();
+                        asset_root.join(stripped)
+                    } else {
+                        current_dir.join(&asset_path)
+                    };
+
+                    let sub_reader = TextReader::read(&ref_path)?;
+                    let ref_current_dir = ref_path.parent().unwrap_or(Path::new("."));
+                    let mut sub_data: HashMap<sdf::Path, sdf::Spec> = sub_reader.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+                    // Only recurse into referenced file's own refs if not already processed
+                    // (prevents infinite loops from circular references)
+                    if !processed.contains(&ref_path) {
+                        processed.insert(ref_path.clone());
+                        Self::flatten_recursive(&mut sub_data, asset_root, ref_current_dir, processed)?;
+                    }
+
+                    let root = if ref_prim_path.is_empty() {
+                        Self::get_default_prim_from_data(&sub_data).ok_or_else(|| {
+                            anyhow::anyhow!("No defaultPrim in referenced file {}", asset_path)
+                        })?
+                    } else {
+                        ref_prim_path.clone()
+                    };
+                    (sub_data, root)
+                };
+
+                pending_merges.push((path.clone(), source_root, ref_data));
+            }
+        }
+
+        // Materialise binary-asset URIs as `lunco:resolvedAsset`
+        // attribute specs on the referencing prim. We don't add the
+        // attribute to `propertyChildren` — `prim_attribute_value`
+        // resolves attributes by direct path lookup, not by walking
+        // children, so it'd be ceremony with no consumer. Keeps the
+        // synthesis minimally invasive.
+        for (prim_path, resolved) in binary_assets {
+            let attr_path = match prim_path.append_property("lunco:resolvedAsset") {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            // Only synthesise if not already authored — a hand-written
+            // `lunco:resolvedAsset` overrides composer detection.
+            if data_map.contains_key(&attr_path) { continue; }
+            let mut attr_spec = sdf::Spec::new(SpecType::Attribute);
+            attr_spec.fields.insert(
+                sdf::schema::FieldKey::Default.as_str().to_string(),
+                Value::AssetPath(resolved),
+            );
+            data_map.insert(attr_path, attr_spec);
         }
 
         // Apply merges: Weak-merge strategy (Local opinions win)
@@ -196,5 +309,58 @@ impl UsdComposer {
         } else {
             bail!("Path {} not under root {}", source_str, root_str)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_asset_detection() {
+        assert!(is_binary_asset("body.glb"));
+        assert!(is_binary_asset("BODY.GLB"));
+        assert!(is_binary_asset("./models/body.gltf"));
+        assert!(is_binary_asset("lunco-lib://models/perseverance.glb"));
+        assert!(is_binary_asset("/models/x.obj"));
+        // Real-world URL with a query string — must look at the
+        // path component, not the whole string.
+        assert!(is_binary_asset(
+            "https://nasa.example/m2020.glb?emrc=69f2a834c1972"
+        ));
+        // USD references should NOT match.
+        assert!(!is_binary_asset("/vessels/rovers/skid_rover.usda"));
+        assert!(!is_binary_asset("body.usd"));
+        assert!(!is_binary_asset(""));
+    }
+
+    #[test]
+    fn resolve_uri_passes_through_schemes() {
+        let asset_root = Path::new("/ws/assets");
+        let layer_dir = Path::new("/ws/assets/scenes");
+        assert_eq!(
+            resolve_asset_uri("lunco-lib://models/x.glb", asset_root, layer_dir),
+            "lunco-lib://models/x.glb"
+        );
+        assert_eq!(
+            resolve_asset_uri("https://nasa/x.glb", asset_root, layer_dir),
+            "https://nasa/x.glb"
+        );
+    }
+
+    #[test]
+    fn resolve_uri_handles_relative_and_absolute() {
+        let asset_root = Path::new("/ws/assets");
+        let layer_dir = Path::new("/ws/assets/scenes");
+        // /-prefixed → resolved against the asset root.
+        assert_eq!(
+            resolve_asset_uri("/models/x.glb", asset_root, layer_dir),
+            "/ws/assets/models/x.glb"
+        );
+        // Plain relative → resolved against the layer's directory.
+        assert_eq!(
+            resolve_asset_uri("./body.glb", asset_root, layer_dir),
+            "/ws/assets/scenes/./body.glb"
+        );
     }
 }
