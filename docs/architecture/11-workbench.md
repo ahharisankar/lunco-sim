@@ -429,6 +429,9 @@ crates):
 | `ui` | `lunco-workbench` | Tab styling (italic for unsaved/Untitled, dirty-dot glyph), font sizes |
 | `modelica.naming` | `lunco-modelica` | Class↔file rename behaviour (`Always`/`Ask`/`Never`), default-filename-from-class, tab-title source (class vs filename) |
 | `modelica.canvas` | `lunco-modelica` | Diagram defaults (grid snap, default port side, auto-layout) |
+| `modelica.canvas.animation` | `lunco-modelica` | Tween/pulse durations, ease curve, per-origin animation policy (Local / Api / Remote — see `20-domain-modelica.md` § 9c) |
+| `modelica.canvas.add` | `lunco-modelica` | Auto-focus behaviour on AddComponent (None / Center / FitVisible), batch debounce window |
+| `modelica.canvas.collab` | `lunco-modelica` | Remote cursor + selection visibility, user color, follow-user camera (multi-user precursor; deferred) |
 | `modelica.editor` | `lunco-modelica` | Source editor word-wrap, tab width, auto-format-on-save |
 | `perf_hud` | `lunco-workbench` | Spike threshold, plot rolling window, Twin overlay toggles |
 | `journal` | `lunco-twin-journal` | Retention, blob commit policy (`twin.toml` may override) |
