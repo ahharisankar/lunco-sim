@@ -208,6 +208,45 @@ continuation line so generated source stays readable:
 		annotation(Line(points={{0,0},{10,10}}));
 ```
 
+### 5.4a External API surface (`api_edits.rs`)
+
+Each `ModelicaOp` variant has a Reflect-registered command wrapper so
+external callers (HTTP / MCP / agent SDK) hit the same code path as the
+GUI panels (per AGENTS.md §4.1):
+
+| API command | Wraps | Purpose |
+|-------------|-------|---------|
+| `SetDocumentSource { doc, source }` | `ReplaceSource` | Whole-buffer rewrite — agent batch edits, lint apply, source import |
+| `AddModelicaComponent { doc, class, type_name, name, x, y, w, h }` | `AddComponent` | Drop a component into a class with a placement |
+| `RemoveModelicaComponent { doc, class, name }` | `RemoveComponent` | Delete a component declaration |
+| `ConnectComponents { doc, class, from, to }` | `AddConnection` | Add a `connect(a.p, b.q);` equation; `from`/`to` are dot-paths |
+| `DisconnectComponents { doc, class, from, to }` | `RemoveConnection` | Drop the matching connect equation |
+| `ApplyModelicaOps { doc, ops: Vec<ApiOp> }` | All structural variants | Batch fan-out: `AddComponent / RemoveComponent / AddConnection / RemoveConnection / SetPlacement / SetParameter` in order |
+| `RenameModelicaClass { doc, old_name, new_name }` | string-level rewrite | Rename a top-level class declaration + its `end OLD;` closer; if the doc origin is `Untitled`, the origin name is updated too so the tab title follows |
+
+`ApplyModelicaOps` is the primary path for agent / canvas drag-drop —
+each op in the batch becomes its own undoable step, but the caller
+gets a single round-trip and a guaranteed ordering. The single-op
+wrappers exist because hand-written agent code reads cleaner with
+named commands than with a flat `ApiOp::AddComponent { ... }` payload.
+
+API edits backdate the AST debounce timer (`waive_ast_debounce`), so
+the canvas + text editor refresh inside the same frame instead of
+waiting out the keystroke debounce window — see § 5.7.
+
+**Gaps as of Phase α** — typed wrappers we don't expose yet, available
+via `ApplyModelicaOps` or planned as standalones:
+
+- `SetPlacement` / `SetParameter` — only via `ApplyModelicaOps`
+- `EditText { range, replacement }` — no API surface (use
+  `SetDocumentSource` for now); needed for granular LSP-style edits
+- `RenameModelicaComponent`, `RenameModelicaPort` — not implemented
+- `AddClass` / `RemoveClass` / `MoveClass` (between packages) — not
+  implemented; `RenameModelicaClass` covers in-place rename only
+- `SetClassAnnotation` (Icon, Diagram graphics) — not implemented;
+  whole-source replace is the workaround
+- `AddImport`, `AddExtends`, `SetDocumentation` — not implemented
+
 ### 5.5 Structured change events
 
 After every successful mutation the document pushes a
@@ -318,6 +357,91 @@ A `ModelicaModel` component on a Bevy entity is an **instance** of that type.
 Dymola has the same distinction. Our UI should keep it visible — a
 parameter edit in the Inspector is instance-level unless the user
 explicitly promotes it ("save as default in model").
+
+## 7a. Document identity — three tiers, one truth
+
+A Modelica document has three identity caches that historically drift:
+
+| Tier | Source of truth | Used by |
+|------|-----------------|---------|
+| **File** | `Document::origin` (`Untitled{name}` or `File{path, writable}`) | Save logic, dirty check, Files browser |
+| **Workspace entry** | `WorkspaceResource.DocumentEntry.title` | Tab label, Recents |
+| **Modelica class** | AST top-level class name (in source) | Compile, references, drill-in, Class browser, journal entries |
+
+**Modelica's class-first identity is authoritative** — same as Dymola
+and OMEdit, where the class name is what you see in tabs and the
+file is filesystem implementation detail. Workbench follows this
+convention with VS Code's untitled handling for the unsaved case.
+
+### 7a.1 Title derivation
+
+`DocumentEntry.title` is **derived**, not stored. A `Last`-schedule
+system recomputes it whenever `(origin, ast_first_class,
+drilled_in_class, dirty)` changes:
+
+```
+title = derive(origin, ast_first_class, drilled_in_class, dirty)
+
+  primary  = ast_first_class            (Modelica name lookup wins)
+           | drilled_in_class           (multi-class file → focused class)
+           | origin.display_name()      (parse failed → fall back)
+           | "Untitled-N"               (no source yet)
+
+  prefix   = drilled_pkg.drilled_class  (if drilled into a sub-class)
+
+  postfix  = "●"                        (dirty)
+
+  style    = italic                     (origin.is_untitled || dirty)
+```
+
+Multi-class file shows `Pkg.Active` on the tab plus a
+breadcrumb above the active editor (Dymola-style: `Pkg ▸ Active`,
+each segment clickable to drill out). Switching drilled class flips
+the tab label without remounting the document.
+
+### 7a.2 Rename behaviour
+
+`RenameModelicaClass`:
+1. Rewrites the source declaration + `end OLD;` closer (string-level,
+   first match only — multi-class files require explicit
+   class-targeted renames in v1).
+2. If the doc origin is `Untitled`, updates `origin.name` to match.
+   Title derivation picks up the new class name automatically next
+   frame.
+3. **If the doc is File-backed**, behaviour is governed by the
+   `modelica.naming.rename_class_renames_file` setting:
+   - `Always` — rename the `.mo` file in lock-step (Dymola default).
+   - `Ask` — prompt the user; default for the workbench.
+   - `Never` — file stays at its old path; class name and filename
+     diverge until the user does a Save-As (VS Code default).
+
+The setting lives in the `modelica.naming` section of
+`settings.json` (see `11-workbench.md` § 9b.2). Per-twin overrides
+let library projects pin `Always` while sandbox twins keep `Never`.
+
+### 7a.3 Save-As default
+
+When an Untitled doc transitions to File via Save-As, the suggested
+filename is `<ast_first_class>.mo` in the active Twin's models
+folder, governed by `modelica.naming.save_as_default_uses_class_name`
+(default `true`). Users can override the suggested name; the setting
+just controls the default.
+
+### 7a.4 Implementation notes
+
+- `WorkspaceResource.DocumentEntry.title` becomes a derived field —
+  the system that maintains it reads from
+  `(ModelicaDocumentRegistry, drilled_in_class, dirty)` and writes
+  the entry. No call site sets `entry.title` directly any more; that
+  was the source of the drift.
+- The italic + dirty-dot styling is handled by the tab renderer
+  (`lunco-workbench`) reading `UiSettings + DocumentEntry.origin +
+  dirty`. No per-domain logic in the renderer.
+- `RenameModelicaClass` no longer needs to touch
+  `WorkspaceResource` directly — the title-derive system picks up
+  the AST change. (Today's implementation does write the entry
+  manually as a compatibility shim; remove once the derive system
+  lands.)
 
 ## 8. New-model workflow (target)
 

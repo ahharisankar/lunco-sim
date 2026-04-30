@@ -61,6 +61,7 @@ register_commands!(
     on_connect_components,
     on_disconnect_components,
     on_apply_modelica_ops,
+    on_rename_modelica_class,
 );
 
 impl Plugin for ModelicaApiEditPlugin {
@@ -131,6 +132,155 @@ fn on_set_document_source(
         registry.checkpoint_source(doc, source);
         bevy::log::info!("[SetDocumentSource] doc={} replaced", doc.raw());
     });
+}
+
+// ─── RenameModelicaClass ──────────────────────────────────────────────
+
+/// Rename a top-level class within an open Modelica document.
+///
+/// Rewrites the `<keyword> OLD` declaration line and the matching
+/// `end OLD;` closer. When the document's origin is `Untitled`, the
+/// origin display name is also updated so the tab title follows the
+/// class — Untitled scratch docs have no other authoritative name.
+///
+/// String-level replace, not AST: scans for the keyword + identifier
+/// pair and the closing `end` line. Multi-class files are supported
+/// because each declaration carries its own keyword. The implementation
+/// is conservative: it only renames the first matching declaration and
+/// its single closer, leaving any usages of OLD as a *type* name (e.g.
+/// `OLD instance;` elsewhere) untouched — those are component-decl
+/// references that an external rename refactor should be explicit
+/// about, not silently rewritten.
+#[Command(default)]
+pub struct RenameModelicaClass {
+    pub doc: DocumentId,
+    pub old_name: String,
+    pub new_name: String,
+}
+
+#[on_command(RenameModelicaClass)]
+fn on_rename_modelica_class(
+    trigger: On<RenameModelicaClass>,
+    mut commands: Commands,
+) {
+    let ev = trigger.event().clone();
+    commands.queue(move |world: &mut World| {
+        let Some(doc) = resolve_doc(world, ev.doc) else {
+            bevy::log::warn!("[RenameModelicaClass] no doc for id {}", ev.doc);
+            return;
+        };
+        if ev.old_name.is_empty() || ev.new_name.is_empty() {
+            bevy::log::warn!("[RenameModelicaClass] old/new must be non-empty");
+            return;
+        }
+        if !ev.new_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            bevy::log::warn!(
+                "[RenameModelicaClass] new_name `{}` must be a valid identifier",
+                ev.new_name
+            );
+            return;
+        }
+
+        let mut registry = world.resource_mut::<ModelicaDocumentRegistry>();
+        let Some(host) = registry.host(doc) else {
+            return;
+        };
+        let source = host.document().source().to_string();
+        let new_source = match rewrite_class_name(&source, &ev.old_name, &ev.new_name) {
+            Some(s) => s,
+            None => {
+                bevy::log::warn!(
+                    "[RenameModelicaClass] no `<keyword> {}` declaration found in doc {}",
+                    ev.old_name,
+                    doc.raw()
+                );
+                return;
+            }
+        };
+        // Drop the immutable borrow before taking the mut one.
+        drop(registry);
+
+        let mut registry = world.resource_mut::<ModelicaDocumentRegistry>();
+        registry.checkpoint_source(doc, new_source);
+
+        let mut updated_origin = false;
+        if let Some(host) = registry.host_mut(doc) {
+            let doc_obj = host.document_mut();
+            if doc_obj.origin().is_untitled() {
+                doc_obj.set_origin(lunco_doc::DocumentOrigin::untitled(ev.new_name.clone()));
+                updated_origin = true;
+            }
+            doc_obj.waive_ast_debounce();
+        }
+        // Mirror the renamed Untitled origin into WorkspaceResource so
+        // the tab title + Files browser pick up the new name. The doc
+        // and the workspace entry hold separate origin/title caches —
+        // keep them in lock-step or the tab still says `Untitled1`.
+        if updated_origin {
+            let mut ws = world.resource_mut::<lunco_workbench::WorkspaceResource>();
+            if let Some(entry) = ws.document_mut(doc) {
+                entry.origin = lunco_doc::DocumentOrigin::untitled(ev.new_name.clone());
+                entry.title = ev.new_name.clone();
+            }
+        }
+        bevy::log::info!(
+            "[RenameModelicaClass] doc={} {} → {}",
+            doc.raw(),
+            ev.old_name,
+            ev.new_name
+        );
+    });
+}
+
+/// Replace `<keyword> OLD` and the matching `end OLD;` once each.
+/// Returns `None` if no class declaration was found.
+fn rewrite_class_name(source: &str, old: &str, new: &str) -> Option<String> {
+    const KEYWORDS: &[&str] = &[
+        "model", "class", "package", "connector", "record", "block", "type", "function",
+    ];
+    // Find the first `<keyword> OLD` with word boundaries.
+    let bytes = source.as_bytes();
+    let mut decl_pos = None;
+    let mut decl_len = 0;
+    let mut decl_kw = "";
+    'outer: for (i, _) in source.char_indices() {
+        for kw in KEYWORDS {
+            let pat_len = kw.len() + 1 + old.len();
+            if i + pat_len > source.len() {
+                continue;
+            }
+            if !source[i..].starts_with(kw) {
+                continue;
+            }
+            if bytes[i + kw.len()] != b' ' {
+                continue;
+            }
+            if !source[i + kw.len() + 1..].starts_with(old) {
+                continue;
+            }
+            let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+            let after = i + pat_len;
+            let after_ok = after >= bytes.len() || !is_ident_byte(bytes[after]);
+            if before_ok && after_ok {
+                decl_pos = Some(i);
+                decl_len = pat_len;
+                decl_kw = kw;
+                break 'outer;
+            }
+        }
+    }
+    let pos = decl_pos?;
+    let mut out = String::with_capacity(source.len() + new.len());
+    out.push_str(&source[..pos]);
+    out.push_str(&format!("{decl_kw} {new}"));
+    out.push_str(&source[pos + decl_len..]);
+    let end_pat = format!("end {old};");
+    let new_end = format!("end {new};");
+    Some(out.replacen(&end_pat, &new_end, 1))
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 // ─── AddModelicaComponent ──────────────────────────────────────────────
