@@ -125,6 +125,15 @@ fn collect_child_colliders_from_usd(
     let mut shapes = Vec::new();
 
     for child_path in reader.prim_children(parent_path) {
+        // Skip wheel children — they're independent dynamics handled
+        // by `lunco-usd-sim` (raycast probe or physical wheel rigid
+        // body), NOT collider pieces of the chassis compound. The
+        // `physxVehicleWheel:radius` attribute is the canonical marker
+        // (matches the same skip in `process_usd_avian_prims`).
+        if reader.prim_attribute_value::<f32>(&child_path, "physxVehicleWheel:radius").is_some() {
+            continue;
+        }
+
         // Check if child has collision enabled
         let child_collision = reader
             .prim_attribute_value::<bool>(&child_path, "physics:collisionEnabled")

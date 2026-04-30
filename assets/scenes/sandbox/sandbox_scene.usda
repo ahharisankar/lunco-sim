@@ -103,65 +103,84 @@ def Xform "SandboxScene"
     #   - ackermann_rover.usda  → PhysxVehicleDrive4WAPI
     #   - lunco:wheelType = "physical" → physical-wheel override
 
-    # Note: instances mirror the base prim's typeName (`Cube` for
-    # rovers, `Sphere` for balloons) — Pixar USD composition rule is
-    # "local opinion wins for typeName", so an `Xform` instance would
-    # mask the chassis geometry. Migrating bases to Xform-root +
-    # child collider is a separate refactor.
+    # Instances are `def Xform` (matching the base typeName after
+    # the Xform-root refactor). Per-instance color overrides use
+    # path-targeted `over "Chassis"` opinions — Pixar's standard way
+    # to redirect attribute opinions across a reference.
 
     # === Skid-Steer, Raycast Wheels ===
 
-    def Cube "Skid_Raycast_1" (
+    def Xform "Skid_Raycast_1" (
         prepend references = @../../vessels/rovers/skid_rover.usda@</SkidRover>
     )
     {
-        color3f primvars:displayColor = (0.8, 0.2, 0.2)
         double3 xformOp:translate = (15.0, 5.0, -10.0)
-        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        over "Chassis"
+        {
+            color3f primvars:displayColor = (0.8, 0.2, 0.2)
+        }
     }
 
-    def Cube "Skid_Raycast_2" (
+    def Xform "Skid_Raycast_2" (
         prepend references = @../../vessels/rovers/skid_rover.usda@</SkidRover>
     )
     {
-        color3f primvars:displayColor = (0.2, 0.8, 0.2)
         double3 xformOp:translate = (15.0, 5.0, 10.0)
-        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        over "Chassis"
+        {
+            color3f primvars:displayColor = (0.2, 0.8, 0.2)
+        }
     }
 
     # === Skid-Steer, Physical Wheels ===
 
-    def Cube "Skid_Physical_1" (
+    def Xform "Skid_Physical_1" (
         prepend references = @../../vessels/rovers/skid_rover.usda@</SkidRover>
     )
     {
-        color3f primvars:displayColor = (0.2, 0.2, 0.8)
         double3 xformOp:translate = (-15.0, 5.0, -10.0)
-        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        uniform token[] xformOpOrder = ["xformOp:translate"]
         string lunco:wheelType = "physical"
+
+        over "Chassis"
+        {
+            color3f primvars:displayColor = (0.2, 0.2, 0.8)
+        }
     }
 
     # === Ackermann, Raycast Wheels ===
 
-    def Cube "Ackermann_Raycast_1" (
+    def Xform "Ackermann_Raycast_1" (
         prepend references = @../../vessels/rovers/ackermann_rover.usda@</AckermannRover>
     )
     {
-        color3f primvars:displayColor = (0.8, 0.8, 0.2)
         double3 xformOp:translate = (-15.0, 5.0, 10.0)
-        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        over "Chassis"
+        {
+            color3f primvars:displayColor = (0.8, 0.8, 0.2)
+        }
     }
 
     # === Ackermann, Physical Wheels ===
 
-    def Cube "Ackermann_Physical_1" (
+    def Xform "Ackermann_Physical_1" (
         prepend references = @../../vessels/rovers/ackermann_rover.usda@</AckermannRover>
     )
     {
-        color3f primvars:displayColor = (0.8, 0.5, 0.1)
         double3 xformOp:translate = (-25.0, 5.0, 0.0)
-        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        uniform token[] xformOpOrder = ["xformOp:translate"]
         string lunco:wheelType = "physical"
+
+        over "Chassis"
+        {
+            color3f primvars:displayColor = (0.8, 0.5, 0.1)
+        }
     }
 
     # --- glTF rover (NASA Mars 2020 Perseverance) ---
@@ -198,6 +217,14 @@ def Xform "SandboxScene"
             double3 xformOp:scale = (2.7, 1.85, 3.1)
             uniform token[] xformOpOrder = ["xformOp:scale"]
             color3f primvars:displayColor = (0.6, 0.4, 0.2)   # Mars-tan
+            # `lunco:placeholder = true` keeps the Cube hidden in our
+            # pipeline — third-party USD tools (Blender, usdview) still
+            # render it because they ignore the custom attribute and
+            # the `lunco-lib://` payload fails to resolve, so the
+            # local Cube definition is the only thing left to draw.
+            # Hiding by default in our renderer prevents a brief
+            # placeholder flash while the glTF Scene is async-loading.
+            bool lunco:placeholder = true
         }
 
         def Xform "Visual" (

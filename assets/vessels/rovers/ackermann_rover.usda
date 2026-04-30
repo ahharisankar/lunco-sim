@@ -5,34 +5,34 @@
     metersPerUnit = 1
 )
 
-# Base Ackermann-Steer Rover — reusable component definition.
-# Instantiate in scenes via reference + overrides:
-#   - color3f primvars:displayColor  → change appearance
-#   - double3 xformOp:translate      → set position
-#   - string lunco:wheelType = "physical" → switch to physical wheels (default: "raycast")
-#
-# Chassis: 2.0m × 0.3m × 3.5m, Mass: 1000kg
-#
-# Uses legacy `width/height/depth` (not spec `size + xformOp:scale`)
-# because xformOp:scale on a parent propagates to wheel children's
-# transforms, breaking Avian's raycaster `Dir3` normalization. See
-# the longer comment in `skid_rover.usda`.
-def Cube "AckermannRover" (
-    prepend apiSchemas = ["PhysxVehicleContextAPI", "PhysxVehicleDrive4WAPI"]
+# Base Ackermann-Steer Rover — same Xform-root + child-Chassis form
+# as `skid_rover.usda` (see that file's header comment for the
+# rationale). Chassis: 2.0 m × 0.3 m × 3.5 m. Mass: 1000 kg.
+
+def Xform "AckermannRover" (
+    prepend apiSchemas = [
+        "PhysicsRigidBodyAPI",
+        "PhysicsMassAPI",
+        "PhysxVehicleContextAPI",
+        "PhysxVehicleDrive4WAPI"
+    ]
 )
 {
-    double width = 2.0
-    double height = 0.3
-    double depth = 3.5
-    color3f primvars:displayColor = (0.8, 0.8, 0.8)
+    float physics:mass = 1000.0
+    float physics:linearDamping = 0.5
+    float physics:angularDamping = 2.0
 
     string lunco:wheelType = "raycast"
 
-    bool physics:rigidBodyEnabled = true
-    float physics:mass = 1000.0
-    bool physics:collisionEnabled = true
-    float physics:linearDamping = 0.5
-    float physics:angularDamping = 2.0
+    def Cube "Chassis" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    )
+    {
+        double size = 1.0
+        double3 xformOp:scale = (2.0, 0.3, 3.5)
+        uniform token[] xformOpOrder = ["xformOp:scale"]
+        color3f primvars:displayColor = (0.8, 0.8, 0.8)
+    }
 
     def Cylinder "Wheel_FL" (
         prepend references = @../../components/mobility/wheel.usda@</Wheel>
