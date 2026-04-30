@@ -701,6 +701,30 @@ impl Plugin for ModelicaUiPlugin {
             "LunCo Examples",
             false,
         )));
+        // Third-party Modelica libraries downloaded via lunco-assets.
+        // Each row appears alongside the MSL in the Twin browser as
+        // a top-level system library. The id ties to
+        // `PackageTreeCache::new()`'s extra-library entries — both
+        // use `<cache_subdir>_root` as the key.
+        //
+        // Adding a library means: (1) Assets.toml entry with the
+        // GitHub release tarball, (2) `msl_indexer.rs::extra_libraries`
+        // for palette / parsed-bundle inclusion, (3)
+        // `class_cache.rs` filesystem-resolve roots, (4) browser
+        // tree row in `package_browser.rs::PackageTreeCache::new`,
+        // (5) this registration. All five are tiny one-line
+        // additions with the same `<cache_subdir>` key.
+        if lunco_assets::cache_dir()
+            .join("thermofluidstream")
+            .join("ThermofluidStream")
+            .exists()
+        {
+            loaded.register(Box::new(loaded_classes::SystemLibraryClass::new(
+                "thermofluidstream_root",
+                "ThermofluidStream",
+                false,
+            )));
+        }
     }
 }
 

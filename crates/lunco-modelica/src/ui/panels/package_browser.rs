@@ -182,6 +182,33 @@ impl PackageTreeCache {
             is_loading: false,
         });
 
+        // Extra third-party Modelica libraries downloaded via
+        // `lunco-assets`. Each entry mirrors the cache layout written
+        // by `Assets.toml`'s `dest = "<name>"` (the unpacked archive
+        // lands at `<cache>/<name>/<PackageDir>/`). Adding a library
+        // here surfaces it in the Twin browser as a top-level node;
+        // pair with the corresponding entries in `msl_indexer.rs`
+        // (palette indexing) and `class_cache.rs` (drill-in path
+        // resolution).
+        for (cache_subdir, package_dir, label) in &[(
+            "thermofluidstream",
+            "ThermofluidStream",
+            "🌊 ThermofluidStream",
+        )] {
+            let cache_root = lunco_assets::cache_dir().join(cache_subdir);
+            let lib_dir = cache_root.join(package_dir);
+            if lib_dir.exists() {
+                roots.push(PackageNode::Category {
+                    id: format!("{}_root", cache_subdir).into(),
+                    name: (*label).into(),
+                    package_path: (*package_dir).into(),
+                    fs_path: lib_dir,
+                    children: None,
+                    is_loading: false,
+                });
+            }
+        }
+
         roots.push(PackageNode::Category {
             id: "bundled_root".into(),
             name: "📦 Bundled Models".into(),
