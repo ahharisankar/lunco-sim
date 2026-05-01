@@ -402,6 +402,7 @@ pub fn sync_usd_visuals(
             if let Some(q) = axis_rot {
                 transform.rotation = transform.rotation * q;
             }
+            info!("[usd-bevy] {} cylinder axis={} rot={:?}", sdf_path.as_str(), axis, transform.rotation);
         }
         // `xformOp:scale` (UsdGeomXformable) — non-uniform scaling
         // composed with translate + rotate. Spec-compliant `Cube`

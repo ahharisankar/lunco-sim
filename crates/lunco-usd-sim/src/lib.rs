@@ -408,7 +408,7 @@ fn process_usd_sim_prims(
                 WheelType::Physical => {
                     setup_physical_wheel(
                         &mut commands, entity, &prim_path, &existing_tf,
-                        maybe_mesh, maybe_mat,
+                        maybe_mesh, maybe_mat, maybe_child_of,
                         radius, index, p_drive, p_steer,
                         &mut reader, &sdf_path,
                     );
@@ -568,6 +568,7 @@ fn setup_physical_wheel(
     existing_tf: &Transform,
     _maybe_mesh: Option<&Mesh3d>,
     _maybe_mat: Option<&MeshMaterial3d<StandardMaterial>>,
+    maybe_child_of: Option<&ChildOf>,
     radius: f32,
     _index: i32,
     p_drive: Entity,
@@ -583,21 +584,54 @@ fn setup_physical_wheel(
     let _motor_efficiency = reader.prim_attribute_value::<f64>(sdf_path, "lunco:motorEfficiency")
         .unwrap_or(0.85);
 
-    // Physical wheel: keep rotation (no raycast direction issue), keep mesh
-    // but ensure it's a proper rigid body with collision
+    // The wheel entity must have **identity rotation** for the
+    // revolute joint to work — Avian's `with_hinge_axis(axis)` treats
+    // `axis` as a vector in BOTH bodies' local frames, so the chassis
+    // and wheel local frames need to be aligned. Any axis-induced
+    // rotation (from `UsdGeomCylinder.axis`) is moved off the entity
+    // and onto a visual child + the collider's compound-local rotation.
+    let wheel_axis_rot = existing_tf.rotation;
     let wheel_tf = Transform {
         translation: existing_tf.translation,
-        rotation: existing_tf.rotation, // Keep USD rotation for physical wheels
+        rotation: Quat::IDENTITY,
         scale: existing_tf.scale,
     };
 
-    // The wheel entity's Transform rotation is set from
-    // UsdGeomCylinder.axis in `lunco-usd-bevy::sync_usd_visuals`, so a
-    // Y-axis Avian cylinder collider is rotated correctly in world
-    // space without any compound-wrapping here. Motor torque axis is
-    // local Y (the wheel's spin axis in entity-local frame).
-    let collider = Collider::cylinder(radius as f64, (radius * 0.5) as f64);
+    let cyl = Collider::cylinder(radius as f64, (radius * 0.5) as f64);
+    let collider = if wheel_axis_rot.abs_diff_eq(Quat::IDENTITY, 1e-5) {
+        cyl
+    } else {
+        Collider::compound(vec![(
+            Position(DVec3::ZERO),
+            Rotation(wheel_axis_rot.as_dquat()),
+            cyl,
+        )])
+    };
+    // Spin axis in wheel-local frame is +Y (Avian's cylinder native
+    // orientation, before the compound rotation).
     let motor_axis = DVec3::Y;
+
+    // Spawn the visual as a child of the wheel entity so it carries
+    // the axis-induced rotation while the wheel body stays identity.
+    if let Some(mesh) = _maybe_mesh.cloned() {
+        let visual = commands.spawn((
+            Name::new(format!(
+                "{}_visual",
+                prim_path.path.split('/').next_back().unwrap_or("wheel")
+            )),
+            Transform::from_rotation(wheel_axis_rot),
+            Visibility::Inherited,
+            InheritedVisibility::default(),
+            ViewVisibility::default(),
+            mesh,
+        )).id();
+        if let Some(mat) = _maybe_mat.cloned() {
+            commands.entity(visual).insert(mat);
+        }
+        commands.entity(entity).add_child(visual);
+        commands.entity(entity).remove::<Mesh3d>();
+        commands.entity(entity).remove::<MeshMaterial3d<StandardMaterial>>();
+    }
 
     // Remove raycast components if they were added by a previous pass
     commands.entity(entity).remove::<WheelRaycast>()
@@ -619,6 +653,39 @@ fn setup_physical_wheel(
         AngularDamping(2.0),
         wheel_tf,
     ));
+
+    // Connect the wheel to the chassis with a revolute joint so the
+    // wheel hangs off the chassis at its authored offset and is free
+    // to spin around the wheel's axle. Without this the wheel and
+    // chassis are independent rigid bodies — the chassis falls onto
+    // its belly and the wheels roll away on their own.
+    if let Some(child_of) = maybe_child_of {
+        let chassis = child_of.parent();
+        // Anchor on chassis: wheel's authored local position (e.g.,
+        // (-1.0, -0.15, 1.225)).
+        let anchor_chassis = existing_tf.translation.as_dvec3();
+        // `with_hinge_axis` is interpreted in body0's (chassis) local
+        // frame. The wheel's spin axis is the wheel-cylinder's axis,
+        // which in entity-local space is +Y; the wheel entity's
+        // rotation (set from `UsdGeomCylinder.axis` in lunco-usd-bevy)
+        // turns that into the chassis-frame X (axis="X") or Z
+        // (axis="Z"). The chassis itself is unrotated, so the wheel's
+        // world axis equals the chassis-frame hinge axis.
+        let chassis_axis = (existing_tf.rotation * Vec3::Y).as_dvec3();
+        let joint = RevoluteJoint::new(chassis, entity)
+            .with_local_anchor1(anchor_chassis)
+            .with_local_anchor2(DVec3::ZERO)
+            .with_hinge_axis(chassis_axis);
+        commands.spawn((
+            joint,
+            Name::new(format!("PhysicalWheelJoint_{}", prim_path.path)),
+        ));
+    } else {
+        warn!(
+            "Physical wheel {} has no chassis parent; skipping revolute joint",
+            prim_path.path
+        );
+    }
 }
 
 /// Marker to indicate a prim has been processed by the sim system.
