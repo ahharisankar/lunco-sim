@@ -139,6 +139,16 @@ egui_colors = "0.4.0"
 catppuccin-egui = "5.2.0"
 egui-phosphor = "0.7.1"
 
+# ── Dev profile ──────────────────────────────────────────────────────
+# Bevy/avian/parry are unusably slow at opt-level 0. opt-level=1 on our
+# own crates + opt-level=3 on deps recovers most of release-mode runtime
+# speed for a one-time longer dep build (cached afterwards).
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
 # ── Release profile (native, speed-first) ────────────────────────────
 # Default `cargo build --release` targets native binaries. Wants runtime
 # speed, not binary size. Earlier this profile was tuned for the wasm web
