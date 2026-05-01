@@ -147,7 +147,28 @@ fn collect_child_colliders_from_usd(
         if !child_collision { continue; }
 
         // Read child's local transform
-        let child_tf = read_transform_from_usd(reader, &child_path);
+        let mut child_tf = read_transform_from_usd(reader, &child_path);
+
+        // For Cylinder children, fold UsdGeomCylinder.axis into the
+        // child's compound-local rotation so the Y-axis collider lines
+        // up with the authored axis (mirrors what lunco-usd-bevy does
+        // for the entity Transform).
+        if let Ok(val) = reader.get(&child_path, "typeName") {
+            if let Value::Token(ty) = &*val {
+                if ty.as_str() == "Cylinder" {
+                    let axis_tok = read_token_attribute(reader, &child_path, "axis")
+                        .unwrap_or_else(|| "Z".to_string());
+                    let axis_q = match axis_tok.as_str() {
+                        "X" => Some(Quat::from_rotation_arc(Vec3::Y, Vec3::X)),
+                        "Z" => Some(Quat::from_rotation_arc(Vec3::Y, Vec3::Z)),
+                        _ => None,
+                    };
+                    if let Some(q) = axis_q {
+                        child_tf.rotation = child_tf.rotation * q;
+                    }
+                }
+            }
+        }
 
         // Build collider from child's geometry
         if let Some(collider) = build_collider_from_usd(reader, &child_path) {
@@ -208,9 +229,14 @@ fn build_collider_from_usd(reader: &TextReader, sdf_path: &SdfPath) -> Option<Co
         "Cylinder" => {
             let radius = reader.prim_attribute_value::<f64>(sdf_path, "radius").unwrap_or(1.0);
             let height = reader.prim_attribute_value::<f64>(sdf_path, "height").unwrap_or(2.0);
-            // USD cylinder default axis = Z; in our usage we lay them
-            // along Y (Bevy default) via xformOp:rotateXYZ. Treat
-            // X/Z scale as radial, Y as height.
+            // Avian's `Collider::cylinder` is Y-axis natively. The
+            // UsdGeomCylinder.axis token is honoured by the entity's
+            // Transform rotation (composed in `lunco-usd-bevy`) — for
+            // standalone cylinder bodies that's enough, and for
+            // compound children `collect_child_colliders_from_usd`
+            // adds the axis rotation onto the child's local rotation.
+            // Scale interpretation always treats Y as axial here; the
+            // entity rotation will swing it to whichever world axis.
             let radial = scale.0.max(scale.2);
             Some(Collider::cylinder(radius * radial, height * scale.1))
         }
@@ -557,6 +583,18 @@ fn read_rel_target(reader: &TextReader, prim_path: &SdfPath, rel_name: &str) -> 
             {
                 return Some(target.as_str().to_string());
             }
+        }
+    }
+    None
+}
+
+/// Reads a USD token attribute (e.g., `uniform token axis = "X"`).
+fn read_token_attribute(reader: &TextReader, path: &SdfPath, attr: &str) -> Option<String> {
+    if let Ok(val) = reader.get(path, attr) {
+        match &*val {
+            Value::Token(t) => return Some(t.clone()),
+            Value::String(s) => return Some(s.clone()),
+            _ => {}
         }
     }
     None

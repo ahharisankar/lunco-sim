@@ -13,6 +13,10 @@ def Cylinder "Wheel" (
 )
 {
     # --- Geometry ---
+    # `axis = "X"` so the cylinder lies along the rover's left/right
+    # axle direction (perpendicular to forward). Instances may
+    # override `axis` (e.g. Rucheyok uses Z-forward and sets axis="Z").
+    uniform token axis = "X"
     double radius = 2.0
     double height = 4.0
     double3 xformOp:translate = (0, 0, 0)

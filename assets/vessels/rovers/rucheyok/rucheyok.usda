@@ -93,11 +93,11 @@ def Xform "Rucheyok" (
         prepend references = @../../../components/mobility/wheel.usda@</Wheel>
     )
     {
+        uniform token axis = "Z"
         double radius = 2.0
         double height = 1.5
         double3 xformOp:translate = (-8.5, 0, 10.5)
-        float3 xformOp:rotateXYZ = (90, 0, 0)
-        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        uniform token[] xformOpOrder = ["xformOp:translate"]
         color3f primvars:displayColor = (0.2, 0.8, 0.2)
 
         int physxVehicleWheel:index = 0
@@ -120,11 +120,11 @@ def Xform "Rucheyok" (
         prepend references = @../../../components/mobility/wheel.usda@</Wheel>
     )
     {
+        uniform token axis = "Z"
         double radius = 2.0
         double height = 1.5
         double3 xformOp:translate = (8.5, 0, 10.5)
-        float3 xformOp:rotateXYZ = (90, 0, 0)
-        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        uniform token[] xformOpOrder = ["xformOp:translate"]
         color3f primvars:displayColor = (0.2, 0.8, 0.2)
 
         int physxVehicleWheel:index = 1
@@ -145,11 +145,11 @@ def Xform "Rucheyok" (
         prepend references = @../../../components/mobility/wheel.usda@</Wheel>
     )
     {
+        uniform token axis = "Z"
         double radius = 2.0
         double height = 1.5
         double3 xformOp:translate = (-8.5, 0, -10.5)
-        float3 xformOp:rotateXYZ = (90, 0, 0)
-        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        uniform token[] xformOpOrder = ["xformOp:translate"]
         color3f primvars:displayColor = (0.8, 0.2, 0.2)
 
         int physxVehicleWheel:index = 2
@@ -170,11 +170,11 @@ def Xform "Rucheyok" (
         prepend references = @../../../components/mobility/wheel.usda@</Wheel>
     )
     {
+        uniform token axis = "Z"
         double radius = 2.0
         double height = 1.5
         double3 xformOp:translate = (8.5, 0, -10.5)
-        float3 xformOp:rotateXYZ = (90, 0, 0)
-        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        uniform token[] xformOpOrder = ["xformOp:translate"]
         color3f primvars:displayColor = (0.8, 0.2, 0.2)
 
         int physxVehicleWheel:index = 3

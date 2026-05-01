@@ -491,11 +491,16 @@ fn setup_raycast_wheel(
         ..default()
     };
 
-    // --- Wheel Entity Splitting ---
+    // --- Wheel Entity Splitting (always) ---
+    // The physics entity needs identity rotation so `RayCaster::NEG_Y`
+    // casts straight down. The visual mesh is moved to a child entity
+    // so `apply_wheel_suspension` can reposition it to ground-level
+    // each frame — its `q_visual` query filters out `WheelRaycast`,
+    // so it can only operate on a separate visual entity.
     let wheel_mesh = maybe_mesh.map(|m| m.clone());
     let wheel_rotation = existing_tf.rotation;
 
-    if wheel_mesh.is_some() && wheel_rotation != Quat::IDENTITY {
+    if wheel_mesh.is_some() {
         let visual_entity = commands.spawn((
             Name::new(format!("{}_visual", prim_path.path.split('/').next_back().unwrap_or("wheel"))),
             Transform {
@@ -586,6 +591,14 @@ fn setup_physical_wheel(
         scale: existing_tf.scale,
     };
 
+    // The wheel entity's Transform rotation is set from
+    // UsdGeomCylinder.axis in `lunco-usd-bevy::sync_usd_visuals`, so a
+    // Y-axis Avian cylinder collider is rotated correctly in world
+    // space without any compound-wrapping here. Motor torque axis is
+    // local Y (the wheel's spin axis in entity-local frame).
+    let collider = Collider::cylinder(radius as f64, (radius * 0.5) as f64);
+    let motor_axis = DVec3::Y;
+
     // Remove raycast components if they were added by a previous pass
     commands.entity(entity).remove::<WheelRaycast>()
         .remove::<RayCaster>()
@@ -596,10 +609,10 @@ fn setup_physical_wheel(
         PhysicalWheel,
         MotorActuator {
             port_entity: p_drive,
-            axis: DVec3::Y,
+            axis: motor_axis,
         },
         RigidBody::Dynamic,
-        Collider::cylinder(radius as f64, (radius * 0.5) as f64),
+        collider,
         Mass(25.0),
         Friction::new(0.8),
         LinearDamping(0.5),
@@ -697,6 +710,8 @@ fn swap_raycast_to_joint(
 ) {
     for (entity, wheel, _) in q_physical.iter() {
         info!("Swapping Raycast wheel to Physical Joint-Based wheel");
+        // Entity Transform.rotation already carries the axis rotation
+        // (see lunco-usd-bevy). Collider stays Y-axis Avian-native.
         commands.entity(entity)
             .remove::<WheelRaycast>()
             .remove::<RayCaster>()

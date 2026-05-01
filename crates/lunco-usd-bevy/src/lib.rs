@@ -379,6 +379,30 @@ pub fn sync_usd_visuals(
                 transform.rotation = Quat::from_euler(EulerRot::XYZ, rx, ry, rz);
             }
         }
+        // UsdGeomCylinder.axis token (X|Y|Z, default Z). Compose the
+        // axis-induced rotation onto the entity Transform so a Y-axis
+        // Bevy `Cylinder` mesh appears along the authored axis without
+        // an explicit `xformOp:rotateXYZ` hack. Goes after rotateXYZ so
+        // it applies on top of any user-authored rotation.
+        if matches!(prim_type.as_deref(), Some("Cylinder")) {
+            let axis = match reader.get(&sdf_path, "axis") {
+                Ok(v) => match &*v {
+                    Value::Token(t) | Value::String(t) => Some(t.clone()),
+                    _ => None,
+                },
+                Err(_) => None,
+            }
+            .or_else(|| get_attribute_as_string(&reader, &sdf_path, "axis"))
+            .unwrap_or_else(|| "Z".to_string());
+            let axis_rot = match axis.as_str() {
+                "X" => Some(Quat::from_rotation_arc(Vec3::Y, Vec3::X)),
+                "Z" => Some(Quat::from_rotation_arc(Vec3::Y, Vec3::Z)),
+                _ => None,
+            };
+            if let Some(q) = axis_rot {
+                transform.rotation = transform.rotation * q;
+            }
+        }
         // `xformOp:scale` (UsdGeomXformable) — non-uniform scaling
         // composed with translate + rotate. Spec-compliant `Cube`
         // prims rely on this to express width/height/depth without

@@ -156,13 +156,18 @@ fn apply_wheel_suspension(
                     forces.apply_force_at_point(force_vec, world_pos);
                     wheel.last_normal_force = total_force_mag;
 
-                    // Position the wheel visual on the ground: ground_y + radius.
-                    // ground_local_y = wheel_tf.y + ray_origin_y - hit_distance
-                    // wheel_center_local_y = ground_local_y + wheel_radius
+                    // Position the wheel visual on the ground.
+                    //
+                    // The visual is now always a CHILD of the wheel entity
+                    // (see `setup_raycast_wheel` in lunco-usd-sim) — its
+                    // local Y is relative to the wheel mount point, not the
+                    // chassis. We want the visual centre at `ground + radius`
+                    // in world space; in wheel-local space that's
+                    // `wheel_radius - distance` (the suspension extension
+                    // below the mount, lifted by the wheel radius).
                     if let Some(visual_entity) = wheel.visual_entity {
                         if let Ok(mut visual_tf) = q_visual.get_mut(visual_entity) {
-                            let ground_y_local = wheel_tf.translation.y as f64 + wheel.ray_origin_y - distance;
-                            visual_tf.translation.y = (ground_y_local + wheel.wheel_radius) as f32;
+                            visual_tf.translation.y = (wheel.wheel_radius - distance) as f32;
                         }
                     }
                 } else {
