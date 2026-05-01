@@ -226,6 +226,12 @@ impl NodeVisual for PlotNodeVisual {
             return;
         }
 
+        // Hard-clip everything we paint to the canvas widget's own
+        // clip rect — without this the right-most plot in a row of
+        // nodes can visibly bleed into the inspector / side-panel
+        // area (the panel layer paints over most of it but corner
+        // overlay labels still flash through during pan/zoom).
+        let _canvas_clip = ctx.ui.clip_rect();
         let theme = lunco_canvas::theme::current(ctx.ui.ctx());
         let stroke = if selected {
             egui::Stroke::new(2.0, theme.selection_outline)
@@ -269,14 +275,14 @@ impl NodeVisual for PlotNodeVisual {
         let key = (entity, self.data.signal_path.clone());
         let points = snapshot.samples.get(&key).cloned().unwrap_or_default();
 
-        // Adaptive density: when zoomed out the card is tiny and a
-        // text label / axes would be larger than the chart itself.
-        // Hide labels under 80×60 px, hide everything but the line
-        // under 40×30 px. Symmetric with how vector design tools
-        // handle thumbnail nodes.
+        // Adaptive density: at extreme zoom-out we drop to a bare
+        // sparkline (under 40×30 px). Above that we *always* keep
+        // the title row so the chart doesn't suddenly grow when the
+        // card crosses the old 80×60 threshold (that jump was
+        // jarring during canvas zoom).
         let card_w = egui_rect.width();
         let card_h = egui_rect.height();
-        let show_label = card_w >= 80.0 && card_h >= 60.0;
+        let show_label = card_w >= 40.0 && card_h >= 30.0;
         if card_w < 40.0 || card_h < 30.0 {
             // Tiny — just paint a sparkline directly into the rect,
             // no child UI.
@@ -392,13 +398,26 @@ impl NodeVisual for PlotNodeVisual {
             .show_grid(false)
             .show_background(false)
             // Plot does not capture pointer/wheel — the canvas owns
-            // pan/zoom. If we let egui_plot handle drag/scroll/zoom,
-            // hovering a plot would trap the wheel and the user
-            // couldn't pan the canvas through the plot card.
+            // pan/zoom AND the resize-handle hit test. egui_plot's
+            // default `click_and_drag` sense would swallow the
+            // primary-down before the canvas tool sees it, so the
+            // user can never grab the bottom-right resize grip on
+            // a plot node. `hover()` lets the click fall through.
             .allow_drag(false)
             .allow_zoom(false)
             .allow_scroll(false)
-            .allow_boxed_zoom(false);
+            .allow_boxed_zoom(false)
+            .sense(egui::Sense::hover())
+            // Hover tooltip used to spit raw f64 digits — when the
+            // sim diverges to 1e260 that's a 300-character wall of
+            // numbers that overflows the panel into adjacent UI.
+            // Route through `format_axis_value` for a compact form.
+            .label_formatter({
+                let var = short_name(&self.data.signal_path).to_owned();
+                move |_name, p| {
+                    format!("t: {} s\n{}: {}", format_axis_value(p.x), var, format_axis_value(p.y))
+                }
+            });
         plot.show(&mut child, |plot_ui| {
             if !points.is_empty() {
                 let line_label = if self.data.title.is_empty() {

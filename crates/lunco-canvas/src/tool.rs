@@ -461,7 +461,7 @@ impl DefaultTool {
         // promote-to-Resizing branch in `on_pointer_move` also
         // honours this, but bailing here saves the state churn).
         if !ops.read_only {
-            const RESIZE_HANDLE_RADIUS: f32 = 6.0;
+            const RESIZE_HANDLE_RADIUS: f32 = 9.0;
             let mut handle_hit: Option<NodeId> = None;
             for (nid, node) in ops.scene.nodes() {
                 let dx = world.x - node.rect.max.x;
