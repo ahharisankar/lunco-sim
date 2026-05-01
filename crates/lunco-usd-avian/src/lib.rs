@@ -84,6 +84,12 @@ pub struct PendingUsdJoint {
     pub body1_path: String,
     /// Joint axis in local space of body0.
     pub axis: DVec3,
+    /// Anchor point on body0 in body0's local frame
+    /// (UsdPhysics `physics:localPos0`). Defaults to origin.
+    pub local_pos0: DVec3,
+    /// Anchor point on body1 in body1's local frame
+    /// (UsdPhysics `physics:localPos1`). Defaults to origin.
+    pub local_pos1: DVec3,
     /// Lower travel limit along the axis (meters for prismatic, radians for revolute).
     pub limit_lower: f64,
     /// Upper travel limit.
@@ -316,8 +322,17 @@ fn process_usd_avian_prims(
                 add_collider_from_usd(&mut commands, entity, &reader, &sdf_path);
             }
 
+            // Honour `bool physics:kinematicEnabled = true` for
+            // bodies that should be externally controlled (gizmo,
+            // scripts, MCP) without responding to gravity or impulses.
+            // Kinematic bodies still participate in joint constraints
+            // and contact events — that's the value here vs Static.
+            let kinematic = reader
+                .prim_attribute_value::<bool>(&sdf_path, "physics:kinematicEnabled")
+                .unwrap_or(false);
+            let body = if kinematic { RigidBody::Kinematic } else { RigidBody::Dynamic };
             commands.entity(entity).insert((
-                RigidBody::Dynamic,
+                body,
                 lunco_core::SelectableRoot,
             ));
 
@@ -413,6 +428,16 @@ fn on_add_usd_prim(
                     (Some(body0_path), Some(body1_path)) => {
                         let axis = read_vec3_attribute(&reader, &sdf_path, "physics:axis0")
                             .unwrap_or(DVec3::Y);
+                        // UsdPhysics `physics:localPos0/1` give the
+                        // joint anchor on each body in that body's
+                        // local frame. Without these, the joint forces
+                        // both body centres to coincide — useful only
+                        // when the bodies are co-located, which is
+                        // rarely true in practice.
+                        let local_pos0 = read_vec3_attribute(&reader, &sdf_path, "physics:localPos0")
+                            .unwrap_or(DVec3::ZERO);
+                        let local_pos1 = read_vec3_attribute(&reader, &sdf_path, "physics:localPos1")
+                            .unwrap_or(DVec3::ZERO);
                         let limit_lower = reader.prim_attribute_value::<f64>(&sdf_path, "physics:limitLower")
                             .unwrap_or(f64::NEG_INFINITY);
                         let limit_upper = reader.prim_attribute_value::<f64>(&sdf_path, "physics:limitUpper")
@@ -424,6 +449,8 @@ fn on_add_usd_prim(
                             body0_path,
                             body1_path,
                             axis,
+                            local_pos0,
+                            local_pos1,
                             limit_lower,
                             limit_upper,
                             joint_type: type_name.clone(),
@@ -451,7 +478,16 @@ fn on_add_usd_prim(
 fn build_usd_physics_joints(
     mut commands: Commands,
     q_pending: Query<(Entity, &PendingUsdJoint, &UsdPrimPath)>,
-    q_bodies: Query<(Entity, &UsdPrimPath)>,
+    // **Avian readiness gate**: matching on `&Position` (added by
+    // Avian's body-init systems alongside `BodyIslandNode`) ensures
+    // we don't create a joint before Avian has admitted both bodies
+    // into its island graph — without this the solver panics with
+    // `Neither body … is in an island`. `process_usd_avian_prims`
+    // queues the `RigidBody` insertion in our `Update`; Avian's
+    // initialisation runs in its `PhysicsSchedule` (FixedUpdate),
+    // so this query is empty for the first few frames after spawn,
+    // and the joint stays in `PendingUsdJoint` until ready.
+    q_bodies: Query<(Entity, &UsdPrimPath), With<Position>>,
 ) {
     for (joint_entity, pending, joint_prim_path) in q_pending.iter() {
         // Find body0 and body1 entities by matching USD paths
@@ -472,6 +508,8 @@ fn build_usd_physics_joints(
             "PhysicsPrismaticJoint" => {
                 commands.spawn((
                     PrismaticJoint::new(b0, b1)
+                        .with_local_anchor1(pending.local_pos0)
+                        .with_local_anchor2(pending.local_pos1)
                         .with_slider_axis(pending.axis)
                         .with_limits(pending.limit_lower, pending.limit_upper),
                 ));
@@ -479,13 +517,17 @@ fn build_usd_physics_joints(
             "PhysicsRevoluteJoint" => {
                 commands.spawn((
                     RevoluteJoint::new(b0, b1)
+                        .with_local_anchor1(pending.local_pos0)
+                        .with_local_anchor2(pending.local_pos1)
                         .with_hinge_axis(pending.axis)
                         .with_angle_limits(pending.limit_lower, pending.limit_upper),
                 ));
             }
             "PhysicsFixedJoint" => {
                 commands.spawn((
-                    FixedJoint::new(b0, b1),
+                    FixedJoint::new(b0, b1)
+                        .with_local_anchor1(pending.local_pos0)
+                        .with_local_anchor2(pending.local_pos1),
                 ));
             }
             other => {
@@ -526,6 +568,19 @@ fn read_rel_target(reader: &TextReader, prim_path: &SdfPath, rel_name: &str) -> 
 /// floating-point arrays. Returns `None` if the attribute doesn't exist or has
 /// fewer than 3 elements.
 fn read_vec3_attribute(reader: &TextReader, path: &SdfPath, attr: &str) -> Option<DVec3> {
+    // **Fixed-size array forms first** (`Value::Vec3f`/`Value::Vec3d`).
+    // USD's `point3f` and `float3` parse as `[f32; 3]`, `point3d` and
+    // `double3` as `[f64; 3]`. Without this, `physics:localPos0` etc.
+    // (declared `point3f` in our scenes) silently read as `None` and
+    // defaulted joint anchors to zero — producing infinite-stiffness
+    // corrective impulses that launched bodies into orbit.
+    if let Some(v) = reader.prim_attribute_value::<[f32; 3]>(path, attr) {
+        return Some(DVec3::new(v[0] as f64, v[1] as f64, v[2] as f64));
+    }
+    if let Some(v) = reader.prim_attribute_value::<[f64; 3]>(path, attr) {
+        return Some(DVec3::new(v[0], v[1], v[2]));
+    }
+    // Vec<f32>/Vec<f64> array forms (rare in authored USD).
     if let Some(v) = reader.prim_attribute_value::<Vec<f64>>(path, attr) {
         if v.len() >= 3 { return Some(DVec3::new(v[0], v[1], v[2])); }
     }

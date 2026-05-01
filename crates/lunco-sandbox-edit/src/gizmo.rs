@@ -9,7 +9,9 @@
 //! - Restoring dynamic bodies when drag ends
 
 use bevy::prelude::*;
-use avian3d::prelude::RigidBody;
+use bevy::math::DVec3;
+use avian3d::prelude::{LinearVelocity, RigidBody};
+use avian3d::physics_transform::{Position, Rotation};
 use transform_gizmo_bevy::{GizmoCamera, GizmoTarget};
 
 use crate::SelectedEntity;
@@ -61,15 +63,26 @@ pub fn capture_gizmo_start(
         .insert(GizmoPrevPos { pos: tf.translation, original_body });
 }
 
-/// Syncs Avian3D `Position` and `GlobalTransform` from `Transform` during gizmo drag.
+/// Syncs Avian3D `Position`/`Rotation` and `GlobalTransform` from
+/// `Transform` during gizmo drag.
 ///
 /// **Why GlobalTransform sync is needed:** `global_transform_propagation_system` runs in
 /// `PostUpdate` (before the gizmo in `Last`). Without syncing, `GlobalTransform` is stale
 /// and the mesh renders at the old position while the gizmo is at the new position.
 ///
-/// **NOTE:** Position sync is intentionally DISABLED because syncing Position causes the
-/// gizmo library to double-apply transforms on subsequent frames (it reads the synced
-/// Position via Transform and adds the cumulative delta on top).
+/// **Why `Position`/`Rotation` sync is needed:** Avian's joint solver
+/// reads `Position` (DVec3, double precision) — *not* `Transform` —
+/// when applying constraints. Without the sync, dragging a kinematic
+/// body via gizmo updates Transform but Avian never sees the move,
+/// so a `PhysicsFixedJoint`-coupled body doesn't follow. We're safe
+/// to write Position here because:
+///   * `capture_gizmo_start` swaps the body to `RigidBody::Kinematic`
+///     before this runs, so Avian won't fight back via integration.
+///   * Avian's `transform_to_position` skips Position-changed entities
+///     within the same physics tick, so explicit Position writes won't
+///     race the auto-sync.
+/// Earlier the sync was disabled due to a "double-apply" bug; the
+/// kinematic-swap-on-drag-start is what makes it safe now.
 ///
 /// Skips possessed entities to avoid conflicting with vehicle control physics.
 pub fn sync_gizmo_transforms(
@@ -79,7 +92,12 @@ pub fn sync_gizmo_transforms(
     q_child_of: Query<&ChildOf>,
     q_children: Query<&Children>,
     mut q_global_transforms: Query<&mut GlobalTransform>,
+    mut q_position: Query<&mut Position>,
+    mut q_rotation: Query<&mut Rotation>,
+    mut q_lin_vel: Query<&mut LinearVelocity>,
+    mut q_prev_pos: Query<&mut GizmoPrevPos>,
     q_controller_links: Query<&lunco_controller::ControllerLink>,
+    time: Res<Time>,
 ) {
     let Some(entity) = selected.entity else { return; };
 
@@ -106,6 +124,44 @@ pub fn sync_gizmo_transforms(
     // Update GlobalTransform so the mesh renders at the correct position
     if let Ok(mut gtf) = q_global_transforms.get_mut(entity) {
         *gtf = computed_gtf;
+    }
+
+    // Sync Avian's `Position` / `Rotation` from the gizmo's
+    // GlobalTransform so the joint/contact solver sees the new pose.
+    // Use the *world-space* GlobalTransform (not local Transform) so
+    // nested entities work correctly — Avian operates in world space.
+    let world_tf = computed_gtf.compute_transform();
+    if let Ok(mut pos) = q_position.get_mut(entity) {
+        pos.0 = DVec3::new(
+            world_tf.translation.x as f64,
+            world_tf.translation.y as f64,
+            world_tf.translation.z as f64,
+        );
+    }
+    if let Ok(mut rot) = q_rotation.get_mut(entity) {
+        rot.0 = world_tf.rotation.as_dquat();
+    }
+
+    // Compute and write `LinearVelocity` from the per-frame position
+    // delta. Avian's joint constraint solver works on velocities —
+    // without an explicit velocity, a kinematic body teleporting via
+    // `Position` writes alone doesn't transmit motion through joints
+    // to coupled dynamic bodies. Using `GizmoPrevPos` (already
+    // captured at drag start) as the previous-frame anchor and
+    // updating it here keeps the velocity smooth across the drag.
+    let dt = time.delta_secs();
+    if dt > 1e-6 {
+        if let Ok(mut prev) = q_prev_pos.get_mut(entity) {
+            let delta = world_tf.translation - prev.pos;
+            if let Ok(mut lin_vel) = q_lin_vel.get_mut(entity) {
+                lin_vel.0 = DVec3::new(
+                    (delta.x as f64) / dt as f64,
+                    (delta.y as f64) / dt as f64,
+                    (delta.z as f64) / dt as f64,
+                );
+            }
+            prev.pos = world_tf.translation;
+        }
     }
 
     // Propagate GlobalTransform to children recursively
@@ -145,6 +201,7 @@ pub fn restore_gizmo_dynamic(
     selected: Res<SelectedEntity>,
     gizmo_targets: Query<&GizmoTarget>,
     q_prev_pos: Query<&GizmoPrevPos>,
+    mut q_lin_vel: Query<&mut LinearVelocity>,
     q_controller_links: Query<&lunco_controller::ControllerLink>,
     mut commands: Commands,
 ) {
@@ -159,6 +216,14 @@ pub fn restore_gizmo_dynamic(
     // Check if gizmo is no longer active (drag ended)
     let Ok(gizmo_target) = gizmo_targets.get(entity) else { return; };
     if gizmo_target.is_active() { return; } // Still dragging gizmo
+
+    // Zero LinearVelocity so the body doesn't keep drifting at the
+    // last drag-frame velocity after release. The per-frame velocity
+    // set in `sync_gizmo_transforms` is a signal to Avian's joint
+    // solver, not a desired motion to continue.
+    if let Ok(mut vel) = q_lin_vel.get_mut(entity) {
+        vel.0 = DVec3::ZERO;
+    }
 
     // Restore to the original body type and clear tracking data.
     // This preserves Kinematic for co-sim entities (e.g. balloon) instead of

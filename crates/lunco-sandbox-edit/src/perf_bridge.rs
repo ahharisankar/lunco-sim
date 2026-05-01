@@ -37,10 +37,18 @@ impl Plugin for PerfBridgePlugin {
 
 fn sample_physics_step(
     diags: Option<Res<PhysicsTotalDiagnostics>>,
-    settings: Res<PerfHudSettings>,
-    mut stats: ResMut<PerfStats>,
+    // `Option<Res>` so binaries that don't include the workbench
+    // (and therefore don't init `PerfHudSettings`) can still use
+    // `SandboxEditPlugin` for selection/gizmo. When the resource is
+    // missing, behave as if the perf HUD is off.
+    settings: Option<Res<PerfHudSettings>>,
+    // Same rationale: optional so the system tolerates a missing
+    // workbench (joint_minimal etc.).
+    stats: Option<ResMut<PerfStats>>,
 ) {
-    if !settings.enabled {
+    let Some(mut stats) = stats else { return; };
+    let enabled = settings.as_deref().map(|s| s.enabled).unwrap_or(false);
+    if !enabled {
         if stats.physics_ms.is_some() {
             stats.physics_ms = None;
         }

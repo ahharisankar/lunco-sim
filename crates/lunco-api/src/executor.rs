@@ -65,13 +65,18 @@ pub fn api_request_observer(
     type_registry: Res<AppTypeRegistry>,
     q_meta: Query<(Option<&Name>, Option<&lunco_core::RoverVessel>, Option<&lunco_core::CelestialBody>)>,
     q_cameras: Query<Entity, With<Camera3d>>,
+    // World pose for QueryEntity / future telemetry. `GlobalTransform`
+    // mirrors Avian's `Position` post-writeback — we read it (instead
+    // of Avian's `Position` directly) to keep this crate free of an
+    // avian3d dep.
+    q_transforms: Query<&GlobalTransform>,
 ) {
     let req = trigger.event();
     let correlation_id = req.correlation_id;
 
     let maybe_response = {
         let type_reg = type_registry.read();
-        execute_request(&req.request, &mut commands, &mut id_counter, &registry, &query_registry, &visibility, &type_reg, &q_meta, &q_cameras, correlation_id)
+        execute_request(&req.request, &mut commands, &mut id_counter, &registry, &query_registry, &visibility, &type_reg, &q_meta, &q_cameras, &q_transforms, correlation_id)
     };
 
     // None means the response is deferred (e.g. waiting for ScreenshotCaptured).
@@ -183,6 +188,7 @@ fn execute_request(
     type_registry: &TypeRegistry,
     q_meta: &Query<(Option<&Name>, Option<&lunco_core::RoverVessel>, Option<&lunco_core::CelestialBody>)>,
     _q_cameras: &Query<Entity, With<Camera3d>>,
+    q_transforms: &Query<&GlobalTransform>,
     correlation_id: u64,
 ) -> Option<ApiResponse> {
     match request {
@@ -288,10 +294,19 @@ fn execute_request(
                 Some(e) => {
                     let (name, rover, body) = q_meta.get(e).unwrap_or((None, None, None));
                     let kind = if rover.is_some() { "rover" } else if body.is_some() { "planet" } else { "unknown" };
+                    // World-space translation from GlobalTransform.
+                    // Mirrors Avian's `Position` after physics writeback.
+                    // Used by joint/physics test scripts to compute
+                    // distances between linked bodies — the user's
+                    // request was "distance between centers as test".
+                    let pos = q_transforms.get(e).ok()
+                        .map(|gt| gt.translation())
+                        .unwrap_or(Vec3::ZERO);
                     ApiResponse::ok(serde_json::json!({
                         "api_id": id,
                         "name": name.map(|n| n.as_str()).unwrap_or(""),
                         "type": kind,
+                        "position": [pos.x, pos.y, pos.z],
                     }))
                 },
                 None => ApiResponse::error(ApiErrorCode::EntityNotFound, format!("Entity {} not found", id)),

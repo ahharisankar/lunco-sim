@@ -1,0 +1,81 @@
+#usda 1.0
+(
+    defaultPrim = "SandboxScene"
+    upAxis = "Y"
+    metersPerUnit = 1
+)
+
+# Minimal scene to isolate Avian joint behaviour end-to-end.
+# Three prims:
+#   - Ground (static collider)
+#   - CubeA (kinematic, externally controlled — gizmo / `MoveEntity`)
+#   - CubeB (dynamic)
+#   - Hinge (`PhysicsFixedJoint` connecting A and B at the midpoint)
+#
+# With a working FixedJoint they settle to the ground together as a
+# rigid pair; if the joint is broken they fall independently. Drag
+# CubeA via the gizmo (or call the `MoveEntity` API) and CubeB
+# follows rigidly.
+#
+# Loaded by `rover_sandbox_usd --scene scenes/sandbox/joint_test.usda`.
+
+def Xform "SandboxScene"
+{
+    def Cube "Ground" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysxTerrainAPI"]
+    )
+    {
+        double size = 1.0
+        double3 xformOp:translate = (0, -0.5, 0)
+        double3 xformOp:scale = (200.0, 1.0, 200.0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        color3f primvars:displayColor = (0.4, 0.4, 0.45)
+        bool physics:collisionEnabled = true
+        float physics:friction = 1.0
+    }
+
+    # Avatar so the API observer has someone to focus from.
+    def Xform "Avatar"
+    {
+        string lunco:avatar = "true"
+        string lunco:cameraMode = "freeflight"
+        float lunco:cameraYaw = 0.0
+        float lunco:cameraPitch = -0.4
+        double3 xformOp:translate = (0.0, 6.0, 12.0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "CubeA" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        double size = 1.0
+        double3 xformOp:translate = (-2.0, 5.0, 0.0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        color3f primvars:displayColor = (1.0, 0.2, 0.2)
+        float physics:mass = 1.0
+        # A is Kinematic from setup — doesn't fall under gravity. With
+        # the joint working, B (Dynamic) hangs at A's level.
+        bool physics:kinematicEnabled = true
+    }
+
+    def Cube "CubeB" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        double size = 1.0
+        double3 xformOp:translate = (2.0, 5.0, 0.0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        color3f primvars:displayColor = (0.2, 0.6, 1.0)
+        float physics:mass = 1.0
+    }
+
+    def PhysicsFixedJoint "Hinge"
+    {
+        rel physics:body0 = </SandboxScene/CubeA>
+        rel physics:body1 = </SandboxScene/CubeB>
+        # Anchors meet at world (0, 5, 0) — midpoint between the cubes.
+        point3f physics:localPos0 = (2.0, 0, 0)
+        point3f physics:localPos1 = (-2.0, 0, 0)
+    }
+}

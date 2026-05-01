@@ -294,6 +294,59 @@ def Xform "SandboxScene"
         # writes amplified signal into AvianSim.inputs["force_y"].
     }
 
+    # --- Joint test: two cubes rigidly linked by a fixed joint ---
+    #
+    # Demonstrates the `lunco-usd-avian` joint pipeline end-to-end.
+    # Two side-by-side cubes (red + orange) sit 3 m apart, joined
+    # by a `PhysicsFixedJoint` whose anchors coincide at the midpoint
+    # between them. Move either cube with the sandbox-edit gizmo and
+    # the other follows rigidly — that's the visible proof the joint
+    # is constraining their relative pose.
+    #
+    # Why fixed (not revolute): a fixed joint shows the strongest
+    # coupling — translating one body translates the other 1:1, and
+    # rotating one rotates the other 1:1 too. Revolute would only
+    # constrain position around the hinge axis, harder to read at
+    # a glance.
+
+    def Cube "JointTestA" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        double size = 1.0
+        double3 xformOp:translate = (-5.0, 6.0, 5.0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        color3f primvars:displayColor = (1.0, 0.2, 0.2)   # red
+        float physics:mass = 5.0
+        # Born kinematic — externally controlled (gizmo / `MoveEntity`
+        # API command). Doesn't fall under gravity; doesn't fight back
+        # against pose updates. The coupled `JointTestB` (Dynamic)
+        # follows via the `PhysicsFixedJoint` constraint.
+        bool physics:kinematicEnabled = true
+    }
+
+    def Cube "JointTestB" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        double size = 1.0
+        double3 xformOp:translate = (-2.0, 6.0, 5.0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        color3f primvars:displayColor = (1.0, 0.6, 0.1)   # orange
+        float physics:mass = 5.0
+    }
+
+    def PhysicsFixedJoint "JointTestLink"
+    {
+        rel physics:body0 = </SandboxScene/JointTestA>
+        rel physics:body1 = </SandboxScene/JointTestB>
+        # Anchors meet at the midpoint between the two cubes (world
+        # x = -3.5). 1.5 m to the right of A's centre, 1.5 m to the
+        # left of B's centre.
+        point3f physics:localPos0 = (1.5, 0, 0)
+        point3f physics:localPos1 = (-1.5, 0, 0)
+    }
+
     def "OscToAmp"
     {
         rel lunco:wireFrom = </SandboxScene/Oscillator>

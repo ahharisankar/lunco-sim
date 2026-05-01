@@ -72,6 +72,20 @@ fn main() {
         port
     };
     let no_vsync = args.iter().any(|a| a == "--no-vsync");
+    // `--scene <path>` overrides the default sandbox_scene.usda load.
+    // Path is relative to the asset source root (`assets/`). Used by
+    // automated joint/physics tests that need an isolated minimal
+    // scene rather than the full sandbox.
+    let scene_path: String = {
+        let mut s = "scenes/sandbox/sandbox_scene.usda".to_string();
+        for i in 0..args.len() {
+            if args[i] == "--scene" && i + 1 < args.len() {
+                s = args[i + 1].clone();
+                break;
+            }
+        }
+        s
+    };
     // `--log-diag` toggles Bevy's `LogDiagnosticsPlugin`, which prints
     // FPS / FrameTime / EntityCount and — when `bevy_diagnostic` is on
     // for avian — the physics step time, every second. Off by default
@@ -99,7 +113,8 @@ fn main() {
     // compounded, breaking the jitter cascade.
     let mut virtual_time = Time::<Virtual>::default();
     virtual_time.set_max_delta(std::time::Duration::from_millis(33));
-    app.insert_resource(virtual_time)
+    app.insert_resource(ScenePath(scene_path))
+        .insert_resource(virtual_time)
         // `lunco-lib://` shipped-fixture asset source — must be
         // registered *before* `DefaultPlugins`/`AssetPlugin` builds the
         // server. Mirrors the registration in `lunco-client`'s main
@@ -254,10 +269,17 @@ impl Default for SandboxSettings {
     }
 }
 
+/// Resource that holds the asset-source-relative path of the scene
+/// to load on Startup. Initialised from the `--scene` CLI arg.
+#[derive(Resource)]
+struct ScenePath(String);
+
 fn setup_sandbox(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
+    scene_path: Res<ScenePath>,
 ) {
+    let scene_path: String = scene_path.0.clone();
     let big_space_root = commands.spawn(BigSpace::default()).id();
     let grid = commands.spawn((
         Grid::new(2000.0, 1.0e10),
@@ -286,7 +308,7 @@ fn setup_sandbox(
     // The scene file references rover definitions from external .usda files
     // with position overrides. The UsdComposer flattens everything into
     // a single stage, then sync_usd_visuals spawns entities for all prims.
-    let scene_handle = asset_server.load("scenes/sandbox/sandbox_scene.usda");
+    let scene_handle = asset_server.load(scene_path.as_str().to_string());
     info!("Loading sandbox scene from USD");
     commands.spawn((
         Name::new("SandboxScene"),

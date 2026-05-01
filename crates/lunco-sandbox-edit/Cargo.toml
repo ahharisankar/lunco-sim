@@ -14,6 +14,7 @@ transform-gizmo-bevy = "0.9.0"
 bevy_picking = "0.18.1"
 bevy-inspector-egui = { workspace = true }
 lunco-core = { path = "../lunco-core" }
+lunco-api = { path = "../lunco-api" }
 lunco-avatar = { path = "../lunco-avatar" }
 lunco-controller = { path = "../lunco-controller" }
 lunco-mobility = { path = "../lunco-mobility" }
