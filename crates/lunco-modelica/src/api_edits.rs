@@ -301,6 +301,12 @@ pub struct AddModelicaComponent {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+    /// Pulse-glow duration in ms. `0` = no animation (instant).
+    /// Omit / use 0 to disable; positive values override the
+    /// canvas's default duration. See
+    /// `docs/architecture/20-domain-modelica.md` § 9c for the
+    /// per-call animation contract.
+    pub animation_ms: u32,
 }
 
 #[on_command(AddModelicaComponent)]
@@ -361,6 +367,40 @@ fn on_add_modelica_component(
                     ev.name,
                     ev.type_name
                 );
+                // Drop the registry borrow before touching another
+                // resource — Bevy's resource-mut is exclusive.
+                drop(registry);
+                // Queue a smooth camera focus on the new node. The
+                // canvas-side `drive_pending_api_focus` system applies
+                // it once projection lands the node in the scene.
+                // Implements `OpOrigin::Api` policy from
+                // `docs/architecture/20-domain-modelica.md` § 9c.5
+                // (single-add → Center; batch → FitVisible). See
+                // canvas_diagram.rs for the queue + driver.
+                //
+                // TODO(modelica.canvas.animation.api_origin): make
+                // animation opt-in/out per the user setting + per-call
+                // override; for now AddComponent always animates.
+                // Per-call duration: 0 from the wire is treated as
+                // "use default" (Reflect deserialization gives 0 for
+                // missing fields). Callers pass an explicit positive
+                // value to override; pass any non-zero value (e.g. 1)
+                // for instant.
+                let anim_ms = if ev.animation_ms == 0 {
+                    crate::ui::panels::canvas_diagram::DEFAULT_PULSE_MS
+                } else {
+                    ev.animation_ms
+                };
+                if let Some(mut q) = world.get_resource_mut::<
+                    crate::ui::panels::canvas_diagram::PendingApiFocusQueue,
+                >() {
+                    q.push(crate::ui::panels::canvas_diagram::PendingApiFocus {
+                        doc,
+                        name: ev.name.clone(),
+                        queued_at: web_time::Instant::now(),
+                        animation_ms: anim_ms,
+                    });
+                }
             }
             Err(e) => bevy::log::warn!(
                 "[AddModelicaComponent] doc={} {}: {:?}",
@@ -437,6 +477,8 @@ pub struct ConnectComponents {
     pub class: String,
     pub from: String,
     pub to: String,
+    /// Edge-flash duration in ms. `0` = no animation.
+    pub animation_ms: u32,
 }
 
 #[on_command(ConnectComponents)]
@@ -474,7 +516,7 @@ fn on_connect_components(
         };
         match host.apply(ModelicaOp::AddConnection {
             class: ev.class.clone(),
-            eq,
+            eq: eq.clone(),
         }) {
             Ok(_) => {
                 host.document_mut().waive_ast_debounce();
@@ -485,6 +527,28 @@ fn on_connect_components(
                     ev.from,
                     ev.to
                 );
+                drop(registry);
+                // Queue an edge-flash. The driver matches against the
+                // scene's edge list once projection lands the new
+                // edge (same async pattern as `PendingApiFocusQueue`).
+                let anim_ms = if ev.animation_ms == 0 {
+                    crate::ui::panels::canvas_diagram::DEFAULT_EDGE_FLASH_MS
+                } else {
+                    ev.animation_ms
+                };
+                if let Some(mut q) = world.get_resource_mut::<
+                    crate::ui::panels::canvas_diagram::PendingApiConnectionQueue,
+                >() {
+                    q.push(crate::ui::panels::canvas_diagram::PendingApiConnection {
+                        doc,
+                        from_component: eq.from.component.clone(),
+                        from_port: eq.from.port.clone(),
+                        to_component: eq.to.component.clone(),
+                        to_port: eq.to.port.clone(),
+                        queued_at: web_time::Instant::now(),
+                        animation_ms: anim_ms,
+                    });
+                }
             }
             Err(e) => bevy::log::warn!(
                 "[ConnectComponents] doc={} failed: {:?}",

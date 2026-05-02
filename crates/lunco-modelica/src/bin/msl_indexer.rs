@@ -1142,6 +1142,35 @@ fn main() {
         }
     }
 
+    // Additional Modelica libraries downloaded via lunco-assets and
+    // surfaced into the workbench alongside the MSL. Each entry is
+    // (cache_subdir, top_level_package_dir_inside_it). The cache
+    // subdir is what `lunco-assets` writes (e.g. `dest = "thermofluidstream"`
+    // in Assets.toml lands the unpacked archive at
+    // `<cache>/thermofluidstream/`), and the inner directory is the
+    // actual Modelica package root (the GitHub archive layout puts
+    // the library one level down).
+    //
+    // Adding a library here makes its classes visible in the
+    // workbench's package browser, drillable from the Twin tree, and
+    // resolvable as `Library.Class` from any open document.
+    let extra_libraries: &[(&str, &str)] = &[
+        ("thermofluidstream", "ThermofluidStream"),
+    ];
+    for (cache_subdir, package_dir) in extra_libraries {
+        let cache_root = lunco_assets::cache_dir().join(cache_subdir);
+        let lib_path = cache_root.join(package_dir);
+        if lib_path.exists() {
+            println!("[indexer] scanning `{}` at {:?}", package_dir, lib_path);
+            indexer.scan_dir(&lib_path, package_dir);
+        } else {
+            println!(
+                "[indexer] (skipping `{}` — run `cargo run -p lunco-assets --bin lunco-assets -- download` to fetch)",
+                package_dir
+            );
+        }
+    }
+
     let scan_secs = indexer
         .scan_started
         .map(|t| t.elapsed().as_secs_f64())

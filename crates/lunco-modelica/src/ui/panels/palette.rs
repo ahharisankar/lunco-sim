@@ -563,6 +563,12 @@ pub(crate) fn place_component(
             y,
             width: 20.0,
             height: 20.0,
+            // Local mouse-drag from the palette: zero means
+            // "use default" inside the observer, which animates.
+            // Drag-add is a *Local* origin in our model; default
+            // animation gives the user feedback on what landed
+            // even though they initiated the action.
+            animation_ms: 0,
         });
 }
 

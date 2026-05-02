@@ -397,10 +397,25 @@ impl NodeVisual for IconNodeVisual {
             };
             let resolver_ref: &dyn Fn(&str) -> Option<f64> = &resolver;
             let palette = modelica_icon_palette_from_ctx(ctx.ui.ctx());
+            // Source coord system: prefer the icon's *graphics* bbox
+            // (visible body, excluding labels) so the icon body fills
+            // the placement instead of leaving 30–50 % empty padding
+            // around it. MSL convention is to author at -100..100, but
+            // many components actually draw at -50..50 / -60..60 etc.,
+            // which makes them look small inside the standard
+            // placement. Excluding text from the bbox is intentional:
+            // the body should fill the rect; labels drift slightly
+            // outside but get clipped by the canvas widget. Falls
+            // back to the declared coord system when there are no
+            // graphics.
+            let coord_system_for_paint = icon
+                .graphics_bbox()
+                .map(|e| crate::annotations::CoordinateSystem { extent: e })
+                .unwrap_or(icon.coordinate_system);
             crate::icon_paint::paint_graphics_themed(
                 painter,
                 rect,
-                icon.coordinate_system,
+                coord_system_for_paint,
                 orientation,
                 Some(&sub),
                 Some(resolver_ref),
@@ -719,7 +734,7 @@ impl NodeVisual for IconNodeVisual {
         // `ui.interact`). The widget is always visible while the
         // icon is rendered and captures pointer events itself so
         // dragging the slider does NOT also drag the node.
-        paint_input_control_widget(ctx.ui, rect, &self.instance_name);
+        paint_input_control_widget(ctx.ui, rect, &self.instance_name, ctx.viewport.zoom);
     }
     fn debug_name(&self) -> &str {
         "modelica.icon"
@@ -850,15 +865,18 @@ fn paint_flow_dots(
     if total_len < 1.0 {
         return;
     }
-    // Spacing + speed in screen pixels. Tunable.
-    const SPACING_PX: f32 = 28.0;
+    // Spacing + speed in screen pixels. Tunable. Sparser spacing
+    // and lower alpha so the dots read as a subtle motion cue
+    // rather than a dotted wire — at the previous 28-px / α=220
+    // settings users called the wires "bumpy".
+    const SPACING_PX: f32 = 64.0;
     const SPEED_PX_S: f32 = 36.0;
     let phase = ((time as f32) * SPEED_PX_S).rem_euclid(SPACING_PX);
     let dot_color = egui::Color32::from_rgba_unmultiplied(
         base_color.r(),
         base_color.g(),
         base_color.b(),
-        220,
+        140,
     );
     let mut s = phase;
     while s < total_len {
@@ -1167,17 +1185,29 @@ impl EdgeVisual for OrthogonalEdgeVisual {
                     egui::pos2(s.x, s.y)
                 })
                 .collect();
-            // Stale-anchor guard: a wire whose first / last waypoint
-            // sits far (> 60 screen px) from its current port end is
-            // stale (drag in progress); use auto-Z instead.
-            const STALE_PX: f32 = 60.0;
+            // Stale-anchor guard: a fresh A* polyline is *always*
+            // strictly orthogonal — its first and last segments share
+            // an axis with their respective ports (the bend-only
+            // emitter forces this). If either is off-axis the port
+            // has moved relative to its waypoint anchor, i.e. the
+            // user is dragging the node and re-projection hasn't
+            // landed yet. Off-axis-ness, not distance, is the right
+            // signal: legit long L-stubs stay axis-aligned at any
+            // zoom, while a 1-px drag offset already breaks alignment.
+            const ALIGN_TOL: f32 = 1.0;
             let first_far = way_screen
                 .first()
-                .map(|p| (p.x - from_screen.x).hypot(p.y - from_screen.y) > STALE_PX)
+                .map(|p| {
+                    (p.x - from_screen.x).abs() > ALIGN_TOL
+                        && (p.y - from_screen.y).abs() > ALIGN_TOL
+                })
                 .unwrap_or(false);
             let last_far = way_screen
                 .last()
-                .map(|p| (p.x - to_screen.x).hypot(p.y - to_screen.y) > STALE_PX)
+                .map(|p| {
+                    (p.x - to_screen.x).abs() > ALIGN_TOL
+                        && (p.y - to_screen.y).abs() > ALIGN_TOL
+                })
                 .unwrap_or(false);
             if !(first_far || last_far) {
                 let mut pts = Vec::with_capacity(way_screen.len() + 2);
@@ -1426,24 +1456,37 @@ fn route_orthogonal(
 
     let mut pts: Vec<egui::Pos2> = Vec::with_capacity(6);
     pts.push(from);
+
+    // Decide the inner routing between f_stub and t_stub.
+    if (f_horiz && t_vert) || (f_vert && t_horiz) {
+        // Perpendicular ports → clean two-segment L with the corner
+        // at the intersection of each port's exit axis. *No stubs*
+        // here: the parallel case below uses stubs to make sure the
+        // wire exits the icon body before bending, but on a
+        // perpendicular pair an unconditionally-added stub causes a
+        // visible back-and-forth jog when the stub overshoots the
+        // corner along its axis (Tank.Down + Valve.Left at almost-
+        // aligned y was the canonical failure: 10 px down, 6 px back
+        // up to the corner, then right). Going straight to the
+        // corner produces the OMEdit/Dymola-style elbow users
+        // expect.
+        let corner = if f_horiz {
+            egui::pos2(to.x, from.y)
+        } else {
+            egui::pos2(from.x, to.y)
+        };
+        if corner != from && corner != to {
+            pts.push(corner);
+        }
+        pts.push(to);
+        pts.dedup_by(|a, b| (a.x - b.x).abs() < 0.5 && (a.y - b.y).abs() < 0.5);
+        return pts;
+    }
     if from_dir != None {
         pts.push(f_stub);
     }
 
-    // Decide the inner routing between f_stub and t_stub.
-    if (f_horiz && t_vert) || (f_vert && t_horiz) {
-        // Perpendicular → L-elbow at the corner that sits along
-        // each port's exit axis. `from`-side determines which
-        // ordinate the corner takes from which side.
-        let corner = if f_horiz {
-            egui::pos2(t_stub.x, f_stub.y)
-        } else {
-            egui::pos2(f_stub.x, t_stub.y)
-        };
-        if corner != f_stub && corner != t_stub {
-            pts.push(corner);
-        }
-    } else if f_horiz && t_horiz {
+    if f_horiz && t_horiz {
         // Both horizontal. Pivot Y at midway between stub-ends;
         // pivot X at midway between stub-ends if both helping
         // (classic Z), else push past the trailing port + stub
@@ -1674,6 +1717,7 @@ fn paint_input_control_widget(
     ui: &mut egui::Ui,
     icon_rect: egui::Rect,
     instance_name: &str,
+    zoom: f32,
 ) {
     if instance_name.is_empty() || icon_rect.height() < 24.0 {
         return;
@@ -1701,23 +1745,26 @@ fn paint_input_control_widget(
     }
     bound.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // Strip geometry, in screen pixels (no zoom scaling so the
-    // widget stays usably-sized at any zoom). Multiple strips stack
-    // right-to-left from the icon's right edge.
-    const STRIP_WIDTH: f32 = 10.0;
-    const STRIP_GAP: f32 = 3.0;
-    const STRIP_PAD: f32 = 4.0;
-    let h = (icon_rect.height() * 0.7).max(24.0);
+    // Strip geometry. Widths/gaps/padding scale with the canvas zoom
+    // so the slider tracks the icon's rendered size — at 50 % zoom it
+    // shrinks by 50 %, mirroring how the icon body shrinks. Floor at a
+    // small fraction of the original so the strip stays a tappable
+    // target on extreme zoom-out (no need to zoom further to grab it).
+    let s = zoom.clamp(0.4, 2.0);
+    let strip_width = 10.0 * s;
+    let strip_gap = 3.0 * s;
+    let strip_pad = 4.0 * s;
+    let h = (icon_rect.height() * 0.7).max(24.0 * s);
     let strip_top_y = icon_rect.center().y - h * 0.5;
 
     for (idx, (name, value, mn, mx)) in bound.iter().enumerate() {
         let x = icon_rect.right()
-            - STRIP_PAD
-            - STRIP_WIDTH
-            - (idx as f32) * (STRIP_WIDTH + STRIP_GAP);
+            - strip_pad
+            - strip_width
+            - (idx as f32) * (strip_width + strip_gap);
         let strip_rect = egui::Rect::from_min_size(
             egui::pos2(x, strip_top_y),
-            egui::vec2(STRIP_WIDTH, h),
+            egui::vec2(strip_width, h),
         );
 
         // Publish the strip's screen-rect so the canvas's raw-input
@@ -2333,6 +2380,34 @@ fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramNodeId, Canv
             ports,
             label: node.instance_name.clone(),
             origin: Some(node.instance_name.clone()),
+            // Modelica icons are sized by their `Icon` annotation; a
+            // user-driven resize would desync from the source. Plot /
+            // dashboard nodes opt into resize via the default `true`.
+            resizable: false,
+            // Tight halo follows the visible graphics, not the full
+            // -100..100 placement frame. Modelica icons commonly only
+            // fill ~50 % of their frame (e.g. Tank's body uses
+            // -50..50), so a placement-rect halo leaves big empty
+            // bands inside the selection box. Apply the same
+            // `xform` that mapped icon-local → world to the graphics
+            // bbox so rotation / mirror are honoured.
+            visual_rect: node
+                .component_def
+                .icon_graphics
+                .as_ref()
+                .and_then(|icon| icon.graphics_bbox())
+                .map(|e| {
+                    let ((vx0, vy0), (vx1, vy1)) = xform.local_aabb(
+                        e.p1.x as f32,
+                        e.p1.y as f32,
+                        e.p2.x as f32,
+                        e.p2.y as f32,
+                    );
+                    CanvasRect::from_min_max(
+                        CanvasPos::new(vx0, vy0),
+                        CanvasPos::new(vx1, vy1),
+                    )
+                }),
         });
     }
 
@@ -2402,6 +2477,75 @@ fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramNodeId, Canv
         };
 
         let eid = scene.alloc_edge_id();
+
+        // Auto-route waypoints when the source has no authored
+        // `Line(points={...})` annotation. A* on a 4-unit grid with
+        // a bend penalty + obstacle inflation produces clean L / Z /
+        // wrap-around routes that the per-frame Z-bend heuristic
+        // can't manage. Authored waypoints win — preserves user
+        // intent on hand-routed connections.
+        let waypoints_world: Vec<CanvasPos> = if !edge.waypoints.is_empty() {
+            edge.waypoints
+                .iter()
+                .map(|&(x, y)| CanvasPos::new(x, -y))
+                .collect()
+        } else {
+            // World endpoints: port world position via owning
+            // node's transform.
+            let src_world = src_node
+                .and_then(|n| src_port_def.as_ref().map(|p| n.icon_transform.apply(p.x, p.y)));
+            let tgt_world = tgt_node
+                .and_then(|n| tgt_port_def.as_ref().map(|p| n.icon_transform.apply(p.x, p.y)));
+            match (src_world, tgt_world) {
+                (Some(s), Some(t)) => {
+                    let from_out = from_dir.outward();
+                    let to_out = to_dir.outward();
+                    let obstacles: Vec<crate::ui::wire_router::Obstacle> = scene
+                        .nodes()
+                        .filter(|(id, _)| **id != *src_cid && **id != *tgt_cid)
+                        .filter(|(_, n)| n.kind.as_str() == "modelica.icon")
+                        .map(|(_, n)| {
+                            let r = n.visual_rect.unwrap_or(n.rect);
+                            crate::ui::wire_router::Obstacle {
+                                min_x: r.min.x,
+                                min_y: r.min.y,
+                                max_x: r.max.x,
+                                max_y: r.max.y,
+                            }
+                        })
+                        .collect();
+                    // grid 4 / bend 80 / clearance 2: bend penalty
+                    // is 20× the step cost so A* very strongly prefers
+                    // 1- or 2-bend routes over wrappy multi-bend ones.
+                    // Earlier value (16) was tied with relatively short
+                    // detours, so the green Tank.mass_out wire took a
+                    // 4-bend wrap around the engine when a 2-bend
+                    // route over the top was available.
+                    let pts = crate::ui::wire_router::route(
+                        s,
+                        from_out,
+                        t,
+                        to_out,
+                        &obstacles,
+                        4.0,
+                        80.0,
+                        2.0,
+                    );
+                    // Strip endpoints — `waypoints_world` carries
+                    // *interior* bends only; the renderer prepends /
+                    // appends the actual port positions.
+                    if pts.len() >= 2 {
+                        pts[1..pts.len() - 1]
+                            .iter()
+                            .map(|&(x, y)| CanvasPos::new(x, y))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
+                }
+                _ => Vec::new(),
+            }
+        };
         scene.insert_edge(CanvasEdge {
             id: eid,
             from: PortRef {
@@ -2417,11 +2561,7 @@ fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramNodeId, Canv
                 connector_type: connector_type.clone(),
                 from_dir,
                 to_dir,
-                waypoints_world: edge
-                    .waypoints
-                    .iter()
-                    .map(|&(x, y)| CanvasPos::new(x, -y))
-                    .collect(),
+                waypoints_world,
                 icon_color: icon_color
                     .map(|[r, g, b]| egui::Color32::from_rgb(r, g, b)),
                 source_path: src_node
@@ -2652,6 +2792,17 @@ pub struct CanvasDocState {
     /// the projection code can update the layer's data without
     /// reaching into `canvas.layers`.
     pub background_diagram: BackgroundDiagramHandle,
+    /// Per-doc pulse-glow registry. The `drive_pending_api_focus`
+    /// system writes new entries when an API-driven AddComponent's
+    /// node lands in the projected scene; the `PulseGlowLayer` reads
+    /// this every draw and paints a Figma-style outer-glow ring with
+    /// alpha decaying over `PULSE_DURATION`. Shared by `Arc` so both
+    /// sides see the same vec without walking the layer list.
+    pub pulse_handle: PulseHandle,
+    /// Per-doc edge-pulse registry — same shape as `pulse_handle`
+    /// but for newly-added connections. Drives the wire-flash
+    /// rendered by `EdgePulseLayer`.
+    pub edge_pulse_handle: EdgePulseHandle,
 }
 
 impl Default for CanvasDocState {
@@ -2677,6 +2828,20 @@ impl Default for CanvasDocState {
                 data: background_diagram.clone(),
             }),
         );
+        // Pulse-glow layer goes at the END of the layer list so the
+        // ring paints ON TOP of nodes/edges/selection — matches
+        // Figma's outer-glow which is visible regardless of underlying
+        // chrome. See `docs/architecture/20-domain-modelica.md` § 9c.4.
+        let pulse_handle: PulseHandle =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        canvas.layers.push(Box::new(PulseGlowLayer {
+            data: pulse_handle.clone(),
+        }));
+        let edge_pulse_handle: EdgePulseHandle =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        canvas.layers.push(Box::new(EdgePulseLayer {
+            data: edge_pulse_handle.clone(),
+        }));
         Self {
             canvas,
             last_seen_gen: 0,
@@ -2688,6 +2853,8 @@ impl Default for CanvasDocState {
             context_menu: None,
             projection_task: None,
             background_diagram,
+            pulse_handle,
+            edge_pulse_handle,
         }
     }
 }
@@ -2884,6 +3051,799 @@ impl CanvasDiagramState {
     pub fn has_entry(&self, doc: lunco_doc::DocumentId) -> bool {
         self.per_doc.contains_key(&doc)
     }
+}
+
+// ─── Animation: pending API-focus queue ────────────────────────────────
+//
+// Implements the `OpOrigin::Api` half of `docs/architecture/20-domain-modelica.md`
+// § 9c.5 (batch focus debounce). When an API caller adds a component,
+// the API command observer writes a `PendingApiFocus` entry; this
+// canvas-side system polls it each frame and, once the named node has
+// landed in the projected scene, calls `viewport.set_target` to ease
+// the camera onto it. The viewport's built-in tween (`set_target` +
+// `tick` in `lunco-canvas/viewport.rs`) handles the actual smoothing
+// — there is no separate animation system here.
+//
+// Why a queue rather than a direct-call observer: `AddComponent`
+// applies synchronously, but the canvas reprojects asynchronously
+// (off-thread parse → `projection_task`), so the new node isn't in
+// `scene` for one or more frames. The queue waits patiently and
+// applies the focus the moment the node appears.
+//
+// Batch debounce: when the queue contains multiple entries within a
+// `BATCH_WINDOW`, the focus collapses to a single FitVisible over the
+// accumulated set instead of ping-ponging between centroids — so a
+// scripted N-component build animates into a single framed shot at
+// the end. See § 9c.5 for the full rationale.
+//
+// TODO(modelica.canvas.add.focus_behavior): make None / Center /
+// FitVisible settings-driven. Today the policy is hardcoded:
+// single-add → Center, batch → FitVisible.
+//
+// TODO(modelica.canvas.add.batch_debounce_ms): expose `BATCH_WINDOW`
+// as a setting.
+//
+// Pulse glow (§ 9c.4): the focus driver below also pushes matched
+// (NodeId, started_at) pairs into the per-doc `PulseHandle`. The
+// `PulseGlowLayer` (registered last in the canvas's layer list, so it
+// paints on top) walks those entries each frame and draws a soft
+// outer ring with alpha decaying linearly over `PULSE_DURATION`.
+//
+// TODO(modelica.canvas.animation.pulse_ms): expose `PULSE_DURATION`
+// as a setting (0 = disable). Today it's hardcoded to 1.0 s.
+
+/// One pending camera focus, queued by an API caller, drained by the
+/// canvas's per-frame system once the projection settles.
+#[derive(Debug, Clone)]
+pub struct PendingApiFocus {
+    /// Document the new component lives in.
+    pub doc: lunco_doc::DocumentId,
+    /// Component instance name (matches `Node.origin` after projection).
+    pub name: String,
+    /// When the API caller queued this. Used both for batch debounce
+    /// and timeout GC.
+    pub queued_at: web_time::Instant,
+    /// Per-call pulse glow duration (ms). 0 disables the glow for
+    /// this entry. Defaults to `DEFAULT_PULSE_MS` when the API
+    /// caller didn't supply `animation_ms`.
+    pub animation_ms: u32,
+}
+
+/// FIFO queue of pending API-driven focuses. `ApiEdits::on_add_modelica_component`
+/// pushes; the canvas's `drive_pending_api_focus` system drains.
+///
+/// Kept as a `Vec` not a `HashMap` so order is preserved — batch debounce
+/// needs to know whether the *latest* push is recent enough to coalesce.
+#[derive(Resource, Default)]
+pub struct PendingApiFocusQueue(pub Vec<PendingApiFocus>);
+
+impl PendingApiFocusQueue {
+    pub fn push(&mut self, focus: PendingApiFocus) {
+        self.0.push(focus);
+    }
+}
+
+/// Window for batch-collapse: if a new entry arrives within this of
+/// the previous one, the system holds back from focusing on the older
+/// entries individually and instead waits for the burst to end.
+const BATCH_WINDOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Hard timeout — drop a queued focus if no node with the given origin
+/// has appeared in the scene by then. Stops the queue from leaking on
+/// failed AddComponent ops or rename races.
+const FOCUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Default pulse duration when the API caller doesn't override it.
+/// Per-call override lives on `AddModelicaComponent.animation_ms` /
+/// `ConnectComponents.animation_ms`; 0 disables the highlight
+/// entirely. Quartic slow-tail (`alpha = 1 - t^4`) decay regardless
+/// of total length.
+pub const DEFAULT_PULSE_MS: u32 = 2000;
+pub const DEFAULT_EDGE_FLASH_MS: u32 = 1500;
+
+/// Stagger between consecutive node-pulse start times within a batch.
+/// Adds a "slight delay between elements" feel (per user feedback)
+/// without actually delaying the source mutation — the components
+/// land in the scene at once; the *pulse* is what reveals them in
+/// sequence. Empty for batch=1.
+const PULSE_STAGGER_MS: u64 = 250;
+
+/// Connection-add queue (mirror of `PendingApiFocusQueue` but for
+/// `ConnectComponents`). The driver matches each entry against the
+/// scene's edge list (by from/to component+port) and pushes a brief
+/// flash entry into the doc's `edge_pulse_handle`.
+#[derive(Resource, Default)]
+pub struct PendingApiConnectionQueue(pub Vec<PendingApiConnection>);
+
+#[derive(Debug, Clone)]
+pub struct PendingApiConnection {
+    pub doc: lunco_doc::DocumentId,
+    pub from_component: String,
+    pub from_port: String,
+    pub to_component: String,
+    pub to_port: String,
+    pub queued_at: web_time::Instant,
+    /// Per-call edge-flash duration (ms). 0 = no flash. Defaults to
+    /// `DEFAULT_EDGE_FLASH_MS` when not supplied.
+    pub animation_ms: u32,
+}
+
+impl PendingApiConnectionQueue {
+    pub fn push(&mut self, entry: PendingApiConnection) {
+        self.0.push(entry);
+    }
+}
+
+/// Outer-glow render layer for newly-added edges. Re-uses the
+/// `PulseGlowLayer`'s decay curve and theme colour, but draws an
+/// additional thicker stroke ON TOP of the edge so the wire visibly
+/// flashes — see `docs/architecture/20-domain-modelica.md` § 9c.4.
+struct EdgePulseLayer {
+    data: EdgePulseHandle,
+}
+
+impl lunco_canvas::Layer for EdgePulseLayer {
+    fn name(&self) -> &'static str {
+        "modelica.edge_pulse"
+    }
+
+    fn draw(
+        &mut self,
+        ctx: &mut lunco_canvas::visual::DrawCtx,
+        scene: &lunco_canvas::Scene,
+        _selection: &lunco_canvas::Selection,
+    ) {
+        let live: Vec<(lunco_canvas::EdgeId, f32)> = {
+            let Ok(mut guard) = self.data.write() else {
+                return;
+            };
+            let now = web_time::Instant::now();
+            guard.retain(|e| match now.checked_duration_since(e.started) {
+                Some(d) => d.as_millis() < e.duration_ms as u128,
+                None => true,
+            });
+            guard
+                .iter()
+                .map(|e| {
+                    let alpha = match now.checked_duration_since(e.started) {
+                        None => 0.0,
+                        Some(elapsed) => {
+                            let age_ms = elapsed.as_secs_f32() * 1000.0;
+                            let total_ms = (e.duration_ms as f32).max(1.0);
+                            let t = (age_ms / total_ms).clamp(0.0, 1.0);
+                            1.0 - t.powi(4)
+                        }
+                    };
+                    (e.id, alpha)
+                })
+                .filter(|(_, a)| *a > 0.001)
+                .collect()
+        };
+        if live.is_empty() {
+            return;
+        }
+        let painter = ctx.ui.painter();
+        let _theme = lunco_canvas::theme::current(ctx.ui.ctx());
+        // Warm yellow-orange — distinct from the wire's blue so the
+        // flash reads as a *highlight*, not a thicker wire. Picked
+        // for high contrast against both light and dark themes.
+        // (`theme.selection_outline` matched too closely to the wire
+        // colour and the user reported the flash didn't register.)
+        let base = bevy_egui::egui::Color32::from_rgb(255, 196, 60);
+        for (edge_id, alpha) in live {
+            let Some(edge) = scene.edge(edge_id) else {
+                continue;
+            };
+            // Look up the two endpoints' world positions via their
+            // owning nodes' rects + the port's local offset. If
+            // either endpoint is missing (race during projection),
+            // skip silently.
+            let Some(from_node) = scene.node(edge.from.node) else {
+                continue;
+            };
+            let Some(to_node) = scene.node(edge.to.node) else {
+                continue;
+            };
+            let from_world = port_world_pos(from_node, &edge.from.port);
+            let to_world = port_world_pos(to_node, &edge.to.port);
+            let Some(from_world) = from_world else { continue };
+            let Some(to_world) = to_world else { continue };
+            let from_screen = ctx
+                .viewport
+                .world_to_screen(from_world, ctx.screen_rect);
+            let to_screen = ctx.viewport.world_to_screen(to_world, ctx.screen_rect);
+
+            // Two stacked strokes — fat outer halo + tighter bright
+            // inner line. Distinct yellow-orange so the highlight
+            // reads against the wire's blue body.
+            let halo_a = (alpha * 0.7 * 255.0) as u8;
+            let line_a = (alpha * 0.95 * 255.0) as u8;
+            painter.line_segment(
+                [
+                    bevy_egui::egui::pos2(from_screen.x, from_screen.y),
+                    bevy_egui::egui::pos2(to_screen.x, to_screen.y),
+                ],
+                bevy_egui::egui::Stroke::new(
+                    18.0,
+                    bevy_egui::egui::Color32::from_rgba_unmultiplied(
+                        base.r(),
+                        base.g(),
+                        base.b(),
+                        halo_a,
+                    ),
+                ),
+            );
+            painter.line_segment(
+                [
+                    bevy_egui::egui::pos2(from_screen.x, from_screen.y),
+                    bevy_egui::egui::pos2(to_screen.x, to_screen.y),
+                ],
+                bevy_egui::egui::Stroke::new(
+                    5.0,
+                    bevy_egui::egui::Color32::from_rgba_unmultiplied(
+                        base.r(),
+                        base.g(),
+                        base.b(),
+                        line_a,
+                    ),
+                ),
+            );
+        }
+    }
+}
+
+/// Resolve a port's world-space position via its owning node's rect
+/// + the port's `local_offset`. Canvas convention (see
+/// `lunco-canvas::layer::EdgesLayer::draw`): `local_offset` is
+/// relative to `rect.min` (top-left), NOT the centre. Falls back to
+/// the rect centre when the port id isn't on the node — same fallback
+/// the edges layer uses for connector-only nodes.
+fn port_world_pos(
+    node: &lunco_canvas::Node,
+    port_id: &lunco_canvas::PortId,
+) -> Option<lunco_canvas::Pos> {
+    let port = node.ports.iter().find(|p| &p.id == port_id)?;
+    Some(lunco_canvas::Pos::new(
+        node.rect.min.x + port.local_offset.x,
+        node.rect.min.y + port.local_offset.y,
+    ))
+}
+
+/// Per-frame driver for connection adds: like
+/// `drive_pending_api_focus`, but matches the queue against scene
+/// edges and pushes flashes into the edge-pulse handle. No camera
+/// move — connections appear in the existing camera frame; their
+/// flash is the signal.
+pub fn drive_pending_api_connections(
+    mut queue: ResMut<PendingApiConnectionQueue>,
+    mut state: ResMut<CanvasDiagramState>,
+) {
+    if queue.0.is_empty() {
+        return;
+    }
+    let now = web_time::Instant::now();
+    let mut still_pending: Vec<PendingApiConnection> = Vec::new();
+    for entry in queue.0.drain(..) {
+        if now.duration_since(entry.queued_at) > FOCUS_TIMEOUT {
+            continue;
+        }
+        let docstate = state.get(Some(entry.doc));
+        // Match by node `origin` (component name) + port id (port
+        // name). The canvas projection puts the port's name in
+        // `Port.id`'s string form via the SmolStr; matching by id
+        // works because the projector keys ports by simple name.
+        let hit = docstate.canvas.scene.edges().find(|(_, e)| {
+            let from_node = docstate.canvas.scene.node(e.from.node);
+            let to_node = docstate.canvas.scene.node(e.to.node);
+            let from_match = from_node
+                .map(|n| {
+                    n.origin.as_deref() == Some(entry.from_component.as_str())
+                        && n.ports
+                            .iter()
+                            .any(|p| p.id == e.from.port && p.id.as_str() == entry.from_port.as_str())
+                })
+                .unwrap_or(false);
+            let to_match = to_node
+                .map(|n| {
+                    n.origin.as_deref() == Some(entry.to_component.as_str())
+                        && n.ports
+                            .iter()
+                            .any(|p| p.id == e.to.port && p.id.as_str() == entry.to_port.as_str())
+                })
+                .unwrap_or(false);
+            from_match && to_match
+        });
+        match hit {
+            Some((edge_id, _)) => {
+                let edge_id = *edge_id;
+                let anim_ms = entry.animation_ms;
+                let docstate_mut = state.get_mut(Some(entry.doc));
+                if anim_ms > 0 {
+                    if let Ok(mut guard) = docstate_mut.edge_pulse_handle.write() {
+                        guard.push(PulseEntry {
+                            id: edge_id,
+                            started: web_time::Instant::now(),
+                            duration_ms: anim_ms,
+                        });
+                    }
+                }
+            }
+            None => still_pending.push(entry),
+        }
+    }
+    queue.0 = still_pending;
+}
+
+// ─── Cinematic camera ──────────────────────────────────────────────────
+//
+// Replaces `viewport.set_target`'s constant exponential smoothing with
+// a keyframe-driven curve. Lets us do shot types — pure dolly, focus
+// pull (zoom-out + hold + zoom-in), establishing shot — instead of
+// always linearly easing toward the target. Frame-rate independent;
+// driven by elapsed wall-clock.
+//
+// Why a keyframe model: a single `Tween { from, to, duration, ease }`
+// can't express the "pull back, hold, push in" shape that makes
+// distant targets feel intentional rather than swoopy. Keyframes are
+// the standard movie-camera abstraction: anchor a curve at each
+// time offset, blend in between.
+//
+// While a cinematic is active, the viewport's built-in tween must not
+// also drift the values, so each frame we snap-set both current AND
+// target to the eased keyframe value (`viewport.snap_to`).
+
+#[derive(Clone, Copy, Debug)]
+enum EaseKind {
+    /// Constant value — produces a "hold" segment between two
+    /// identical keyframes.
+    Hold,
+    /// Linear blend.
+    Linear,
+    /// Soft-start, hard-end. Good for arrivals.
+    EaseOutCubic,
+    /// Symmetric soft-start and soft-end. Default for smooth dollies.
+    EaseInOutCubic,
+}
+
+impl EaseKind {
+    fn apply(self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            EaseKind::Hold => 0.0,
+            EaseKind::Linear => t,
+            EaseKind::EaseOutCubic => 1.0 - (1.0 - t).powi(3),
+            EaseKind::EaseInOutCubic => {
+                if t < 0.5 {
+                    4.0 * t * t * t
+                } else {
+                    1.0 - ((-2.0 * t + 2.0).powi(3)) / 2.0
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Keyframe {
+    /// Offset from move start, milliseconds.
+    at_ms: u32,
+    center: lunco_canvas::Pos,
+    zoom: f32,
+    /// How to ease *into* this keyframe from the previous one.
+    ease_in: EaseKind,
+}
+
+struct CameraMove {
+    started_at: web_time::Instant,
+    keyframes: Vec<Keyframe>,
+    /// What we last `snap_to`'d the viewport with. On the next tick,
+    /// if `viewport.center / .zoom` no longer matches, the user (or
+    /// the on-canvas zoom widget at the bottom-right) moved the
+    /// camera — the cinematic yields and stops fighting them.
+    last_applied: Option<(lunco_canvas::Pos, f32)>,
+}
+
+impl CameraMove {
+    fn total_ms(&self) -> u32 {
+        self.keyframes.last().map(|k| k.at_ms).unwrap_or(0)
+    }
+    /// Eased (center, zoom) at the given elapsed time. `None` once
+    /// past the last keyframe — caller drops the move then.
+    fn sample(&self, elapsed_ms: u32) -> Option<(lunco_canvas::Pos, f32)> {
+        if self.keyframes.is_empty() {
+            return None;
+        }
+        if elapsed_ms >= self.total_ms() {
+            return None;
+        }
+        // Find the segment [prev, next] containing elapsed_ms.
+        let mut prev = &self.keyframes[0];
+        for kf in self.keyframes.iter().skip(1) {
+            if elapsed_ms < kf.at_ms {
+                let span_ms = (kf.at_ms - prev.at_ms).max(1) as f32;
+                let local_t = (elapsed_ms - prev.at_ms) as f32 / span_ms;
+                let eased = kf.ease_in.apply(local_t);
+                return Some((
+                    lerp_pos(prev.center, kf.center, eased),
+                    lerp_f32(prev.zoom, kf.zoom, eased),
+                ));
+            }
+            prev = kf;
+        }
+        Some((prev.center, prev.zoom))
+    }
+}
+
+fn lerp_pos(a: lunco_canvas::Pos, b: lunco_canvas::Pos, t: f32) -> lunco_canvas::Pos {
+    lunco_canvas::Pos::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
+}
+fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+/// Per-doc active cinematic move. None = no move (viewport is free).
+#[derive(Resource, Default)]
+pub struct CinematicCamera {
+    moves: std::collections::HashMap<lunco_doc::DocumentId, CameraMove>,
+}
+
+/// Single-move cinematic duration: pull the camera from wherever it
+/// is to the fit-all view in one smooth sweep.
+const FIT_MOVE_MS: u32 = 700;
+
+/// Plan a cinematic for an API-driven add batch.
+///
+/// Per user feedback: simpler than a per-node tour. One smooth
+/// pan-and-zoom from the current viewport to a wide framing of *all*
+/// nodes (existing + new). The pulse glow on the new nodes is what
+/// signals "this just landed"; the wide view is what gives the user
+/// "where in the diagram it landed".
+///
+/// Returns a 2-keyframe move: current → fit-all over `FIT_MOVE_MS`.
+fn plan_camera_move(
+    current_center: lunco_canvas::Pos,
+    current_zoom: f32,
+    fit_all_center: lunco_canvas::Pos,
+    fit_all_zoom: f32,
+) -> Vec<Keyframe> {
+    vec![
+        Keyframe {
+            at_ms: 0,
+            center: current_center,
+            zoom: current_zoom,
+            ease_in: EaseKind::Linear,
+        },
+        Keyframe {
+            at_ms: FIT_MOVE_MS,
+            center: fit_all_center,
+            zoom: fit_all_zoom,
+            ease_in: EaseKind::EaseInOutCubic,
+        },
+    ]
+}
+
+/// Per-frame system: advance every active cinematic move, snap the
+/// owning canvas's viewport to the eased value. When a move's last
+/// keyframe is reached, drop it and let the user have free camera.
+pub fn tick_cinematic_camera(
+    mut cinematic: ResMut<CinematicCamera>,
+    mut state: ResMut<CanvasDiagramState>,
+) {
+    if cinematic.moves.is_empty() {
+        return;
+    }
+    let now = web_time::Instant::now();
+    let mut finished: Vec<lunco_doc::DocumentId> = Vec::new();
+    for (doc, mv) in cinematic.moves.iter_mut() {
+        let docstate = state.get_mut(Some(*doc));
+        // User-input yield: if the live viewport doesn't match what
+        // we last applied, something else moved it (zoom widget,
+        // mouse pan, F-to-fit, scroll). Cancel the cinematic and let
+        // the user have the camera.
+        if let Some((last_c, last_z)) = mv.last_applied {
+            let live_c = docstate.canvas.viewport.center;
+            let live_z = docstate.canvas.viewport.zoom;
+            let dc = (live_c.x - last_c.x).abs() + (live_c.y - last_c.y).abs();
+            let dz = (live_z - last_z).abs();
+            if dc > 0.5 || dz > 0.005 {
+                finished.push(*doc);
+                continue;
+            }
+        }
+        let elapsed = now.duration_since(mv.started_at).as_millis() as u32;
+        match mv.sample(elapsed) {
+            Some((center, zoom)) => {
+                docstate.canvas.viewport.snap_to(center, zoom);
+                mv.last_applied = Some((center, zoom));
+            }
+            None => finished.push(*doc),
+        }
+    }
+    for d in finished {
+        cinematic.moves.remove(&d);
+    }
+}
+
+/// One pulse-glow entry: target id, when it started, and how long it
+/// should last (per-call duration; the API caller can pass
+/// `animation_ms` on the command to override the default). Splitting
+/// per-entry instead of using a single global constant lets callers
+/// mix instant adds with cinematic ones.
+#[derive(Debug, Clone, Copy)]
+pub struct PulseEntry<T> {
+    pub id: T,
+    pub started: web_time::Instant,
+    pub duration_ms: u32,
+}
+
+/// Per-doc node-pulse registry. Vec rather than HashMap because we
+/// expect ≤ a few entries at a time and iteration order doesn't
+/// matter — the layer re-walks every frame anyway.
+pub type PulseHandle =
+    std::sync::Arc<std::sync::RwLock<Vec<PulseEntry<lunco_canvas::NodeId>>>>;
+
+/// Edge-pulse registry: same shape as `PulseHandle` but keyed by edge
+/// id. Drives the wire-flash animation when `ConnectComponents` fires
+/// from an API caller.
+pub type EdgePulseHandle =
+    std::sync::Arc<std::sync::RwLock<Vec<PulseEntry<lunco_canvas::EdgeId>>>>;
+
+/// Outer-glow render layer: paints a soft ring around each
+/// recently-added node, alpha decaying linearly to 0 over
+/// `PULSE_DURATION`. Figma-style — see `docs/architecture/20-domain-modelica.md`
+/// § 9c.4 for the design rationale.
+struct PulseGlowLayer {
+    data: PulseHandle,
+}
+
+impl lunco_canvas::Layer for PulseGlowLayer {
+    fn name(&self) -> &'static str {
+        "modelica.pulse_glow"
+    }
+
+    fn draw(
+        &mut self,
+        ctx: &mut lunco_canvas::visual::DrawCtx,
+        scene: &lunco_canvas::Scene,
+        _selection: &lunco_canvas::Selection,
+    ) {
+        // First, walk + decay; collect (node_id, alpha) for entries
+        // still alive. Drop the write guard before any heavy painting.
+        let live: Vec<(lunco_canvas::NodeId, f32)> = {
+            let Ok(mut guard) = self.data.write() else {
+                return;
+            };
+            let now = web_time::Instant::now();
+            // Drop entries whose start+duration has elapsed. Entries
+            // whose `started` is still in the future stay (they were
+            // staggered by the focus driver — see PULSE_STAGGER_MS).
+            // Per-entry duration: each call carries its own
+            // `duration_ms` so a caller can pass `animation_ms = 500`
+            // for a quick add or `animation_ms = 0` to skip the
+            // glow.
+            guard.retain(|e| match now.checked_duration_since(e.started) {
+                Some(d) => d.as_millis() < e.duration_ms as u128,
+                None => true,
+            });
+            guard
+                .iter()
+                .map(|e| {
+                    let alpha = match now.checked_duration_since(e.started) {
+                        None => 0.0,
+                        Some(elapsed) => {
+                            let age_ms = elapsed.as_secs_f32() * 1000.0;
+                            let total_ms = (e.duration_ms as f32).max(1.0);
+                            let t = (age_ms / total_ms).clamp(0.0, 1.0);
+                            1.0 - t.powi(4)
+                        }
+                    };
+                    (e.id, alpha)
+                })
+                .filter(|(_, a)| *a > 0.001)
+                .collect()
+        };
+        if live.is_empty() {
+            return;
+        }
+        let painter = ctx.ui.painter();
+        let theme = lunco_canvas::theme::current(ctx.ui.ctx());
+        // Use the theme's selection color as the glow base — ties
+        // visually to the rest of the canvas chrome and shifts with
+        // the active theme. Multiplied by per-entry alpha and a
+        // global pulse intensity (0.65) so the glow stays subtle.
+        let base = theme.selection_outline;
+        for (node_id, alpha) in live {
+            let Some(node) = scene.node(node_id) else {
+                continue;
+            };
+            let world_rect = node.rect;
+            let screen = ctx
+                .viewport
+                .world_rect_to_screen(world_rect, ctx.screen_rect);
+            let r = bevy_egui::egui::Rect::from_min_max(
+                bevy_egui::egui::pos2(screen.min.x, screen.min.y),
+                bevy_egui::egui::pos2(screen.max.x, screen.max.y),
+            );
+            // Stack 4 expanding outlines with decreasing alpha — the
+            // cheapest convincing outer-glow you can do with egui's
+            // stroke API. Each layer doubles its outset and halves its
+            // opacity, producing a soft falloff.
+            for ring in 0..4 {
+                let outset = (ring as f32 + 1.0) * 3.0;
+                let ring_rect = r.expand(outset);
+                let ring_alpha = alpha * 0.65 * (1.0 - ring as f32 * 0.22);
+                let a = (ring_alpha * 255.0).clamp(0.0, 255.0) as u8;
+                let color = bevy_egui::egui::Color32::from_rgba_unmultiplied(
+                    base.r(),
+                    base.g(),
+                    base.b(),
+                    a,
+                );
+                painter.rect_stroke(
+                    ring_rect,
+                    bevy_egui::egui::CornerRadius::same(2),
+                    bevy_egui::egui::Stroke::new(2.0, color),
+                    bevy_egui::egui::StrokeKind::Outside,
+                );
+            }
+        }
+    }
+}
+
+/// Per-frame driver: drain the focus queue once a *complete* batch has
+/// landed in the projected scene, then act ONCE for the whole batch.
+/// Designed to avoid the "camera jumps between nodes" feel when N
+/// AddComponents arrive across several frames with staggered
+/// projection latency.
+///
+/// Sequence:
+///   1. Hold the queue until the latest push is `BATCH_WINDOW` idle.
+///   2. Try to match every queued entry. If any is unmatched and not
+///      timed out, defer one more frame — keeps the batch atomic.
+///   3. Once all matched (or timed out): drain, pulse all, decide the
+///      camera move:
+///        a. New nodes already inside the viewport → no camera move
+///           (Figma/Miro convention — pulse alone signals the change).
+///        b. Otherwise → smooth FitVisible over the union of (current
+///           visible region ∪ new nodes), so context is preserved.
+pub fn drive_pending_api_focus(
+    mut queue: ResMut<PendingApiFocusQueue>,
+    mut state: ResMut<CanvasDiagramState>,
+    mut cinematic: ResMut<CinematicCamera>,
+) {
+    if queue.0.is_empty() {
+        return;
+    }
+    let now = web_time::Instant::now();
+
+    // (1) Batch-idle gate.
+    if let Some(latest) = queue.0.last() {
+        if now.duration_since(latest.queued_at) < BATCH_WINDOW {
+            return;
+        }
+    }
+
+    // (2) Try-match pass — non-draining. Anything unmatched and within
+    // FOCUS_TIMEOUT forces us to wait one more frame.
+    // Match payload now carries per-entry `animation_ms` so the
+    // pulse layer entry can use the API caller's override (or 0 to
+    // skip the glow entirely).
+    let mut matched: std::collections::HashMap<
+        lunco_doc::DocumentId,
+        Vec<(lunco_canvas::NodeId, lunco_canvas::Pos, lunco_canvas::Rect, u32)>,
+    > = std::collections::HashMap::new();
+    let mut any_still_unmatched_within_timeout = false;
+    for entry in queue.0.iter() {
+        let docstate = state.get(Some(entry.doc));
+        let hit = docstate
+            .canvas
+            .scene
+            .nodes()
+            .find(|(_, n)| n.origin.as_deref() == Some(entry.name.as_str()))
+            .map(|(id, node)| (*id, node.rect.center(), node.rect, entry.animation_ms));
+        match hit {
+            Some(payload) => {
+                matched.entry(entry.doc).or_default().push(payload);
+            }
+            None => {
+                if now.duration_since(entry.queued_at) <= FOCUS_TIMEOUT {
+                    any_still_unmatched_within_timeout = true;
+                }
+            }
+        }
+    }
+    if any_still_unmatched_within_timeout {
+        return;
+    }
+
+    // (3) Whole batch resolved (or timed out). Drain + act.
+    queue.0.clear();
+    if matched.is_empty() {
+        return;
+    }
+
+    let now_pulse = web_time::Instant::now();
+    let _ = cinematic; // kept for shape; not used now that the camera
+                       // move delegates to `pending_fit` (next frame's
+                       // canvas render does the math against the real
+                       // widget rect — see commentary below).
+    for (doc, entries) in matched {
+        let docstate = state.get_mut(Some(doc));
+
+        // Always pulse — that's the "what changed" signal. Stagger
+        // the start time across entries so a batch reveals
+        // one-by-one rather than all flaring at once. Reads as a
+        // brief "delay between adds" without delaying the source
+        // mutation. Entry order matches the order the API caller
+        // queued them.
+        if let Ok(mut guard) = docstate.pulse_handle.write() {
+            for (i, (node_id, _, _, anim_ms)) in entries.iter().enumerate() {
+                if *anim_ms == 0 {
+                    continue;
+                }
+                let stagger = std::time::Duration::from_millis(
+                    PULSE_STAGGER_MS * i as u64,
+                );
+                guard.push(PulseEntry {
+                    id: *node_id,
+                    started: now_pulse + stagger,
+                    duration_ms: *anim_ms,
+                });
+            }
+        }
+
+        // Camera move: defer to the canvas render's `pending_fit`
+        // branch. That branch runs INSIDE the panel render where the
+        // actual `response.rect` is in scope, so the fit math uses the
+        // real widget size — not the 1280×800 approximation we'd have
+        // to guess at here. It calls `viewport.set_target`, which
+        // animates via the viewport's built-in exponential ease.
+        //
+        // Why we don't keyframe-cinematic this any more: hardcoding
+        // a fake screen rect produced wrong final zoom (the rocket
+        // build session showed this — components ended at 37%
+        // clipping the labels). The render path's actual-rect fit is
+        // the reliable framing.
+        //
+        // Pulse + edge flash + viewport's smooth ease together carry
+        // the visual cadence; the bespoke `plan_camera_move` keyframes
+        // are kept in the file for future use (cinematic tours of
+        // existing content, etc.) but bypassed for API add-flow.
+        docstate.pending_fit = true;
+    }
+}
+
+/// World-space rect currently visible given the viewport's center,
+/// zoom, and the screen extent. Reverse of `world_rect_to_screen`.
+fn world_view_rect(
+    viewport: &lunco_canvas::Viewport,
+    screen: lunco_canvas::Rect,
+) -> lunco_canvas::Rect {
+    let half_w = (screen.max.x - screen.min.x) * 0.5
+        / viewport.zoom.max(f32::EPSILON);
+    let half_h = (screen.max.y - screen.min.y) * 0.5
+        / viewport.zoom.max(f32::EPSILON);
+    let c = viewport.center;
+    lunco_canvas::Rect::from_min_max(
+        lunco_canvas::Pos::new(c.x - half_w, c.y - half_h),
+        lunco_canvas::Pos::new(c.x + half_w, c.y + half_h),
+    )
+}
+
+/// Strict containment with a small slack — `inner` is considered
+/// inside `outer` only if every edge of `inner` is at least `MARGIN`
+/// world-units inset from `outer`'s edges. Avoids "technically visible
+/// but clipped at the corner" cases where the user would still want a
+/// small pan.
+fn rect_contains_rect(
+    outer: lunco_canvas::Rect,
+    inner: lunco_canvas::Rect,
+) -> bool {
+    const MARGIN: f32 = 20.0;
+    inner.min.x >= outer.min.x + MARGIN
+        && inner.min.y >= outer.min.y + MARGIN
+        && inner.max.x <= outer.max.x - MARGIN
+        && inner.max.y <= outer.max.y - MARGIN
 }
 
 /// Running projection task + the generation that spawned it, so the
@@ -3479,6 +4439,28 @@ impl Panel for CanvasDiagramPanel {
                 docstate.canvas.tool.remap_node_ids(&|old: lunco_canvas::NodeId| {
                     id_remap.get(&old).copied()
                 });
+                // Carry over scene-only nodes (plots, future dashboard
+                // / control widgets) that have no Modelica source
+                // counterpart — projection rebuilds the scene from the
+                // diagram alone, so without this they'd vanish on
+                // every reproject (initial parse, sim start, source
+                // edit, …). Keyed by `kind` so any future scene-only
+                // visual gets the same treatment without code changes.
+                const SCENE_ONLY_KINDS: &[&str] = &[
+                    lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND,
+                ];
+                let scene_only_nodes: Vec<lunco_canvas::scene::Node> = docstate
+                    .canvas
+                    .scene
+                    .nodes()
+                    .filter(|(_, n)| SCENE_ONLY_KINDS.contains(&n.kind.as_str()))
+                    .map(|(_, n)| n.clone())
+                    .collect();
+                let mut scene = scene;
+                for mut node in scene_only_nodes {
+                    node.id = scene.alloc_node_id();
+                    scene.insert_node(node);
+                }
                 docstate.canvas.scene = scene;
                 docstate.canvas.selection.clear();
                 if !preserved_origins.is_empty() {
@@ -4583,6 +5565,25 @@ fn render_node_menu(
     editing_class: Option<&str>,
     out: &mut Vec<ModelicaOp>,
 ) {
+    // Plot nodes are scene-only (no Modelica counterpart) — show a
+    // signal-binding submenu and a Delete entry, skip the component-
+    // specific actions (Open class, Parameters, Duplicate).
+    let node_kind: Option<String> = {
+        let active_doc = active_doc_from_world(world);
+        let state = world.resource::<CanvasDiagramState>();
+        state
+            .get(active_doc)
+            .canvas
+            .scene
+            .node(id)
+            .map(|n| n.kind.to_string())
+    };
+    if node_kind.as_deref()
+        == Some(lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND)
+    {
+        render_plot_node_menu(ui, world, id);
+        return;
+    }
     let (instance, type_name) = component_headers(world, id);
     ui.label(egui::RichText::new(&instance).strong());
     if !type_name.is_empty() {
@@ -4613,6 +5614,113 @@ fn render_node_menu(
     }
     if ui.button("🔧 Parameters…").clicked() {
         ui.close();
+    }
+}
+
+fn render_plot_node_menu(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    id: lunco_canvas::NodeId,
+) {
+    use lunco_viz::kinds::canvas_plot_node::PlotNodeData;
+
+    let current: PlotNodeData = {
+        let active_doc = active_doc_from_world(world);
+        let state = world.resource::<CanvasDiagramState>();
+        state
+            .get(active_doc)
+            .canvas
+            .scene
+            .node(id)
+            .and_then(|n| n.data.downcast_ref::<PlotNodeData>().cloned())
+            .unwrap_or_default()
+    };
+    ui.label(egui::RichText::new("Plot").strong());
+    if !current.signal_path.is_empty() {
+        ui.label(
+            egui::RichText::new(&current.signal_path)
+                .weak()
+                .small(),
+        );
+    } else {
+        ui.label(
+            egui::RichText::new("(unbound)")
+                .weak()
+                .small()
+                .italics(),
+        );
+    }
+    ui.separator();
+
+    let sigs: Vec<(bevy::prelude::Entity, String)> = world
+        .get_resource::<lunco_viz::SignalRegistry>()
+        .map(|r| {
+            let mut v: Vec<_> = r
+                .iter_scalar()
+                .map(|(s, _)| (s.entity, s.path.clone()))
+                .collect();
+            v.sort_by(|a, b| a.1.cmp(&b.1));
+            v
+        })
+        .unwrap_or_default();
+
+    ui.menu_button("🔗 Bind signal", |ui| {
+        if sigs.is_empty() {
+            ui.label(
+                egui::RichText::new("(no signals yet — run a simulation)")
+                    .weak()
+                    .small(),
+            );
+            return;
+        }
+        let max_h = ui.ctx().screen_rect().height() * 0.7;
+        egui::ScrollArea::vertical()
+            .max_height(max_h)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                for (entity, path) in &sigs {
+                    let is_current = entity.to_bits() == current.entity
+                        && path == &current.signal_path;
+                    if ui.selectable_label(is_current, path).clicked() {
+                        rebind_plot_node(world, id, entity.to_bits(), path);
+                        ui.close();
+                    }
+                }
+            });
+    });
+
+    if !current.signal_path.is_empty() && ui.button("Unbind").clicked() {
+        rebind_plot_node(world, id, 0, "");
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("✂ Delete").clicked() {
+        let active_doc = active_doc_from_world(world);
+        let mut state = world.resource_mut::<CanvasDiagramState>();
+        let docstate = state.get_mut(active_doc);
+        docstate.canvas.scene.remove_node(id);
+        ui.close();
+    }
+}
+
+fn rebind_plot_node(
+    world: &mut World,
+    id: lunco_canvas::NodeId,
+    entity_bits: u64,
+    signal_path: &str,
+) {
+    use lunco_viz::kinds::canvas_plot_node::PlotNodeData;
+    let payload = PlotNodeData {
+        entity: entity_bits,
+        signal_path: signal_path.to_string(),
+        title: String::new(),
+    };
+    let data: lunco_canvas::NodeData = std::sync::Arc::new(payload);
+    let active_doc = active_doc_from_world(world);
+    let mut state = world.resource_mut::<CanvasDiagramState>();
+    let docstate = state.get_mut(active_doc);
+    if let Some(node) = docstate.canvas.scene.node_mut(id) {
+        node.data = data;
     }
 }
 
@@ -4673,39 +5781,13 @@ fn render_empty_menu(
         out,
     );
     ui.separator();
-    ui.label(egui::RichText::new("Common").weak().small());
-    for quick_name in ["Resistor", "Capacitor", "Ground", "ConstantVoltage", "Inductor"] {
-        if let Some(comp) = crate::visual_diagram::msl_component_library()
-            .iter()
-            .find(|c| c.name == quick_name)
-        {
-            if ui.button(quick_name).clicked() {
-                if let Some(class) = editing_class {
-                    let instance_name = {
-                        let state = world.resource::<CanvasDiagramState>();
-                        pick_add_instance_name(comp, &state.get(active_doc).canvas.scene)
-                    };
-                    {
-                        let mut state = world.resource_mut::<CanvasDiagramState>();
-                        let docstate = state.get_mut(active_doc);
-                        synthesize_msl_node(
-                            &mut docstate.canvas.scene,
-                            comp,
-                            &instance_name,
-                            click_world,
-                        );
-                    }
-                    out.push(op_add_component_with_name(comp, &instance_name, click_world, class));
-                }
-                ui.close();
-            }
-        }
-    }
-    ui.separator();
     // ── Add Plot ──────────────────────────────────────────────────
-    // In-canvas scope: pick a signal from the active simulator and
-    // drop a `lunco.viz.plot` Scene node at the click position.
-    // Empty submenu means no sim has run yet.
+    // In-canvas scope: drop a `lunco.viz.plot` Scene node at the click
+    // position. The "Empty plot" entry is always available so users
+    // can place a chart while authoring, before any simulation has
+    // run; signal entries appear once the active sim has populated
+    // `SignalRegistry`. An empty plot can be bound later via the
+    // inspector.
     let sigs: Vec<(bevy::prelude::Entity, String)> = world
         .get_resource::<lunco_viz::SignalRegistry>()
         .map(|r| {
@@ -4730,11 +5812,16 @@ fn render_empty_menu(
         // the ScrollArea wrapper too).
         const ROW_PX: f32 = 18.0;
         let max_h = (ui.ctx().screen_rect().height() * 0.7).max(180.0);
-        let wanted = ((sigs.len() + 2) as f32 * ROW_PX).min(max_h);
+        let wanted = ((sigs.len() + 3) as f32 * ROW_PX).min(max_h);
         ui.set_min_height(wanted);
+        if ui.button("Empty plot (bind later)").clicked() {
+            insert_plot_node(world, click_world, 0, "");
+            ui.close();
+        }
+        ui.separator();
         if sigs.is_empty() {
             ui.label(
-                egui::RichText::new("(no signals yet — run a simulation)")
+                egui::RichText::new("(no signals yet — run a simulation to bind)")
                     .weak()
                     .small(),
             );
@@ -4752,39 +5839,7 @@ fn render_empty_menu(
             .show(ui, |ui| {
                 for (entity, path) in &sigs {
                     if ui.button(path).clicked() {
-                        let payload =
-                            lunco_viz::kinds::canvas_plot_node::PlotNodeData {
-                                entity: entity.to_bits(),
-                                signal_path: path.clone(),
-                                title: String::new(),
-                            };
-                        let data: lunco_canvas::NodeData =
-                            std::sync::Arc::new(payload);
-                        let active_doc = active_doc_from_world(world);
-                        let mut state =
-                            world.resource_mut::<CanvasDiagramState>();
-                        let docstate = state.get_mut(active_doc);
-                        let scene = &mut docstate.canvas.scene;
-                        let id = scene.alloc_node_id();
-                        // 60×40 default size in canvas world coords;
-                        // anchor top-left at the click point so the
-                        // plot appears where the menu opened.
-                        scene.insert_node(lunco_canvas::scene::Node {
-                            id,
-                            rect: lunco_canvas::Rect::from_min_max(
-                                click_world,
-                                lunco_canvas::Pos::new(
-                                    click_world.x + 60.0,
-                                    click_world.y + 40.0,
-                                ),
-                            ),
-                            kind: lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND
-                                .into(),
-                            data,
-                            ports: Vec::new(),
-                            label: String::new(),
-                            origin: None,
-                        });
+                        insert_plot_node(world, click_world, entity.to_bits(), path);
                         ui.close();
                     }
                 }
@@ -4823,6 +5878,42 @@ fn active_doc_from_world(world: &World) -> Option<lunco_doc::DocumentId> {
     world
         .resource::<lunco_workbench::WorkspaceResource>()
         .active_document
+}
+
+/// Insert a plot scene node anchored at `click_world`. `entity_bits = 0`
+/// + empty `signal_path` is the unbound form — the visual draws an
+/// empty card the user can resize and bind later from the inspector.
+fn insert_plot_node(
+    world: &mut World,
+    click_world: lunco_canvas::Pos,
+    entity_bits: u64,
+    signal_path: &str,
+) {
+    let payload = lunco_viz::kinds::canvas_plot_node::PlotNodeData {
+        entity: entity_bits,
+        signal_path: signal_path.to_string(),
+        title: String::new(),
+    };
+    let data: lunco_canvas::NodeData = std::sync::Arc::new(payload);
+    let active_doc = active_doc_from_world(world);
+    let mut state = world.resource_mut::<CanvasDiagramState>();
+    let docstate = state.get_mut(active_doc);
+    let scene = &mut docstate.canvas.scene;
+    let id = scene.alloc_node_id();
+    scene.insert_node(lunco_canvas::scene::Node {
+        id,
+        rect: lunco_canvas::Rect::from_min_max(
+            click_world,
+            lunco_canvas::Pos::new(click_world.x + 60.0, click_world.y + 40.0),
+        ),
+        kind: lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND.into(),
+        data,
+        ports: Vec::new(),
+        label: String::new(),
+        origin: None,
+        resizable: true,
+        visual_rect: None,
+    });
 }
 
 // ─── Drill-in loading overlay ──────────────────────────────────────
@@ -5673,6 +6764,7 @@ pub fn drive_duplicate_loads(
     mut registry: bevy::prelude::ResMut<ModelicaDocumentRegistry>,
     mut probe: Option<bevy::prelude::ResMut<crate::FrameTimeProbe>>,
     mut egui_q: bevy::prelude::Query<&mut bevy_egui::EguiContext>,
+    mut class_names: bevy::prelude::ResMut<DrilledInClassNames>,
 ) {
     use bevy::prelude::*;
     // While any duplicate is in-flight, ping egui every tick so the
@@ -5711,6 +6803,23 @@ pub fn drive_duplicate_loads(
             dup_display_name, origin_short,
         );
         had_install = true;
+        // Seed the drill-in target so the canvas projects the inner
+        // model, not the package's empty top-level. Duplicating a
+        // `package Foo { model Bar ... }` lands as
+        // `package FooCopy { model Bar ... }`; `DrilledInClassNames`
+        // points at `FooCopy.Bar` so the projection scopes the builder
+        // to that class. Without this the user sees the empty-overlay
+        // placeholder card and has to click into the package tree
+        // manually.
+        if let Some(host) = registry.host(doc_id) {
+            if let Some(ast) = host.document().ast().result.as_ref().ok() {
+                if let Some(qualified) =
+                    crate::ast_extract::extract_model_name_from_ast(ast)
+                {
+                    class_names.set(doc_id, qualified);
+                }
+            }
+        }
         // Pre-warm the MSL inheritance chain on a dedicated thread so
         // the projection finds inherited connectors. Same pattern as
         // the drill-in path. The duplicated copy carries `within
@@ -6340,6 +7449,11 @@ fn synthesize_msl_node(
         ports,
         label: instance_name.to_string(),
         origin: Some(instance_name.to_string()),
+        resizable: false,
+        // Optimistic synth: skip the icon-bbox computation (cheap but
+        // not free); the next reproject from the source overwrites
+        // this node anyway with the bbox-aware version.
+        visual_rect: None,
     });
     id
 }

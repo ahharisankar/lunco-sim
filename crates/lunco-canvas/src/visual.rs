@@ -331,6 +331,8 @@ mod tests {
             ],
             label: String::new(),
             origin: None,
+            resizable: true,
+            visual_rect: None,
         }
     }
 

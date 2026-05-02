@@ -106,7 +106,7 @@ package AnnotatedRocketStage
     // as `valve.opening` in the flattened model. No wrapper input
     // on the stage; UI controls bind directly to the valve.
     Valve valve(m_flow_max = 100)
-      annotation(Placement(transformation(extent={{-40,10},{0,50}})));
+      annotation(Placement(transformation(extent={{-40,-20},{0,20}})));
     Engine engine(p_chamber = 1.0e5)
       annotation(Placement(transformation(extent={{15,-30},{55,30}})));
     Airframe airframe(g = g, dry_mass = dry_mass)
@@ -151,7 +151,7 @@ package AnnotatedRocketStage
       "Propellant mass (kg)";
 
     FluidPort_a port "Fluid outlet"
-      annotation(Placement(transformation(extent={{-10,-120},{10,-100}})));
+      annotation(Placement(transformation(extent={{-10,-90},{10,-70}})));
     MassSignalOutput mass_out "Current mass (kg)"
       annotation(Placement(transformation(extent={{100,-10},{120,10}})));
     // Smooth supply availability ∈ [0, 1]: 1 when full, fading

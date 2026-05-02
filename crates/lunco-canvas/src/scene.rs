@@ -263,6 +263,26 @@ pub struct Node {
     /// crate free of any domain dependency.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    /// Whether the bottom-right resize handle is active for this node.
+    /// Plot / control / dashboard nodes are resizable; Modelica
+    /// component icons keep the size declared in their `Icon`
+    /// annotation (resizing them would desync from the source). Default
+    /// `true` so legacy code paths that build `Node` directly aren't
+    /// silently turned non-resizable.
+    #[serde(default = "default_resizable")]
+    pub resizable: bool,
+    /// Tight bounding box of the *visible* graphics, in world coords.
+    /// Layers that draw a halo around the node — selection outline,
+    /// hover, focus ring — should prefer this over `rect` so the halo
+    /// fits the actual icon and not the placement extent (Modelica
+    /// icons typically only fill ~50 % of their placement). `None`
+    /// means "no tight bounds reported, fall back to `rect`".
+    #[serde(default)]
+    pub visual_rect: Option<Rect>,
+}
+
+fn default_resizable() -> bool {
+    true
 }
 
 /// Reference to a specific port on a specific node. Edge endpoints
@@ -510,6 +530,8 @@ mod tests {
             }],
             label: String::new(),
             origin: None,
+            resizable: true,
+            visual_rect: None,
         });
         id
     }

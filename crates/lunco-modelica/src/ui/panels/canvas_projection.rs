@@ -728,6 +728,45 @@ pub fn import_model_to_diagram_from_ast(
             }
         }
 
+        // Last-resort placeholder: if every lookup missed, still
+        // render the component as a labelled rectangle. Without this,
+        // user-defined types that don't resolve (e.g. authored in
+        // the same file but with an unusual scope) silently drop out
+        // of the diagram and the user sees a blank canvas. A bare
+        // placeholder is far better — they can see the wiring and
+        // edit the source to fix the type.
+        //
+        // EXCEPT: builtin scalar primitives (`Real`, `Integer`,
+        // `Boolean`, `String`, `enumeration`) are *parameters*, not
+        // component instances — they don't belong on the diagram. The
+        // graph builder still emits them as nodes, so we have to
+        // filter here.
+        let is_builtin_scalar = matches!(
+            type_name,
+            "Real" | "Integer" | "Boolean" | "String" | "enumeration"
+        );
+        if component_def.is_none() && !type_name.is_empty() && !is_builtin_scalar {
+            let leaf = type_name.rsplit('.').next().unwrap_or(type_name);
+            component_def = Some(MSLComponentDef {
+                name: leaf.to_string(),
+                msl_path: type_name.to_string(),
+                category: "User".to_string(),
+                display_name: leaf.to_string(),
+                description: None,
+                icon_text: None,
+                ports: Vec::new(),
+                parameters: Vec::new(),
+                icon_graphics: None,
+                diagram_graphics: None,
+                is_expandable_connector: false,
+                short_description: None,
+                documentation_info: None,
+                is_example: false,
+                domain: String::new(),
+                class_kind: String::from("model"),
+            });
+        }
+
         // Re-extract the icon at runtime through the same code path
         // the standalone Icon view uses. The pre-baked
         // `MSLComponentDef.icon_graphics` from `msl_index.json` drops

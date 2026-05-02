@@ -205,11 +205,11 @@ impl NodeVisual for PlotNodeVisual {
         // the actual rect.max corner, so any visual MIN would
         // decouple the grip from where it appears. Users zoom in
         // when they need the plot bigger.
-        // Cull only when fully outside the canvas widget. Sub-pixel
-        // rects DO still paint — `egui` rounds them to 1px which
-        // keeps the plot visible as a marker dot at extreme zoom-out
-        // (rather than vanishing entirely as before).
-        if !ctx.ui.max_rect().intersects(egui_rect) {
+        // Cull only when fully off-canvas. The canvas widget's
+        // `set_clip_rect` (in lunco-canvas) handles the visual
+        // clipping for partial overlaps, so half-visible cards still
+        // render correctly without a broken-frame artefact.
+        if !ctx.ui.clip_rect().intersects(egui_rect) {
             return;
         }
         if egui_rect.width() < 1.0 || egui_rect.height() < 1.0 {
@@ -226,18 +226,22 @@ impl NodeVisual for PlotNodeVisual {
             return;
         }
 
+        // Hard-clip everything we paint to the canvas widget's own
+        // clip rect — without this the right-most plot in a row of
+        // nodes can visibly bleed into the inspector / side-panel
+        // area (e.g. paint over the Telemetry panel when the plot
+        // node is dragged near the right edge of the canvas).
+        let canvas_clip = ctx.ui.clip_rect();
         let theme = lunco_canvas::theme::current(ctx.ui.ctx());
         let stroke = if selected {
             egui::Stroke::new(2.0, theme.selection_outline)
         } else {
             egui::Stroke::new(1.0, theme.overlay_stroke)
         };
-        // Plot card uses a near-black fill so it always pops
-        // against the dark-grey canvas background — small +12 RGB
-        // bump from `overlay_fill` was visually invisible at small
-        // sizes (canvas bg is around the same brightness).
-        let card_fill = egui::Color32::from_rgb(8, 12, 18);
-        ctx.ui.painter().rect_filled(egui_rect, 6.0, card_fill);
+        // Card fill comes from the canvas theme so the plot matches
+        // the rest of the diagram nodes (no jarring near-black box
+        // when the active theme is light or mid-grey).
+        ctx.ui.painter().rect_filled(egui_rect, 6.0, theme.overlay_fill);
         // `Inside` so the stroke stays *within* the node's rect —
         // `Outside` would visually extend the plot 1-2 px past
         // node.rect on every side, decoupling the apparent size
@@ -261,24 +265,34 @@ impl NodeVisual for PlotNodeVisual {
             );
         }
 
-        let title = if self.data.title.is_empty() {
+        let title: &str = if !self.data.title.is_empty() {
+            &self.data.title
+        } else if !self.data.signal_path.is_empty() {
             &self.data.signal_path
         } else {
-            &self.data.title
+            "(unbound plot)"
         };
-        let entity = Entity::from_bits(self.data.entity);
+        // Unbound plots store `entity = 0` (invalid bit pattern in
+        // bevy 0.18). `try_from_bits` returns `None` instead of
+        // panicking, and an unbound plot naturally has no samples.
         let snapshot = fetch_signal_snapshot(ctx.ui.ctx());
-        let key = (entity, self.data.signal_path.clone());
-        let points = snapshot.samples.get(&key).cloned().unwrap_or_default();
+        let points: Vec<SamplePoint> = Entity::try_from_bits(self.data.entity)
+            .and_then(|e| {
+                snapshot
+                    .samples
+                    .get(&(e, self.data.signal_path.clone()))
+                    .cloned()
+            })
+            .unwrap_or_default();
 
-        // Adaptive density: when zoomed out the card is tiny and a
-        // text label / axes would be larger than the chart itself.
-        // Hide labels under 80×60 px, hide everything but the line
-        // under 40×30 px. Symmetric with how vector design tools
-        // handle thumbnail nodes.
+        // Adaptive density: at extreme zoom-out we drop to a bare
+        // sparkline (under 40×30 px). Above that we *always* keep
+        // the title row so the chart doesn't suddenly grow when the
+        // card crosses the old 80×60 threshold (that jump was
+        // jarring during canvas zoom).
         let card_w = egui_rect.width();
         let card_h = egui_rect.height();
-        let show_label = card_w >= 80.0 && card_h >= 60.0;
+        let show_label = card_w >= 40.0 && card_h >= 30.0;
         if card_w < 40.0 || card_h < 30.0 {
             // Tiny — just paint a sparkline directly into the rect,
             // no child UI.
@@ -312,7 +326,10 @@ impl NodeVisual for PlotNodeVisual {
             return;
         }
 
-        let inner_rect = egui_rect.shrink(4.0);
+        // Tight inset — we draw our own axis labels as overlays
+        // inside the plot area, so we don't need to reserve a margin
+        // for egui_plot's external axis strip.
+        let inner_rect = egui_rect.shrink(2.0);
         let mut child = ctx.ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(inner_rect)
@@ -320,9 +337,12 @@ impl NodeVisual for PlotNodeVisual {
         );
         // Hard-clip the child UI so anything inside (label text,
         // egui_plot legend / axes) never paints past the node's
-        // rect. egui_plot otherwise prefers its `min_size` (~96 px)
-        // and overflows when the node is smaller than that.
-        child.set_clip_rect(inner_rect);
+        // rect *or* past the canvas widget itself. egui_plot
+        // otherwise prefers its `min_size` (~96 px) and overflows
+        // when the node is smaller than that. Intersecting with
+        // `canvas_clip` is what stops a plot dragged near the right
+        // edge from painting over the Telemetry side panel.
+        child.set_clip_rect(inner_rect.intersect(canvas_clip));
         let label_h = if show_label {
             // Title row with hover hint — shows the full
             // signal-binding path (which may be truncated in the
@@ -360,30 +380,195 @@ impl NodeVisual for PlotNodeVisual {
             0.0
         };
         let color = crate::signal::color_for_signal(&self.data.signal_path);
-        // Explicit width/height so the plot fills exactly the
-        // remaining child area — no growth past the card.
-        let plot_w = inner_rect.width().max(1.0);
-        let plot_h = (inner_rect.height() - label_h).max(1.0);
-        Plot::new(("plot_node", node.id.0))
+        // Explicit width/height so the plot fills the child area
+        // *except* a small bottom-right strip reserved for the
+        // canvas's resize grip. Without this reservation egui_plot
+        // allocates a Response over the corner and steals the
+        // mouse-down, so the user can never resize the plot node.
+        let grip_reserve = 12.0_f32;
+        let plot_w = (inner_rect.width() - grip_reserve).max(1.0);
+        let plot_h = (inner_rect.height() - label_h - grip_reserve).max(1.0);
+        // Plot rect inside the card (under the title). Used for the
+        // overlay axis labels we paint directly onto the data area.
+        let plot_min_y = inner_rect.min.y + label_h;
+        let plot_rect = egui::Rect::from_min_max(
+            egui::pos2(inner_rect.min.x, plot_min_y),
+            egui::pos2(inner_rect.max.x, inner_rect.max.y),
+        );
+        // Adaptive chrome: only worth painting axis-labels overlay
+        // when the card is large enough that they don't dominate the
+        // line. Below 140×100 we keep the bare line + title.
+        let show_chrome = card_w >= 140.0 && card_h >= 100.0;
+        let plot = Plot::new(("plot_node", node.id.0))
             .width(plot_w)
             .height(plot_h)
+            // We draw our own min/max overlays inside the chart, so
+            // egui_plot's external axis strip / grid / legend are
+            // turned off — this also gives us the full width/height
+            // for the line itself. Title row above the plot already
+            // identifies the signal, so no in-plot legend.
             .show_axes([false, false])
             .show_grid(false)
+            .show_background(false)
+            // Plot does not capture pointer/wheel — the canvas owns
+            // pan/zoom AND the resize-handle hit test. egui_plot's
+            // default `click_and_drag` sense would swallow the
+            // primary-down before the canvas tool sees it, so the
+            // user can never grab the bottom-right resize grip on
+            // a plot node. `hover()` lets the click fall through.
             .allow_drag(false)
             .allow_zoom(false)
             .allow_scroll(false)
-            .show(&mut child, |plot_ui| {
-                if !points.is_empty() {
-                    plot_ui.line(
-                        Line::new("", PlotPoints::from(points)).color(color),
-                    );
+            .allow_boxed_zoom(false)
+            .sense(egui::Sense::hover())
+            // Hover tooltip used to spit raw f64 digits — when the
+            // sim diverges to 1e260 that's a 300-character wall of
+            // numbers that overflows the panel into adjacent UI.
+            // Route through `format_axis_value` for a compact form.
+            .label_formatter({
+                let var = short_name(&self.data.signal_path).to_owned();
+                move |_name, p| {
+                    format!("t: {} s\n{}: {}", format_axis_value(p.x), var, format_axis_value(p.y))
                 }
             });
+        plot.show(&mut child, |plot_ui| {
+            if !points.is_empty() {
+                let line_label = if self.data.title.is_empty() {
+                    self.data.signal_path.as_str()
+                } else {
+                    self.data.title.as_str()
+                };
+                plot_ui.line(
+                    Line::new(line_label, PlotPoints::from(points.clone())).color(color),
+                );
+            }
+        });
+
+        // Overlay axis numbers + faint grid lines INSIDE the plot
+        // rect so they read against the dark card without bleeding
+        // past the node bounds. Drawn after the plot so they sit on
+        // top of the line.
+        if show_chrome && !points.is_empty() {
+            let painter = ctx.ui.painter();
+            let (mut tmax, mut vmin, mut vmax) =
+                (f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+            for p in &points {
+                tmax = tmax.max(p[0]);
+                vmin = vmin.min(p[1]);
+                vmax = vmax.max(p[1]);
+            }
+            // Faint horizontal grid (3 lines) + one vertical mid-line.
+            // Derived from theme.overlay_stroke at low alpha so the
+            // grid stays subtle on whichever card fill is active.
+            let grid_color = {
+                let s = theme.overlay_stroke;
+                egui::Color32::from_rgba_unmultiplied(s.r(), s.g(), s.b(), 60)
+            };
+            let grid_stroke = egui::Stroke::new(1.0, grid_color);
+            for f in [0.25, 0.5, 0.75] {
+                let y = plot_rect.min.y + plot_rect.height() * f;
+                painter.line_segment(
+                    [egui::pos2(plot_rect.min.x, y), egui::pos2(plot_rect.max.x, y)],
+                    grid_stroke,
+                );
+            }
+            let mid_x = plot_rect.min.x + plot_rect.width() * 0.5;
+            painter.line_segment(
+                [egui::pos2(mid_x, plot_rect.min.y), egui::pos2(mid_x, plot_rect.max.y)],
+                grid_stroke,
+            );
+
+            // Corner labels use the signal's short name on the Y
+            // axis ("F: 26.0k", not just "26.0k") and an explicit
+            // `t` on the X axis. Theme-driven colour so they stay
+            // readable on any card fill.
+            let label_color = theme.overlay_text;
+            let font = egui::FontId::monospace(9.0);
+            let pad = 3.0;
+            let var = short_name(&self.data.signal_path);
+            // y-axis: max top-left, min bottom-left
+            painter.text(
+                egui::pos2(plot_rect.min.x + pad, plot_rect.min.y + pad),
+                egui::Align2::LEFT_TOP,
+                format!("{var}: {}", format_axis_value(vmax)),
+                font.clone(),
+                label_color,
+            );
+            painter.text(
+                egui::pos2(plot_rect.min.x + pad, plot_rect.max.y - pad),
+                egui::Align2::LEFT_BOTTOM,
+                format!("{var}: {}", format_axis_value(vmin)),
+                font.clone(),
+                label_color,
+            );
+            // x-axis: tmax bottom-right; tmin omitted (always 0 for
+            // a fresh sim, and putting two labels on the same row
+            // crowds the corner — "t: <max> s" is enough to give a
+            // reader the time scale).
+            painter.text(
+                egui::pos2(plot_rect.max.x - pad, plot_rect.max.y - pad),
+                egui::Align2::RIGHT_BOTTOM,
+                format!("t: {} s", format_axis_value(tmax)),
+                font,
+                label_color,
+            );
+        }
     }
 
     fn debug_name(&self) -> &str {
         PLOT_NODE_KIND
     }
+}
+
+/// Compact, fixed-width formatter for in-plot axis labels. Engineering
+/// suffixes (n/μ/m/k/M/G/T) keep mid-range values readable, falling
+/// back to scientific notation outside that range so a numerical
+/// blow-up renders as `1e+87` instead of an unreadable string of
+/// digits that escapes the corner.
+fn format_axis_value(v: f64) -> String {
+    if !v.is_finite() {
+        return "—".to_string();
+    }
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    let av = v.abs();
+    // Out of engineering range — fall back to compact scientific.
+    if av >= 1.0e15 || av < 1.0e-9 {
+        return format!("{:.1e}", v);
+    }
+    let (scale, suffix) = if av >= 1.0e12 {
+        (1.0e12, "T")
+    } else if av >= 1.0e9 {
+        (1.0e9, "G")
+    } else if av >= 1.0e6 {
+        (1.0e6, "M")
+    } else if av >= 1.0e3 {
+        (1.0e3, "k")
+    } else if av >= 1.0 {
+        (1.0, "")
+    } else if av >= 1.0e-3 {
+        (1.0e-3, "m")
+    } else if av >= 1.0e-6 {
+        (1.0e-6, "μ")
+    } else {
+        (1.0e-9, "n")
+    };
+    let scaled = v / scale;
+    if scaled.abs() >= 100.0 {
+        format!("{:.0}{}", scaled, suffix)
+    } else if scaled.abs() >= 10.0 {
+        format!("{:.1}{}", scaled, suffix)
+    } else {
+        format!("{:.2}{}", scaled, suffix)
+    }
+}
+
+/// Last dotted segment of a Modelica path — `nozzle.F` → `F`,
+/// `body.m_total` → `m_total`. Used as a short axis-label prefix
+/// inside the plot corner overlays.
+fn short_name(path: &str) -> &str {
+    path.rsplit('.').next().unwrap_or(path)
 }
 
 /// Convenience: register this kind with a `VisualRegistry`.

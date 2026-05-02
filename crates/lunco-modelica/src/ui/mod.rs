@@ -77,6 +77,7 @@ pub mod welcome_progress;
 /// Debounced AST reparse driver — see module docs.
 pub mod ast_refresh;
 pub mod input_activity;
+pub mod wire_router;
 /// Phase 1: bevy_vello-backed diagram canvas, one render target per
 /// open document tab. See module docs.
 pub mod vello_canvas;
@@ -552,6 +553,29 @@ impl Plugin for ModelicaUiPlugin {
             .init_resource::<panels::diagnostics::DiagnosticsLog>()
             .init_resource::<panels::journal::JournalLog>()
             .add_systems(Update, panels::journal::poll_changes)
+            // Canvas animation: API-driven AddComponent calls queue a
+            // pending camera focus; this system applies it via
+            // `viewport.set_target` (which auto-eases) once the new
+            // node has landed in the projected scene. See
+            // `docs/architecture/20-domain-modelica.md` § 9c.
+            .init_resource::<panels::canvas_diagram::PendingApiFocusQueue>()
+            .init_resource::<panels::canvas_diagram::PendingApiConnectionQueue>()
+            .init_resource::<panels::canvas_diagram::CinematicCamera>()
+            .add_systems(
+                Update,
+                (
+                    panels::canvas_diagram::drive_pending_api_focus,
+                    // Tick must run AFTER the focus driver so a move
+                    // queued this frame gets sampled the same frame
+                    // it's planned (saves one frame of "stuck" feel).
+                    panels::canvas_diagram::tick_cinematic_camera,
+                    // Connections fire alongside node adds and use
+                    // the same `EdgePulseLayer` to flash; ordering
+                    // doesn't matter relative to the camera tick.
+                    panels::canvas_diagram::drive_pending_api_connections,
+                )
+                    .chain(),
+            )
             // Forward StatusBus events to the Console panel so the
             // user has a chronological audit trail of every status
             // event from every subsystem (MSL, compile, sim, …).
@@ -678,6 +702,30 @@ impl Plugin for ModelicaUiPlugin {
             "LunCo Examples",
             false,
         )));
+        // Third-party Modelica libraries downloaded via lunco-assets.
+        // Each row appears alongside the MSL in the Twin browser as
+        // a top-level system library. The id ties to
+        // `PackageTreeCache::new()`'s extra-library entries — both
+        // use `<cache_subdir>_root` as the key.
+        //
+        // Adding a library means: (1) Assets.toml entry with the
+        // GitHub release tarball, (2) `msl_indexer.rs::extra_libraries`
+        // for palette / parsed-bundle inclusion, (3)
+        // `class_cache.rs` filesystem-resolve roots, (4) browser
+        // tree row in `package_browser.rs::PackageTreeCache::new`,
+        // (5) this registration. All five are tiny one-line
+        // additions with the same `<cache_subdir>` key.
+        if lunco_assets::cache_dir()
+            .join("thermofluidstream")
+            .join("ThermofluidStream")
+            .exists()
+        {
+            loaded.register(Box::new(loaded_classes::SystemLibraryClass::new(
+                "thermofluidstream_root",
+                "ThermofluidStream",
+                false,
+            )));
+        }
     }
 }
 

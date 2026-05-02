@@ -134,6 +134,15 @@ impl Canvas {
             ui.available_size(),
             egui::Sense::click_and_drag() | egui::Sense::click(),
         );
+        // Hard-clip every paint inside the canvas to its allocated
+        // rect. Without this, node visuals and overlays positioned
+        // near the canvas edge bleed past the boundary into adjacent
+        // egui content (side panels, neighbour widgets) — egui's
+        // default clip_rect is the parent UI, which is wider than
+        // the canvas's own rect when there are docked panels in the
+        // same parent. Tightening it here makes the rule explicit:
+        // we draw on the canvas, nothing outside it.
+        ui.set_clip_rect(rect);
         let screen_rect = Rect::from_min_max(
             Pos::new(rect.min.x, rect.min.y),
             Pos::new(rect.max.x, rect.max.y),

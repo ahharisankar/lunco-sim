@@ -513,19 +513,36 @@ pub fn locate_msl_file(qualified: &str) -> Option<std::path::PathBuf> {
     //    on a target that can't satisfy it.
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let msl_root = lunco_assets::msl_dir();
-        for i in (1..=segments.len()).rev() {
-            let mut dir = msl_root.clone();
-            for seg in &segments[..i] {
-                dir.push(seg);
+        // Search the MSL cache first, then any extra libraries
+        // installed via `lunco-assets`. Extra-library cache layout
+        // (per `Assets.toml`'s `dest = "<name>"`) puts the unpacked
+        // archive at `<cache>/<name>/`, with the actual Modelica
+        // package one level down (GitHub archive convention). The
+        // pairs below mirror `msl_indexer.rs::extra_libraries` —
+        // adding a library there + here is the two-line surface
+        // for new third-party libs.
+        let mut roots: Vec<std::path::PathBuf> = vec![lunco_assets::msl_dir()];
+        let cache_root = lunco_assets::cache_dir();
+        for cache_subdir in ["thermofluidstream"] {
+            let p = cache_root.join(cache_subdir);
+            if p.exists() {
+                roots.push(p);
             }
-            let pkg = dir.join("package.mo");
-            if pkg.exists() {
-                return Some(pkg);
-            }
-            let flat = dir.with_extension("mo");
-            if flat.exists() {
-                return Some(flat);
+        }
+        for root in &roots {
+            for i in (1..=segments.len()).rev() {
+                let mut dir = root.clone();
+                for seg in &segments[..i] {
+                    dir.push(seg);
+                }
+                let pkg = dir.join("package.mo");
+                if pkg.exists() {
+                    return Some(pkg);
+                }
+                let flat = dir.with_extension("mo");
+                if flat.exists() {
+                    return Some(flat);
+                }
             }
         }
     }
