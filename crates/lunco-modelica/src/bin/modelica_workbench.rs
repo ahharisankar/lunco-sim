@@ -69,7 +69,11 @@ fn main() {
 
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window { title: window_title, ..default() }),  // BISECT: default window (with decorations)
+            primary_window: Some(Window {
+                resolution: bevy::window::WindowResolution::new(1600, 1000),
+                position: WindowPosition::Centered(MonitorSelection::Primary),
+                ..lunco_workbench::merged_titlebar_window(window_title)
+            }),
             ..default()
         }))
         .add_plugins(EguiPlugin::default())
