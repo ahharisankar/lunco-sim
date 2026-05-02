@@ -95,7 +95,10 @@ pub struct UsdSimPlugin;
 
 impl Plugin for UsdSimPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(on_add_usd_sim_prim)
+        app.register_type::<WheelOf>()
+           .register_type::<RoverWheels>()
+           .register_type::<ArticulationRoot>()
+           .add_observer(on_add_usd_sim_prim)
            // `try_wire_wheel` runs in PreUpdate so that Wire entities exist
            // before `wire_system` (Update) propagates values through them.
            .add_systems(PreUpdate, try_wire_wheel)
@@ -132,6 +135,43 @@ fn has_api_schema(reader: &mut TextReader, path: &SdfPath, schema_name: &str) ->
     }
     false
 }
+
+/// Logical link from a joint-based wheel rigid body up to its rover.
+///
+/// Decouples ownership ("this wheel belongs to that rover") from the
+/// Bevy parent-child hierarchy, which is reserved for transform
+/// propagation. Used for selection ("click on a wheel, focus the
+/// rover"), camera follow, and to find the matching `RoverWheels`
+/// list when teleporting / despawning the rover.
+///
+/// Set in `setup_physical_wheel`; mirrors the standard OpenUSD
+/// `PhysicsArticulationRootAPI` link declared on the rover Xform —
+/// when Avian gains articulation support, this component becomes a
+/// runtime reflection of the authored articulation graph.
+#[derive(Component, Debug, Clone, Copy, Reflect)]
+#[reflect(Component)]
+pub struct WheelOf(pub Entity);
+
+/// On a rover root: the wheel rigid bodies the rover owns.
+///
+/// Populated alongside [`WheelOf`] for the inverse lookup — iterating
+/// a single rover's wheels without scanning every wheel in the world.
+#[derive(Component, Debug, Default, Clone, Reflect)]
+#[reflect(Component)]
+pub struct RoverWheels(pub Vec<Entity>);
+
+/// Marker for rovers authored with `PhysicsArticulationRootAPI`.
+///
+/// Standard OpenUSD schema declaring "this Xform plus everything joint-
+/// connected below it is **one** articulated multibody, not loose
+/// rigid bodies that happen to be linked." Avian 0.6's XPBD-impulse
+/// solver doesn't natively articulate; we honour the declaration by
+/// reparenting wheels to top-level and tracking the link via
+/// `WheelOf`/`RoverWheels`. The day Avian gains articulation, this
+/// marker becomes the trigger for the engine-native path.
+#[derive(Component, Debug, Default, Clone, Copy, Reflect)]
+#[reflect(Component)]
+pub struct ArticulationRoot;
 
 /// Marker for physical wheels awaiting full physical setup.
 ///
@@ -340,7 +380,19 @@ fn process_usd_sim_prims(
                 RoverVessel,
                 lunco_core::SelectableRoot,
                 lunco_core::Vessel,
+                RoverWheels::default(),
             ));
+
+            // OpenUSD-standard `PhysicsArticulationRootAPI` declares
+            // the rover as an articulated multibody. We mark it for
+            // downstream code that needs to know wheels and chassis
+            // are kinematically coupled even after the wheels are
+            // reparented out of the Bevy hierarchy.
+            if has_api_schema(&mut reader, &sdf_path, "PhysicsArticulationRootAPI") {
+                commands.entity(entity).insert(ArticulationRoot);
+                info!("Detected PhysicsArticulationRootAPI on {}", prim_path.path);
+            }
+
             info!("Successfully initialized FSW for {}", prim_path.path);
         }
 
@@ -650,6 +702,15 @@ fn setup_physical_wheel(
         JointCollisionDisabled,
         Name::new(format!("PhysicalWheelJoint_{}", prim_path.path)),
     ));
+
+    // Logical wheel↔rover link, independent of Bevy hierarchy.
+    // Reflects the OpenUSD `PhysicsArticulationRootAPI` graph.
+    commands.entity(entity).insert(WheelOf(chassis));
+    commands.queue(move |world: &mut World| {
+        if let Some(mut rw) = world.get_mut::<RoverWheels>(chassis) {
+            rw.0.push(entity);
+        }
+    });
 }
 
 /// Marker to indicate a prim has been processed by the sim system.

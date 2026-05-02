@@ -146,6 +146,17 @@ def Xform "SandboxScene"
     # joint-based instead of raycast — see `lunco-usd-sim` dispatcher.
     def Xform "Skid_Physical_1" (
         prepend references = @../../vessels/rovers/skid_rover.usda@</SkidRover>
+        # Re-list the base's apiSchemas alongside the per-instance
+        # `PhysicsArticulationRootAPI` so the composed list is complete
+        # — openusd-rs's resolver returns this prim's local apiSchemas
+        # rather than the cross-layer composed set.
+        prepend apiSchemas = [
+            "PhysicsRigidBodyAPI",
+            "PhysicsMassAPI",
+            "PhysxVehicleContextAPI",
+            "PhysxVehicleDriveSkidAPI",
+            "PhysicsArticulationRootAPI"
+        ]
     )
     {
         double3 xformOp:translate = (-15.0, 5.0, -10.0)
@@ -225,6 +236,13 @@ def Xform "SandboxScene"
 
     def Xform "Ackermann_Physical_1" (
         prepend references = @../../vessels/rovers/ackermann_rover.usda@</AckermannRover>
+        prepend apiSchemas = [
+            "PhysicsRigidBodyAPI",
+            "PhysicsMassAPI",
+            "PhysxVehicleContextAPI",
+            "PhysxVehicleDrive4WAPI",
+            "PhysicsArticulationRootAPI"
+        ]
     )
     {
         double3 xformOp:translate = (-25.0, 5.0, 0.0)
