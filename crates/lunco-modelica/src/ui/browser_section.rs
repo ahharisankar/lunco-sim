@@ -358,23 +358,36 @@ fn render_class_row(
         && active_qualified == Some(class.qualified_path.as_str());
 
     if class.children.is_empty() {
-        ui.horizontal(|ui| {
+        let resp = ui.horizontal(|ui| {
             paint_badge(ui, badge, theme);
-            // `selectable_label`'s `selected` flag drives egui's own
-            // highlight chrome — same look as the active tab in the
-            // dock, so the visual language is consistent.
             let label = if is_active {
                 egui::RichText::new(&class.short_name).strong()
             } else {
                 egui::RichText::new(&class.short_name)
             };
-            let resp = ui.selectable_label(is_active, label);
-            if resp.clicked() {
-                ctx.actions.push(BrowserAction::OpenLoadedClass {
-                    doc_id: doc_id.raw(),
-                    qualified_path: class.qualified_path.clone(),
-                });
-            }
+            ui.add(egui::Label::new(label).sense(egui::Sense::click()))
+        }).inner;
+        // Explicit highlight band — `selectable_label`'s default
+        // selected chrome blends into the panel background under a
+        // dark egui theme, leaving the user with no visual cue. We
+        // paint the same translucent yellow the package-browser
+        // tree's `render_node` uses so the active row matches across
+        // both views (Twin sidebar Modelica section + standalone
+        // Package Browser).
+        if is_active {
+            ui.painter().rect_filled(
+                resp.rect,
+                2.0,
+                egui::Color32::from_rgba_unmultiplied(80, 80, 0, 40),
+            );
+        }
+        if resp.clicked() {
+            ctx.actions.push(BrowserAction::OpenLoadedClass {
+                doc_id: doc_id.raw(),
+                qualified_path: class.qualified_path.clone(),
+            });
+        }
+        {
             // Hover stays lightweight — short name + qualified path
             // only. The docstring lives in the Docs view, not on
             // hover, so we don't duplicate content one click away.
@@ -387,7 +400,7 @@ fn render_class_row(
                         .color(muted),
                 );
             });
-        });
+        }
     } else {
         let mut header_text =
             egui::RichText::new(format!("{} {}", badge.letter, class.short_name));

@@ -1190,10 +1190,41 @@ fn main() {
         t_index.elapsed().as_secs_f64()
     );
 
+    // Bundled examples — small `.mo` files compiled into the workbench
+    // binary at runtime via `include_dir!()`. Pre-parse their class
+    // hierarchy here so the Package Browser can render them with
+    // proper kind badges and expandable inner classes (matches MSL /
+    // workspace docs) without paying any parse cost at startup.
+    let bundled_trees = scan_bundled_examples();
+    println!(
+        "[indexer] bundled examples indexed: {} files",
+        bundled_trees.len()
+    );
+
+    // Local `MslIndex` mirror — wire-compatible with
+    // `lunco_modelica::visual_diagram::MslIndex` (serde structurally
+    // matches), but built around the indexer's local
+    // `MSLComponentDef` so we don't need to share the type across
+    // crates. The runtime reader on the other side uses the
+    // canonical `MslIndex` and accepts both shapes.
+    #[derive(Serialize)]
+    struct LocalMslIndex<'a> {
+        components: &'a [MSLComponentDef],
+        bundled: &'a [lunco_modelica::visual_diagram::BundledFileTree],
+    }
     let output_path = lunco_assets::msl_dir().join("msl_index.json");
-    let json = serde_json::to_string_pretty(&components).unwrap();
+    let index = LocalMslIndex {
+        components: &components,
+        bundled: &bundled_trees,
+    };
+    let json = serde_json::to_string_pretty(&index).unwrap();
     fs::write(&output_path, json).unwrap();
-    println!("[indexer] wrote {} → {}", components.len(), output_path.display());
+    println!(
+        "[indexer] wrote {} components + {} bundled trees → {}",
+        components.len(),
+        bundled_trees.len(),
+        output_path.display()
+    );
 
     // Pre-parsed bundle for the workbench's fast path. Native mirror
     // of the wasm `parsed-*.bin.zst` artifact: bincode-serialised
@@ -1229,6 +1260,85 @@ fn main() {
         "[indexer] all done in {:.1}s",
         t_total.elapsed().as_secs_f64()
     );
+}
+
+/// Parse every bundled `.mo` (compiled into `lunco_modelica` via
+/// `include_dir!`) and produce a [`BundledFileTree`] for each. The
+/// runtime Package Browser consumes the result so multi-class
+/// bundled files (`AnnotatedRocketStage.mo`'s package + nested
+/// models / connectors) render with the same shape MSL files get.
+///
+/// Pure function over the in-memory `bundled_models()` list — no
+/// disk I/O beyond what `include_dir!` already inlined at compile
+/// time, so the cost is `n * parse(file)`, ≤ ~10 small files.
+fn scan_bundled_examples() -> Vec<lunco_modelica::visual_diagram::BundledFileTree> {
+    use lunco_modelica::models::bundled_models;
+    use lunco_modelica::visual_diagram::{BundledClassTree, BundledFileTree};
+
+    // `parse_to_syntax(...).best_effort()` is the same path
+    // `SyntaxCache::from_source` uses and is what the workspace
+    // browser already renders cleanly — it preserves the full
+    // nested class list, including `partial connector` siblings
+    // that the bare `parse_to_recovered_ast` recovery parser
+    // truncates after the first error-ish token.
+    bundled_models()
+        .into_iter()
+        .filter_map(|m| {
+            let syntax = rumoca_phase_parse::parse_to_syntax(m.source, m.filename);
+            let ast = syntax.best_effort();
+            let (top_short, top_class) = ast.classes.iter().next()?;
+            Some(BundledFileTree {
+                filename: m.filename.to_string(),
+                top: bundled_class_tree(top_short, top_class, ""),
+            })
+        })
+        .collect()
+}
+
+fn bundled_class_tree(
+    short_name: &str,
+    class_def: &ClassDef,
+    parent_path: &str,
+) -> lunco_modelica::visual_diagram::BundledClassTree {
+    use lunco_modelica::visual_diagram::BundledClassTree;
+    let qualified = if parent_path.is_empty() {
+        short_name.to_string()
+    } else {
+        format!("{parent_path}.{short_name}")
+    };
+    let children = class_def
+        .classes
+        .iter()
+        .map(|(child_short, child_def)| {
+            bundled_class_tree(child_short, child_def, &qualified)
+        })
+        .collect();
+    BundledClassTree {
+        short_name: short_name.to_string(),
+        qualified_path: qualified,
+        class_kind: bundled_class_kind(&class_def.class_type).to_string(),
+        description: class_def
+            .description
+            .iter()
+            .next()
+            .map(|t| t.text.as_ref().trim_matches('"').to_string())
+            .filter(|s| !s.is_empty()),
+        children,
+    }
+}
+
+fn bundled_class_kind(kind: &ClassType) -> &'static str {
+    match kind {
+        ClassType::Model => "model",
+        ClassType::Block => "block",
+        ClassType::Connector => "connector",
+        ClassType::Function => "function",
+        ClassType::Record => "record",
+        ClassType::Type => "type",
+        ClassType::Package => "package",
+        ClassType::Class => "class",
+        ClassType::Operator => "operator",
+    }
 }
 
 /// Drive a full rumoca compile of every requested model so that

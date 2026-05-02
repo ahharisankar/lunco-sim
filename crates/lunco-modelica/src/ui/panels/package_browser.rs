@@ -75,6 +75,15 @@ pub struct FileLoadResult {
     pub line_starts: std::sync::Arc<[usize]>,
     pub detected_name: Option<String>,
     pub layout_job: Option<bevy_egui::egui::text::LayoutJob>,
+    /// Pre-allocated document id and fully-built `ModelicaDocument`
+    /// from the bg task. The heavy work (rumoca parse + AST cache
+    /// fill) runs off the UI thread; the main thread only performs
+    /// the cheap `install_prebuilt` HashMap insert. Without this
+    /// the parse used to block egui for hundreds of ms on
+    /// MSL-package-sized files (Rotational, MultiBody) — a clear
+    /// violation of the "Update systems short" mandate.
+    pub doc_id: lunco_doc::DocumentId,
+    pub doc: crate::document::ModelicaDocument,
 }
 
 /// Tracks one in-memory ("scratch") model the user has created this
@@ -101,6 +110,15 @@ pub struct PackageTreeCache {
     pub tasks: Vec<Task<ScanResult>>,
     /// Active file loading tasks.
     pub file_tasks: Vec<Task<FileLoadResult>>,
+    /// Ids currently being loaded — guards against the user
+    /// double- / triple-clicking a row while the bg parse is still
+    /// running. Without this, every re-click spawns a fresh task
+    /// and ends up opening a duplicate tab once each completes.
+    /// Inserted before `spawn`, removed in `handle_package_loading_tasks`
+    /// when the task finishes (success or failure). Maps id →
+    /// reserved doc_id so a re-click can also re-focus the
+    /// pre-opened placeholder tab.
+    pub loading_ids: std::collections::HashMap<String, lunco_doc::DocumentId>,
     /// In-memory models created via "New Model…" this session. Listed
     /// under "Your Models" so the user can click back into one after
     /// they've navigated away.
@@ -231,6 +249,7 @@ impl PackageTreeCache {
             roots,
             tasks: Vec::new(),
             file_tasks: Vec::new(),
+            loading_ids: std::collections::HashMap::new(),
             in_memory_models: Vec::new(),
             twin: None,
             twin_scan_task: None,
@@ -494,25 +513,74 @@ pub fn discover_third_party_libs() -> Vec<(String, String)> {
 }
 
 fn build_bundled_tree() -> Vec<PackageNode> {
-    // Use the bundled:// URL scheme as the id so open_model can find it.
+    use crate::visual_diagram::{msl_bundled_trees, BundledClassTree};
+    // Pre-baked tree shape from `msl_indexer` (in `msl_index.json`).
+    // Lets multi-class bundled files render with proper kind badges
+    // and expandable inner classes — same shape MSL files get from
+    // the disk scan. `bundled_models()` still owns the source text;
+    // the index just adds the structure we'd otherwise have to
+    // parse at startup. Keyed by filename.
+    let trees = msl_bundled_trees();
+    let trees_by_filename: std::collections::HashMap<&str, &BundledClassTree> =
+        trees.iter().map(|t| (t.filename.as_str(), &t.top)).collect();
     bundled_models()
         .iter()
-        .map(|m| PackageNode::Model {
-            id: format!("bundled://{}", m.filename),
-            name: m
-                .filename
-                .strip_suffix(".mo")
-                .unwrap_or(m.filename)
-                .to_string(),
-            library: ModelLibrary::Bundled,
-            // Bundled sources are baked into the binary, not on disk
-            // — `peek_class_header` can't reach them. Almost all
-            // bundled examples are `model`s; default to that so the
-            // badge reads sensibly until we plumb the kind from the
-            // bundled metadata.
-            class_kind: Some("model".to_string()),
+        .map(|m| match trees_by_filename.get(m.filename) {
+            Some(tree) => bundled_class_to_node(m.filename, tree),
+            // No index entry (legacy `msl_index.json` predating the
+            // bundled-tree extension, or a `.mo` added since the
+            // last indexer run) — fall back to a flat leaf with a
+            // `model` badge guess. Re-running `msl_indexer` upgrades
+            // it to the proper shape next launch.
+            None => PackageNode::Model {
+                id: format!("bundled://{}", m.filename),
+                name: m
+                    .filename
+                    .strip_suffix(".mo")
+                    .unwrap_or(m.filename)
+                    .to_string(),
+                library: ModelLibrary::Bundled,
+                class_kind: Some("model".to_string()),
+            },
         })
         .collect()
+}
+
+/// Convert one indexer-baked [`BundledClassTree`] into a
+/// [`PackageNode`]. Package classes become Categories with
+/// recursively-built children; leaves become Models. Click ids
+/// route through `bundled://<filename>#<qualified>` so the open
+/// handler can drill into a specific inner class — matches MSL's
+/// `msl_path:` drill-in convention but scoped to the bundled
+/// source file.
+fn bundled_class_to_node(
+    filename: &str,
+    tree: &crate::visual_diagram::BundledClassTree,
+) -> PackageNode {
+    let is_package = tree.class_kind == "package";
+    if is_package && !tree.children.is_empty() {
+        let mut children: Vec<PackageNode> = tree
+            .children
+            .iter()
+            .map(|child| bundled_class_to_node(filename, child))
+            .collect();
+        children.sort_by_key(omedit_sort_key);
+        PackageNode::Category {
+            id: format!("bundled://{filename}#{}", tree.qualified_path),
+            name: tree.short_name.clone(),
+            package_path: tree.qualified_path.clone(),
+            fs_path: std::path::PathBuf::new(),
+            children: Some(children),
+            is_loading: false,
+        }
+    } else {
+        PackageNode::Model {
+            id: format!("bundled://{filename}#{}", tree.qualified_path),
+            name: tree.short_name.clone(),
+            library: ModelLibrary::Bundled,
+            class_kind: Some(tree.class_kind.clone()),
+        }
+    }
 }
 
 fn find_and_update_node(nodes: &mut [PackageNode], parent_id: &str, children: Vec<PackageNode>) -> bool {
@@ -587,23 +655,21 @@ pub fn handle_package_loading_tasks(
     }
 
     for result in finished_files {
+        // Drop the dedup guard: subsequent clicks on the same row
+        // now go through the registry-lookup branch and re-focus
+        // the existing tab instead of spawning another parse.
+        cache.loading_ids.remove(&result.id);
         // Final font-dependent shaping on main thread
         let cached_galley = result.layout_job.map(|job| {
             egui_ctx.ctx_mut().unwrap().fonts_mut(|f| f.layout_job(job))
         });
 
-        // Allocate the Document *now* so we have a stable DocumentId
-        // to key a tab by. Previously we deferred allocation until the
-        // first Compile, but multi-tab needs the id up front.
-        let writable = matches!(result.library, ModelLibrary::User);
-        let origin = lunco_doc::DocumentOrigin::File {
-            path: std::path::PathBuf::from(&result.id),
-            writable,
-        };
-        let doc_id = registry.allocate_with_origin(
-            result.source.to_string(),
-            origin,
-        );
+        // Document was pre-allocated off-thread by the bg task —
+        // installing here is just a HashMap insert. The expensive
+        // rumoca parse already finished by the time this runs, so
+        // the UI never blocks on it.
+        let doc_id = result.doc_id;
+        registry.install_prebuilt(doc_id, result.doc);
 
         // If the Twin Browser dispatcher queued a drill-in for this
         // file, apply it now. The canvas projector reads
@@ -973,10 +1039,24 @@ fn render_node(
     node: &mut PackageNode,
     ui: &mut egui::Ui,
     active_path: Option<&str>,
+    active_drill: Option<&str>,
     depth: usize,
     tasks: &mut Vec<Task<ScanResult>>,
     theme: &lunco_theme::Theme,
 ) -> Option<PackageAction> {
+    // Compare a tree-row id to the active document + drill-in state.
+    // Bundled rows use `bundled://<file>#<qualified>`, so the file
+    // half must match the active doc's `model_path` (with the
+    // fragment stripped on open) AND the qualified half must match
+    // the canvas's drill-in target. Non-bundled ids fall back to
+    // the bare file-path equality the legacy comparison did.
+    let id_is_active = |id: &str| -> bool {
+        if let Some((file, qual)) = id.split_once('#') {
+            active_path == Some(file) && active_drill == Some(qual)
+        } else {
+            active_path == Some(id) && active_drill.is_none()
+        }
+    };
     let indent = depth as f32 * 16.0 + 4.0;
     let mut result = None;
 
@@ -985,6 +1065,19 @@ fn render_node(
             let expand_id = egui::Id::new(format!("tree_expand_{}", id));
             let is_expanded = ui.memory(|m| m.data.get_temp::<bool>(expand_id).unwrap_or(false));
             let arrow = if is_expanded { "▼" } else { "▶" };
+            // Highlight the row when its id matches the active
+            // doc + drill-in pair. Currently meaningful for bundled
+            // package rows whose `bundled://<file>#<qualified>` id
+            // can refer to a `package` the user is currently
+            // viewing. Non-bundled Categories are directories with
+            // no doc-path equivalent, so they never match — same as
+            // before, no regression.
+            let is_active = id_is_active(id);
+            let bg_active = if is_active {
+                egui::Color32::from_rgba_unmultiplied(80, 80, 0, 40)
+            } else {
+                egui::Color32::TRANSPARENT
+            };
 
             let resp = ui.horizontal(|ui| {
                 ui.add_space(indent);
@@ -995,6 +1088,9 @@ fn render_node(
                     egui::RichText::new(name.as_str()).size(11.0)
                 ).sense(egui::Sense::click()))
             }).inner;
+            if is_active {
+                ui.painter().rect_filled(resp.rect, 2.0, bg_active);
+            }
 
             if resp.clicked() {
                 ui.memory_mut(|m| m.data.insert_temp(expand_id, !is_expanded));
@@ -1015,9 +1111,15 @@ fn render_node(
                             });
                             break;
                         }
-                        if let Some(req) =
-                            render_node(child, ui, active_path, depth + 1, tasks, theme)
-                        {
+                        if let Some(req) = render_node(
+                            child,
+                            ui,
+                            active_path,
+                            active_drill,
+                            depth + 1,
+                            tasks,
+                            theme,
+                        ) {
                             result = Some(req);
                         }
                     }
@@ -1051,7 +1153,7 @@ fn render_node(
             library,
             class_kind,
         } => {
-            let is_active = active_path == Some(id.as_str());
+            let is_active = id_is_active(id);
 
             let bg = if is_active {
                 egui::Color32::from_rgba_unmultiplied(80, 80, 0, 40)
@@ -1852,6 +1954,32 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
         state.is_loading = true;
     }
 
+    // Bundled inner-class click: ids of the form
+    // `bundled://<file>#<qualified>` carry a drill-in target in the
+    // fragment. Strip the fragment off so the source loader still
+    // resolves the file by its base id, and queue the qualified
+    // path into `PendingDrillIns` keyed by that same base — the
+    // file-load task will pick it up and seed `DrilledInClassNames`
+    // so the canvas lands on the inner class. Same machinery MSL
+    // inner-class clicks use; just routed through the bundled
+    // open-handler instead of the MSL path resolver.
+    let id = if let Some(hash) = id.find('#') {
+        if id.starts_with("bundled://") {
+            let qualified = id[hash + 1..].to_string();
+            let base = id[..hash].to_string();
+            if let Some(mut pending) = world
+                .get_resource_mut::<crate::ui::browser_dispatch::PendingDrillIns>()
+            {
+                pending.queue(base.clone(), qualified);
+            }
+            base
+        } else {
+            id
+        }
+    } else {
+        id
+    };
+
     // Determine the loading strategy based on the ID scheme
     if id.starts_with("mem://") {
         let mem_name_str = id.strip_prefix("mem://").unwrap_or("NewModel").to_string();
@@ -1936,7 +2064,67 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
         return;
     }
 
-    // Background load for all other types (Disk or Bundled)
+    // Background load for all other types (Disk or Bundled).
+    //
+    // Dedup: if a tab is already open for this id (registered
+    // doc whose origin path matches `id`) — focus it. If a load
+    // for this id is already in flight (user double-clicked while
+    // the bg parse is running), focus the placeholder tab we
+    // opened on the first click. Without these the second click
+    // reserves a new DocumentId, spawns a second parse, and the
+    // user ends up with a duplicate tab once both land.
+    let path_buf = std::path::PathBuf::from(&id);
+    let already_open: Option<lunco_doc::DocumentId> = world
+        .resource::<ModelicaDocumentRegistry>()
+        .find_by_path(&path_buf);
+    if let Some(doc) = already_open {
+        world
+            .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
+            .ensure(doc);
+        world.commands().trigger(lunco_workbench::OpenTab {
+            kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
+            instance: doc.raw(),
+        });
+        return;
+    }
+    if let Some(&doc) = world
+        .resource::<PackageTreeCache>()
+        .loading_ids
+        .get(&id)
+    {
+        world.commands().trigger(lunco_workbench::OpenTab {
+            kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
+            instance: doc.raw(),
+        });
+        return;
+    }
+    // Reserve a `DocumentId` up front so the bg task can build a
+    // fully-parsed `ModelicaDocument` off the UI thread (rumoca
+    // parses can take 100s of ms on MSL package files); the main
+    // thread only does the cheap `install_prebuilt` HashMap insert.
+    let reserved_doc_id = world
+        .resource_mut::<ModelicaDocumentRegistry>()
+        .reserve_id();
+    world
+        .resource_mut::<PackageTreeCache>()
+        .loading_ids
+        .insert(id.clone(), reserved_doc_id);
+    // Open the tab immediately so the user gets visible feedback
+    // even though the parse is still running off-thread. The model
+    // view paints a "Loading…" overlay while the registry has no
+    // host for the reserved id yet.
+    world
+        .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
+        .ensure(reserved_doc_id);
+    world.commands().trigger(lunco_workbench::OpenTab {
+        kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
+        instance: reserved_doc_id.raw(),
+    });
+    let writable = matches!(library, ModelLibrary::User);
+    let origin = lunco_doc::DocumentOrigin::File {
+        path: path_buf,
+        writable,
+    };
     let pool = AsyncComputeTaskPool::get();
     let id_clone = id.clone();
     let name_clone = name.clone();
@@ -2021,6 +2209,17 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
         let mut layout_job = crate::ui::panels::code_editor::modelica_layouter(&style, &source_text);
         layout_job.wrap.max_width = f32::INFINITY;
 
+        // Heavy: rumoca parse happens here, off the UI thread. The
+        // resulting `ModelicaDocument` carries its own copy of the
+        // source; we still return `source: Arc<str>` for the
+        // editor / open_model fields so the main thread doesn't
+        // need to clone the doc's source out under a lock.
+        let doc = crate::document::ModelicaDocument::with_origin(
+            reserved_doc_id,
+            source_text.clone(),
+            origin,
+        );
+
         FileLoadResult {
             id: id_clone,
             name: name_result,
@@ -2029,6 +2228,8 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
             line_starts: line_starts.into(),
             detected_name,
             layout_job: Some(layout_job),
+            doc_id: reserved_doc_id,
+            doc,
         }
     });
 
@@ -2064,6 +2265,20 @@ pub(crate) fn render_root_subtree(world: &mut World, ui: &mut egui::Ui, root_id:
         .get_resource::<WorkbenchState>()
         .and_then(|s| s.open_model.as_ref().map(|m| m.model_path.clone()));
     let active_path_ref = active_path.as_deref();
+    // Active drill-in target for the foreground tab — `RocketStage`
+    // when the user has clicked into the inner class of a bundled
+    // package, `AnnotatedRocketStage` when the package itself is
+    // selected. Used for tree-row highlighting so the inner-class
+    // bundled rows light up alongside their containing file.
+    let active_drill: Option<String> = world
+        .get_resource::<lunco_workbench::WorkspaceResource>()
+        .and_then(|ws| ws.active_document)
+        .and_then(|doc| {
+            world
+                .get_resource::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
+                .and_then(|m| m.get(doc).map(str::to_string))
+        });
+    let active_drill_ref = active_drill.as_deref();
     let theme = world
         .get_resource::<lunco_theme::Theme>()
         .cloned()
@@ -2097,9 +2312,15 @@ pub(crate) fn render_root_subtree(world: &mut World, ui: &mut egui::Ui, root_id:
                 ui.set_max_width(ui.available_width());
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                 for child in kids.iter_mut() {
-                    if let Some(a) =
-                        render_node(child, ui, active_path_ref, 0, &mut cache.tasks, &theme)
-                    {
+                    if let Some(a) = render_node(
+                        child,
+                        ui,
+                        active_path_ref,
+                        active_drill_ref,
+                        0,
+                        &mut cache.tasks,
+                        &theme,
+                    ) {
                         action = Some(a);
                     }
                 }

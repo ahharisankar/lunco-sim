@@ -6709,6 +6709,15 @@ pub struct DuplicateLoads {
 pub struct DuplicateBinding {
     pub display_name: String,
     pub origin_short: String,
+    /// Path *within* the duplicated top class the user was drilled
+    /// into when they hit Duplicate. e.g. duplicating an
+    /// `AnnotatedRocketStage` package while focused on its inner
+    /// `RocketStage` model lands here as `Some("RocketStage")` and
+    /// the install hook seeds `DrilledInClassNames` with
+    /// `<top_copy>.<inner_drill>` so the new tab opens on that
+    /// same inner class. `None` when the user was on the top
+    /// class itself.
+    pub inner_drill: Option<String>,
     pub started: web_time::Instant,
     pub task: bevy::tasks::Task<crate::document::ModelicaDocument>,
 }
@@ -6794,6 +6803,7 @@ pub fn drive_duplicate_loads(
         let poll_ms = t_poll.elapsed().as_secs_f64() * 1000.0;
         let dup_display_name = binding.display_name.clone();
         let origin_short = binding.origin_short.clone();
+        let inner_drill = binding.inner_drill.clone();
         loads.pending.remove(&doc_id);
         let t_install = web_time::Instant::now();
         registry.install_prebuilt(doc_id, doc);
@@ -6813,10 +6823,20 @@ pub fn drive_duplicate_loads(
         // manually.
         if let Some(host) = registry.host(doc_id) {
             if let Some(ast) = host.document().ast().result.as_ref().ok() {
-                if let Some(qualified) =
-                    crate::ast_extract::extract_model_name_from_ast(ast)
-                {
-                    class_names.set(doc_id, qualified);
+                // Prefer the explicit `inner_drill` from the binding
+                // — that's the path the user was viewing when they
+                // hit Duplicate, expressed relative to the original
+                // top class. Re-base it onto the renamed top
+                // (e.g. `RocketStage` → `AnnotatedRocketStageCopy.RocketStage`)
+                // so the canvas projects the same inner class on the
+                // new doc. Falls back to the AST-derived first model
+                // when the user duplicated the top class itself.
+                let qualified = match inner_drill.as_deref() {
+                    Some(rest) => Some(format!("{dup_display_name}.{rest}")),
+                    None => crate::ast_extract::extract_model_name_from_ast(ast),
+                };
+                if let Some(q) = qualified {
+                    class_names.set(doc_id, q);
                 }
             }
         }

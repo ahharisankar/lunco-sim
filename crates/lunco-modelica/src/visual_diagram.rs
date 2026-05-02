@@ -478,7 +478,7 @@ impl VisualDiagram {
 
 use std::sync::OnceLock;
 
-static MSL_LIBRARY: OnceLock<Vec<MSLComponentDef>> = OnceLock::new();
+static MSL_LIBRARY: OnceLock<MslIndex> = OnceLock::new();
 
 /// Returns the MSL component definitions available in the palette.
 /// Loaded from `msl_index.json` — either via the in-memory MSL bundle
@@ -491,16 +491,27 @@ static MSL_LIBRARY: OnceLock<Vec<MSLComponentDef>> = OnceLock::new();
 /// load until it succeeds, then memoize. Per-frame cost while empty is
 /// one `OnceLock::get` + one hashmap lookup — negligible.
 pub fn msl_component_library() -> &'static [MSLComponentDef] {
-    if let Some(lib) = MSL_LIBRARY.get() {
-        return lib;
-    }
-    if let Some(lib) = try_load_msl_library() {
-        let _ = MSL_LIBRARY.set(lib);
-    }
-    MSL_LIBRARY.get().map(|v| v.as_slice()).unwrap_or(&[])
+    msl_index().map(|i| i.components.as_slice()).unwrap_or(&[])
 }
 
-fn try_load_msl_library() -> Option<Vec<MSLComponentDef>> {
+/// Per-bundled-file class trees from the indexer. Empty when the
+/// running `msl_index.json` predates the bundled-tree extension —
+/// callers should fall back to flat-leaf rendering in that case.
+pub fn msl_bundled_trees() -> &'static [BundledFileTree] {
+    msl_index().map(|i| i.bundled.as_slice()).unwrap_or(&[])
+}
+
+fn msl_index() -> Option<&'static MslIndex> {
+    if let Some(idx) = MSL_LIBRARY.get() {
+        return Some(idx);
+    }
+    if let Some(idx) = try_load_msl_index() {
+        let _ = MSL_LIBRARY.set(idx);
+    }
+    MSL_LIBRARY.get()
+}
+
+fn try_load_msl_index() -> Option<MslIndex> {
     // 1. In-memory bundle (set by `MslRemotePlugin` on wasm; also
     //    populated on native if we ever decide to load via the same
     //    pipeline). This wins so a host that has both still uses the
@@ -508,8 +519,8 @@ fn try_load_msl_library() -> Option<Vec<MSLComponentDef>> {
     if let Some(src) = lunco_assets::msl::global_msl_source() {
         if let Some(bytes) = src.read(std::path::Path::new("msl_index.json")) {
             if let Ok(text) = std::str::from_utf8(&bytes) {
-                if let Ok(lib) = serde_json::from_str::<Vec<MSLComponentDef>>(text) {
-                    return Some(lib);
+                if let Some(idx) = parse_msl_index(text) {
+                    return Some(idx);
                 }
             }
         }
@@ -519,10 +530,28 @@ fn try_load_msl_library() -> Option<Vec<MSLComponentDef>> {
     {
         let path = lunco_assets::msl_dir().join("msl_index.json");
         if let Ok(content) = std::fs::read_to_string(path) {
-            if let Ok(lib) = serde_json::from_str::<Vec<MSLComponentDef>>(&content) {
-                return Some(lib);
+            if let Some(idx) = parse_msl_index(&content) {
+                return Some(idx);
             }
         }
+    }
+    None
+}
+
+/// Deserialise `msl_index.json` accepting both the new
+/// [`MslIndex`] object form and the legacy bare-array form. Older
+/// caches already on user disks parse cleanly via the array branch
+/// (with `bundled` left empty); freshly indexed caches use the
+/// object form.
+fn parse_msl_index(text: &str) -> Option<MslIndex> {
+    if let Ok(idx) = serde_json::from_str::<MslIndex>(text) {
+        return Some(idx);
+    }
+    if let Ok(components) = serde_json::from_str::<Vec<MSLComponentDef>>(text) {
+        return Some(MslIndex {
+            components,
+            bundled: Vec::new(),
+        });
     }
     None
 }

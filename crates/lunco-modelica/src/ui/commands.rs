@@ -1455,7 +1455,16 @@ fn on_duplicate_model_from_read_only(
     // parse in `ModelicaDocument::with_origin` — goes to a bg task
     // below. Per the architectural rule: no O(source_bytes) work
     // on the UI thread.
-    let (source_full, origin_class_short, origin_fqn, class_byte_range) = {
+    // Duplicate scope = the *file*, not the currently-drilled-in
+    // inner class. Picking the AST's top-level class (the package
+    // or model that owns the file) keeps cross-class refs intact —
+    // an inner `model RocketStage` referencing sibling `Tank` /
+    // `Valve` / `FluidPort_a` connectors stays consistent in the
+    // copy, instead of being torn out into a dangling stub. The
+    // user's drill-in is preserved as a navigation hint via
+    // `inner_drill` so the new tab opens on the same inner class
+    // they had selected.
+    let (source_full, origin_class_short, origin_fqn, class_byte_range, inner_drill) = {
         let Some(host) = registry.host(source_doc) else {
             console.error("Duplicate failed: source doc not found in registry");
             return;
@@ -1465,21 +1474,43 @@ fn on_duplicate_model_from_read_only(
             .as_ref()
             .and_then(|m| m.get(source_doc))
             .map(String::from);
-        let short = fqn
+        let ast_opt = doc.ast().ast();
+        // Top-level class name = first key in `ast.classes` if we
+        // have a parsed AST, otherwise fall back to the origin's
+        // display name (e.g. `Untitled1`). This is the *outermost*
+        // declaration in the file, never an inner class.
+        let top_short = ast_opt
             .as_ref()
-            .and_then(|q| q.rsplit('.').next().map(String::from))
+            .and_then(|ast| ast.classes.iter().next().map(|(n, _)| n.clone()))
+            .or_else(|| {
+                fqn.as_ref()
+                    .and_then(|q| q.split('.').next().map(String::from))
+            })
             .unwrap_or_else(|| doc.origin().display_name());
-        // Look up the class's exact byte range from the parsed AST.
-        // This is the robust replacement for the regex-based
-        // `extract_class_source` which mis-fires when the source has
-        // earlier docstrings that mention `block <ClassName>` (LimPID
-        // case — a docstring on `PID` mentions `block LimPID.` and
-        // the regex matches that line as the class header).
-        let byte_range: Option<(usize, usize)> = doc
-            .ast()
-            .ast()
-            .and_then(|ast| find_class_byte_range(ast, &short));
-        (doc.source().to_string(), short, fqn, byte_range)
+        let byte_range: Option<(usize, usize)> = ast_opt
+            .as_ref()
+            .and_then(|ast| find_class_byte_range(ast, &top_short));
+        // Path *within* the package the user was drilled into.
+        // `Modelica.Foo.Pkg.RocketStage` with top `Pkg` → drill =
+        // `RocketStage`. Empty / None when the user was on the top
+        // class itself (drill = top short, or no drill at all).
+        let inner_drill: Option<String> = fqn.as_ref().and_then(|q| {
+            let suffix = q.rsplit('.').next().unwrap_or("");
+            (suffix != top_short).then(|| {
+                // Strip the `<within>.<top>.` prefix if present, else
+                // just the `<top>.` prefix. Whatever's left is the
+                // inner-class path the canvas should drill into
+                // after the duplicate lands.
+                let after_top = q
+                    .split('.')
+                    .skip_while(|seg| *seg != top_short)
+                    .skip(1)
+                    .collect::<Vec<_>>()
+                    .join(".");
+                after_top
+            }).filter(|s| !s.is_empty())
+        });
+        (doc.source().to_string(), top_short, fqn, byte_range, inner_drill)
     };
 
     // Pick a new Untitled name. Try `<ClassName>Copy` first; fall
@@ -1534,19 +1565,18 @@ fn on_duplicate_model_from_read_only(
     let name_for_task = name.clone();
     let origin_fqn_for_task = origin_fqn.clone();
     let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
-        // 1. Extract just the target class's source from a
-        //    multi-class package file. Prefer the AST-derived byte
-        //    range (precise) over the regex fallback, which mis-fires
-        //    when an earlier class's docstring contains `block <Name>`.
-        //    Falls through to the full source if neither path resolved.
-        let class_src = match class_byte_range {
-            Some((s, e)) if e <= source_full.len() && s < e => {
-                let (s, e) = expand_class_byte_range(&source_full, s, e);
-                source_full[s..e].to_string()
-            }
-            _ => extract_class_source(&source_full, &origin_short_for_task)
-                .unwrap_or(source_full),
-        };
+        // We always duplicate the file-level *top* class (see the
+        // `top_short` derivation above). For a single-file package
+        // that means the whole source — no byte-range extraction
+        // needed, and any inner classes (RocketStage, FluidPort_a,
+        // …) come along automatically. Byte-range extraction was
+        // only needed back when duplicate operated on the
+        // currently-drilled-in inner class; under the present
+        // design the AST's recovered location.end can be wrong
+        // after a lenient-parse recovery, which truncated the
+        // extracted source mid-package and produced a malformed
+        // copy. Passing the whole source avoids that class entirely.
+        let class_src = source_full;
         // 2. Rewrite: rename the class + strip `within` so the
         //    copy is standalone.
         let renamed = rewrite_duplicated_source(
@@ -1599,6 +1629,7 @@ fn on_duplicate_model_from_read_only(
         crate::ui::panels::canvas_diagram::DuplicateBinding {
             display_name: name.clone(),
             origin_short: origin_class_short.clone(),
+            inner_drill: inner_drill.clone(),
             started: web_time::Instant::now(),
             task,
         },
@@ -1753,6 +1784,10 @@ fn on_open_example_in_workspace(
         crate::ui::panels::canvas_diagram::DuplicateBinding {
             display_name: name.clone(),
             origin_short: origin_short.clone(),
+            // OpenExampleInWorkspace duplicates a single named class
+            // (`qualified` is already the leaf the user clicked) —
+            // there's no inner-drill to preserve.
+            inner_drill: None,
             started: web_time::Instant::now(),
             task,
         },
