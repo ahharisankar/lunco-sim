@@ -205,11 +205,11 @@ impl NodeVisual for PlotNodeVisual {
         // the actual rect.max corner, so any visual MIN would
         // decouple the grip from where it appears. Users zoom in
         // when they need the plot bigger.
-        // Cull only when fully outside the canvas widget. Sub-pixel
-        // rects DO still paint — `egui` rounds them to 1px which
-        // keeps the plot visible as a marker dot at extreme zoom-out
-        // (rather than vanishing entirely as before).
-        if !ctx.ui.max_rect().intersects(egui_rect) {
+        // Cull only when fully off-canvas. The canvas widget's
+        // `set_clip_rect` (in lunco-canvas) handles the visual
+        // clipping for partial overlaps, so half-visible cards still
+        // render correctly without a broken-frame artefact.
+        if !ctx.ui.clip_rect().intersects(egui_rect) {
             return;
         }
         if egui_rect.width() < 1.0 || egui_rect.height() < 1.0 {

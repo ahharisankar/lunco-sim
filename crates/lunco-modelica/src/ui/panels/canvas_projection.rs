@@ -735,7 +735,17 @@ pub fn import_model_to_diagram_from_ast(
         // of the diagram and the user sees a blank canvas. A bare
         // placeholder is far better — they can see the wiring and
         // edit the source to fix the type.
-        if component_def.is_none() && !type_name.is_empty() {
+        //
+        // EXCEPT: builtin scalar primitives (`Real`, `Integer`,
+        // `Boolean`, `String`, `enumeration`) are *parameters*, not
+        // component instances — they don't belong on the diagram. The
+        // graph builder still emits them as nodes, so we have to
+        // filter here.
+        let is_builtin_scalar = matches!(
+            type_name,
+            "Real" | "Integer" | "Boolean" | "String" | "enumeration"
+        );
+        if component_def.is_none() && !type_name.is_empty() && !is_builtin_scalar {
             let leaf = type_name.rsplit('.').next().unwrap_or(type_name);
             component_def = Some(MSLComponentDef {
                 name: leaf.to_string(),

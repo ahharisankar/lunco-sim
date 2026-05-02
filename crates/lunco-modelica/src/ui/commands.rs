@@ -1541,6 +1541,7 @@ fn on_duplicate_model_from_read_only(
         //    Falls through to the full source if neither path resolved.
         let class_src = match class_byte_range {
             Some((s, e)) if e <= source_full.len() && s < e => {
+                let (s, e) = expand_class_byte_range(&source_full, s, e);
                 source_full[s..e].to_string()
             }
             _ => extract_class_source(&source_full, &origin_short_for_task)
@@ -1801,6 +1802,31 @@ fn find_class_byte_range(
         None
     }
     walk(&ast.classes, short_name)
+}
+
+/// Widen a `(start, end)` AST class span so the slice contains a
+/// stand-alone class definition: the start backs up to the beginning
+/// of the line containing the class header (so `package`/`model`/etc.
+/// plus any `partial`/`encapsulated` modifiers are included), and the
+/// end advances past the next `;` (rumoca's range stops at `end <Name>`,
+/// before the terminator). Without this, extracting a `package` from a
+/// multi-class file produces source that's missing the keyword and the
+/// trailing `;` — `rewrite_duplicated_source`'s header regex no-ops on
+/// it, and rumoca then picks the first nested class as the doc title.
+fn expand_class_byte_range(src: &str, start: usize, end: usize) -> (usize, usize) {
+    let bytes = src.as_bytes();
+    let mut s = start.min(bytes.len());
+    while s > 0 && bytes[s - 1] != b'\n' {
+        s -= 1;
+    }
+    let mut e = end.min(bytes.len());
+    while e < bytes.len() && (bytes[e] == b' ' || bytes[e] == b'\t') {
+        e += 1;
+    }
+    if e < bytes.len() && bytes[e] == b';' {
+        e += 1;
+    }
+    (s, e)
 }
 
 /// Replace bytes inside Modelica string literals and comments with
@@ -2973,8 +2999,13 @@ fn on_add_canvas_plot(trigger: On<AddCanvasPlot>, mut commands: Commands) {
             bevy::log::warn!("[AddCanvasPlot] no active document");
             return;
         };
-        let w = if ev.width > 0.0 { ev.width } else { 60.0 };
-        let h = if ev.height > 0.0 { ev.height } else { 40.0 };
+        // Default size matches the typical Modelica icon extent
+        // (-50..50 on each axis = 100×100 world units), with a
+        // slightly wider aspect that fits a time-series chart
+        // better than a square. Plots dropped via the palette no
+        // longer dwarf the components they sit next to.
+        let w = if ev.width > 0.0 { ev.width } else { 120.0 };
+        let h = if ev.height > 0.0 { ev.height } else { 90.0 };
         // Bind to the active simulator entity — same lookup
         // NewPlotPanel uses. Stored as the entity's bit-pattern so
         // the JSON payload is platform-stable.
