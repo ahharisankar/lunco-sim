@@ -294,7 +294,8 @@ impl Layer for SelectionLayer {
         for item in selection.iter() {
             if let crate::selection::SelectItem::Node(nid) = *item {
                 if let Some(node) = scene.node(nid) {
-                    let r = ctx.viewport.world_rect_to_screen(node.rect, sr);
+                    let halo_rect = node.visual_rect.unwrap_or(node.rect);
+                    let r = ctx.viewport.world_rect_to_screen(halo_rect, sr);
                     let rect = egui::Rect::from_min_max(
                         egui::pos2(r.min.x - 2.0, r.min.y - 2.0),
                         egui::pos2(r.max.x + 2.0, r.max.y + 2.0),

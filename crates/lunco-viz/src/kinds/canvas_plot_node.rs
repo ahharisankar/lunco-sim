@@ -229,9 +229,9 @@ impl NodeVisual for PlotNodeVisual {
         // Hard-clip everything we paint to the canvas widget's own
         // clip rect — without this the right-most plot in a row of
         // nodes can visibly bleed into the inspector / side-panel
-        // area (the panel layer paints over most of it but corner
-        // overlay labels still flash through during pan/zoom).
-        let _canvas_clip = ctx.ui.clip_rect();
+        // area (e.g. paint over the Telemetry panel when the plot
+        // node is dragged near the right edge of the canvas).
+        let canvas_clip = ctx.ui.clip_rect();
         let theme = lunco_canvas::theme::current(ctx.ui.ctx());
         let stroke = if selected {
             egui::Stroke::new(2.0, theme.selection_outline)
@@ -337,9 +337,12 @@ impl NodeVisual for PlotNodeVisual {
         );
         // Hard-clip the child UI so anything inside (label text,
         // egui_plot legend / axes) never paints past the node's
-        // rect. egui_plot otherwise prefers its `min_size` (~96 px)
-        // and overflows when the node is smaller than that.
-        child.set_clip_rect(inner_rect);
+        // rect *or* past the canvas widget itself. egui_plot
+        // otherwise prefers its `min_size` (~96 px) and overflows
+        // when the node is smaller than that. Intersecting with
+        // `canvas_clip` is what stops a plot dragged near the right
+        // edge from painting over the Telemetry side panel.
+        child.set_clip_rect(inner_rect.intersect(canvas_clip));
         let label_h = if show_label {
             // Title row with hover hint — shows the full
             // signal-binding path (which may be truncated in the

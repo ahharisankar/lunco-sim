@@ -271,6 +271,14 @@ pub struct Node {
     /// silently turned non-resizable.
     #[serde(default = "default_resizable")]
     pub resizable: bool,
+    /// Tight bounding box of the *visible* graphics, in world coords.
+    /// Layers that draw a halo around the node — selection outline,
+    /// hover, focus ring — should prefer this over `rect` so the halo
+    /// fits the actual icon and not the placement extent (Modelica
+    /// icons typically only fill ~50 % of their placement). `None`
+    /// means "no tight bounds reported, fall back to `rect`".
+    #[serde(default)]
+    pub visual_rect: Option<Rect>,
 }
 
 fn default_resizable() -> bool {
@@ -523,6 +531,7 @@ mod tests {
             label: String::new(),
             origin: None,
             resizable: true,
+            visual_rect: None,
         });
         id
     }

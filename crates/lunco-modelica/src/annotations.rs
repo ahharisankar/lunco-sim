@@ -177,6 +177,125 @@ pub struct Icon {
     pub graphics: Vec<GraphicItem>,
 }
 
+impl Icon {
+    /// AABB of the visible graphics (rectangles, ellipses, polygons,
+    /// lines, bitmaps) in icon-local coords. `Text` is excluded so
+    /// labels — which often hang past the visible body — don't inflate
+    /// the bounding box. `None` when the icon has no bounded primitive.
+    /// Used by the canvas projector to populate `Node::visual_rect`,
+    /// which `SelectionLayer` prefers over `node.rect` so the halo
+    /// fits the actual icon and not the placement extent.
+    pub fn graphics_bbox(&self) -> Option<Extent> {
+        let mut found = false;
+        let mut xmin = f64::INFINITY;
+        let mut ymin = f64::INFINITY;
+        let mut xmax = f64::NEG_INFINITY;
+        let mut ymax = f64::NEG_INFINITY;
+        let mut merge = |x: f64, y: f64| {
+            xmin = xmin.min(x);
+            ymin = ymin.min(y);
+            xmax = xmax.max(x);
+            ymax = ymax.max(y);
+            found = true;
+        };
+        for item in &self.graphics {
+            match item {
+                GraphicItem::Rectangle(r) => {
+                    merge(r.extent.p1.x + r.origin.x, r.extent.p1.y + r.origin.y);
+                    merge(r.extent.p2.x + r.origin.x, r.extent.p2.y + r.origin.y);
+                }
+                GraphicItem::Ellipse(e) => {
+                    merge(e.extent.p1.x + e.origin.x, e.extent.p1.y + e.origin.y);
+                    merge(e.extent.p2.x + e.origin.x, e.extent.p2.y + e.origin.y);
+                }
+                GraphicItem::Polygon(p) => {
+                    for pt in &p.points {
+                        merge(pt.x + p.origin.x, pt.y + p.origin.y);
+                    }
+                }
+                GraphicItem::Line(l) => {
+                    for pt in &l.points {
+                        merge(pt.x + l.origin.x, pt.y + l.origin.y);
+                    }
+                }
+                GraphicItem::Bitmap(b) => {
+                    merge(b.extent.p1.x + b.origin.x, b.extent.p1.y + b.origin.y);
+                    merge(b.extent.p2.x + b.origin.x, b.extent.p2.y + b.origin.y);
+                }
+                GraphicItem::Text(_) => continue,
+            }
+        }
+        if found {
+            Some(Extent {
+                p1: Point { x: xmin, y: ymin },
+                p2: Point { x: xmax, y: ymax },
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Full bounding box including `Text` labels. Used as the source
+    /// extent at *render* time so the icon fills its placement instead
+    /// of leaving 30–50 % empty padding on every side (typical of MSL
+    /// icons that draw at -50..50 within the standard -100..100 frame).
+    /// Selection halos use [`Self::graphics_bbox`] (no text) so labels
+    /// don't pad the halo, but rendering wants text included so labels
+    /// stay inside the placement rect when the icon is upscaled.
+    pub fn full_bbox(&self) -> Option<Extent> {
+        let mut xmin = f64::INFINITY;
+        let mut ymin = f64::INFINITY;
+        let mut xmax = f64::NEG_INFINITY;
+        let mut ymax = f64::NEG_INFINITY;
+        let mut found = false;
+        let mut merge = |x: f64, y: f64| {
+            xmin = xmin.min(x);
+            ymin = ymin.min(y);
+            xmax = xmax.max(x);
+            ymax = ymax.max(y);
+            found = true;
+        };
+        for item in &self.graphics {
+            match item {
+                GraphicItem::Rectangle(r) => {
+                    merge(r.extent.p1.x + r.origin.x, r.extent.p1.y + r.origin.y);
+                    merge(r.extent.p2.x + r.origin.x, r.extent.p2.y + r.origin.y);
+                }
+                GraphicItem::Ellipse(e) => {
+                    merge(e.extent.p1.x + e.origin.x, e.extent.p1.y + e.origin.y);
+                    merge(e.extent.p2.x + e.origin.x, e.extent.p2.y + e.origin.y);
+                }
+                GraphicItem::Polygon(p) => {
+                    for pt in &p.points {
+                        merge(pt.x + p.origin.x, pt.y + p.origin.y);
+                    }
+                }
+                GraphicItem::Line(l) => {
+                    for pt in &l.points {
+                        merge(pt.x + l.origin.x, pt.y + l.origin.y);
+                    }
+                }
+                GraphicItem::Bitmap(b) => {
+                    merge(b.extent.p1.x + b.origin.x, b.extent.p1.y + b.origin.y);
+                    merge(b.extent.p2.x + b.origin.x, b.extent.p2.y + b.origin.y);
+                }
+                GraphicItem::Text(t) => {
+                    merge(t.extent.p1.x + t.origin.x, t.extent.p1.y + t.origin.y);
+                    merge(t.extent.p2.x + t.origin.x, t.extent.p2.y + t.origin.y);
+                }
+            }
+        }
+        if found {
+            Some(Extent {
+                p1: Point { x: xmin, y: ymin },
+                p2: Point { x: xmax, y: ymax },
+            })
+        } else {
+            None
+        }
+    }
+}
+
 /// Decoded `Diagram(coordinateSystem=..., graphics={...})` annotation.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Diagram {

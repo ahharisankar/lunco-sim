@@ -3060,6 +3060,7 @@ fn on_add_canvas_plot(trigger: On<AddCanvasPlot>, mut commands: Commands) {
             label: String::new(),
             origin: None,
             resizable: true,
+            visual_rect: None,
         });
         bevy::log::info!(
             "[AddCanvasPlot] doc={} signal={} at ({},{}) {}x{} (node id={})",

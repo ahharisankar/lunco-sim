@@ -397,10 +397,25 @@ impl NodeVisual for IconNodeVisual {
             };
             let resolver_ref: &dyn Fn(&str) -> Option<f64> = &resolver;
             let palette = modelica_icon_palette_from_ctx(ctx.ui.ctx());
+            // Source coord system: prefer the icon's *graphics* bbox
+            // (visible body, excluding labels) so the icon body fills
+            // the placement instead of leaving 30–50 % empty padding
+            // around it. MSL convention is to author at -100..100, but
+            // many components actually draw at -50..50 / -60..60 etc.,
+            // which makes them look small inside the standard
+            // placement. Excluding text from the bbox is intentional:
+            // the body should fill the rect; labels drift slightly
+            // outside but get clipped by the canvas widget. Falls
+            // back to the declared coord system when there are no
+            // graphics.
+            let coord_system_for_paint = icon
+                .graphics_bbox()
+                .map(|e| crate::annotations::CoordinateSystem { extent: e })
+                .unwrap_or(icon.coordinate_system);
             crate::icon_paint::paint_graphics_themed(
                 painter,
                 rect,
-                icon.coordinate_system,
+                coord_system_for_paint,
                 orientation,
                 Some(&sub),
                 Some(resolver_ref),
@@ -719,7 +734,7 @@ impl NodeVisual for IconNodeVisual {
         // `ui.interact`). The widget is always visible while the
         // icon is rendered and captures pointer events itself so
         // dragging the slider does NOT also drag the node.
-        paint_input_control_widget(ctx.ui, rect, &self.instance_name);
+        paint_input_control_widget(ctx.ui, rect, &self.instance_name, ctx.viewport.zoom);
     }
     fn debug_name(&self) -> &str {
         "modelica.icon"
@@ -850,15 +865,18 @@ fn paint_flow_dots(
     if total_len < 1.0 {
         return;
     }
-    // Spacing + speed in screen pixels. Tunable.
-    const SPACING_PX: f32 = 28.0;
+    // Spacing + speed in screen pixels. Tunable. Sparser spacing
+    // and lower alpha so the dots read as a subtle motion cue
+    // rather than a dotted wire — at the previous 28-px / α=220
+    // settings users called the wires "bumpy".
+    const SPACING_PX: f32 = 64.0;
     const SPEED_PX_S: f32 = 36.0;
     let phase = ((time as f32) * SPEED_PX_S).rem_euclid(SPACING_PX);
     let dot_color = egui::Color32::from_rgba_unmultiplied(
         base_color.r(),
         base_color.g(),
         base_color.b(),
-        220,
+        140,
     );
     let mut s = phase;
     while s < total_len {
@@ -1167,17 +1185,29 @@ impl EdgeVisual for OrthogonalEdgeVisual {
                     egui::pos2(s.x, s.y)
                 })
                 .collect();
-            // Stale-anchor guard: a wire whose first / last waypoint
-            // sits far (> 60 screen px) from its current port end is
-            // stale (drag in progress); use auto-Z instead.
-            const STALE_PX: f32 = 60.0;
+            // Stale-anchor guard: a fresh A* polyline is *always*
+            // strictly orthogonal — its first and last segments share
+            // an axis with their respective ports (the bend-only
+            // emitter forces this). If either is off-axis the port
+            // has moved relative to its waypoint anchor, i.e. the
+            // user is dragging the node and re-projection hasn't
+            // landed yet. Off-axis-ness, not distance, is the right
+            // signal: legit long L-stubs stay axis-aligned at any
+            // zoom, while a 1-px drag offset already breaks alignment.
+            const ALIGN_TOL: f32 = 1.0;
             let first_far = way_screen
                 .first()
-                .map(|p| (p.x - from_screen.x).hypot(p.y - from_screen.y) > STALE_PX)
+                .map(|p| {
+                    (p.x - from_screen.x).abs() > ALIGN_TOL
+                        && (p.y - from_screen.y).abs() > ALIGN_TOL
+                })
                 .unwrap_or(false);
             let last_far = way_screen
                 .last()
-                .map(|p| (p.x - to_screen.x).hypot(p.y - to_screen.y) > STALE_PX)
+                .map(|p| {
+                    (p.x - to_screen.x).abs() > ALIGN_TOL
+                        && (p.y - to_screen.y).abs() > ALIGN_TOL
+                })
                 .unwrap_or(false);
             if !(first_far || last_far) {
                 let mut pts = Vec::with_capacity(way_screen.len() + 2);
@@ -1426,24 +1456,37 @@ fn route_orthogonal(
 
     let mut pts: Vec<egui::Pos2> = Vec::with_capacity(6);
     pts.push(from);
+
+    // Decide the inner routing between f_stub and t_stub.
+    if (f_horiz && t_vert) || (f_vert && t_horiz) {
+        // Perpendicular ports → clean two-segment L with the corner
+        // at the intersection of each port's exit axis. *No stubs*
+        // here: the parallel case below uses stubs to make sure the
+        // wire exits the icon body before bending, but on a
+        // perpendicular pair an unconditionally-added stub causes a
+        // visible back-and-forth jog when the stub overshoots the
+        // corner along its axis (Tank.Down + Valve.Left at almost-
+        // aligned y was the canonical failure: 10 px down, 6 px back
+        // up to the corner, then right). Going straight to the
+        // corner produces the OMEdit/Dymola-style elbow users
+        // expect.
+        let corner = if f_horiz {
+            egui::pos2(to.x, from.y)
+        } else {
+            egui::pos2(from.x, to.y)
+        };
+        if corner != from && corner != to {
+            pts.push(corner);
+        }
+        pts.push(to);
+        pts.dedup_by(|a, b| (a.x - b.x).abs() < 0.5 && (a.y - b.y).abs() < 0.5);
+        return pts;
+    }
     if from_dir != None {
         pts.push(f_stub);
     }
 
-    // Decide the inner routing between f_stub and t_stub.
-    if (f_horiz && t_vert) || (f_vert && t_horiz) {
-        // Perpendicular → L-elbow at the corner that sits along
-        // each port's exit axis. `from`-side determines which
-        // ordinate the corner takes from which side.
-        let corner = if f_horiz {
-            egui::pos2(t_stub.x, f_stub.y)
-        } else {
-            egui::pos2(f_stub.x, t_stub.y)
-        };
-        if corner != f_stub && corner != t_stub {
-            pts.push(corner);
-        }
-    } else if f_horiz && t_horiz {
+    if f_horiz && t_horiz {
         // Both horizontal. Pivot Y at midway between stub-ends;
         // pivot X at midway between stub-ends if both helping
         // (classic Z), else push past the trailing port + stub
@@ -1674,6 +1717,7 @@ fn paint_input_control_widget(
     ui: &mut egui::Ui,
     icon_rect: egui::Rect,
     instance_name: &str,
+    zoom: f32,
 ) {
     if instance_name.is_empty() || icon_rect.height() < 24.0 {
         return;
@@ -1701,23 +1745,26 @@ fn paint_input_control_widget(
     }
     bound.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // Strip geometry, in screen pixels (no zoom scaling so the
-    // widget stays usably-sized at any zoom). Multiple strips stack
-    // right-to-left from the icon's right edge.
-    const STRIP_WIDTH: f32 = 10.0;
-    const STRIP_GAP: f32 = 3.0;
-    const STRIP_PAD: f32 = 4.0;
-    let h = (icon_rect.height() * 0.7).max(24.0);
+    // Strip geometry. Widths/gaps/padding scale with the canvas zoom
+    // so the slider tracks the icon's rendered size — at 50 % zoom it
+    // shrinks by 50 %, mirroring how the icon body shrinks. Floor at a
+    // small fraction of the original so the strip stays a tappable
+    // target on extreme zoom-out (no need to zoom further to grab it).
+    let s = zoom.clamp(0.4, 2.0);
+    let strip_width = 10.0 * s;
+    let strip_gap = 3.0 * s;
+    let strip_pad = 4.0 * s;
+    let h = (icon_rect.height() * 0.7).max(24.0 * s);
     let strip_top_y = icon_rect.center().y - h * 0.5;
 
     for (idx, (name, value, mn, mx)) in bound.iter().enumerate() {
         let x = icon_rect.right()
-            - STRIP_PAD
-            - STRIP_WIDTH
-            - (idx as f32) * (STRIP_WIDTH + STRIP_GAP);
+            - strip_pad
+            - strip_width
+            - (idx as f32) * (strip_width + strip_gap);
         let strip_rect = egui::Rect::from_min_size(
             egui::pos2(x, strip_top_y),
-            egui::vec2(STRIP_WIDTH, h),
+            egui::vec2(strip_width, h),
         );
 
         // Publish the strip's screen-rect so the canvas's raw-input
@@ -2337,6 +2384,30 @@ fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramNodeId, Canv
             // user-driven resize would desync from the source. Plot /
             // dashboard nodes opt into resize via the default `true`.
             resizable: false,
+            // Tight halo follows the visible graphics, not the full
+            // -100..100 placement frame. Modelica icons commonly only
+            // fill ~50 % of their frame (e.g. Tank's body uses
+            // -50..50), so a placement-rect halo leaves big empty
+            // bands inside the selection box. Apply the same
+            // `xform` that mapped icon-local → world to the graphics
+            // bbox so rotation / mirror are honoured.
+            visual_rect: node
+                .component_def
+                .icon_graphics
+                .as_ref()
+                .and_then(|icon| icon.graphics_bbox())
+                .map(|e| {
+                    let ((vx0, vy0), (vx1, vy1)) = xform.local_aabb(
+                        e.p1.x as f32,
+                        e.p1.y as f32,
+                        e.p2.x as f32,
+                        e.p2.y as f32,
+                    );
+                    CanvasRect::from_min_max(
+                        CanvasPos::new(vx0, vy0),
+                        CanvasPos::new(vx1, vy1),
+                    )
+                }),
         });
     }
 
@@ -2406,6 +2477,75 @@ fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramNodeId, Canv
         };
 
         let eid = scene.alloc_edge_id();
+
+        // Auto-route waypoints when the source has no authored
+        // `Line(points={...})` annotation. A* on a 4-unit grid with
+        // a bend penalty + obstacle inflation produces clean L / Z /
+        // wrap-around routes that the per-frame Z-bend heuristic
+        // can't manage. Authored waypoints win — preserves user
+        // intent on hand-routed connections.
+        let waypoints_world: Vec<CanvasPos> = if !edge.waypoints.is_empty() {
+            edge.waypoints
+                .iter()
+                .map(|&(x, y)| CanvasPos::new(x, -y))
+                .collect()
+        } else {
+            // World endpoints: port world position via owning
+            // node's transform.
+            let src_world = src_node
+                .and_then(|n| src_port_def.as_ref().map(|p| n.icon_transform.apply(p.x, p.y)));
+            let tgt_world = tgt_node
+                .and_then(|n| tgt_port_def.as_ref().map(|p| n.icon_transform.apply(p.x, p.y)));
+            match (src_world, tgt_world) {
+                (Some(s), Some(t)) => {
+                    let from_out = from_dir.outward();
+                    let to_out = to_dir.outward();
+                    let obstacles: Vec<crate::ui::wire_router::Obstacle> = scene
+                        .nodes()
+                        .filter(|(id, _)| **id != *src_cid && **id != *tgt_cid)
+                        .filter(|(_, n)| n.kind.as_str() == "modelica.icon")
+                        .map(|(_, n)| {
+                            let r = n.visual_rect.unwrap_or(n.rect);
+                            crate::ui::wire_router::Obstacle {
+                                min_x: r.min.x,
+                                min_y: r.min.y,
+                                max_x: r.max.x,
+                                max_y: r.max.y,
+                            }
+                        })
+                        .collect();
+                    // grid 4 / bend 80 / clearance 2: bend penalty
+                    // is 20× the step cost so A* very strongly prefers
+                    // 1- or 2-bend routes over wrappy multi-bend ones.
+                    // Earlier value (16) was tied with relatively short
+                    // detours, so the green Tank.mass_out wire took a
+                    // 4-bend wrap around the engine when a 2-bend
+                    // route over the top was available.
+                    let pts = crate::ui::wire_router::route(
+                        s,
+                        from_out,
+                        t,
+                        to_out,
+                        &obstacles,
+                        4.0,
+                        80.0,
+                        2.0,
+                    );
+                    // Strip endpoints — `waypoints_world` carries
+                    // *interior* bends only; the renderer prepends /
+                    // appends the actual port positions.
+                    if pts.len() >= 2 {
+                        pts[1..pts.len() - 1]
+                            .iter()
+                            .map(|&(x, y)| CanvasPos::new(x, y))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
+                }
+                _ => Vec::new(),
+            }
+        };
         scene.insert_edge(CanvasEdge {
             id: eid,
             from: PortRef {
@@ -2421,11 +2561,7 @@ fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramNodeId, Canv
                 connector_type: connector_type.clone(),
                 from_dir,
                 to_dir,
-                waypoints_world: edge
-                    .waypoints
-                    .iter()
-                    .map(|&(x, y)| CanvasPos::new(x, -y))
-                    .collect(),
+                waypoints_world,
                 icon_color: icon_color
                     .map(|[r, g, b]| egui::Color32::from_rgb(r, g, b)),
                 source_path: src_node
@@ -5768,6 +5904,7 @@ fn insert_plot_node(
         label: String::new(),
         origin: None,
         resizable: true,
+        visual_rect: None,
     });
 }
 
@@ -6619,6 +6756,7 @@ pub fn drive_duplicate_loads(
     mut registry: bevy::prelude::ResMut<ModelicaDocumentRegistry>,
     mut probe: Option<bevy::prelude::ResMut<crate::FrameTimeProbe>>,
     mut egui_q: bevy::prelude::Query<&mut bevy_egui::EguiContext>,
+    mut class_names: bevy::prelude::ResMut<DrilledInClassNames>,
 ) {
     use bevy::prelude::*;
     // While any duplicate is in-flight, ping egui every tick so the
@@ -6657,6 +6795,23 @@ pub fn drive_duplicate_loads(
             dup_display_name, origin_short,
         );
         had_install = true;
+        // Seed the drill-in target so the canvas projects the inner
+        // model, not the package's empty top-level. Duplicating a
+        // `package Foo { model Bar ... }` lands as
+        // `package FooCopy { model Bar ... }`; `DrilledInClassNames`
+        // points at `FooCopy.Bar` so the projection scopes the builder
+        // to that class. Without this the user sees the empty-overlay
+        // placeholder card and has to click into the package tree
+        // manually.
+        if let Some(host) = registry.host(doc_id) {
+            if let Some(ast) = host.document().ast().result.as_ref().ok() {
+                if let Some(qualified) =
+                    crate::ast_extract::extract_model_name_from_ast(ast)
+                {
+                    class_names.set(doc_id, qualified);
+                }
+            }
+        }
         // Pre-warm the MSL inheritance chain on a dedicated thread so
         // the projection finds inherited connectors. Same pattern as
         // the drill-in path. The duplicated copy carries `within
@@ -7287,6 +7442,10 @@ fn synthesize_msl_node(
         label: instance_name.to_string(),
         origin: Some(instance_name.to_string()),
         resizable: false,
+        // Optimistic synth: skip the icon-bbox computation (cheap but
+        // not free); the next reproject from the source overwrites
+        // this node anyway with the bbox-aware version.
+        visual_rect: None,
     });
     id
 }

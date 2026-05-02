@@ -77,6 +77,7 @@ pub mod welcome_progress;
 /// Debounced AST reparse driver — see module docs.
 pub mod ast_refresh;
 pub mod input_activity;
+pub mod wire_router;
 /// Phase 1: bevy_vello-backed diagram canvas, one render target per
 /// open document tab. See module docs.
 pub mod vello_canvas;

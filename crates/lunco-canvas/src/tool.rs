@@ -964,6 +964,7 @@ mod tests {
             label: "A".into(),
             origin: None,
             resizable: true,
+            visual_rect: None,
         });
         // B: (100,0)-(140,30), port "in" at left edge centre (0,15)
         s.insert_node(Node {
@@ -979,6 +980,7 @@ mod tests {
             label: "B".into(),
             origin: None,
             resizable: true,
+            visual_rect: None,
         });
         s
     }
