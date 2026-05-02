@@ -23,6 +23,7 @@ use avian3d::prelude::PhysicsPlugins;
 use leafwing_input_manager::prelude::*;
 
 use lunco_mobility::LunCoMobilityPlugin;
+use lunco_hardware::LunCoHardwarePlugin;
 use lunco_usd::{ui::UsdUiPlugin, UsdPlugins, UsdPrimPath};
 use lunco_terrain::TerrainPlugin;
 use lunco_sandbox_edit::SandboxEditPlugin;
@@ -175,6 +176,7 @@ fn main() {
         .add_plugins(GravityPlugin)
         .add_plugins(EnvironmentPlugin)
         .add_plugins(TerrainPlugin)
+        .add_plugins(LunCoHardwarePlugin)
         .add_plugins(LunCoMobilityPlugin)
         .add_plugins(UsdPlugins)
         // Phase 3+: surface USD documents in the Twin browser. Browser

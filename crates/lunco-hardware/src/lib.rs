@@ -36,6 +36,11 @@ pub struct MotorActuator {
     pub port_entity: Entity,
     /// Local axis of rotation to apply torque along.
     pub axis: DVec3,
+    /// Peak torque in N·m delivered when the input port reads ±1.0
+    /// (after the wire's normalization). Mirrors PhysX Vehicle's
+    /// `physxVehicleEngine:peakTorque`. For wheel-hub motors,
+    /// `peak_torque ≈ motor_power · efficiency / max_omega`.
+    pub peak_torque: f64,
 }
 
 impl Default for MotorActuator {
@@ -43,6 +48,7 @@ impl Default for MotorActuator {
         Self {
             port_entity: Entity::PLACEHOLDER,
             axis: DVec3::Y,
+            peak_torque: 1.0,
         }
     }
 }
@@ -54,7 +60,9 @@ fn motor_actuator_system(
 ) {
     for (motor, mut forces) in q_motors.iter_mut() {
         if let Ok(port) = q_ports.get(motor.port_entity) {
-            let torque_mag = port.value as f64;
+            // `port.value` is normalized -1..+1 (see wire_system); scale
+            // by `peak_torque` so the input acts as a throttle.
+            let torque_mag = port.value as f64 * motor.peak_torque;
             forces.apply_local_torque(motor.axis * torque_mag);
         }
     }

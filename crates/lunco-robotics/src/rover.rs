@@ -235,7 +235,7 @@ pub fn spawn_joint_rover(
             LinearDamping(0.5), 
             AngularDamping(2.0),
             CellCoord::default(),
-            MotorActuator { port_entity: motor_port, axis: DVec3::Y },
+            MotorActuator { port_entity: motor_port, axis: DVec3::Y, peak_torque: 60.0 },
             BrakeActuator { port_entity: brake_port, max_force: 32767.0 },
             Mesh3d(wheel_mesh.clone()),
             MeshMaterial3d(materials.add(StandardMaterial::from(if is_front { Color::from(Srgba::RED) } else { Color::from(Srgba::BLUE) }))),
@@ -276,7 +276,7 @@ pub fn spawn_joint_rover(
                 CollisionLayers::from_bits(0, 0),
                 Transform::from_translation(spawn_pos + rel_pos),
                 CellCoord::default(),
-                MotorActuator { port_entity: steer_port, axis: DVec3::Y },
+                MotorActuator { port_entity: steer_port, axis: DVec3::Y, peak_torque: 60.0 },
                 ChildOf(rover_entity),
             )).id();
 

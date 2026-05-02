@@ -22,7 +22,6 @@
 #
 # Instantiate in scenes via reference + overrides:
 #   - double3 xformOp:translate         → set position
-#   - string lunco:wheelType = "physical" → switch to physical wheels (default: "raycast")
 #   - over "Chassis" { color3f primvars:displayColor = (...) } → per-instance colour
 
 def Xform "SkidRover" (
@@ -39,9 +38,6 @@ def Xform "SkidRover" (
     float physics:linearDamping = 0.5
     float physics:angularDamping = 2.0
 
-    # Wheel type: "raycast" (suspension simulation) or "physical" (rigid body collision)
-    # Default is "raycast" — override in scene for physical variant.
-    string lunco:wheelType = "raycast"
 
     # Chassis collider + visual — 2.0 m × 0.3 m × 3.5 m.
     def Cube "Chassis" (
@@ -71,9 +67,6 @@ def Xform "SkidRover" (
         float physxVehicleSuspension:restLength = 0.7
         float physxVehicleSuspension:springStiffness = 15000.0
         float physxVehicleSuspension:springDamping = 3000.0
-
-        double lunco:motorPower = 2000.0
-        double lunco:motorEfficiency = 0.85
     }
 
     def Cylinder "Wheel_FR" (
@@ -92,9 +85,6 @@ def Xform "SkidRover" (
         float physxVehicleSuspension:restLength = 0.7
         float physxVehicleSuspension:springStiffness = 15000.0
         float physxVehicleSuspension:springDamping = 3000.0
-
-        double lunco:motorPower = 2000.0
-        double lunco:motorEfficiency = 0.85
     }
 
     def Cylinder "Wheel_RL" (
@@ -113,9 +103,6 @@ def Xform "SkidRover" (
         float physxVehicleSuspension:restLength = 0.7
         float physxVehicleSuspension:springStiffness = 15000.0
         float physxVehicleSuspension:springDamping = 3000.0
-
-        double lunco:motorPower = 2000.0
-        double lunco:motorEfficiency = 0.85
     }
 
     def Cylinder "Wheel_RR" (
@@ -134,8 +121,5 @@ def Xform "SkidRover" (
         float physxVehicleSuspension:restLength = 0.7
         float physxVehicleSuspension:springStiffness = 15000.0
         float physxVehicleSuspension:springDamping = 3000.0
-
-        double lunco:motorPower = 2000.0
-        double lunco:motorEfficiency = 0.85
     }
 }

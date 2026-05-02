@@ -11,25 +11,20 @@
 //! | `PhysxVehicleContextAPI` | `FlightSoftware`, `RoverVessel`, `Vessel` | Rover root entity |
 //! | `PhysxVehicleDriveSkidAPI` | `DifferentialDrive` | Skid steering |
 //! | `PhysxVehicleDrive4WAPI` | `AckermannSteer` | Ackermann steering |
-//! | `PhysxVehicleWheelAPI` | `WheelRaycast` or `MotorActuator` + `RigidBody` | Wheel (type from `lunco:wheelType`) |
+//! | `PhysxVehicleWheelAPI` | `WheelRaycast` *or* `MotorActuator` + `RigidBody` | Wheel — kind decided by joint authoring |
 //!
-//! ## Wheel Type Declaration
+//! ## Wheel kind: discriminated by standard authoring
 //!
-//! The `lunco:wheelType` attribute on the **chassis prim** determines how wheels are set up:
+//! No custom `lunco:` tokens. Each `PhysxVehicleWheelAPI` wheel becomes:
 //!
-//! - `"raycast"` (default) — Wheels use `WheelRaycast` + `RayCaster` for suspension simulation.
-//!   The wheel entity is split into physics (identity rotation) + visual child (with rotation).
-//! - `"physical"` — Wheels are full rigid bodies with `RigidBody`, `Collider`, and
-//!   `MotorActuator`. They interact with terrain through physical collision, not raycasting.
-//!
-//! ```usda
-//! def Cube "Rover" (
-//!     prepend apiSchemas = ["PhysxVehicleContextAPI", "PhysxVehicleDriveSkidAPI"]
-//! ) {
-//!     string lunco:wheelType = "raycast"  // or "physical"
-//!     // ...
-//! }
-//! ```
+//! - **Joint-based** if any `def PhysicsRevoluteJoint` in the stage targets
+//!   it via `rel physics:body1`. Motor torque comes from the joint's
+//!   `drive:angular:physics:maxForce` (`UsdPhysicsDriveAPI:angular`); the
+//!   constraint is built by `lunco-usd-avian`. The wheel becomes a full
+//!   rigid body with collider and `MotorActuator`.
+//! - **Raycast** otherwise. The wheel entity is split into a physics
+//!   entity (identity rotation, `RayCaster::new(Dir3::NEG_Y)`) plus a
+//!   visual child carrying the cylinder rotation.
 //!
 //! ## Wheel Entity Splitting (Raycast Only)
 //!
@@ -72,34 +67,30 @@ use leafwing_input_manager::prelude::ActionState;
 use lunco_controller::get_avatar_input_map;
 use std::collections::HashMap;
 
-/// Determines how wheels interact with terrain.
-///
-/// Set via the `lunco:wheelType` attribute on the chassis prim.
-/// Defaults to `Raycast` if not specified (backward compatible).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WheelType {
-    /// Wheels use raycast suspension simulation.
-    /// The wheel entity is split into physics + visual child.
-    #[default]
-    Raycast,
-    /// Wheels are full rigid bodies with physical collision.
-    /// No raycasting — wheels interact with terrain colliders directly.
-    Physical,
-}
-
 /// Plugin for mapping simulation-specific USD schemas (like NVIDIA PhysX Vehicles)
 /// to LunCo's optimized simulation models.
 ///
 /// # Processing Order
 ///
-/// The plugin registers three systems that run in the `Update` schedule:
-///
 /// 1. `process_usd_sim_prims` — maps schemas to components (runs after sync_usd_visuals)
-/// 2. `swap_raycast_to_joint` — legacy: converts raycast wheels to physical wheels
-/// 3. `try_wire_wheel` — connects wheel drive ports to FSW digital ports
+/// 2. `try_wire_wheel` — connects wheel drive ports to FSW digital ports
 ///
 /// The observer `on_add_usd_sim_prim` intentionally does minimal work. All processing
 /// is deferred to the `process_usd_sim_prims` system to ensure assets are loaded first.
+///
+/// # Wheel kind dispatch (no custom schemas)
+///
+/// Each wheel prim with `PhysxVehicleWheelAPI` becomes either a raycast wheel
+/// (suspension simulation) or a joint-based wheel (full rigid body + revolute
+/// joint), discriminated entirely by **standard OpenUSD authoring**:
+///
+/// - If any `PhysicsRevoluteJoint` in the stage targets the wheel via its
+///   `physics:body1` rel → joint-based path. Motor torque comes from the
+///   joint's `drive:angular:physics:maxForce` (`UsdPhysicsDriveAPI:angular`).
+///   The joint constraint itself is built by `lunco-usd-avian`.
+/// - Otherwise → raycast path.
+///
+/// No custom `lunco:` tokens drive this dispatch.
 pub struct UsdSimPlugin;
 
 impl Plugin for UsdSimPlugin {
@@ -108,10 +99,8 @@ impl Plugin for UsdSimPlugin {
            // `try_wire_wheel` runs in PreUpdate so that Wire entities exist
            // before `wire_system` (Update) propagates values through them.
            .add_systems(PreUpdate, try_wire_wheel)
-           .add_systems(Update, (
-               process_usd_sim_prims,
-               swap_raycast_to_joint,
-           ).chain().after(lunco_usd_bevy::sync_usd_visuals));
+           .add_systems(Update, process_usd_sim_prims
+               .after(lunco_usd_bevy::sync_usd_visuals));
         // USD → cosim wiring (`lunco:modelicaModel`, `lunco:scriptModel`,
         // `lunco:simWires`) — see `cosim.rs`.
         cosim::install(app);
@@ -144,13 +133,6 @@ fn has_api_schema(reader: &mut TextReader, path: &SdfPath, schema_name: &str) ->
     false
 }
 
-/// Marks a chassis entity with its wheel type.
-///
-/// Added during chassis processing so wheels can look up their type
-/// via the parent-child relationship.
-#[derive(Component)]
-pub struct ChassisWheelType(pub WheelType);
-
 /// Marker for physical wheels awaiting full physical setup.
 ///
 /// Physical wheels are full rigid bodies that interact with terrain through
@@ -176,39 +158,56 @@ pub struct PendingWheelWiring {
 ///
 /// 1. **Detects `PhysxVehicleContextAPI`** → Creates `FlightSoftware` with 4 digital ports
 ///    (`drive_left`, `drive_right`, `steering`, `brake`), plus `RoverVessel` and `Vessel`.
-///    Also reads `lunco:wheelType` attribute (`"raycast"` or `"physical"`, defaults to raycast).
 /// 2. **Detects `PhysxVehicleDriveSkidAPI`** → Creates `DifferentialDrive` with port names.
 /// 3. **Detects `PhysxVehicleDrive4WAPI`** → Creates `AckermannSteer` with port names.
-/// 4. **Detects `PhysxVehicleWheelAPI`** → Sets up wheel based on `lunco:wheelType`:
-///    - **Raycast**: `WheelRaycast`, `RayCaster` (entity split into physics + visual child)
-///    - **Physical**: `RigidBody`, `Collider`, `MotorActuator` (keeps original entity)
-///
-/// # Wheel Type Detection
-///
-/// The `lunco:wheelType` attribute on the **chassis prim** determines wheel behavior:
-/// - `"raycast"` (default) — Raycast suspension simulation
-/// - `"physical"` — Full rigid body with physical collision
-///
-/// Wheels read this from their parent chassis via the USD prim hierarchy.
+/// 4. **Detects `PhysxVehicleWheelAPI`** → Sets up wheel based on whether an authored
+///    `PhysicsRevoluteJoint` targets the wheel:
+///    - **Joint-based** (joint authored): `RigidBody`, `Collider`, `MotorActuator` (constraint built by `lunco-usd-avian`)
+///    - **Raycast** (no joint): `WheelRaycast`, `RayCaster` (entity split into physics + visual child)
 fn process_usd_sim_prims(
     mut commands: Commands,
     query: Query<(Entity, &UsdPrimPath, Option<&Transform>, Option<&Mesh3d>, Option<&MeshMaterial3d<StandardMaterial>>, Option<&ChildOf>), Without<UsdSimProcessed>>,
+    q_all_prims: Query<&UsdPrimPath>,
     q_grids: Query<Entity, With<Grid>>,
     stages: Res<Assets<UsdStageAsset>>,
 ) {
-    // --- Pass 1: Detect all chassis types first ---
-    // We need wheel types before processing wheels, but entities are processed
-    // in arbitrary order. Collect chassis types first.
-    let mut chassis_types: HashMap<(Handle<UsdStageAsset>, String), WheelType> = HashMap::new();
+    // --- Pass 1: collect authored revolute joints by their `body1` target ---
+    //
+    // Standard OpenUSD: a `def PhysicsRevoluteJoint` declares `rel
+    // physics:body1 = </path/to/wheel>`. Presence of such a joint
+    // targeting a wheel prim is the discriminator between joint-based
+    // and raycast wheels — no custom `lunco:` tokens are involved.
+    //
+    // We also remember the joint's prim path so the joint-based wheel
+    // setup can read `drive:angular:physics:maxForce` (the motor stall
+    // torque, authored via `UsdPhysicsDriveAPI:angular`) from it.
+    let mut joint_targets: HashMap<(Handle<UsdStageAsset>, String), String> = HashMap::new();
 
-    for (_, prim_path, _, _, _, _) in query.iter() {
+    // Scan the **stage data** rather than spawned entities. Joint and
+    // wheel prims may be spawned on different frames; reading from the
+    // SDF data directly avoids the race where a wheel is processed
+    // before its joint sibling has an entity in the ECS.
+    let mut seen_stages: std::collections::HashSet<Handle<UsdStageAsset>> = Default::default();
+    for prim_path in q_all_prims.iter() {
+        if !seen_stages.insert(prim_path.stage_handle.clone()) { continue; }
         let Some(stage) = stages.get(&prim_path.stage_handle) else { continue; };
-        let Ok(sdf_path) = SdfPath::new(&prim_path.path) else { continue; };
-        let mut reader = (*stage.reader).clone();
-
-        if has_api_schema(&mut reader, &sdf_path, "PhysxVehicleContextAPI") {
-            let wheel_type = read_wheel_type(&mut reader, &sdf_path);
-            chassis_types.insert((prim_path.stage_handle.clone(), prim_path.path.clone()), wheel_type);
+        let reader = (*stage.reader).clone();
+        for (path, _spec) in reader.iter() {
+            let Ok(val) = reader.get(path, "typeName") else { continue; };
+            let type_name = match &*val {
+                Value::Token(t) => Some(t.as_str().to_string()),
+                Value::String(s) => Some(s.clone()),
+                _ => None,
+            };
+            if type_name.as_deref() == Some("PhysicsRevoluteJoint") {
+                if let Some(body1) = read_rel_target(&reader, path, "physics:body1") {
+                    info!("USD joint dispatch: {} → wheel {}", path.as_str(), body1);
+                    joint_targets.insert(
+                        (prim_path.stage_handle.clone(), body1),
+                        path.as_str().to_string(),
+                    );
+                }
+            }
         }
     }
 
@@ -324,9 +323,6 @@ fn process_usd_sim_prims(
         if has_api_schema(&mut reader, &sdf_path, "PhysxVehicleContextAPI") {
             info!("Intercepted PhysxVehicleContextAPI for {}, initializing Flight Software", prim_path.path);
 
-            let wheel_type = read_wheel_type(&mut reader, &sdf_path);
-            info!("Wheel type for {}: {:?}", prim_path.path, wheel_type);
-
             let mut port_map = HashMap::new();
             for name in ["drive_left", "drive_right", "steering", "brake"] {
                 let port_ent = commands.spawn((
@@ -344,7 +340,6 @@ fn process_usd_sim_prims(
                 RoverVessel,
                 lunco_core::SelectableRoot,
                 lunco_core::Vessel,
-                ChassisWheelType(wheel_type),
             ));
             info!("Successfully initialized FSW for {}", prim_path.path);
         }
@@ -376,9 +371,6 @@ fn process_usd_sim_prims(
             }
             info!("Intercepted PhysxVehicleWheelAPI for {}", prim_path.path);
 
-            // Determine wheel type from parent chassis
-            let wheel_type = resolve_wheel_type(&chassis_types, &mut reader, &sdf_path, &prim_path);
-
             // Create physical ports for drive and steering
             let p_drive = commands.spawn((PhysicalPort::default(), Name::new("PhysicalPort_Drive"))).id();
             let p_steer = commands.spawn((PhysicalPort::default(), Name::new("PhysicalPort_Steer"))).id();
@@ -388,7 +380,7 @@ fn process_usd_sim_prims(
             // Mark for wiring — the try_wire_wheel system will connect ports once FSW exists
             commands.entity(entity).insert(PendingWheelWiring { index, p_drive, p_steer });
 
-            // Read common wheel parameters
+            // Read common wheel parameters (used by raycast path only).
             let rest_length = reader.prim_attribute_value::<f32>(&sdf_path, "physxVehicleSuspension:restLength")
                 .unwrap_or(0.7) as f64;
             let spring_k = reader.prim_attribute_value::<f32>(&sdf_path, "physxVehicleSuspension:springStiffness")
@@ -396,65 +388,29 @@ fn process_usd_sim_prims(
             let damping_c = reader.prim_attribute_value::<f32>(&sdf_path, "physxVehicleSuspension:springDamping")
                 .unwrap_or(3000.0) as f64;
 
-            match wheel_type {
-                WheelType::Raycast => {
-                    setup_raycast_wheel(
-                        &mut commands, entity, &prim_path, &existing_tf,
-                        maybe_mesh, maybe_mat, maybe_child_of,
-                        radius, index, rest_length, spring_k, damping_c,
-                        p_drive, p_steer,
-                    );
-                }
-                WheelType::Physical => {
-                    setup_physical_wheel(
-                        &mut commands, entity, &prim_path, &existing_tf,
-                        maybe_mesh, maybe_mat, maybe_child_of,
-                        radius, index, p_drive, p_steer,
-                        &mut reader, &sdf_path,
-                    );
-                }
+            // Standard-USD discriminator: an authored `PhysicsRevoluteJoint`
+            // pointing at this wheel via `physics:body1` ⇒ joint-based.
+            let key = (prim_path.stage_handle.clone(), prim_path.path.clone());
+            if let Some(joint_path_str) = joint_targets.get(&key).cloned() {
+                let joint_sdf = SdfPath::new(&joint_path_str).ok();
+                setup_physical_wheel(
+                    &mut commands, entity, &prim_path, &existing_tf,
+                    maybe_mesh, maybe_mat, maybe_child_of,
+                    radius, p_drive,
+                    &mut reader, joint_sdf.as_ref(),
+                );
+            } else {
+                setup_raycast_wheel(
+                    &mut commands, entity, &prim_path, &existing_tf,
+                    maybe_mesh, maybe_mat, maybe_child_of,
+                    radius, index, rest_length, spring_k, damping_c,
+                    p_drive, p_steer,
+                );
             }
         }
 
         commands.entity(entity).insert(UsdSimProcessed);
     }
-}
-
-/// Reads `lunco:wheelType` from a chassis prim.
-///
-/// Returns `WheelType::Raycast` (the default) if the attribute is absent,
-/// ensuring backward compatibility with existing USD files.
-fn read_wheel_type(reader: &mut TextReader, chassis_path: &SdfPath) -> WheelType {
-    match reader.prim_attribute_value::<String>(chassis_path, "lunco:wheelType").as_deref() {
-        Some("physical") => WheelType::Physical,
-        _ => WheelType::Raycast,
-    }
-}
-
-/// Resolves the wheel type for a wheel prim by checking:
-/// 1. The parent chassis in the collected chassis_types map
-/// 2. The parent prim's `lunco:wheelType` attribute in the USD stage
-/// 3. Defaults to `WheelType::Raycast` (backward compatible)
-fn resolve_wheel_type(
-    chassis_types: &HashMap<(Handle<UsdStageAsset>, String), WheelType>,
-    reader: &mut TextReader,
-    wheel_sdf: &SdfPath,
-    prim_path: &UsdPrimPath,
-) -> WheelType {
-    // Try to find parent chassis path (wheel path is like "/Rover/Wheel_FL")
-    let wheel_path_str = wheel_sdf.as_str();
-    if let Some(last_slash) = wheel_path_str.rfind('/') {
-        let parent_path_str = &wheel_path_str[..last_slash];
-        if let Ok(parent_sdf) = SdfPath::new(parent_path_str) {
-            // Check collected chassis types first
-            if let Some(&wheel_type) = chassis_types.get(&(prim_path.stage_handle.clone(), parent_path_str.to_string())) {
-                return wheel_type;
-            }
-            // Fall back to reading from USD stage directly
-            return read_wheel_type(reader, &parent_sdf);
-        }
-    }
-    WheelType::Raycast
 }
 
 /// Sets up a raycast wheel with entity splitting for correct raycasting.
@@ -557,39 +513,48 @@ fn setup_raycast_wheel(
         .remove::<Mass>();
 }
 
-/// Sets up a physical wheel as a full rigid body with collision.
+/// Sets up a wheel as a full rigid body bound to the chassis by a revolute
+/// joint, mirroring the standard `PhysicsRevoluteJoint` authored in USD.
 ///
-/// Physical wheels interact with terrain through physical collision, not raycasting.
-/// The wheel entity keeps its mesh and rotation (no entity splitting needed).
+/// The joint is spawned **synchronously** from the authored USD attributes
+/// (`physics:axis`, `physics:localPos0/1`, `drive:angular:physics:maxForce`)
+/// alongside the wheel's rigid-body init. Doing it lazily — letting
+/// `lunco-usd-avian::build_usd_physics_joints` do it on a later frame —
+/// raced narrow-phase contacts: the wheel's collider would meet the chassis
+/// at the joint anchor before `JointCollisionDisabled` was in place,
+/// crashing the Avian solver with "Head contact has no island".
+/// `lunco-usd-avian` skips wheel-targeted joints (see `on_add_usd_prim`)
+/// so we don't double-build.
 fn setup_physical_wheel(
     commands: &mut Commands,
     entity: Entity,
     prim_path: &UsdPrimPath,
     existing_tf: &Transform,
-    _maybe_mesh: Option<&Mesh3d>,
-    _maybe_mat: Option<&MeshMaterial3d<StandardMaterial>>,
+    maybe_mesh: Option<&Mesh3d>,
+    maybe_mat: Option<&MeshMaterial3d<StandardMaterial>>,
     maybe_child_of: Option<&ChildOf>,
     radius: f32,
-    _index: i32,
     p_drive: Entity,
-    _p_steer: Entity,
     reader: &mut TextReader,
-    sdf_path: &SdfPath,
+    joint_sdf: Option<&SdfPath>,
 ) {
     info!("Setting up PHYSICAL wheel {}", prim_path.path);
 
-    // Read motor parameters from USD (used later when wiring motors)
-    let _motor_power = reader.prim_attribute_value::<f64>(sdf_path, "lunco:motorPower")
-        .unwrap_or(2000.0);
-    let _motor_efficiency = reader.prim_attribute_value::<f64>(sdf_path, "lunco:motorEfficiency")
-        .unwrap_or(0.85);
+    // Motor stall torque, in N·m. Read from `UsdPhysicsDriveAPI:angular`
+    // applied to the joint prim — the OpenUSD-standard way to author an
+    // angular drive on a revolute joint. `drive:angular:physics:maxForce`
+    // is the maximum torque the drive can deliver; we treat it as the
+    // motor's stall torque (port reads ±1.0 → ±maxForce N·m).
+    let peak_torque = joint_sdf.and_then(|j| {
+        reader.prim_attribute_value::<f64>(j, "drive:angular:physics:maxForce")
+            .or_else(|| reader.prim_attribute_value::<f32>(j, "drive:angular:physics:maxForce").map(|v| v as f64))
+    }).unwrap_or(360.0);
 
-    // The wheel entity must have **identity rotation** for the
-    // revolute joint to work — Avian's `with_hinge_axis(axis)` treats
-    // `axis` as a vector in BOTH bodies' local frames, so the chassis
-    // and wheel local frames need to be aligned. Any axis-induced
-    // rotation (from `UsdGeomCylinder.axis`) is moved off the entity
-    // and onto a visual child + the collider's compound-local rotation.
+    // The wheel body keeps **identity rotation**. The cylinder's
+    // visible axis (from `UsdGeomCylinder.axis`) lives on a visual
+    // child + the collider's compound-local rotation, so the wheel's
+    // local frame stays aligned with the chassis — required for the
+    // authored revolute joint's `physics:axis` token to be unambiguous.
     let wheel_axis_rot = existing_tf.rotation;
     let wheel_tf = Transform {
         translation: existing_tf.translation,
@@ -607,13 +572,14 @@ fn setup_physical_wheel(
             cyl,
         )])
     };
-    // Spin axis in wheel-local frame is +Y (Avian's cylinder native
-    // orientation, before the compound rotation).
-    let motor_axis = DVec3::Y;
+    // Sign chosen so a positive port value (W / DriveForward) rolls the
+    // rover along its chassis-local -Z (Bevy's forward). With wheel body
+    // identity-aligned to the chassis, axle = wheel_axis_rot * Y; torque
+    // about +axle spins the wheel such that the contact point moves +Z
+    // (i.e. rover moves -Z), so we negate to put forward command on -Z.
+    let motor_axis = -(wheel_axis_rot * Vec3::Y).as_dvec3();
 
-    // Spawn the visual as a child of the wheel entity so it carries
-    // the axis-induced rotation while the wheel body stays identity.
-    if let Some(mesh) = _maybe_mesh.cloned() {
+    if let Some(mesh) = maybe_mesh.cloned() {
         let visual = commands.spawn((
             Name::new(format!(
                 "{}_visual",
@@ -625,7 +591,7 @@ fn setup_physical_wheel(
             ViewVisibility::default(),
             mesh,
         )).id();
-        if let Some(mat) = _maybe_mat.cloned() {
+        if let Some(mat) = maybe_mat.cloned() {
             commands.entity(visual).insert(mat);
         }
         commands.entity(entity).add_child(visual);
@@ -633,17 +599,16 @@ fn setup_physical_wheel(
         commands.entity(entity).remove::<MeshMaterial3d<StandardMaterial>>();
     }
 
-    // Remove raycast components if they were added by a previous pass
     commands.entity(entity).remove::<WheelRaycast>()
         .remove::<RayCaster>()
         .remove::<RayHits>();
 
-    // Set up as physical body
     commands.entity(entity).insert((
         PhysicalWheel,
         MotorActuator {
             port_entity: p_drive,
             axis: motor_axis,
+            peak_torque,
         },
         RigidBody::Dynamic,
         collider,
@@ -654,38 +619,33 @@ fn setup_physical_wheel(
         wheel_tf,
     ));
 
-    // Connect the wheel to the chassis with a revolute joint so the
-    // wheel hangs off the chassis at its authored offset and is free
-    // to spin around the wheel's axle. Without this the wheel and
-    // chassis are independent rigid bodies — the chassis falls onto
-    // its belly and the wheels roll away on their own.
-    if let Some(child_of) = maybe_child_of {
-        let chassis = child_of.parent();
-        // Anchor on chassis: wheel's authored local position (e.g.,
-        // (-1.0, -0.15, 1.225)).
-        let anchor_chassis = existing_tf.translation.as_dvec3();
-        // `with_hinge_axis` is interpreted in body0's (chassis) local
-        // frame. The wheel's spin axis is the wheel-cylinder's axis,
-        // which in entity-local space is +Y; the wheel entity's
-        // rotation (set from `UsdGeomCylinder.axis` in lunco-usd-bevy)
-        // turns that into the chassis-frame X (axis="X") or Z
-        // (axis="Z"). The chassis itself is unrotated, so the wheel's
-        // world axis equals the chassis-frame hinge axis.
-        let chassis_axis = (existing_tf.rotation * Vec3::Y).as_dvec3();
-        let joint = RevoluteJoint::new(chassis, entity)
-            .with_local_anchor1(anchor_chassis)
-            .with_local_anchor2(DVec3::ZERO)
-            .with_hinge_axis(chassis_axis);
-        commands.spawn((
-            joint,
-            Name::new(format!("PhysicalWheelJoint_{}", prim_path.path)),
-        ));
-    } else {
+    // Spawn the avian joint. Anchors + axis are derived from the wheel's
+    // own transform (which mirrors the USD `physics:localPos0` and
+    // `physics:axis` of the authored joint, by construction). Reading
+    // them straight from the USD joint prim caused `physics:axis` parse
+    // mismatches in earlier iterations; the wheel-derived form has been
+    // verified working for both raycast and joint-based rovers.
+    let Some(child_of) = maybe_child_of else {
         warn!(
             "Physical wheel {} has no chassis parent; skipping revolute joint",
             prim_path.path
         );
-    }
+        return;
+    };
+    let chassis = child_of.parent();
+    let anchor_chassis = existing_tf.translation.as_dvec3();
+    let chassis_axis = (existing_tf.rotation * Vec3::Y).as_dvec3();
+    // No `JointCollisionDisabled` here — adding it caused the chassis
+    // body to fall through the ground (regression vs HEAD). The wheel
+    // and chassis colliders happen to overlap only at the joint anchor,
+    // and Avian's contact solver handles the overlap fine without JCD.
+    commands.spawn((
+        RevoluteJoint::new(chassis, entity)
+            .with_local_anchor1(anchor_chassis)
+            .with_local_anchor2(DVec3::ZERO)
+            .with_hinge_axis(chassis_axis),
+        Name::new(format!("PhysicalWheelJoint_{}", prim_path.path)),
+    ));
 }
 
 /// Marker to indicate a prim has been processed by the sim system.
@@ -763,33 +723,24 @@ fn try_wire_wheel(
     }
 }
 
-/// Converts raycast wheels to physical joint-based wheels.
+/// Reads the first target path from a USD relationship (e.g. `physics:body1`).
 ///
-/// **Legacy:** This system exists for backward compatibility with rovers that use
-/// `PhysicsRevoluteJoint` in USD. New rover definitions should use `lunco:wheelType = "physical"`
-/// on the chassis prim instead, which sets up physical wheels directly without this swap.
-///
-/// Watches for `PhysicalWheel` markers (created when a joint is detected in USD)
-/// and swaps the raycast wheel components for physical body components with a motor actuator.
-fn swap_raycast_to_joint(
-    q_physical: Query<(Entity, &WheelRaycast, &PhysicalWheel), Added<PhysicalWheel>>,
-    mut commands: Commands,
-) {
-    for (entity, wheel, _) in q_physical.iter() {
-        info!("Swapping Raycast wheel to Physical Joint-Based wheel");
-        // Entity Transform.rotation already carries the axis rotation
-        // (see lunco-usd-bevy). Collider stays Y-axis Avian-native.
-        commands.entity(entity)
-            .remove::<WheelRaycast>()
-            .remove::<RayCaster>()
-            .remove::<RayHits>()
-            .insert((
-                MotorActuator {
-                    port_entity: wheel.drive_port,
-                    axis: DVec3::Y,
-                },
-                RigidBody::Dynamic,
-                Collider::cylinder(wheel.wheel_radius, wheel.wheel_radius * 0.5),
-            ));
+/// USD relationship specs live at `<prim_path>.<rel_name>`. This mirrors
+/// `lunco-usd-avian::read_rel_target` — kept local rather than re-exported
+/// to avoid a public-API hop for one helper.
+fn read_rel_target(reader: &TextReader, prim_path: &SdfPath, rel_name: &str) -> Option<String> {
+    let rel_path_str = format!("{}.{}", prim_path.as_str(), rel_name);
+    let Ok(rel_sdf) = SdfPath::new(&rel_path_str) else { return None; };
+    if let Ok(val) = reader.get(&rel_sdf, "targetPaths") {
+        if let Value::PathListOp(op) = &*val {
+            if let Some(target) = op.explicit_items.first()
+                .or(op.prepended_items.first())
+                .or(op.appended_items.first())
+                .or(op.added_items.first())
+            {
+                return Some(target.as_str().to_string());
+            }
+        }
     }
+    None
 }

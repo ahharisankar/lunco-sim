@@ -110,9 +110,6 @@ def Xform "Rucheyok" (
         float physics:mass = 25.0
         bool physics:collisionEnabled = true
 
-        double lunco:motorPower = 2000.0
-        double lunco:motorEfficiency = 0.88
-
         rel lunco:epsBus = [</Rucheyok/Battery>]
     }
 
@@ -134,9 +131,6 @@ def Xform "Rucheyok" (
         bool physics:rigidBodyEnabled = true
         float physics:mass = 25.0
         bool physics:collisionEnabled = true
-
-        double lunco:motorPower = 2000.0
-        double lunco:motorEfficiency = 0.88
 
         rel lunco:epsBus = [</Rucheyok/Battery>]
     }
@@ -160,9 +154,6 @@ def Xform "Rucheyok" (
         float physics:mass = 25.0
         bool physics:collisionEnabled = true
 
-        double lunco:motorPower = 2000.0
-        double lunco:motorEfficiency = 0.88
-
         rel lunco:epsBus = [</Rucheyok/Battery>]
     }
 
@@ -184,9 +175,6 @@ def Xform "Rucheyok" (
         bool physics:rigidBodyEnabled = true
         float physics:mass = 25.0
         bool physics:collisionEnabled = true
-
-        double lunco:motorPower = 2000.0
-        double lunco:motorEfficiency = 0.88
 
         rel lunco:epsBus = [</Rucheyok/Battery>]
     }

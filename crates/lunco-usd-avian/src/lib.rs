@@ -450,9 +450,36 @@ fn on_add_usd_prim(
                 let body0 = read_rel_target(&reader, &sdf_path, "physics:body0");
                 let body1 = read_rel_target(&reader, &sdf_path, "physics:body1");
 
+                // Wheel-targeted joints are owned by `lunco-usd-sim` —
+                // it spawns them synchronously inside `setup_physical_wheel`
+                // alongside the wheel's `RigidBody`/`Collider`/`Motor`,
+                // ensuring `JointCollisionDisabled` is in place before
+                // any narrow-phase contact forms between wheel and
+                // chassis. Building the same joint here would either
+                // double up or race the wheel-body init.
+                if let Some(b1) = body1.as_ref() {
+                    if let Ok(b1_path) = SdfPath::new(b1) {
+                        if reader.prim_attribute_value::<f32>(&b1_path, "physxVehicleWheel:radius").is_some() {
+                            return;
+                        }
+                    }
+                }
+
                 match (body0, body1) {
                     (Some(body0_path), Some(body1_path)) => {
-                        let axis = read_vec3_attribute(&reader, &sdf_path, "physics:axis0")
+                        // OpenUSD standard: `UsdPhysicsRevoluteJoint.physics:axis`
+                        // is a `uniform token` ("X" | "Y" | "Z"). Older
+                        // authoring used a `physics:axis0` Vec3 — keep
+                        // that as a fallback for any in-tree scenes
+                        // that haven't been migrated yet.
+                        let axis = read_token_attribute(&reader, &sdf_path, "physics:axis")
+                            .and_then(|t| match t.as_str() {
+                                "X" => Some(DVec3::X),
+                                "Y" => Some(DVec3::Y),
+                                "Z" => Some(DVec3::Z),
+                                _ => None,
+                            })
+                            .or_else(|| read_vec3_attribute(&reader, &sdf_path, "physics:axis0"))
                             .unwrap_or(DVec3::Y);
                         // UsdPhysics `physics:localPos0/1` give the
                         // joint anchor on each body in that body's

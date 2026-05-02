@@ -152,13 +152,17 @@ fn resolve_ids_in_json(value: &mut serde_json::Value, registry: &ApiEntityRegist
                 if k == "target" || k == "entity" || k == "body" || k == "parent" || k == "avatar" {
                     if let Some(id_u64) = v.as_u64() {
                         if let Some(entity) = registry.resolve(&GlobalEntityId(id_u64)) {
-                            // Replace with raw Bevy index for reflection deserializer
-                            *v = serde_json::json!(entity.index().index());
+                            *v = serde_json::json!(entity.to_bits());
                         }
                     } else if let Some(id_str) = v.as_str() {
                         if let Ok(id_u64) = id_str.parse::<u64>() {
                             if let Some(entity) = registry.resolve(&GlobalEntityId(id_u64)) {
-                                *v = serde_json::json!(entity.index().index());
+                                // Bevy `Entity` reflection round-trips via
+                            // `to_bits()` (u64 packing index + generation).
+                            // Using just `index()` drops the generation
+                            // and produces a placeholder Entity that no
+                            // query matches.
+                            *v = serde_json::json!(entity.to_bits());
                             }
                         }
                     }
