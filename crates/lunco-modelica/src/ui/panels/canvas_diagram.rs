@@ -4303,6 +4303,28 @@ impl Panel for CanvasDiagramPanel {
                 docstate.canvas.tool.remap_node_ids(&|old: lunco_canvas::NodeId| {
                     id_remap.get(&old).copied()
                 });
+                // Carry over scene-only nodes (plots, future dashboard
+                // / control widgets) that have no Modelica source
+                // counterpart — projection rebuilds the scene from the
+                // diagram alone, so without this they'd vanish on
+                // every reproject (initial parse, sim start, source
+                // edit, …). Keyed by `kind` so any future scene-only
+                // visual gets the same treatment without code changes.
+                const SCENE_ONLY_KINDS: &[&str] = &[
+                    lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND,
+                ];
+                let scene_only_nodes: Vec<lunco_canvas::scene::Node> = docstate
+                    .canvas
+                    .scene
+                    .nodes()
+                    .filter(|(_, n)| SCENE_ONLY_KINDS.contains(&n.kind.as_str()))
+                    .map(|(_, n)| n.clone())
+                    .collect();
+                let mut scene = scene;
+                for mut node in scene_only_nodes {
+                    node.id = scene.alloc_node_id();
+                    scene.insert_node(node);
+                }
                 docstate.canvas.scene = scene;
                 docstate.canvas.selection.clear();
                 if !preserved_origins.is_empty() {
@@ -5399,6 +5421,25 @@ fn render_node_menu(
     editing_class: Option<&str>,
     out: &mut Vec<ModelicaOp>,
 ) {
+    // Plot nodes are scene-only (no Modelica counterpart) — show a
+    // signal-binding submenu and a Delete entry, skip the component-
+    // specific actions (Open class, Parameters, Duplicate).
+    let node_kind: Option<String> = {
+        let active_doc = active_doc_from_world(world);
+        let state = world.resource::<CanvasDiagramState>();
+        state
+            .get(active_doc)
+            .canvas
+            .scene
+            .node(id)
+            .map(|n| n.kind.to_string())
+    };
+    if node_kind.as_deref()
+        == Some(lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND)
+    {
+        render_plot_node_menu(ui, world, id);
+        return;
+    }
     let (instance, type_name) = component_headers(world, id);
     ui.label(egui::RichText::new(&instance).strong());
     if !type_name.is_empty() {
@@ -5429,6 +5470,113 @@ fn render_node_menu(
     }
     if ui.button("🔧 Parameters…").clicked() {
         ui.close();
+    }
+}
+
+fn render_plot_node_menu(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    id: lunco_canvas::NodeId,
+) {
+    use lunco_viz::kinds::canvas_plot_node::PlotNodeData;
+
+    let current: PlotNodeData = {
+        let active_doc = active_doc_from_world(world);
+        let state = world.resource::<CanvasDiagramState>();
+        state
+            .get(active_doc)
+            .canvas
+            .scene
+            .node(id)
+            .and_then(|n| n.data.downcast_ref::<PlotNodeData>().cloned())
+            .unwrap_or_default()
+    };
+    ui.label(egui::RichText::new("Plot").strong());
+    if !current.signal_path.is_empty() {
+        ui.label(
+            egui::RichText::new(&current.signal_path)
+                .weak()
+                .small(),
+        );
+    } else {
+        ui.label(
+            egui::RichText::new("(unbound)")
+                .weak()
+                .small()
+                .italics(),
+        );
+    }
+    ui.separator();
+
+    let sigs: Vec<(bevy::prelude::Entity, String)> = world
+        .get_resource::<lunco_viz::SignalRegistry>()
+        .map(|r| {
+            let mut v: Vec<_> = r
+                .iter_scalar()
+                .map(|(s, _)| (s.entity, s.path.clone()))
+                .collect();
+            v.sort_by(|a, b| a.1.cmp(&b.1));
+            v
+        })
+        .unwrap_or_default();
+
+    ui.menu_button("🔗 Bind signal", |ui| {
+        if sigs.is_empty() {
+            ui.label(
+                egui::RichText::new("(no signals yet — run a simulation)")
+                    .weak()
+                    .small(),
+            );
+            return;
+        }
+        let max_h = ui.ctx().screen_rect().height() * 0.7;
+        egui::ScrollArea::vertical()
+            .max_height(max_h)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                for (entity, path) in &sigs {
+                    let is_current = entity.to_bits() == current.entity
+                        && path == &current.signal_path;
+                    if ui.selectable_label(is_current, path).clicked() {
+                        rebind_plot_node(world, id, entity.to_bits(), path);
+                        ui.close();
+                    }
+                }
+            });
+    });
+
+    if !current.signal_path.is_empty() && ui.button("Unbind").clicked() {
+        rebind_plot_node(world, id, 0, "");
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("✂ Delete").clicked() {
+        let active_doc = active_doc_from_world(world);
+        let mut state = world.resource_mut::<CanvasDiagramState>();
+        let docstate = state.get_mut(active_doc);
+        docstate.canvas.scene.remove_node(id);
+        ui.close();
+    }
+}
+
+fn rebind_plot_node(
+    world: &mut World,
+    id: lunco_canvas::NodeId,
+    entity_bits: u64,
+    signal_path: &str,
+) {
+    use lunco_viz::kinds::canvas_plot_node::PlotNodeData;
+    let payload = PlotNodeData {
+        entity: entity_bits,
+        signal_path: signal_path.to_string(),
+        title: String::new(),
+    };
+    let data: lunco_canvas::NodeData = std::sync::Arc::new(payload);
+    let active_doc = active_doc_from_world(world);
+    let mut state = world.resource_mut::<CanvasDiagramState>();
+    let docstate = state.get_mut(active_doc);
+    if let Some(node) = docstate.canvas.scene.node_mut(id) {
+        node.data = data;
     }
 }
 
