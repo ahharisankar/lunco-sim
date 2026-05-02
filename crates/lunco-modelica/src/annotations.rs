@@ -518,13 +518,17 @@ pub enum DynValue {
 
 impl DynValue {
     /// Render any value as the string the icon should display.
-    /// Round to three decimals, then trim trailing zeros (and a
-    /// trailing dot) so integers come out as `3127`, fractions like
-    /// `3127.4`, and exact values aren't padded with noise.
+    /// Round to two decimals, then trim trailing zeros (and a
+    /// trailing dot) so integers come out as `3127`, fractions
+    /// like `3127.4` or `3127.45`, and exact values aren't padded
+    /// with noise. Two decimals is the OMEdit / Dymola default for
+    /// inline icon captions — three was too noisy on values like
+    /// `3488.774 kg` where the third digit doesn't carry useful
+    /// information at icon scale.
     pub fn to_display(&self) -> String {
         match self {
             DynValue::Number(n) => {
-                let s = format!("{n:.3}");
+                let s = format!("{n:.2}");
                 let trimmed = s.trim_end_matches('0').trim_end_matches('.');
                 trimmed.to_string()
             }

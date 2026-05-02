@@ -865,11 +865,14 @@ fn paint_flow_dots(
     if total_len < 1.0 {
         return;
     }
-    // Spacing + speed in screen pixels. Tunable. Sparser spacing
-    // and lower alpha so the dots read as a subtle motion cue
-    // rather than a dotted wire — at the previous 28-px / α=220
-    // settings users called the wires "bumpy".
-    const SPACING_PX: f32 = 64.0;
+    // Spacing + speed in screen pixels. Tuned iteratively: 64 px
+    // looked empty; 28 px read as a dotted wire ("bumpy"); 32 px
+    // was OK but still felt sparse on long runs; 22 px (~1.5×
+    // denser than 32) gives a clear "flowing stream" cue with
+    // enough breathing room between dots that the wire doesn't
+    // turn into a solid line. Alpha stays low so the dots remain
+    // a motion hint rather than a hard pattern.
+    const SPACING_PX: f32 = 22.0;
     const SPEED_PX_S: f32 = 36.0;
     let phase = ((time as f32) * SPEED_PX_S).rem_euclid(SPACING_PX);
     let dot_color = egui::Color32::from_rgba_unmultiplied(
@@ -1745,16 +1748,19 @@ fn paint_input_control_widget(
     }
     bound.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // Strip geometry. Widths/gaps/padding scale with the canvas zoom
-    // so the slider tracks the icon's rendered size — at 50 % zoom it
-    // shrinks by 50 %, mirroring how the icon body shrinks. Floor at a
-    // small fraction of the original so the strip stays a tappable
-    // target on extreme zoom-out (no need to zoom further to grab it).
-    let s = zoom.clamp(0.4, 2.0);
-    let strip_width = 10.0 * s;
-    let strip_gap = 3.0 * s;
-    let strip_pad = 4.0 * s;
-    let h = (icon_rect.height() * 0.7).max(24.0 * s);
+    // Strip geometry sized as a fraction of the icon's rendered
+    // height — keeps the slider visually proportional to the icon
+    // at every canvas zoom (the previous zoom-clamped formula
+    // floored at 0.4× / capped at 2×, so on a large diagram the
+    // slider looked tiny next to the icon body). 8 % of icon
+    // height is the same ratio Dymola uses for inline indicators.
+    // Floor at a few pixels so the strip stays grabbable even
+    // when the icon is heavily zoomed out.
+    let strip_width = (icon_rect.height() * 0.08).max(4.0);
+    let strip_gap = strip_width * 0.4;
+    let strip_pad = strip_width * 0.5;
+    let h = icon_rect.height() * 0.7;
+    let s = strip_width / 10.0;
     let strip_top_y = icon_rect.center().y - h * 0.5;
 
     for (idx, (name, value, mn, mx)) in bound.iter().enumerate() {
@@ -1774,9 +1780,13 @@ fn paint_input_control_widget(
         // [`lunco_canvas::canvas::push_canvas_widget_rect`].
         lunco_canvas::canvas::push_canvas_widget_rect(ui.ctx(), strip_rect);
 
-        // Background trough.
-        let trough_color = egui::Color32::from_rgba_unmultiplied(40, 40, 50, 200);
-        ui.painter().rect_filled(strip_rect, 3.0, trough_color);
+        // Background trough — desaturated near-black so the fill
+        // pops without fighting the icon body underneath. Higher
+        // corner radius (was 3) reads as a softer control surface,
+        // not a tooltip rectangle.
+        let trough_color = egui::Color32::from_rgba_unmultiplied(28, 30, 38, 220);
+        let radius = (strip_width * 0.45).min(5.0);
+        ui.painter().rect_filled(strip_rect, radius, trough_color);
 
         // Filled portion = current value normalised against bounds.
         let frac = ((*value - *mn) / (*mx - *mn)).clamp(0.0, 1.0) as f32;
@@ -1786,15 +1796,30 @@ fn paint_input_control_widget(
                 egui::pos2(strip_rect.min.x, strip_rect.max.y - fill_h),
                 egui::vec2(strip_rect.width(), fill_h),
             );
-            let fill_color = egui::Color32::from_rgb(80, 180, 250);
-            ui.painter().rect_filled(fill_rect, 3.0, fill_color);
+            // Theme accent — same blue the rest of the workbench
+            // uses for "active / live signal" state. Slightly more
+            // saturated than the previous flat blue so it reads as
+            // a deliberate control rather than a flat fill.
+            let fill_color = egui::Color32::from_rgb(70, 160, 240);
+            ui.painter().rect_filled(fill_rect, radius, fill_color);
+            // Indicator line at the fill top — tells the eye
+            // exactly where the current value sits without having
+            // to estimate from the gradient. 1.5 px stays crisp at
+            // every zoom level the strip is visible at.
+            let y = strip_rect.max.y - fill_h;
+            ui.painter().line_segment(
+                [egui::pos2(strip_rect.min.x, y), egui::pos2(strip_rect.max.x, y)],
+                egui::Stroke::new(1.5 * s, egui::Color32::from_rgb(220, 235, 250)),
+            );
         }
 
         // Outline so the strip stays visible against any icon body.
+        // Slightly dimmer than before — the indicator line plus the
+        // deeper trough already give the control its silhouette.
         ui.painter().rect_stroke(
             strip_rect,
-            3.0,
-            egui::Stroke::new(1.0, egui::Color32::from_gray(180)),
+            radius,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 130, 145)),
             egui::StrokeKind::Inside,
         );
 

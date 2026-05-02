@@ -203,14 +203,22 @@ package AnnotatedRocketStage
           lineColor={50,80,140},
           fillColor={120,160,220},
           fillPattern=FillPattern.Solid),
-        Text(extent={{-50,10},{50,-10}},
-          // MLS §18 DynamicSelect: tools that don't animate render
-          // the static "LOX"; the workbench renders the live mass
-          // during simulation by evaluating the dynamic branch.
+        // Compact in-tank caption: live mass during simulation,
+        // static "LOX" pre-run. Shrunk and lowered into the bottom
+        // strip of the tank body so it doesn't visually swamp the
+        // fluid-level rectangle. MLS §18 DynamicSelect — tools that
+        // don't animate render only the static branch.
+        Text(extent={{-40,-50},{40,-65}},
           textString=DynamicSelect("LOX", "LOX " + String(m) + " kg"),
           textColor={0,0,80}),
-        Text(extent={{-90,-85},{90,-100}},
-          textString="Tank",
+        // Instance name placed just below the tank body (body
+        // bottom is y=-80) so the gap from icon-bottom to label
+        // matches the Engine/Airframe icons. The previous
+        // -105..-130 extent worked at the bounding-box level but
+        // looked far away for components whose body doesn't fill
+        // the box.
+        Text(extent={{-120,-85},{120,-110}},
+          textString="%name",
           textColor={40,40,40})
       }));
   end Tank;
@@ -291,9 +299,12 @@ package AnnotatedRocketStage
           lineColor={40,40,40},
           fillColor={200,200,210},
           fillPattern=FillPattern.Solid),
-        Text(extent={{-90,-60},{90,-85}},
-          // Live opening % via MLS §18 DynamicSelect.
-          textString=DynamicSelect("Valve", "Valve " + String(opening) + " %"),
+        // Instance name right below the bowtie body (body bottom
+        // y=-40). The runtime control gauge already shows the live
+        // opening %, so a redundant caption above the name was
+        // removed — keeps the icon clean.
+        Text(extent={{-120,-50},{120,-75}},
+          textString="%name",
           textColor={40,40,40})
       }));
   end Valve;
@@ -338,9 +349,9 @@ package AnnotatedRocketStage
           color={0,0,0}, pattern=LinePattern.Dash, thickness=0.25),
         Line(points={{-40,-70},{0,-95},{40,-70}},
           color={220,40,30}, thickness=0.6),
-        Text(extent={{-80,90},{80,70}},
-          textString="Engine",
-          textColor={0,0,0})
+        Text(extent={{-120,-105},{120,-130}},
+          textString="%name",
+          textColor={40,40,40})
       }));
   end Engine;
 
@@ -381,9 +392,12 @@ package AnnotatedRocketStage
           lineColor={40,40,40},
           fillColor={160,60,60},
           fillPattern=FillPattern.Solid),
-        Text(extent={{-60,10},{60,-10}},
-          textString="Airframe",
-          textColor={0,0,0})
+        // Body bottom is y=-90 (rocket-fin polygon tips); place the
+        // name just below that for the same icon-to-label gap the
+        // Engine and Tank icons use.
+        Text(extent={{-120,-95},{120,-120}},
+          textString="%name",
+          textColor={40,40,40})
       }));
   end Airframe;
 
@@ -410,9 +424,10 @@ package AnnotatedRocketStage
           lineColor={0,0,0},
           fillColor={255,180,40},
           fillPattern=FillPattern.Solid),
-        Text(extent={{-90,90},{90,70}},
-          textString="Gimbal",
-          textColor={0,0,0})
+        // Cross-axis lines end at ±80; place the name just below.
+        Text(extent={{-120,-85},{120,-110}},
+          textString="%name",
+          textColor={40,40,40})
       }));
   end Gimbal;
 
