@@ -443,13 +443,30 @@ fn on_drive_rover(
             if let Ok(mut p) = q_digital_ports.get_mut(port_r) { p.raw_value = right_mix; }
         }
     } else if let Ok(ack) = q_ack.get(cmd.target) {
-        let drive_val = (cmd.forward * 32767.0).clamp(-32767.0, 32767.0) as i16;
+        // Ackermann normally yaws the front wheels via a steering joint
+        // — a `PhysicsRevoluteJoint` about Y between chassis and a
+        // steering knuckle. We don't author those today, so the steer
+        // port has no physical consumer on joint-based rovers. Until
+        // those steering joints land, mix the steer command into the
+        // left/right drive torques as a soft differential so the rover
+        // can still turn under a `steer` command. The dedicated steer
+        // port is still set for any consumer that implements true
+        // Ackermann (raycast wheels render a visible steer angle from
+        // it).
+        // Skid-style mix at full magnitude until proper steering
+        // knuckle joints (RevoluteJoint about Y between chassis and a
+        // knuckle, with the wheel's X-axis hinge below the knuckle)
+        // are authored. With the full mix the rover yaws under steer
+        // input by spinning the L/R wheel groups in opposite
+        // directions — visually identical to skid steer.
+        let left_mix = ((cmd.forward + cmd.steer) * 32767.0).clamp(-32767.0, 32767.0) as i16;
+        let right_mix = ((cmd.forward - cmd.steer) * 32767.0).clamp(-32767.0, 32767.0) as i16;
         let steer_val = (cmd.steer * 32767.0).clamp(-32767.0, 32767.0) as i16;
         if let Some(&port_l) = fsw.port_map.get(&ack.drive_left_port) {
-            if let Ok(mut p) = q_digital_ports.get_mut(port_l) { p.raw_value = drive_val; }
+            if let Ok(mut p) = q_digital_ports.get_mut(port_l) { p.raw_value = left_mix; }
         }
         if let Some(&port_r) = fsw.port_map.get(&ack.drive_right_port) {
-            if let Ok(mut p) = q_digital_ports.get_mut(port_r) { p.raw_value = drive_val; }
+            if let Ok(mut p) = q_digital_ports.get_mut(port_r) { p.raw_value = right_mix; }
         }
         if let Some(&port_s) = fsw.port_map.get(&ack.steer_port) {
             if let Ok(mut p) = q_digital_ports.get_mut(port_s) { p.raw_value = steer_val; }

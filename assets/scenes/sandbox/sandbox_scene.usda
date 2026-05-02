@@ -176,7 +176,7 @@ def Xform "SandboxScene"
             uniform token physics:axis = "X"
             point3f physics:localPos0 = (-1.0, -0.15, 1.225)
             point3f physics:localPos1 = (0, 0, 0)
-            float drive:angular:physics:maxForce = 2000.0
+            float drive:angular:physics:maxForce = 12000.0
             uniform token drive:angular:physics:type = "force"
         }
         def PhysicsRevoluteJoint "Wheel_FR_Hinge" (
@@ -188,7 +188,7 @@ def Xform "SandboxScene"
             uniform token physics:axis = "X"
             point3f physics:localPos0 = (1.0, -0.15, 1.225)
             point3f physics:localPos1 = (0, 0, 0)
-            float drive:angular:physics:maxForce = 2000.0
+            float drive:angular:physics:maxForce = 12000.0
             uniform token drive:angular:physics:type = "force"
         }
         def PhysicsRevoluteJoint "Wheel_RL_Hinge" (
@@ -200,7 +200,7 @@ def Xform "SandboxScene"
             uniform token physics:axis = "X"
             point3f physics:localPos0 = (-1.0, -0.15, -1.225)
             point3f physics:localPos1 = (0, 0, 0)
-            float drive:angular:physics:maxForce = 2000.0
+            float drive:angular:physics:maxForce = 12000.0
             uniform token drive:angular:physics:type = "force"
         }
         def PhysicsRevoluteJoint "Wheel_RR_Hinge" (
@@ -212,7 +212,7 @@ def Xform "SandboxScene"
             uniform token physics:axis = "X"
             point3f physics:localPos0 = (1.0, -0.15, -1.225)
             point3f physics:localPos1 = (0, 0, 0)
-            float drive:angular:physics:maxForce = 2000.0
+            float drive:angular:physics:maxForce = 12000.0
             uniform token drive:angular:physics:type = "force"
         }
     }
@@ -262,7 +262,7 @@ def Xform "SandboxScene"
             uniform token physics:axis = "X"
             point3f physics:localPos0 = (-1.0, -0.15, 1.225)
             point3f physics:localPos1 = (0, 0, 0)
-            float drive:angular:physics:maxForce = 2000.0
+            float drive:angular:physics:maxForce = 12000.0
             uniform token drive:angular:physics:type = "force"
         }
         def PhysicsRevoluteJoint "Wheel_FR_Hinge" (
@@ -274,7 +274,7 @@ def Xform "SandboxScene"
             uniform token physics:axis = "X"
             point3f physics:localPos0 = (1.0, -0.15, 1.225)
             point3f physics:localPos1 = (0, 0, 0)
-            float drive:angular:physics:maxForce = 2000.0
+            float drive:angular:physics:maxForce = 12000.0
             uniform token drive:angular:physics:type = "force"
         }
         def PhysicsRevoluteJoint "Wheel_RL_Hinge" (
@@ -286,7 +286,7 @@ def Xform "SandboxScene"
             uniform token physics:axis = "X"
             point3f physics:localPos0 = (-1.0, -0.15, -1.225)
             point3f physics:localPos1 = (0, 0, 0)
-            float drive:angular:physics:maxForce = 2000.0
+            float drive:angular:physics:maxForce = 12000.0
             uniform token drive:angular:physics:type = "force"
         }
         def PhysicsRevoluteJoint "Wheel_RR_Hinge" (
@@ -298,7 +298,7 @@ def Xform "SandboxScene"
             uniform token physics:axis = "X"
             point3f physics:localPos0 = (1.0, -0.15, 1.225)
             point3f physics:localPos1 = (0, 0, 0)
-            float drive:angular:physics:maxForce = 2000.0
+            float drive:angular:physics:maxForce = 12000.0
             uniform token drive:angular:physics:type = "force"
         }
     }
