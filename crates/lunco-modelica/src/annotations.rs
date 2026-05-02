@@ -223,6 +223,11 @@ impl Icon {
                     merge(b.extent.p2.x + b.origin.x, b.extent.p2.y + b.origin.y);
                 }
                 GraphicItem::Text(_) => continue,
+                // Plot nodes belong on the Diagram layer; if one
+                // somehow lands in an Icon's graphics list we skip
+                // it from the geometric bbox rather than treating
+                // its bounds as part of the icon silhouette.
+                GraphicItem::LunCoPlotNode(_) => continue,
             }
         }
         if found {
@@ -283,6 +288,7 @@ impl Icon {
                     merge(t.extent.p1.x + t.origin.x, t.extent.p1.y + t.origin.y);
                     merge(t.extent.p2.x + t.origin.x, t.extent.p2.y + t.origin.y);
                 }
+                GraphicItem::LunCoPlotNode(_) => continue,
             }
         }
         if found {
@@ -312,6 +318,34 @@ pub enum GraphicItem {
     Text(Text),
     Ellipse(Ellipse),
     Bitmap(Bitmap),
+    /// Vendor extension: an embedded plot tile bound to a runtime
+    /// signal. Written as `__LunCo_PlotNode(extent={{x1,y1},{x2,y2}},
+    /// signal="<dotted.path>", title="…")` inside `Diagram(graphics)`.
+    /// Per Modelica spec §18.7, vendor names prefixed with `__` are
+    /// ignored by other tools, so a file with these annotations is
+    /// still readable in Dymola / OMEdit (they just don't render).
+    LunCoPlotNode(LunCoPlotNode),
+}
+
+/// Embedded canvas plot tile — a small live chart of a runtime
+/// signal pinned to the diagram alongside component instances.
+/// Lives in `Diagram.graphics` as a vendor `__LunCo_PlotNode`
+/// annotation; the canvas projector spawns a `lunco.viz.plot`
+/// scene Node for each one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LunCoPlotNode {
+    /// Position + size in diagram coordinates, same convention every
+    /// other graphic primitive uses (`{{xmin,ymin},{xmax,ymax}}`).
+    pub extent: Extent,
+    /// Dotted path identifying the signal to plot. Resolved against
+    /// the document's instance tree at projection time — typically
+    /// `"<instance>.<variable>"` (e.g. `tank.m`,
+    /// `airframe.altitude`) or a pure expression like
+    /// `"der(airframe.velocity)"`.
+    pub signal: String,
+    /// Optional human label shown in the plot frame. Empty falls
+    /// back to `signal` at render time.
+    pub title: String,
 }
 
 /// MLS Annex D `Arrow` enum — line endcap style. Default `None`.
@@ -1005,8 +1039,33 @@ fn extract_graphic_item_filtered(
         "Text" => Some(GraphicItem::Text(extract_text(args)?)),
         "Ellipse" => Some(GraphicItem::Ellipse(extract_ellipse(args)?)),
         "Bitmap" => Some(GraphicItem::Bitmap(extract_bitmap(args)?)),
+        "__LunCo_PlotNode" => {
+            Some(GraphicItem::LunCoPlotNode(extract_lunco_plot_node(args)?))
+        }
         _ => None,
     }
+}
+
+/// Parse a `__LunCo_PlotNode(extent=..., signal="...", title="...")`
+/// vendor annotation. Returns `None` only if `extent` or `signal`
+/// can't be decoded — `title` is optional and falls back to empty
+/// (the renderer substitutes the signal path when the title is
+/// blank). Mirrors the trim-quote convention `extract_text`'s
+/// `textString` parsing uses so authors can keep the source plain
+/// (`signal="tank.m"`) without escape gymnastics.
+fn extract_lunco_plot_node(args: &[Expression]) -> Option<LunCoPlotNode> {
+    let extent = named_arg(args, "extent").and_then(extract_extent)?;
+    let signal = named_arg(args, "signal")
+        .and_then(extract_string)
+        .map(|s| s.trim_matches('"').to_string())?;
+    if signal.is_empty() {
+        return None;
+    }
+    let title = named_arg(args, "title")
+        .and_then(extract_string)
+        .map(|s| s.trim_matches('"').to_string())
+        .unwrap_or_default();
+    Some(LunCoPlotNode { extent, signal, title })
 }
 
 /// Walk a class's components and add the names of `parameter Boolean`

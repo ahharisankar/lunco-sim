@@ -126,7 +126,25 @@ package AnnotatedRocketStage
         graphics={
           Text(extent={{-100,95},{100,80}},
             textString="Rocket Stage — pressurised fluid line with throttle valve",
-            textColor={0,0,0})
+            textColor={0,0,0}),
+          // ── Embedded telemetry plots ──
+          // LunCo vendor extension (`__LunCo_PlotNode`): each entry
+          // becomes a live time-series tile on the diagram canvas
+          // bound to a runtime signal. `signal=` accepts dotted
+          // instance paths and `der(...)` expressions; tiles
+          // round-trip on move/resize/delete via the canvas-edit
+          // pipeline. Other Modelica tools ignore the vendor
+          // annotation entirely (`__` prefix per MLS §18.7).
+          __LunCo_PlotNode(extent={{-100,-50},{-60,-90}},
+            signal="tank.m", title="Tank mass"),
+          __LunCo_PlotNode(extent={{-58,-50},{-18,-90}},
+            signal="airframe.altitude", title="Altitude"),
+          __LunCo_PlotNode(extent={{-16,-50},{24,-90}},
+            signal="airframe.velocity", title="Velocity"),
+          __LunCo_PlotNode(extent={{26,-50},{66,-90}},
+            signal="airframe.thrust_in", title="Thrust"),
+          __LunCo_PlotNode(extent={{68,-50},{108,-90}},
+            signal="der(airframe.velocity)", title="Acceleration")
         }),
       experiment(StartTime=0, StopTime=150, Tolerance=1e-4, Interval=0.1));
   end RocketStage;
@@ -203,13 +221,18 @@ package AnnotatedRocketStage
           lineColor={50,80,140},
           fillColor={120,160,220},
           fillPattern=FillPattern.Solid),
-        // Compact in-tank caption: live mass during simulation,
-        // static "LOX" pre-run. Shrunk and lowered into the bottom
-        // strip of the tank body so it doesn't visually swamp the
-        // fluid-level rectangle. MLS §18 DynamicSelect — tools that
-        // don't animate render only the static branch.
-        Text(extent={{-40,-50},{40,-65}},
-          textString=DynamicSelect("LOX", "LOX " + String(m) + " kg"),
+        // Caption stacked into the y=37..58 band at the top of
+        // the tank body. The fluid level rises only up to y=40
+        // (`m / m_initial == 1`), so this strip is always *above*
+        // the propellant — the previous single-line caption sat
+        // in the lower body where the fluid colour fought the
+        // text and the value blurred at low mass. Two lines:
+        // "LOX" label, dynamic kg value below.
+        Text(extent={{-40,58},{40,48}},
+          textString="LOX",
+          textColor={0,0,80}),
+        Text(extent={{-46,48},{46,37}},
+          textString=DynamicSelect("kg", String(m) + " kg"),
           textColor={0,0,80}),
         // Instance name placed just below the tank body (body
         // bottom is y=-80) so the gap from icon-bottom to label

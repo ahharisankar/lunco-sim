@@ -728,6 +728,59 @@ pub enum ModelicaOp {
         /// Replacement value expression (emitted verbatim).
         value: String,
     },
+    /// Append a `__LunCo_PlotNode(...)` vendor entry to the class's
+    /// `annotation(Diagram(graphics={...}))` array. Creates the
+    /// `Diagram(...)` annotation (and its `graphics={}` array) if
+    /// they don't exist yet.
+    ///
+    /// Identification key: `signal_path`. The combination of class +
+    /// signal_path is treated as unique — adding a plot for a
+    /// signal that already has one in source replaces the existing
+    /// entry's extent / title (mirrors how `SetPlacement` handles a
+    /// pre-existing `Placement(...)`). Multiple plots of the same
+    /// signal aren't supported by this op; use `EditText` for that.
+    AddPlotNode {
+        /// Target class name.
+        class: String,
+        /// Plot annotation to add or update.
+        plot: pretty::LunCoPlotNodeSpec,
+    },
+    /// Remove the first `__LunCo_PlotNode(...)` vendor entry whose
+    /// `signal=` matches `signal_path` from the class's
+    /// `Diagram(graphics)` array. No-op error when no matching entry
+    /// exists — the canvas-side delete should hide the row anyway.
+    RemovePlotNode {
+        /// Target class name.
+        class: String,
+        /// Signal path identifying which plot entry to remove.
+        signal_path: String,
+    },
+    /// Update the `extent={{...}}` argument of the first
+    /// `__LunCo_PlotNode(...)` entry whose `signal=` matches
+    /// `signal_path`. Emitted by canvas drag/resize gestures so the
+    /// stored layout follows the user's manipulation.
+    SetPlotNodeExtent {
+        /// Target class name.
+        class: String,
+        /// Signal path identifying which plot entry to update.
+        signal_path: String,
+        /// New rectangle in diagram coordinates.
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+    },
+    /// Update the `title=` argument (or insert one) on the first
+    /// `__LunCo_PlotNode(...)` entry whose `signal=` matches
+    /// `signal_path`. Empty `title` removes the field entirely.
+    SetPlotNodeTitle {
+        /// Target class name.
+        class: String,
+        /// Signal path identifying which plot entry to update.
+        signal_path: String,
+        /// New title (empty → remove the `title=` field).
+        title: String,
+    },
 }
 
 impl DocumentOp for ModelicaOp {}
@@ -890,6 +943,31 @@ fn op_to_patch(
                 value,
             };
             Ok((r, rp, change))
+        }
+        ModelicaOp::AddPlotNode { class, plot } => {
+            let (r, rp) = compute_add_plot_node_patch(source, ast, &class, &plot)?;
+            // Plot edits don't move components or rewire connections;
+            // they only affect the diagram-decoration layer. The
+            // projection still re-reads the diagram annotation on
+            // every change, so `TextReplaced` is the cleanest signal:
+            // consumers that care rebuild from source.
+            Ok((r, rp, ModelicaChange::TextReplaced))
+        }
+        ModelicaOp::RemovePlotNode { class, signal_path } => {
+            let (r, rp) = compute_remove_plot_node_patch(source, ast, &class, &signal_path)?;
+            Ok((r, rp, ModelicaChange::TextReplaced))
+        }
+        ModelicaOp::SetPlotNodeExtent { class, signal_path, x1, y1, x2, y2 } => {
+            let (r, rp) = compute_set_plot_node_extent_patch(
+                source, ast, &class, &signal_path, x1, y1, x2, y2,
+            )?;
+            Ok((r, rp, ModelicaChange::TextReplaced))
+        }
+        ModelicaOp::SetPlotNodeTitle { class, signal_path, title } => {
+            let (r, rp) = compute_set_plot_node_title_patch(
+                source, ast, &class, &signal_path, &title,
+            )?;
+            Ok((r, rp, ModelicaChange::TextReplaced))
         }
     }
 }
@@ -1435,6 +1513,719 @@ fn compute_set_parameter_patch(
     // Reached terminator without encountering a `(` — insert fresh list.
     let rendered = format!("({}={})", param, value);
     Ok((name_end..name_end, rendered))
+}
+
+// ---------------------------------------------------------------------------
+// `__LunCo_PlotNode` vendor annotation helpers
+// ---------------------------------------------------------------------------
+//
+// All four `*PlotNode` ops navigate the same structure:
+//
+//   class Foo
+//     ...
+//     annotation(Diagram(graphics={
+//       __LunCo_PlotNode(extent=..., signal="...", title="..."),
+//       ...
+//     }));
+//   end Foo;
+//
+// The helpers below locate each layer (class body → `annotation(...)`
+// → `Diagram(...)` → `graphics={...}` → individual entries) using the
+// same paren-depth walks the SetPlacement path uses, so the ops compose
+// without re-parsing.
+
+/// Find the first `Diagram(...)` call inside any class-level
+/// `annotation(...)` block. Walks every `annotation(...)` at depth 0
+/// of the class body and returns the first one whose inner contains
+/// `Diagram(...)`. Returns `(annotation_span, diagram_outer_span,
+/// diagram_inner_span)` so callers can edit the graphics array
+/// (innermost), grow the Diagram args (middle), or replace the whole
+/// annotation (outer).
+fn find_class_diagram(
+    source: &str,
+    body: Range<usize>,
+) -> Option<(Range<usize>, Range<usize>, Range<usize>)> {
+    let mut cursor = body.start;
+    while cursor < body.end {
+        let ann = find_annotation_span(source, cursor..body.end)?;
+        let ann_inner_start = ann.start + "annotation(".len();
+        let ann_inner_end = ann.end - 1;
+        if let Some(d_span) =
+            find_named_call_span(source, ann_inner_start..ann_inner_end, "Diagram")
+        {
+            let d_inner_start = d_span.start + "Diagram(".len();
+            let d_inner_end = d_span.end - 1;
+            return Some((ann.clone(), d_span, d_inner_start..d_inner_end));
+        }
+        cursor = ann.end;
+    }
+    None
+}
+
+/// Top-level scan for `<name>(...)` inside `span`. Generalises
+/// `find_placement_span`. Matches identifiers that don't continue an
+/// adjacent ident (so `__LunCo_PlotNode` is matched but not just
+/// `LunCo_PlotNode` in the middle of one).
+fn find_named_call_span(source: &str, span: Range<usize>, name: &str) -> Option<Range<usize>> {
+    let slice = source.get(span.clone())?;
+    let bytes = slice.as_bytes();
+    let needle = name.as_bytes();
+    let mut depth: i32 = 0;
+    let mut in_str = false;
+    let mut i: usize = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_str {
+            if c == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if c == b'"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'"' => {
+                in_str = true;
+                i += 1;
+                continue;
+            }
+            b'(' | b'{' | b'[' => {
+                depth += 1;
+                i += 1;
+                continue;
+            }
+            b')' | b'}' | b']' => {
+                depth -= 1;
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0
+            && i + needle.len() <= bytes.len()
+            && &bytes[i..i + needle.len()] == needle
+        {
+            let prev_ok = i == 0
+                || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+            let after = i + needle.len();
+            let next_ok = after >= bytes.len()
+                || !(bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_');
+            if prev_ok && next_ok {
+                let mut j = after;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'(' {
+                    let mut d = 0;
+                    let mut k = j;
+                    while k < bytes.len() {
+                        match bytes[k] {
+                            b'(' | b'{' | b'[' => d += 1,
+                            b')' | b'}' | b']' => {
+                                d -= 1;
+                                if d == 0 {
+                                    return Some((span.start + i)..(span.start + k + 1));
+                                }
+                            }
+                            _ => {}
+                        }
+                        k += 1;
+                    }
+                    return None;
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Inside a `Diagram(...)` inner span, find `graphics = {...}` and
+/// return the span of the array contents *excluding* the enclosing
+/// `{}`. Returns `None` if `graphics=` is missing or its RHS isn't an
+/// array literal.
+fn find_diagram_graphics_inner(
+    source: &str,
+    diagram_inner: Range<usize>,
+) -> Option<Range<usize>> {
+    let slice = source.get(diagram_inner.clone())?;
+    let bytes = slice.as_bytes();
+    let needle = b"graphics";
+    let mut depth: i32 = 0;
+    let mut i: usize = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match c {
+            b'(' | b'{' | b'[' => {
+                depth += 1;
+                i += 1;
+                continue;
+            }
+            b')' | b'}' | b']' => {
+                depth -= 1;
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0
+            && i + needle.len() <= bytes.len()
+            && &bytes[i..i + needle.len()] == needle
+        {
+            let prev_ok = i == 0
+                || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+            let after = i + needle.len();
+            let next_ok = after >= bytes.len()
+                || !(bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_');
+            if prev_ok && next_ok {
+                // Skip ws + `=` + ws.
+                let mut j = after;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'=' {
+                    j += 1;
+                    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    if j < bytes.len() && bytes[j] == b'{' {
+                        // Find matching `}`.
+                        let mut d = 0;
+                        let mut k = j;
+                        while k < bytes.len() {
+                            match bytes[k] {
+                                b'(' | b'{' | b'[' => d += 1,
+                                b')' | b'}' | b']' => {
+                                    d -= 1;
+                                    if d == 0 {
+                                        // Inner span excludes the
+                                        // enclosing braces — the
+                                        // splice point for new
+                                        // entries goes between the
+                                        // braces, after a comma if
+                                        // the array is non-empty.
+                                        return Some(
+                                            (diagram_inner.start + j + 1)
+                                                ..(diagram_inner.start + k),
+                                        );
+                                    }
+                                }
+                                _ => {}
+                            }
+                            k += 1;
+                        }
+                        return None;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Locate every `__LunCo_PlotNode(...)` entry inside a `graphics={...}`
+/// inner span, paired with the `signal=` value extracted from each
+/// entry. Returned spans cover the entire call including the trailing
+/// `)`. Used by Remove / SetExtent / SetTitle to find the entry by
+/// signal path.
+fn list_lunco_plot_entries(
+    source: &str,
+    graphics_inner: Range<usize>,
+) -> Vec<(Range<usize>, String)> {
+    let mut out = Vec::new();
+    let mut cursor = graphics_inner.start;
+    while cursor < graphics_inner.end {
+        let Some(call) =
+            find_named_call_span(source, cursor..graphics_inner.end, "__LunCo_PlotNode")
+        else {
+            break;
+        };
+        let inner_start = call.start + "__LunCo_PlotNode(".len();
+        let inner_end = call.end - 1;
+        let signal = parse_signal_arg(source, inner_start..inner_end).unwrap_or_default();
+        out.push((call.clone(), signal));
+        cursor = call.end;
+    }
+    out
+}
+
+/// Extract the value of the `signal=` argument from a `__LunCo_PlotNode`
+/// call's inner span. Tolerant of argument order — scans top-level
+/// for the `signal` identifier followed by `=` and a string literal.
+fn parse_signal_arg(source: &str, inner: Range<usize>) -> Option<String> {
+    let slice = source.get(inner.clone())?;
+    let bytes = slice.as_bytes();
+    let needle = b"signal";
+    let mut depth: i32 = 0;
+    let mut i: usize = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match c {
+            b'(' | b'{' | b'[' => {
+                depth += 1;
+                i += 1;
+                continue;
+            }
+            b')' | b'}' | b']' => {
+                depth -= 1;
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0
+            && i + needle.len() <= bytes.len()
+            && &bytes[i..i + needle.len()] == needle
+        {
+            let prev_ok = i == 0
+                || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+            let after = i + needle.len();
+            let next_ok = after >= bytes.len()
+                || !(bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_');
+            if prev_ok && next_ok {
+                let mut j = after;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'=' {
+                    j += 1;
+                    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    if j < bytes.len() && bytes[j] == b'"' {
+                        // Read until the closing quote, honoring
+                        // simple `\"` escapes.
+                        let mut k = j + 1;
+                        let mut buf = String::new();
+                        while k < bytes.len() {
+                            let b = bytes[k];
+                            if b == b'\\' && k + 1 < bytes.len() {
+                                let e = bytes[k + 1];
+                                buf.push(match e {
+                                    b'"' => '"',
+                                    b'\\' => '\\',
+                                    other => other as char,
+                                });
+                                k += 2;
+                                continue;
+                            }
+                            if b == b'"' {
+                                return Some(buf);
+                            }
+                            buf.push(b as char);
+                            k += 1;
+                        }
+                        return None;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Append (or update) a `__LunCo_PlotNode(...)` entry in the class's
+/// `Diagram(graphics)` array.
+///
+/// Strategy:
+///   - If a `Diagram(graphics={...})` annotation exists and already
+///     contains an entry for `plot.signal`, replace the entire entry
+///     in place. Otherwise append after the last entry (or as the
+///     sole entry if the array is empty).
+///   - If a class-level annotation exists but has no `Diagram(...)`,
+///     prepend `Diagram(graphics={NEW_ENTRY})` into it.
+///   - If no class-level annotation exists, insert a fresh
+///     `annotation(Diagram(graphics={NEW_ENTRY}))` just before the
+///     class's terminating `end <Name>;`.
+fn compute_add_plot_node_patch(
+    source: &str,
+    ast: &AstCache,
+    class: &str,
+    plot: &pretty::LunCoPlotNodeSpec,
+) -> Result<(Range<usize>, String), DocumentError> {
+    let class_def = resolve_class(ast, class)?;
+    let body = (class_def.location.start as usize)..(class_def.location.end as usize);
+    let new_entry = pretty::lunco_plot_node_inner(plot);
+
+    if let Some((_ann, _diagram_outer, diagram_inner)) = find_class_diagram(source, body.clone()) {
+        // Diagram(...) exists. Look for graphics={...}.
+        if let Some(graphics_inner) =
+            find_diagram_graphics_inner(source, diagram_inner.clone())
+        {
+            let entries = list_lunco_plot_entries(source, graphics_inner.clone());
+            if let Some((entry_span, _)) =
+                entries.iter().find(|(_, s)| s == &plot.signal)
+            {
+                // Update existing — full replace of the entry.
+                return Ok((entry_span.clone(), new_entry));
+            }
+            // Append to end of graphics array.
+            let trimmed_end = trim_trailing_ws_back(source, graphics_inner.clone());
+            let prefix = if entries.is_empty() {
+                "".to_string()
+            } else {
+                ",\n        ".to_string()
+            };
+            let leading = if entries.is_empty() {
+                "\n        "
+            } else {
+                ""
+            };
+            let trailing = "\n      ";
+            return Ok((
+                trimmed_end..graphics_inner.end,
+                format!("{prefix}{leading}{new_entry}{trailing}"),
+            ));
+        }
+        // Diagram() with no graphics= argument. Prepend graphics={…} as
+        // the first arg.
+        let insert = if source[diagram_inner.clone()].trim().is_empty() {
+            format!("graphics={{\n        {new_entry}\n      }}")
+        } else {
+            format!("graphics={{\n        {new_entry}\n      }}, ")
+        };
+        return Ok((diagram_inner.start..diagram_inner.start, insert));
+    }
+
+    // No Diagram annotation. Look for an existing class-level
+    // annotation to extend; otherwise create a fresh one before
+    // `end <Name>;`.
+    if let Some(ann) = find_annotation_span(source, body.clone()) {
+        let inner_start = ann.start + "annotation(".len();
+        let payload = format!(
+            "Diagram(graphics={{\n        {new_entry}\n      }})"
+        );
+        let insert = if source[inner_start..ann.end - 1].trim().is_empty() {
+            payload
+        } else {
+            format!("{}, ", payload)
+        };
+        return Ok((inner_start..inner_start, insert));
+    }
+
+    // No annotation at all. Insert just before the class's
+    // terminating `end <Name>;`. AST `class_def.location.end` lands
+    // before that token, so we splice in place.
+    let insert_at = class_def.location.end as usize;
+    let payload = format!(
+        "  annotation(Diagram(graphics={{\n        {new_entry}\n      }}));\n  "
+    );
+    Ok((insert_at..insert_at, payload))
+}
+
+/// Remove the first `__LunCo_PlotNode(...)` entry whose `signal=`
+/// matches `signal_path`. Trims a leading or trailing comma so the
+/// graphics array stays well-formed.
+fn compute_remove_plot_node_patch(
+    source: &str,
+    ast: &AstCache,
+    class: &str,
+    signal_path: &str,
+) -> Result<(Range<usize>, String), DocumentError> {
+    let class_def = resolve_class(ast, class)?;
+    let body = (class_def.location.start as usize)..(class_def.location.end as usize);
+    let (_ann, _diagram_outer, diagram_inner) =
+        find_class_diagram(source, body).ok_or_else(|| {
+            DocumentError::ValidationFailed(
+                "no Diagram(graphics) annotation on class".into(),
+            )
+        })?;
+    let graphics_inner =
+        find_diagram_graphics_inner(source, diagram_inner).ok_or_else(|| {
+            DocumentError::ValidationFailed("Diagram(...) has no graphics=".into())
+        })?;
+    let entries = list_lunco_plot_entries(source, graphics_inner.clone());
+    let target = entries
+        .iter()
+        .find(|(_, s)| s == signal_path)
+        .ok_or_else(|| {
+            DocumentError::ValidationFailed(format!(
+                "no plot node with signal `{signal_path}`"
+            ))
+        })?
+        .0
+        .clone();
+    // Extend the removal span to swallow the comma/whitespace
+    // that separates this entry from its neighbour. Prefer the
+    // trailing comma (entries earlier in the array) so the array
+    // tail stays well-formed; fall back to the leading comma when
+    // the entry is last.
+    let bytes = source.as_bytes();
+    let mut end = target.end;
+    let mut k = end;
+    while k < graphics_inner.end && (bytes[k].is_ascii_whitespace() || bytes[k] == b',') {
+        if bytes[k] == b',' {
+            k += 1;
+            while k < graphics_inner.end && bytes[k].is_ascii_whitespace() {
+                k += 1;
+            }
+            end = k;
+            break;
+        }
+        k += 1;
+    }
+    if end == target.end {
+        // No trailing comma — strip a leading one instead so a
+        // residual `, ` doesn't pollute the array.
+        let mut s = target.start;
+        while s > graphics_inner.start
+            && (bytes[s - 1].is_ascii_whitespace() || bytes[s - 1] == b',')
+        {
+            s -= 1;
+        }
+        return Ok((s..end, String::new()));
+    }
+    Ok((target.start..end, String::new()))
+}
+
+/// Replace the `extent={{…}}` argument of the `__LunCo_PlotNode` entry
+/// matching `signal_path`. Same span-locate logic as `Remove`; this
+/// op only ever rewrites within an existing entry, so failure is a
+/// hard error rather than a fall-through to "create".
+fn compute_set_plot_node_extent_patch(
+    source: &str,
+    ast: &AstCache,
+    class: &str,
+    signal_path: &str,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+) -> Result<(Range<usize>, String), DocumentError> {
+    let entry = locate_plot_entry(source, ast, class, signal_path)?;
+    let inner_start = entry.start + "__LunCo_PlotNode(".len();
+    let inner_end = entry.end - 1;
+    // Locate the existing `extent` arg span (named-arg form). If
+    // missing — unusual; the read-side parser requires it — emit a
+    // validation error rather than silently inserting.
+    let extent_value = find_named_arg_value_span(source, inner_start..inner_end, "extent")
+        .ok_or_else(|| {
+            DocumentError::ValidationFailed(
+                "plot node has no `extent=` argument".into(),
+            )
+        })?;
+    let new_extent = format!("{{{},{}}},{{{},{}}}", fmt(x1), fmt(y1), fmt(x2), fmt(y2));
+    let new_extent = format!("{{{}}}", new_extent);
+    Ok((extent_value, new_extent))
+}
+
+/// Replace (or insert) the `title=` argument on the matching plot
+/// entry. Empty title removes the field entirely.
+fn compute_set_plot_node_title_patch(
+    source: &str,
+    ast: &AstCache,
+    class: &str,
+    signal_path: &str,
+    title: &str,
+) -> Result<(Range<usize>, String), DocumentError> {
+    let entry = locate_plot_entry(source, ast, class, signal_path)?;
+    let inner_start = entry.start + "__LunCo_PlotNode(".len();
+    let inner_end = entry.end - 1;
+    let escaped = title.replace('\\', "\\\\").replace('"', "\\\"");
+    let existing = find_named_arg_value_span(source, inner_start..inner_end, "title");
+    match (existing, title.is_empty()) {
+        (Some(span), true) => {
+            // Remove the entire `, title="…"` (or `title="…", `)
+            // fragment, eating one separating comma either side.
+            let bytes = source.as_bytes();
+            let mut start = span.start;
+            // Walk back to the `title` keyword start.
+            while start > inner_start
+                && (bytes[start - 1].is_ascii_whitespace()
+                    || bytes[start - 1] == b'=')
+            {
+                start -= 1;
+            }
+            let kw = b"title";
+            if start >= kw.len() && &bytes[start - kw.len()..start] == kw {
+                start -= kw.len();
+            }
+            // Eat one preceding comma (if any) so we don't leave
+            // `, , next` in the args list.
+            let mut s = start;
+            while s > inner_start
+                && (bytes[s - 1].is_ascii_whitespace() || bytes[s - 1] == b',')
+            {
+                s -= 1;
+            }
+            Ok((s..span.end, String::new()))
+        }
+        (Some(span), false) => Ok((span, format!("\"{escaped}\""))),
+        (None, true) => {
+            // Already absent — emit a no-op edit so the op stays
+            // idempotent rather than erroring.
+            Ok((inner_end..inner_end, String::new()))
+        }
+        (None, false) => {
+            // Append `, title="…"` just before the closing `)`.
+            Ok((inner_end..inner_end, format!(", title=\"{escaped}\"")))
+        }
+    }
+}
+
+/// Find the span of a single plot entry by signal path.
+fn locate_plot_entry(
+    source: &str,
+    ast: &AstCache,
+    class: &str,
+    signal_path: &str,
+) -> Result<Range<usize>, DocumentError> {
+    let class_def = resolve_class(ast, class)?;
+    let body = (class_def.location.start as usize)..(class_def.location.end as usize);
+    let (_a, _d, diagram_inner) =
+        find_class_diagram(source, body).ok_or_else(|| {
+            DocumentError::ValidationFailed(
+                "no Diagram(graphics) annotation on class".into(),
+            )
+        })?;
+    let graphics_inner =
+        find_diagram_graphics_inner(source, diagram_inner).ok_or_else(|| {
+            DocumentError::ValidationFailed("Diagram(...) has no graphics=".into())
+        })?;
+    list_lunco_plot_entries(source, graphics_inner)
+        .into_iter()
+        .find_map(|(span, s)| (s == signal_path).then_some(span))
+        .ok_or_else(|| {
+            DocumentError::ValidationFailed(format!(
+                "no plot node with signal `{signal_path}`"
+            ))
+        })
+}
+
+/// Locate the value-side span of a named argument inside a call's
+/// inner span. Returns the byte range covering the argument's value
+/// expression, suitable for `EditText` replacement. Skips over
+/// nested parens / braces / brackets and string literals.
+fn find_named_arg_value_span(
+    source: &str,
+    inner: Range<usize>,
+    name: &str,
+) -> Option<Range<usize>> {
+    let slice = source.get(inner.clone())?;
+    let bytes = slice.as_bytes();
+    let needle = name.as_bytes();
+    let mut depth: i32 = 0;
+    let mut in_str = false;
+    let mut i: usize = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_str {
+            if c == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if c == b'"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'"' => {
+                in_str = true;
+                i += 1;
+                continue;
+            }
+            b'(' | b'{' | b'[' => {
+                depth += 1;
+                i += 1;
+                continue;
+            }
+            b')' | b'}' | b']' => {
+                depth -= 1;
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0
+            && i + needle.len() <= bytes.len()
+            && &bytes[i..i + needle.len()] == needle
+        {
+            let prev_ok = i == 0
+                || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+            let after = i + needle.len();
+            let next_ok = after >= bytes.len()
+                || !(bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_');
+            if prev_ok && next_ok {
+                let mut j = after;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'=' {
+                    j += 1;
+                    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    // Walk forward at depth 0 of the call until the
+                    // next top-level comma or end of inner.
+                    let value_start = j;
+                    let mut d = 0;
+                    let mut in_s = false;
+                    while j < bytes.len() {
+                        let b = bytes[j];
+                        if in_s {
+                            if b == b'\\' && j + 1 < bytes.len() {
+                                j += 2;
+                                continue;
+                            }
+                            if b == b'"' {
+                                in_s = false;
+                            }
+                            j += 1;
+                            continue;
+                        }
+                        match b {
+                            b'"' => in_s = true,
+                            b'(' | b'{' | b'[' => d += 1,
+                            b')' | b'}' | b']' => d -= 1,
+                            b',' if d == 0 => break,
+                            _ => {}
+                        }
+                        j += 1;
+                    }
+                    // Trim trailing whitespace from the value span.
+                    let mut end = j;
+                    while end > value_start
+                        && bytes[end - 1].is_ascii_whitespace()
+                    {
+                        end -= 1;
+                    }
+                    return Some((inner.start + value_start)..(inner.start + end));
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Trim trailing whitespace at the end of `span`, returning the
+/// adjusted end position (the splice insertion point that places new
+/// content cleanly without doubling spaces).
+fn trim_trailing_ws_back(source: &str, span: Range<usize>) -> usize {
+    let bytes = source.as_bytes();
+    let mut end = span.end;
+    while end > span.start && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    end
+}
+
+/// Render a coordinate as it appears in `extent={{…}}`. Integers
+/// emit without a trailing `.0` so common diagram positions stay
+/// short and stable across round-trips.
+fn fmt(v: f32) -> String {
+    if v.fract() == 0.0 && v.abs() < 1e10 {
+        format!("{}", v as i64)
+    } else {
+        format!("{}", v)
+    }
 }
 
 /// Helper: emit the patch that either updates or appends `param=value`

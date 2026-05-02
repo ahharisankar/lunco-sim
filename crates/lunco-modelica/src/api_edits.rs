@@ -967,7 +967,17 @@ pub(crate) fn internal_op_to_api(op: &ModelicaOp) -> Option<ApiOp> {
             value: value.clone(),
         }),
         // Text-level ops are intentionally excluded from this pipeline.
-        ModelicaOp::ReplaceSource { .. } | ModelicaOp::EditText { .. } => None,
+        ModelicaOp::ReplaceSource { .. }
+        | ModelicaOp::EditText { .. }
+        // Plot-node ops are vendor-extension layout edits — no
+        // public API surface today, so the structural-pipeline
+        // bridge intentionally drops them. UI / canvas callers
+        // dispatch them directly via `apply_ops_public` (the same
+        // way SetParameter does for typed events).
+        | ModelicaOp::AddPlotNode { .. }
+        | ModelicaOp::RemovePlotNode { .. }
+        | ModelicaOp::SetPlotNodeExtent { .. }
+        | ModelicaOp::SetPlotNodeTitle { .. } => None,
     }
 }
 

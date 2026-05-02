@@ -2137,24 +2137,26 @@ fn handle_modelica_responses(
             // from a freshly-compiled model. Preserves the pre-viz UX
             // where compiling immediately filled the graph with all
             // the model's observables. Does nothing when the user has
-            // already curated the bindings — `auto_bind_observables`
-            // skips already-present bindings.
+            // already curated the bindings.
             if result.is_new_model {
                 if let Some(reg) = viz_registry.as_deref_mut() {
-                    let parameters = model.parameters.clone();
                     // Clear stale bindings from any prior model/entity so
                     // switching models doesn't leave old signals plotted.
-                    // The default plot follows the freshly-compiled model;
-                    // user-created plots retain their explicit bindings.
+                    // We deliberately do *not* auto-bind every detected
+                    // observable any more — a freshly compiled model
+                    // starts with an *empty* default plot. Users add
+                    // signals via the Telemetry panel checkboxes (or
+                    // place embedded `__LunCo_PlotNode` tiles on the
+                    // diagram). Avoids the noisy "12 lines on launch"
+                    // experience that prompted users to manually
+                    // un-tick everything before they could see what
+                    // they cared about.
                     if let Some(cfg) = reg.get_mut(ui::viz::DEFAULT_MODELICA_GRAPH) {
                         cfg.inputs.clear();
                     }
-                    ui::viz::auto_bind_observables(
-                        reg,
-                        result.entity,
-                        &result.detected_symbols,
-                        |name| parameters.contains_key(name),
-                    );
+                    let _ = result.entity;
+                    let _ = result.detected_symbols.len();
+                    let _ = model.parameters.len();
                 }
             }
         }

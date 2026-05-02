@@ -311,6 +311,33 @@ fn render_plot_node_editor(
         if ui.button("Unbind").clicked() {
             apply_plot_binding(world, doc_id, node_id, 0, "");
         }
+        // Title editor — writes back to source as the
+        // `__LunCo_PlotNode(title="…")` argument. Buffer per node
+        // id keyed in egui memory so typing isn't preempted by the
+        // re-projection that follows each commit. The op only
+        // fires on Enter / focus loss to avoid a write per
+        // keystroke (each one would re-parse the document).
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Title").small().weak());
+        let buf_id = egui::Id::new(("plot_title_buf", node_id.0));
+        let mut buf: String = ui
+            .memory(|m| m.data.get_temp::<String>(buf_id))
+            .unwrap_or_else(|| current.title.clone());
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut buf)
+                .hint_text(&current.signal_path)
+                .desired_width(f32::INFINITY),
+        );
+        let committed = resp.lost_focus()
+            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+            || (resp.lost_focus() && !resp.has_focus());
+        if resp.changed() {
+            ui.memory_mut(|m| m.data.insert_temp(buf_id, buf.clone()));
+        }
+        if committed && buf != current.title {
+            apply_plot_title(world, doc_id, node_id, &buf);
+            ui.memory_mut(|m| m.data.remove::<String>(buf_id));
+        }
     }
     ui.separator();
 
@@ -351,6 +378,74 @@ fn render_plot_node_editor(
         });
 }
 
+fn apply_plot_title(
+    world: &mut World,
+    doc_id: lunco_doc::DocumentId,
+    node_id: lunco_canvas::NodeId,
+    title: &str,
+) {
+    use crate::document::ModelicaOp;
+    use lunco_viz::kinds::canvas_plot_node::PlotNodeData;
+
+    // Snapshot the plot's signal path — that's the op key. Skip
+    // when the node isn't a plot or has no binding (no source row
+    // to update).
+    let signal_path = {
+        let state = world
+            .resource::<crate::ui::panels::canvas_diagram::CanvasDiagramState>();
+        let scene = &state.get(Some(doc_id)).canvas.scene;
+        let Some(node) = scene.node(node_id) else { return };
+        if node.kind != lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND {
+            return;
+        }
+        node.data
+            .downcast_ref::<PlotNodeData>()
+            .map(|d| d.signal_path.clone())
+            .unwrap_or_default()
+    };
+    if signal_path.is_empty() {
+        return;
+    }
+    // Optimistic in-memory update — visual reflects the title now,
+    // before the source rewrite + reproject completes.
+    {
+        let mut state =
+            world.resource_mut::<crate::ui::panels::canvas_diagram::CanvasDiagramState>();
+        let docstate = state.get_mut(Some(doc_id));
+        if let Some(node) = docstate.canvas.scene.node_mut(node_id) {
+            if let Some(prev) = node.data.downcast_ref::<PlotNodeData>() {
+                let updated = PlotNodeData {
+                    title: title.to_string(),
+                    ..prev.clone()
+                };
+                node.data = std::sync::Arc::new(updated);
+            }
+        }
+    }
+    let class = world
+        .get_resource::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
+        .and_then(|m| m.get(doc_id).map(str::to_string))
+        .or_else(|| {
+            world
+                .get_resource::<crate::ui::WorkbenchState>()
+                .and_then(|s| s.open_model.as_ref().map(|m| m.detected_name.clone()))
+                .flatten()
+        })
+        .unwrap_or_default();
+    if class.is_empty() {
+        return;
+    }
+    crate::ui::panels::canvas_diagram::apply_ops_public(
+        world,
+        doc_id,
+        vec![ModelicaOp::SetPlotNodeTitle {
+            class,
+            signal_path,
+            title: title.to_string(),
+        }],
+    );
+}
+
 fn apply_plot_binding(
     world: &mut World,
     doc_id: lunco_doc::DocumentId,
@@ -358,18 +453,82 @@ fn apply_plot_binding(
     entity_bits: u64,
     signal_path: &str,
 ) {
+    use crate::document::ModelicaOp;
     use lunco_viz::kinds::canvas_plot_node::PlotNodeData;
 
+    // Snapshot the previous binding + the node's current rect so we
+    // can build the right op pair (remove old, add new) and so the
+    // optimistic in-memory swap stays consistent with what the
+    // source rewrite is about to do.
+    let (prev_signal, rect, kind_is_plot) = {
+        let state = world
+            .resource::<crate::ui::panels::canvas_diagram::CanvasDiagramState>();
+        let scene = &state.get(Some(doc_id)).canvas.scene;
+        let Some(node) = scene.node(node_id) else { return };
+        let prev = node
+            .data
+            .downcast_ref::<PlotNodeData>()
+            .map(|d| d.signal_path.clone())
+            .unwrap_or_default();
+        let is_plot = node.kind == lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND;
+        (prev, node.rect, is_plot)
+    };
+    if !kind_is_plot {
+        return;
+    }
+    // 1. Optimistic in-memory swap so the visual updates this frame.
     let payload = PlotNodeData {
         entity: entity_bits,
         signal_path: signal_path.to_string(),
         title: String::new(),
     };
     let data: lunco_canvas::NodeData = std::sync::Arc::new(payload);
-    let mut state =
-        world.resource_mut::<crate::ui::panels::canvas_diagram::CanvasDiagramState>();
-    let docstate = state.get_mut(Some(doc_id));
-    if let Some(node) = docstate.canvas.scene.node_mut(node_id) {
-        node.data = data;
+    {
+        let mut state =
+            world.resource_mut::<crate::ui::panels::canvas_diagram::CanvasDiagramState>();
+        let docstate = state.get_mut(Some(doc_id));
+        if let Some(node) = docstate.canvas.scene.node_mut(node_id) {
+            node.data = data;
+        }
+    }
+    // 2. Source rewrite: rebinding is `Remove(old) + Add(new)` so
+    //    the diagram annotation tracks the user's choice. Empty
+    //    `signal_path` is "unbind" — only emit the Remove. Empty
+    //    `prev_signal` is "first bind" — only emit the Add.
+    let class = world
+        .get_resource::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
+        .and_then(|m| m.get(doc_id).map(str::to_string))
+        .or_else(|| {
+            world
+                .get_resource::<crate::ui::WorkbenchState>()
+                .and_then(|s| s.open_model.as_ref().map(|m| m.detected_name.clone()))
+                .flatten()
+        })
+        .unwrap_or_default();
+    if class.is_empty() {
+        return;
+    }
+    let mut ops: Vec<ModelicaOp> = Vec::new();
+    if !prev_signal.is_empty() && prev_signal != signal_path {
+        ops.push(ModelicaOp::RemovePlotNode {
+            class: class.clone(),
+            signal_path: prev_signal,
+        });
+    }
+    if !signal_path.is_empty() {
+        ops.push(ModelicaOp::AddPlotNode {
+            class,
+            plot: crate::pretty::LunCoPlotNodeSpec {
+                x1: rect.min.x,
+                y1: rect.min.y,
+                x2: rect.max.x,
+                y2: rect.max.y,
+                signal: signal_path.to_string(),
+                title: String::new(),
+            },
+        });
+    }
+    if !ops.is_empty() {
+        crate::ui::panels::canvas_diagram::apply_ops_public(world, doc_id, ops);
     }
 }

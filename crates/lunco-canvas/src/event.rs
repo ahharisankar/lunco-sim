@@ -13,7 +13,7 @@
 //! scripted replay, remote control) can drive the canvas without
 //! pretending to be egui.
 
-use crate::scene::{EdgeId, NodeId, Pos, PortRef};
+use crate::scene::{EdgeId, NodeId, Pos, PortRef, Rect};
 use crate::selection::Selection;
 
 /// Editor-facing event. One per user action that mutates the scene.
@@ -29,6 +29,16 @@ pub enum SceneEvent {
         id: NodeId,
         old_min: Pos,
         new_min: Pos,
+    },
+    /// Node was resized via the bottom-right resize handle. Emitted
+    /// once on mouse-up — same cadence as `NodeMoved` so consumers
+    /// translate one user gesture to one domain op. Plot / control
+    /// / dashboard nodes are the typical target; component icons
+    /// can also be resized when the projector marks them resizable.
+    NodeResized {
+        id: NodeId,
+        old_rect: Rect,
+        new_rect: Rect,
     },
     /// User dragged from one port and dropped on a compatible port.
     /// The canvas has already validated that a connection makes sense

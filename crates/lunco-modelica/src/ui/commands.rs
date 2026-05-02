@@ -3004,71 +3004,66 @@ pub struct AddCanvasPlot {
 fn on_add_canvas_plot(trigger: On<AddCanvasPlot>, mut commands: Commands) {
     let ev = trigger.event().clone();
     commands.queue(move |world: &mut World| {
+        use crate::document::ModelicaOp;
         let Some(doc) = resolve_active_doc(world) else {
             bevy::log::warn!("[AddCanvasPlot] no active document");
             return;
         };
-        // Default size matches the typical Modelica icon extent
-        // (-50..50 on each axis = 100×100 world units), with a
-        // slightly wider aspect that fits a time-series chart
-        // better than a square. Plots dropped via the palette no
-        // longer dwarf the components they sit next to.
+        // Default plot tile size — slightly wider than tall so a
+        // time-series chart reads naturally next to the typical
+        // 100×100 component icon.
         let w = if ev.width > 0.0 { ev.width } else { 120.0 };
         let h = if ev.height > 0.0 { ev.height } else { 90.0 };
-        // Bind to the active simulator entity — same lookup
-        // NewPlotPanel uses. Stored as the entity's bit-pattern so
-        // the JSON payload is platform-stable. When `ev.signal` is
-        // empty the plot is unbound: zero entity + empty path so the
-        // visual draws an "(unbound plot)" placeholder until the user
-        // picks a signal in the inspector.
-        let (entity_bits, signal_path) = if ev.signal.is_empty() {
-            (0, String::new())
-        } else {
-            let model_entity = world
-                .query::<(bevy::prelude::Entity, &crate::ModelicaModel)>()
-                .iter(world)
-                .next()
-                .map(|(e, _)| e)
-                .unwrap_or(bevy::prelude::Entity::PLACEHOLDER);
-            (model_entity.to_bits(), ev.signal.clone())
-        };
-        // Scene-node addition: the canvas treats this exactly like a
-        // component node (selection, drag, undo all inherit). The
-        // visual is reconstructed from `data` via the registered
-        // `lunco.viz.plot` factory.
-        let payload = lunco_viz::kinds::canvas_plot_node::PlotNodeData {
-            entity: entity_bits,
-            signal_path,
+        if ev.signal.is_empty() {
+            // No source-side persistence path for unbound plots —
+            // the annotation requires a non-empty `signal=`. Refuse
+            // up front so the user gets one consistent error story
+            // (the inspector "bind a signal" UX is unchanged).
+            bevy::log::warn!(
+                "[AddCanvasPlot] empty signal — skipping (bind one first)"
+            );
+            return;
+        }
+        // Resolve the target class the same way `on_move_component`
+        // does — drill-in target wins, then the workbench's
+        // detected name. Empty class is a hard error: every plot
+        // tile lives inside a specific class's Diagram annotation.
+        let class = world
+            .get_resource::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
+            .and_then(|m| m.get(doc).map(str::to_string))
+            .or_else(|| {
+                world
+                    .get_resource::<crate::ui::WorkbenchState>()
+                    .and_then(|s| s.open_model.as_ref().map(|m| m.detected_name.clone()))
+                    .flatten()
+            })
+            .unwrap_or_default();
+        if class.is_empty() {
+            bevy::log::warn!("[AddCanvasPlot] could not resolve target class for doc");
+            return;
+        }
+        let plot = crate::pretty::LunCoPlotNodeSpec {
+            x1: ev.x,
+            y1: ev.y,
+            x2: ev.x + w,
+            y2: ev.y + h,
+            signal: ev.signal.clone(),
             title: String::new(),
         };
-        // Typed payload — boxed straight into the canvas Node.data
-        // (which is `Arc<dyn Any + Send + Sync>` — see
-        // `lunco_canvas::NodeData`). The plot-node factory downcasts
-        // back to `PlotNodeData` at construction.
-        let data: lunco_canvas::NodeData = std::sync::Arc::new(payload);
-        let mut state =
-            world.resource_mut::<crate::ui::panels::canvas_diagram::CanvasDiagramState>();
-        let docstate = state.get_mut(Some(doc));
-        let scene = &mut docstate.canvas.scene;
-        let id = scene.alloc_node_id();
-        scene.insert_node(lunco_canvas::scene::Node {
-            id,
-            rect: lunco_canvas::Rect::from_min_max(
-                lunco_canvas::Pos::new(ev.x, ev.y),
-                lunco_canvas::Pos::new(ev.x + w, ev.y + h),
-            ),
-            kind: lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND.into(),
-            data,
-            ports: Vec::new(),
-            label: String::new(),
-            origin: None,
-            resizable: true,
-            visual_rect: None,
-        });
         bevy::log::info!(
-            "[AddCanvasPlot] doc={} signal={} at ({},{}) {}x{} (node id={})",
-            doc.raw(), ev.signal, ev.x, ev.y, w, h, id.0,
+            "[AddCanvasPlot] doc={} class={class} signal={} at ({},{}) {}x{}",
+            doc.raw(), ev.signal, ev.x, ev.y, w, h,
         );
+        crate::ui::panels::canvas_diagram::apply_ops_public(
+            world,
+            doc,
+            vec![ModelicaOp::AddPlotNode { class, plot }],
+        );
+        // The reprojection that follows the source rewrite emits a
+        // `lunco.viz.plot` scene Node from the new annotation, so
+        // there's no optimistic `scene.insert_node` here — letting
+        // the source be the single source of truth keeps add /
+        // delete / undo coherent without extra plumbing.
     });
 }
 

@@ -238,6 +238,46 @@ fn fmt_points(points: &[(f32, f32)]) -> String {
 // Annotation printers
 // ---------------------------------------------------------------------------
 
+/// LunCo vendor extension: a plot tile pinned to the diagram. See
+/// [`crate::annotations::LunCoPlotNode`] for the read-side mirror.
+/// Position is in Modelica diagram coordinates (`{{x1,y1},{x2,y2}}`,
+/// the same convention every other graphic primitive uses).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LunCoPlotNodeSpec {
+    pub x1: f32,
+    pub y1: f32,
+    pub x2: f32,
+    pub y2: f32,
+    pub signal: String,
+    pub title: String,
+}
+
+/// Render a `__LunCo_PlotNode(extent={{…}}, signal="…", title="…")`
+/// fragment as it appears inside a `Diagram(graphics={…})` array.
+/// `title` is omitted entirely when empty so round-tripping a plot
+/// without a custom label leaves a clean source line.
+pub fn lunco_plot_node_inner(p: &LunCoPlotNodeSpec) -> String {
+    let mut s = format!(
+        "__LunCo_PlotNode(extent={{{},{}}}, signal=\"{}\"",
+        fmt_point(p.x1, p.y1),
+        fmt_point(p.x2, p.y2),
+        // Modelica strings: backslash + quote escapes only. Plot
+        // signal paths are dotted identifiers — neither is expected
+        // here in practice, but escaping keeps the writer robust
+        // against unusual user input (`"foo\"bar"` / `"a\\b"`).
+        p.signal.replace('\\', "\\\\").replace('"', "\\\""),
+    );
+    if !p.title.is_empty() {
+        let _ = write!(
+            s,
+            ", title=\"{}\"",
+            p.title.replace('\\', "\\\\").replace('"', "\\\""),
+        );
+    }
+    s.push(')');
+    s
+}
+
 /// Render a `Placement(transformation(extent={{x1,y1},{x2,y2}}))` fragment
 /// *without* the enclosing `annotation(...)` wrapper.
 pub fn placement_inner(p: &Placement) -> String {

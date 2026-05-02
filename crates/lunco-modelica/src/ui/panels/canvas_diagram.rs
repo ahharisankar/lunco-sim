@@ -4464,13 +4464,30 @@ impl Panel for CanvasDiagramPanel {
                 docstate.canvas.tool.remap_node_ids(&|old: lunco_canvas::NodeId| {
                     id_remap.get(&old).copied()
                 });
-                // Carry over scene-only nodes (plots, future dashboard
-                // / control widgets) that have no Modelica source
-                // counterpart — projection rebuilds the scene from the
-                // diagram alone, so without this they'd vanish on
-                // every reproject (initial parse, sim start, source
-                // edit, …). Keyed by `kind` so any future scene-only
-                // visual gets the same treatment without code changes.
+                // Plot tiles are persisted in the diagram annotation
+                // as `__LunCo_PlotNode(extent=…, signal=…, title=…)`
+                // vendor entries. Re-emit one scene Node per
+                // annotation so they reload with the document.
+                // Scene-only plot nodes (added via the runtime
+                // "Add plot" gesture but not yet round-tripped to
+                // source) carry no `origin` marker — those still
+                // get preserved via the legacy carry-over below so
+                // adding a plot doesn't blink off-screen between
+                // the gesture and the next save.
+                let mut scene = scene;
+                let bg_graphics: Vec<crate::annotations::GraphicItem> = docstate
+                    .background_diagram
+                    .read()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|(_, gfx)| gfx.clone()))
+                    .unwrap_or_default();
+                let plot_origins_from_source =
+                    emit_plot_nodes_from_diagram(&mut scene, &bg_graphics);
+                // Legacy carry-over: scratch plot nodes from a prior
+                // scene that haven't been written to source yet.
+                // Filtered against `plot_origins_from_source` so we
+                // don't double-insert a plot the source already
+                // describes.
                 const SCENE_ONLY_KINDS: &[&str] = &[
                     lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND,
                 ];
@@ -4478,10 +4495,15 @@ impl Panel for CanvasDiagramPanel {
                     .canvas
                     .scene
                     .nodes()
-                    .filter(|(_, n)| SCENE_ONLY_KINDS.contains(&n.kind.as_str()))
+                    .filter(|(_, n)| {
+                        SCENE_ONLY_KINDS.contains(&n.kind.as_str())
+                            && n.origin
+                                .as_deref()
+                                .map(|o| !plot_origins_from_source.contains(o))
+                                .unwrap_or(true)
+                    })
                     .map(|(_, n)| n.clone())
                     .collect();
-                let mut scene = scene;
                 for mut node in scene_only_nodes {
                     node.id = scene.alloc_node_id();
                     scene.insert_node(node);
@@ -4707,6 +4729,48 @@ impl CanvasDiagramPanel {
         let canvas_sim = doc_id.and_then(|d| {
             crate::ui::state::simulator_for(world, d)
         });
+
+        // Re-bind every embedded plot tile's `entity` to the live
+        // simulator each frame. Source-emitted plot Nodes are
+        // serialised with `entity = 0` (Modelica annotations don't
+        // know about Bevy entity ids; they'd be meaningless across
+        // sessions anyway) — without this re-bind the
+        // `SignalSnapshot.samples[(entity, path)]` lookup misses
+        // and the chart stays empty even while the sim publishes
+        // history. Cheap loop: typical canvas has < 10 plot
+        // tiles, and we only mutate when the entity actually
+        // changed.
+        if let (Some(d), Some(sim)) = (doc_id, canvas_sim) {
+            let new_bits = sim.to_bits();
+            let mut state = world.resource_mut::<CanvasDiagramState>();
+            let docstate = state.get_mut(Some(d));
+            let plot_ids: Vec<lunco_canvas::NodeId> = docstate
+                .canvas
+                .scene
+                .nodes()
+                .filter(|(_, n)| {
+                    n.kind == lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            for id in plot_ids {
+                let Some(node) = docstate.canvas.scene.node_mut(id) else { continue };
+                let Some(prev) = node
+                    .data
+                    .downcast_ref::<lunco_viz::kinds::canvas_plot_node::PlotNodeData>()
+                    .cloned()
+                else {
+                    continue;
+                };
+                if prev.entity != new_bits {
+                    let updated = lunco_viz::kinds::canvas_plot_node::PlotNodeData {
+                        entity: new_bits,
+                        ..prev
+                    };
+                    node.data = std::sync::Arc::new(updated);
+                }
+            }
+        }
 
         {
             let mut state =
@@ -6338,6 +6402,71 @@ fn empty_overlay_class_info(
 /// class when no drill-in is active. Used by the background
 /// decoration layer to paint MSL-style diagram callouts (labelled
 /// regions, accent text) behind the nodes.
+/// Emit a `lunco.viz.plot` scene Node for every `__LunCo_PlotNode`
+/// vendor annotation in the active class's `Diagram(graphics=…)`.
+/// Each Node carries a stable `origin` marker (`plot:<index>:<signal>`)
+/// derived from the annotation's position in the source so the
+/// canvas-edit pipeline can recognise it as source-backed and not
+/// double-insert via the scene-only carry-over. Returns the set of
+/// emitted origin keys.
+fn emit_plot_nodes_from_diagram(
+    scene: &mut lunco_canvas::scene::Scene,
+    graphics: &[crate::annotations::GraphicItem],
+) -> std::collections::HashSet<String> {
+    use crate::annotations::GraphicItem;
+    let mut origins: std::collections::HashSet<String> = Default::default();
+    for (idx, item) in graphics.iter().enumerate() {
+        let GraphicItem::LunCoPlotNode(plot) = item else { continue };
+        // `entity` is the runtime Bevy id of the simulator host that
+        // produces samples for this signal. We don't know it at
+        // projection time (the source can be loaded long before the
+        // sim spawns), so we leave it as `Entity::PLACEHOLDER` (0)
+        // — the live sample resolver in
+        // `lunco_viz::canvas_plot_node` keys by signal path and
+        // recovers the active producer at fetch time.
+        let payload = lunco_viz::kinds::canvas_plot_node::PlotNodeData {
+            entity: 0,
+            signal_path: plot.signal.clone(),
+            title: plot.title.clone(),
+        };
+        let data: lunco_canvas::NodeData = std::sync::Arc::new(payload);
+        let origin = format!("plot:{idx}:{}", plot.signal);
+        origins.insert(origin.clone());
+        let id = scene.alloc_node_id();
+        scene.insert_node(lunco_canvas::scene::Node {
+            id,
+            rect: {
+                // Modelica diagrams are +Y up; canvas world is +Y
+                // down (`coords::modelica_to_canvas` negates Y).
+                // Apply the flip per corner, then normalise so
+                // `from_min_max` gets `min < max` on both axes —
+                // Modelica `extent={{x1,y1},{x2,y2}}` doesn't
+                // enforce corner ordering. Without this two
+                // failures stack: a flipped Y range that puts the
+                // tile far above the icons instead of below them,
+                // and a zero-area rect when the source's first
+                // corner has the larger y.
+                let x1 = plot.extent.p1.x as f32;
+                let x2 = plot.extent.p2.x as f32;
+                let y1 = -(plot.extent.p1.y as f32);
+                let y2 = -(plot.extent.p2.y as f32);
+                lunco_canvas::Rect::from_min_max(
+                    lunco_canvas::Pos::new(x1.min(x2), y1.min(y2)),
+                    lunco_canvas::Pos::new(x1.max(x2), y1.max(y2)),
+                )
+            },
+            kind: lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND.into(),
+            data,
+            ports: Vec::new(),
+            label: String::new(),
+            origin: Some(origin),
+            resizable: true,
+            visual_rect: None,
+        });
+    }
+    origins
+}
+
 fn diagram_annotation_for_target(
     ast: &rumoca_session::parsing::ast::StoredDefinition,
     target: Option<&str>,
@@ -7269,10 +7398,48 @@ fn build_ops_from_events(
     for ev in events {
         match ev {
             SceneEvent::NodeMoved { id, new_min, .. } => {
+                let Some(node) = scene.node(*id) else { continue };
+                // Plot tiles are vendor-annotation rows in
+                // `Diagram(graphics)`, not component placements. They
+                // round-trip through `SetPlotNodeExtent` keyed by
+                // signal path; the on-screen rect is taken straight
+                // from `node.rect` (canvas world coords match the
+                // Modelica diagram coord system). Identification:
+                // origin format is `"plot:<idx>:<signal>"` — split
+                // off the signal to use as the op key.
+                if node.kind == lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND {
+                    let signal = node
+                        .origin
+                        .as_deref()
+                        .and_then(|o| o.strip_prefix("plot:"))
+                        .and_then(|rest| rest.split_once(':').map(|(_, s)| s.to_string()))
+                        .or_else(|| {
+                            // Fallback for legacy / scratch plot
+                            // nodes whose origin isn't in the source
+                            // form yet — pull the signal out of the
+                            // node's `data` payload.
+                            node.data
+                                .downcast_ref::<lunco_viz::kinds::canvas_plot_node::PlotNodeData>()
+                                .map(|d| d.signal_path.clone())
+                        });
+                    let Some(signal_path) = signal.filter(|s| !s.is_empty()) else {
+                        continue;
+                    };
+                    let w = node.rect.width().max(1.0);
+                    let h = node.rect.height().max(1.0);
+                    ops.push(ModelicaOp::SetPlotNodeExtent {
+                        class: class.to_string(),
+                        signal_path,
+                        x1: new_min.x,
+                        y1: new_min.y,
+                        x2: new_min.x + w,
+                        y2: new_min.y + h,
+                    });
+                    continue;
+                }
                 // The `origin` we set during projection carries the
                 // Modelica instance name. Skip if missing (shouldn't
                 // happen — projection always sets it).
-                let Some(node) = scene.node(*id) else { continue };
                 let Some(name) = node.origin.clone() else { continue };
                 // Use the node's actual icon extent — `Placement::at`
                 // hardcodes 20×20, which silently shrinks (or grows)
@@ -7292,6 +7459,51 @@ fn build_ops_from_events(
                         y: m.y,
                         width: icon_w,
                         height: icon_h,
+                    },
+                });
+            }
+            SceneEvent::NodeResized { id, new_rect, .. } => {
+                let Some(node) = scene.node(*id) else { continue };
+                if node.kind == lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND {
+                    let signal = node
+                        .origin
+                        .as_deref()
+                        .and_then(|o| o.strip_prefix("plot:"))
+                        .and_then(|rest| rest.split_once(':').map(|(_, s)| s.to_string()))
+                        .or_else(|| {
+                            node.data
+                                .downcast_ref::<lunco_viz::kinds::canvas_plot_node::PlotNodeData>()
+                                .map(|d| d.signal_path.clone())
+                        });
+                    let Some(signal_path) = signal.filter(|s| !s.is_empty()) else {
+                        continue;
+                    };
+                    ops.push(ModelicaOp::SetPlotNodeExtent {
+                        class: class.to_string(),
+                        signal_path,
+                        x1: new_rect.min.x,
+                        y1: new_rect.min.y,
+                        x2: new_rect.max.x,
+                        y2: new_rect.max.y,
+                    });
+                    continue;
+                }
+                // Component icon resize → `SetPlacement` keeping
+                // the node's centre fixed but adopting the new
+                // width/height. Lets users tighten oversized library
+                // icons on the canvas without writing source by hand.
+                let Some(name) = node.origin.clone() else { continue };
+                let w = new_rect.width().max(1.0);
+                let h = new_rect.height().max(1.0);
+                let m = coords::canvas_min_to_modelica_center(new_rect.min, w, h);
+                ops.push(ModelicaOp::SetPlacement {
+                    class: class.to_string(),
+                    name,
+                    placement: Placement {
+                        x: m.x,
+                        y: m.y,
+                        width: w,
+                        height: h,
                     },
                 });
             }
@@ -7529,6 +7741,26 @@ fn op_remove_node_inner(
     class: &str,
 ) -> Option<ModelicaOp> {
     let node = scene.node(id)?;
+    // Plot tiles delete via `RemovePlotNode` keyed by signal path,
+    // not `RemoveComponent` which targets a Modelica component
+    // declaration. Same dispatch shape as the move handler above.
+    if node.kind == lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND {
+        let signal_path = node
+            .origin
+            .as_deref()
+            .and_then(|o| o.strip_prefix("plot:"))
+            .and_then(|rest| rest.split_once(':').map(|(_, s)| s.to_string()))
+            .or_else(|| {
+                node.data
+                    .downcast_ref::<lunco_viz::kinds::canvas_plot_node::PlotNodeData>()
+                    .map(|d| d.signal_path.clone())
+            })
+            .filter(|s| !s.is_empty())?;
+        return Some(ModelicaOp::RemovePlotNode {
+            class: class.to_string(),
+            signal_path,
+        });
+    }
     let name = node.origin.clone()?;
     Some(ModelicaOp::RemoveComponent {
         class: class.to_string(),
