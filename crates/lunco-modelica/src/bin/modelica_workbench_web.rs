@@ -88,6 +88,11 @@ pub fn run() {
         .add_plugins(lunco_viz::LuncoVizPlugin)
         .add_plugins(ModelicaPlugin)
         .add_plugins(lunco_modelica::msl_remote::MslRemotePlugin)
+        // Autosave Untitled / duplicated docs to the browser's
+        // localStorage so a page reload doesn't silently lose
+        // anything. No-op on native (the desktop binary doesn't
+        // include this plugin).
+        .add_plugins(lunco_modelica::ui::wasm_autosave::WasmAutosavePlugin)
         .insert_resource(BundledModelInfo {
             default_filename: default_filename.to_string(),
             default_source: default_source.to_string(),

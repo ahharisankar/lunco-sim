@@ -781,6 +781,39 @@ pub enum ModelicaOp {
         /// New title (empty → remove the `title=` field).
         title: String,
     },
+    /// Replace the `extent={{…}}` argument of the i-th `Text(...)`
+    /// entry inside the class's `Diagram(graphics)` array. Used by
+    /// canvas drag/resize on editable diagram labels.
+    SetDiagramTextExtent {
+        /// Target class name.
+        class: String,
+        /// Index of the Text item within `Diagram(graphics={...})`.
+        /// Counted in source order, Text-only.
+        index: usize,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+    },
+    /// Replace the `textString=` argument of the i-th `Text(...)`
+    /// entry inside the class's `Diagram(graphics)` array. Empty
+    /// `text` is allowed (Modelica permits empty Text labels).
+    SetDiagramTextString {
+        /// Target class name.
+        class: String,
+        /// Index of the Text item within `Diagram(graphics={...})`.
+        index: usize,
+        /// New `textString=` value (the writer adds the quotes).
+        text: String,
+    },
+    /// Remove the i-th `Text(...)` entry from the class's
+    /// `Diagram(graphics)` array.
+    RemoveDiagramText {
+        /// Target class name.
+        class: String,
+        /// Index of the Text item within `Diagram(graphics={...})`.
+        index: usize,
+    },
 }
 
 impl DocumentOp for ModelicaOp {}
@@ -967,6 +1000,22 @@ fn op_to_patch(
             let (r, rp) = compute_set_plot_node_title_patch(
                 source, ast, &class, &signal_path, &title,
             )?;
+            Ok((r, rp, ModelicaChange::TextReplaced))
+        }
+        ModelicaOp::SetDiagramTextExtent { class, index, x1, y1, x2, y2 } => {
+            let (r, rp) = compute_set_diagram_text_extent_patch(
+                source, ast, &class, index, x1, y1, x2, y2,
+            )?;
+            Ok((r, rp, ModelicaChange::TextReplaced))
+        }
+        ModelicaOp::SetDiagramTextString { class, index, text } => {
+            let (r, rp) = compute_set_diagram_text_string_patch(
+                source, ast, &class, index, &text,
+            )?;
+            Ok((r, rp, ModelicaChange::TextReplaced))
+        }
+        ModelicaOp::RemoveDiagramText { class, index } => {
+            let (r, rp) = compute_remove_diagram_text_patch(source, ast, &class, index)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
     }
@@ -2215,6 +2264,138 @@ fn trim_trailing_ws_back(source: &str, span: Range<usize>) -> usize {
         end -= 1;
     }
     end
+}
+
+/// Locate the byte span of the i-th `Text(...)` call inside the
+/// class's `Diagram(graphics)` array. Text-only counter — items of
+/// other kinds (Rectangle, Line, etc.) don't increment `index`.
+fn locate_diagram_text_entry(
+    source: &str,
+    ast: &AstCache,
+    class: &str,
+    target_index: usize,
+) -> Result<Range<usize>, DocumentError> {
+    let class_def = resolve_class(ast, class)?;
+    let body = (class_def.location.start as usize)..(class_def.location.end as usize);
+    let (_a, _d, diagram_inner) =
+        find_class_diagram(source, body).ok_or_else(|| {
+            DocumentError::ValidationFailed(
+                "no Diagram(graphics) annotation on class".into(),
+            )
+        })?;
+    let graphics_inner =
+        find_diagram_graphics_inner(source, diagram_inner).ok_or_else(|| {
+            DocumentError::ValidationFailed("Diagram(...) has no graphics=".into())
+        })?;
+    let mut cursor = graphics_inner.start;
+    let mut text_idx: usize = 0;
+    while cursor < graphics_inner.end {
+        let Some(call) = find_named_call_span(source, cursor..graphics_inner.end, "Text")
+        else {
+            break;
+        };
+        if text_idx == target_index {
+            return Ok(call);
+        }
+        text_idx += 1;
+        cursor = call.end;
+    }
+    Err(DocumentError::ValidationFailed(format!(
+        "no Text entry at index {target_index} in Diagram(graphics)"
+    )))
+}
+
+fn compute_set_diagram_text_extent_patch(
+    source: &str,
+    ast: &AstCache,
+    class: &str,
+    index: usize,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+) -> Result<(Range<usize>, String), DocumentError> {
+    let entry = locate_diagram_text_entry(source, ast, class, index)?;
+    let inner_start = entry.start + "Text(".len();
+    let inner_end = entry.end - 1;
+    let extent_value = find_named_arg_value_span(source, inner_start..inner_end, "extent")
+        .ok_or_else(|| {
+            DocumentError::ValidationFailed("Text has no `extent=` argument".into())
+        })?;
+    let new_extent = format!(
+        "{{{{{},{}}},{{{},{}}}}}",
+        fmt(x1),
+        fmt(y1),
+        fmt(x2),
+        fmt(y2)
+    );
+    Ok((extent_value, new_extent))
+}
+
+fn compute_set_diagram_text_string_patch(
+    source: &str,
+    ast: &AstCache,
+    class: &str,
+    index: usize,
+    text: &str,
+) -> Result<(Range<usize>, String), DocumentError> {
+    let entry = locate_diagram_text_entry(source, ast, class, index)?;
+    let inner_start = entry.start + "Text(".len();
+    let inner_end = entry.end - 1;
+    let value = find_named_arg_value_span(source, inner_start..inner_end, "textString")
+        .ok_or_else(|| {
+            DocumentError::ValidationFailed("Text has no `textString=` argument".into())
+        })?;
+    let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
+    Ok((value, format!("\"{escaped}\"")))
+}
+
+fn compute_remove_diagram_text_patch(
+    source: &str,
+    ast: &AstCache,
+    class: &str,
+    index: usize,
+) -> Result<(Range<usize>, String), DocumentError> {
+    let entry = locate_diagram_text_entry(source, ast, class, index)?;
+    let class_def = resolve_class(ast, class)?;
+    let body = (class_def.location.start as usize)..(class_def.location.end as usize);
+    let (_a, _d, diagram_inner) =
+        find_class_diagram(source, body).ok_or_else(|| {
+            DocumentError::ValidationFailed(
+                "no Diagram(graphics) annotation on class".into(),
+            )
+        })?;
+    let graphics_inner =
+        find_diagram_graphics_inner(source, diagram_inner).ok_or_else(|| {
+            DocumentError::ValidationFailed("Diagram(...) has no graphics=".into())
+        })?;
+    // Same trailing-comma-then-leading-comma trim the plot node
+    // remove uses: keep the array well-formed regardless of
+    // whether the entry was first / middle / last.
+    let bytes = source.as_bytes();
+    let mut end = entry.end;
+    let mut k = end;
+    while k < graphics_inner.end && (bytes[k].is_ascii_whitespace() || bytes[k] == b',') {
+        if bytes[k] == b',' {
+            k += 1;
+            while k < graphics_inner.end && bytes[k].is_ascii_whitespace() {
+                k += 1;
+            }
+            end = k;
+            break;
+        }
+        k += 1;
+    }
+    if end == entry.end {
+        let mut s = entry.start;
+        while s > graphics_inner.start
+            && (bytes[s - 1].is_ascii_whitespace() || bytes[s - 1] == b',')
+        {
+            s -= 1;
+        }
+        return Ok((s..end, String::new()));
+    }
+    Ok((entry.start..end, String::new()))
 }
 
 /// Render a coordinate as it appears in `extent={{…}}`. Integers

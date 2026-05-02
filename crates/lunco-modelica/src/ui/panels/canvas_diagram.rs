@@ -2020,6 +2020,7 @@ fn build_registry() -> VisualRegistry {
     // domain plugin that wants embedded scopes — Modelica is just the
     // first integrator.
     lunco_viz::kinds::canvas_plot_node::register(&mut reg);
+    crate::ui::text_node::register(&mut reg);
     reg.register_node_kind("modelica.icon", |data: &lunco_canvas::NodeData| {
         // Downcast to the typed payload the projector boxed (see
         // `IconNodeData`). Empty payload → render with defaults; the
@@ -3002,11 +3003,29 @@ impl lunco_canvas::Layer for DiagramDecorationLayer {
             bevy_egui::egui::pos2(screen_rect_canvas.min.x, screen_rect_canvas.min.y),
             bevy_egui::egui::pos2(screen_rect_canvas.max.x, screen_rect_canvas.max.y),
         );
+        // Filter out items that have a corresponding scene Node
+        // (Text → editable label, LunCoPlotNode → live plot tile).
+        // Painting them here as well would double-render: the
+        // scene Node already paints itself via its `NodeVisual`
+        // and the decoration would just sit on top with stale
+        // text. Other graphics (Rectangle / Line / Polygon /
+        // Ellipse / Bitmap) stay as background decoration.
+        use crate::annotations::GraphicItem;
+        let decoration: Vec<GraphicItem> = graphics
+            .iter()
+            .filter(|g| {
+                !matches!(
+                    g,
+                    GraphicItem::Text(_) | GraphicItem::LunCoPlotNode(_)
+                )
+            })
+            .cloned()
+            .collect();
         crate::icon_paint::paint_graphics(
             ctx.ui.painter(),
             screen_rect,
             *coord_system,
-            graphics,
+            &decoration,
         );
     }
 }
@@ -4175,6 +4194,12 @@ impl Panel for CanvasDiagramPanel {
                 target_class_snapshot.as_deref(),
             );
             if let Ok(mut guard) = bg_handle.write() {
+                // Stash the *full* graphics list so the projection
+                // completion handler can pick out `Text` and
+                // `LunCoPlotNode` items and emit corresponding
+                // scene Nodes. The decoration painter (which only
+                // wants the static-decoration subset) filters Text
+                // and LunCoPlotNode out itself in `Layer::draw`.
                 *guard = diag.map(|d| (d.coordinate_system, d.graphics));
             }
             // Drop any in-flight projection whose input is now
@@ -4482,7 +4507,7 @@ impl Panel for CanvasDiagramPanel {
                     .and_then(|g| g.as_ref().map(|(_, gfx)| gfx.clone()))
                     .unwrap_or_default();
                 let plot_origins_from_source =
-                    emit_plot_nodes_from_diagram(&mut scene, &bg_graphics);
+                    emit_diagram_decorations(&mut scene, &bg_graphics);
                 // Legacy carry-over: scratch plot nodes from a prior
                 // scene that haven't been written to source yet.
                 // Filtered against `plot_origins_from_source` so we
@@ -6402,20 +6427,69 @@ fn empty_overlay_class_info(
 /// class when no drill-in is active. Used by the background
 /// decoration layer to paint MSL-style diagram callouts (labelled
 /// regions, accent text) behind the nodes.
-/// Emit a `lunco.viz.plot` scene Node for every `__LunCo_PlotNode`
-/// vendor annotation in the active class's `Diagram(graphics=…)`.
-/// Each Node carries a stable `origin` marker (`plot:<index>:<signal>`)
-/// derived from the annotation's position in the source so the
-/// canvas-edit pipeline can recognise it as source-backed and not
-/// double-insert via the scene-only carry-over. Returns the set of
-/// emitted origin keys.
-fn emit_plot_nodes_from_diagram(
+/// Emit canvas Nodes for every interactive item in the active
+/// class's `Diagram(graphics=…)`. Today that's:
+///   * `__LunCo_PlotNode` → `lunco.viz.plot` (live signal tile)
+///   * `Text` → `lunco.modelica.text` (editable label)
+///
+/// Each emitted Node carries a stable `origin` marker derived from
+/// the annotation's position in the source (`plot:<idx>:<signal>` or
+/// `text:<idx>`) so the canvas-edit pipeline recognises it as
+/// source-backed and the carry-over filter doesn't double-insert.
+/// Returns the set of emitted origin keys.
+fn emit_diagram_decorations(
     scene: &mut lunco_canvas::scene::Scene,
     graphics: &[crate::annotations::GraphicItem],
 ) -> std::collections::HashSet<String> {
     use crate::annotations::GraphicItem;
     let mut origins: std::collections::HashSet<String> = Default::default();
+    let mut text_idx: usize = 0;
     for (idx, item) in graphics.iter().enumerate() {
+        if let GraphicItem::Text(t) = item {
+            // Editable label. Strip surrounding quotes the parser
+            // left on `textString` so the visual sees the raw
+            // string. Skip `%name` / `%class` substitutions and
+            // empty strings — those are MSL conventions for
+            // icon-internal Text and aren't meaningful as Diagram
+            // callouts.
+            let raw = t.text_string.trim_matches('"');
+            if raw.is_empty() || raw.starts_with('%') {
+                text_idx += 1;
+                continue;
+            }
+            let payload = crate::ui::text_node::TextNodeData {
+                text: raw.to_string(),
+                font_size: t.font_size,
+                color: t.text_color.map(|c| [c.r, c.g, c.b]),
+            };
+            let data: lunco_canvas::NodeData = std::sync::Arc::new(payload);
+            let origin = format!("text:{text_idx}");
+            origins.insert(origin.clone());
+            let id = scene.alloc_node_id();
+            // Same Y-flip + corner-normalize the plot path uses.
+            // Modelica `extent` is +Y up, canvas world is +Y down.
+            let x1 = t.extent.p1.x as f32;
+            let x2 = t.extent.p2.x as f32;
+            let y1 = -(t.extent.p1.y as f32);
+            let y2 = -(t.extent.p2.y as f32);
+            let rect = lunco_canvas::Rect::from_min_max(
+                lunco_canvas::Pos::new(x1.min(x2), y1.min(y2)),
+                lunco_canvas::Pos::new(x1.max(x2), y1.max(y2)),
+            );
+            scene.insert_node(lunco_canvas::scene::Node {
+                id,
+                rect,
+                kind: crate::ui::text_node::TEXT_NODE_KIND.into(),
+                data,
+                ports: Vec::new(),
+                label: String::new(),
+                origin: Some(origin),
+                resizable: true,
+                visual_rect: None,
+            });
+            text_idx += 1;
+            continue;
+        }
         let GraphicItem::LunCoPlotNode(plot) = item else { continue };
         // `entity` is the runtime Bevy id of the simulator host that
         // produces samples for this signal. We don't know it at
@@ -7437,6 +7511,30 @@ fn build_ops_from_events(
                     });
                     continue;
                 }
+                if node.kind == crate::ui::text_node::TEXT_NODE_KIND {
+                    let Some(idx) = node
+                        .origin
+                        .as_deref()
+                        .and_then(|o| o.strip_prefix("text:"))
+                        .and_then(|n| n.parse::<usize>().ok())
+                    else {
+                        continue;
+                    };
+                    let w = node.rect.width().max(1.0);
+                    let h = node.rect.height().max(1.0);
+                    // Canvas → Modelica: negate Y so the source
+                    // sees +Y up and the round-trip is stable
+                    // (re-projection emits the same screen rect).
+                    ops.push(ModelicaOp::SetDiagramTextExtent {
+                        class: class.to_string(),
+                        index: idx,
+                        x1: new_min.x,
+                        y1: -new_min.y,
+                        x2: new_min.x + w,
+                        y2: -(new_min.y + h),
+                    });
+                    continue;
+                }
                 // The `origin` we set during projection carries the
                 // Modelica instance name. Skip if missing (shouldn't
                 // happen — projection always sets it).
@@ -7485,6 +7583,25 @@ fn build_ops_from_events(
                         y1: new_rect.min.y,
                         x2: new_rect.max.x,
                         y2: new_rect.max.y,
+                    });
+                    continue;
+                }
+                if node.kind == crate::ui::text_node::TEXT_NODE_KIND {
+                    let Some(idx) = node
+                        .origin
+                        .as_deref()
+                        .and_then(|o| o.strip_prefix("text:"))
+                        .and_then(|n| n.parse::<usize>().ok())
+                    else {
+                        continue;
+                    };
+                    ops.push(ModelicaOp::SetDiagramTextExtent {
+                        class: class.to_string(),
+                        index: idx,
+                        x1: new_rect.min.x,
+                        y1: -new_rect.min.y,
+                        x2: new_rect.max.x,
+                        y2: -new_rect.max.y,
                     });
                     continue;
                 }
@@ -7759,6 +7876,17 @@ fn op_remove_node_inner(
         return Some(ModelicaOp::RemovePlotNode {
             class: class.to_string(),
             signal_path,
+        });
+    }
+    if node.kind == crate::ui::text_node::TEXT_NODE_KIND {
+        let idx = node
+            .origin
+            .as_deref()
+            .and_then(|o| o.strip_prefix("text:"))
+            .and_then(|n| n.parse::<usize>().ok())?;
+        return Some(ModelicaOp::RemoveDiagramText {
+            class: class.to_string(),
+            index: idx,
         });
     }
     let name = node.origin.clone()?;

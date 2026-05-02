@@ -977,7 +977,10 @@ pub(crate) fn internal_op_to_api(op: &ModelicaOp) -> Option<ApiOp> {
         | ModelicaOp::AddPlotNode { .. }
         | ModelicaOp::RemovePlotNode { .. }
         | ModelicaOp::SetPlotNodeExtent { .. }
-        | ModelicaOp::SetPlotNodeTitle { .. } => None,
+        | ModelicaOp::SetPlotNodeTitle { .. }
+        | ModelicaOp::SetDiagramTextExtent { .. }
+        | ModelicaOp::SetDiagramTextString { .. }
+        | ModelicaOp::RemoveDiagramText { .. } => None,
     }
 }
 

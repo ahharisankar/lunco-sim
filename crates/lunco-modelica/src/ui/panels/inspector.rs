@@ -113,6 +113,10 @@ impl Panel for InspectorPanel {
             render_plot_node_editor(ui, world, doc_id, node_id);
             return;
         }
+        if node_kind.as_str() == crate::ui::text_node::TEXT_NODE_KIND {
+            render_text_node_editor(ui, world, doc_id, node_id);
+            return;
+        }
 
         let Some(instance_name) = node_origin else {
             placeholder(ui, "Select a node on the canvas.");
@@ -532,3 +536,119 @@ fn apply_plot_binding(
         crate::ui::panels::canvas_diagram::apply_ops_public(world, doc_id, ops);
     }
 }
+
+// ────────────────────────────────────────────────────────────────────
+// Diagram-text editor — string + font-size override
+// ────────────────────────────────────────────────────────────────────
+
+/// Inspector view for a selected `lunco.modelica.text` scene Node.
+/// Lets the user rewrite the label text. Move/resize go through the
+/// canvas drag handles; this panel just owns the text content. The
+/// commit cadence (Enter / focus-loss, not per-keystroke) matches
+/// the plot-title editor — every commit re-parses the source, so a
+/// per-keystroke flush would stall the UI.
+fn render_text_node_editor(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    doc_id: lunco_doc::DocumentId,
+    node_id: lunco_canvas::NodeId,
+) {
+    use crate::ui::text_node::TextNodeData;
+
+    let (current_text, idx_opt) = {
+        let state = world
+            .resource::<crate::ui::panels::canvas_diagram::CanvasDiagramState>();
+        let scene = &state.get(Some(doc_id)).canvas.scene;
+        let Some(node) = scene.node(node_id) else { return };
+        let text = node
+            .data
+            .downcast_ref::<TextNodeData>()
+            .map(|d| d.text.clone())
+            .unwrap_or_default();
+        let idx = node
+            .origin
+            .as_deref()
+            .and_then(|o| o.strip_prefix("text:"))
+            .and_then(|n| n.parse::<usize>().ok());
+        (text, idx)
+    };
+    let Some(idx) = idx_opt else {
+        ui.label(
+            egui::RichText::new("Untracked text — save first to edit.")
+                .italics()
+                .color(egui::Color32::GRAY),
+        );
+        return;
+    };
+
+    ui.add_space(4.0);
+    ui.heading("Text");
+    let buf_id = egui::Id::new(("text_node_buf", node_id.0));
+    let mut buf: String = ui
+        .memory(|m| m.data.get_temp::<String>(buf_id))
+        .unwrap_or_else(|| current_text.clone());
+    let resp = ui.add(
+        egui::TextEdit::multiline(&mut buf)
+            .desired_rows(2)
+            .desired_width(f32::INFINITY),
+    );
+    if resp.changed() {
+        ui.memory_mut(|m| m.data.insert_temp(buf_id, buf.clone()));
+    }
+    let committed = (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+        || (resp.lost_focus() && !resp.has_focus());
+    if committed && buf != current_text {
+        apply_diagram_text_string(world, doc_id, node_id, idx, &buf);
+        ui.memory_mut(|m| m.data.remove::<String>(buf_id));
+    }
+}
+
+fn apply_diagram_text_string(
+    world: &mut World,
+    doc_id: lunco_doc::DocumentId,
+    node_id: lunco_canvas::NodeId,
+    index: usize,
+    text: &str,
+) {
+    use crate::document::ModelicaOp;
+    use crate::ui::text_node::TextNodeData;
+
+    // Optimistic in-memory swap so the visual updates this frame.
+    {
+        let mut state = world
+            .resource_mut::<crate::ui::panels::canvas_diagram::CanvasDiagramState>();
+        let docstate = state.get_mut(Some(doc_id));
+        if let Some(node) = docstate.canvas.scene.node_mut(node_id) {
+            if let Some(prev) = node.data.downcast_ref::<TextNodeData>() {
+                let updated = TextNodeData {
+                    text: text.to_string(),
+                    ..prev.clone()
+                };
+                node.data = std::sync::Arc::new(updated);
+            }
+        }
+    }
+    let class = world
+        .get_resource::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
+        .and_then(|m| m.get(doc_id).map(str::to_string))
+        .or_else(|| {
+            world
+                .get_resource::<crate::ui::WorkbenchState>()
+                .and_then(|s| s.open_model.as_ref().map(|m| m.detected_name.clone()))
+                .flatten()
+        })
+        .unwrap_or_default();
+    if class.is_empty() {
+        return;
+    }
+    crate::ui::panels::canvas_diagram::apply_ops_public(
+        world,
+        doc_id,
+        vec![ModelicaOp::SetDiagramTextString {
+            class,
+            index,
+            text: text.to_string(),
+        }],
+    );
+}
+

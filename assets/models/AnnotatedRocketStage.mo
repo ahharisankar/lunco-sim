@@ -124,8 +124,9 @@ package AnnotatedRocketStage
     annotation(
       Diagram(coordinateSystem(extent={{-100,-100},{100,100}}),
         graphics={
-          Text(extent={{-100,95},{100,80}},
+          Text(extent={{-100,98},{100,90}},
             textString="Rocket Stage — pressurised fluid line with throttle valve",
+            fontSize=8,
             textColor={0,0,0}),
           // ── Embedded telemetry plots ──
           // LunCo vendor extension (`__LunCo_PlotNode`): each entry
@@ -144,7 +145,7 @@ package AnnotatedRocketStage
           __LunCo_PlotNode(extent={{26,-50},{66,-90}},
             signal="airframe.thrust_in", title="Thrust"),
           __LunCo_PlotNode(extent={{68,-50},{108,-90}},
-            signal="der(airframe.velocity)", title="Acceleration")
+            signal="airframe.acceleration", title="Acceleration")
         }),
       experiment(StartTime=0, StopTime=150, Tolerance=1e-4, Interval=0.1));
   end RocketStage;
@@ -210,7 +211,7 @@ package AnnotatedRocketStage
           lineColor={20,20,20},
           fillColor={180,195,215},
           fillPattern=FillPattern.Solid),
-        // Blue LOX fluid level. The bottom edge is fixed at -70;
+        // Blue propellant fluid level. The bottom edge is fixed at -70;
         // the top edge moves between -70 (empty) and 40 (full)
         // proportionally to `m / m_initial`. Modelica.Fluid uses
         // exactly this DynamicSelect-on-extent pattern in its
@@ -227,9 +228,9 @@ package AnnotatedRocketStage
         // the propellant — the previous single-line caption sat
         // in the lower body where the fluid colour fought the
         // text and the value blurred at low mass. Two lines:
-        // "LOX" label, dynamic kg value below.
-        Text(extent={{-40,58},{40,48}},
-          textString="LOX",
+        // "Propellant" label, dynamic kg value below.
+        Text(extent={{-46,58},{46,48}},
+          textString="Propellant",
           textColor={0,0,80}),
         Text(extent={{-46,48},{46,37}},
           textString=DynamicSelect("kg", String(m) + " kg"),
@@ -391,10 +392,20 @@ package AnnotatedRocketStage
     Real altitude(start = 0, fixed = true) "m";
     Real velocity(start = 0, fixed = true) "m/s";
     Real total_mass "kg";
+    // Named acceleration so plots can read it as a first-class
+    // algebraic variable. Defined via the equation-of-motion's
+    // right-hand side (not `der(velocity)`) — `acceleration =
+    // der(velocity)` is an exact alias that rumoca's alias
+    // elimination folds away, leaving the variable absent from
+    // the simulator's published outputs and any plot bound to it
+    // empty. The right-hand-side form is the same number but
+    // gives the variable its own slot in the DAE.
+    Real acceleration "m/s2";
   equation
     total_mass = dry_mass + mass_in;
     der(altitude) = velocity;
-    der(velocity) = (thrust_in - total_mass * g) / total_mass;
+    acceleration = (thrust_in - total_mass * g) / total_mass;
+    der(velocity) = acceleration;
     annotation(Icon(coordinateSystem(extent={{-100,-100},{100,100}}),
       graphics={
         Rectangle(extent={{-20,-70},{20,60}},
