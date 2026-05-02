@@ -867,19 +867,23 @@ fn paint_flow_dots(
     }
     // Spacing + speed in screen pixels. Tuned iteratively: 64 px
     // looked empty; 28 px read as a dotted wire ("bumpy"); 32 px
-    // was OK but still felt sparse on long runs; 22 px (~1.5×
-    // denser than 32) gives a clear "flowing stream" cue with
-    // enough breathing room between dots that the wire doesn't
-    // turn into a solid line. Alpha stays low so the dots remain
-    // a motion hint rather than a hard pattern.
-    const SPACING_PX: f32 = 22.0;
+    // was OK but still felt sparse on long runs; 22 px was better
+    // but on short wire segments (a half-inch fluid line between
+    // valve.port_b and engine.port) only 1–2 dots were ever
+    // visible at one phase, so during the animation cycle the
+    // wire spent most of its time looking static. 16 px gives
+    // every short segment at least 3–4 dots in flight, so the
+    // motion cue is always visible. Alpha stays moderate (180)
+    // so the dots read as a moving stream rather than a solid
+    // dotted line.
+    const SPACING_PX: f32 = 16.0;
     const SPEED_PX_S: f32 = 36.0;
     let phase = ((time as f32) * SPEED_PX_S).rem_euclid(SPACING_PX);
     let dot_color = egui::Color32::from_rgba_unmultiplied(
         base_color.r(),
         base_color.g(),
         base_color.b(),
-        140,
+        180,
     );
     let mut s = phase;
     while s < total_len {
@@ -890,7 +894,9 @@ fn paint_flow_dots(
             if s <= acc + seg_len {
                 let t = ((s - acc) / seg_len).clamp(0.0, 1.0);
                 let p = w[0] + (w[1] - w[0]) * t;
-                painter.circle_filled(p, 2.2 * scale, dot_color);
+                // Slightly larger radius (was 2.2 × scale) so
+                // the dot is unambiguous at low canvas zoom.
+                painter.circle_filled(p, 2.6 * scale, dot_color);
                 break;
             }
             acc += seg_len;

@@ -168,6 +168,7 @@ package AnnotatedRocketStage
     // future change breaks the availability wiring.
     Real m(start = m_initial, fixed = true, min = 0)
       "Propellant mass (kg)";
+    Real fuel_fraction "Remaining propellant fraction (0..1)";
 
     FluidPort_a port "Fluid outlet"
       annotation(Placement(transformation(extent={{-10,-90},{10,-70}})));
@@ -189,6 +190,13 @@ package AnnotatedRocketStage
     // sees a continuous Jacobian instead of a min/max kink that
     // would stall the integrator at the empty boundary.
     availability = m / (m + m_eps);
+    // Algebraic alias of the propellant fraction. Useful for
+    // overlays / telemetry that want a 0..1 readout instead of
+    // raw kg. RHS form (not `m / m_initial` directly assigned to
+    // an alias) so rumoca's alias elimination keeps it in the
+    // published variable set — same trick `airframe.acceleration`
+    // uses.
+    fuel_fraction = m / m_initial;
     // MSL Fluid sign convention: `port.m_flow > 0` means mass
     // enters this component from the line. The tank is losing
     // mass while the engine burns, so `port.m_flow` is negative
