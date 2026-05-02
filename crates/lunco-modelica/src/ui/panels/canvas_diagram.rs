@@ -4435,6 +4435,23 @@ impl Panel for CanvasDiagramPanel {
             });
             if let Some((gen, target, source_hash, prewarm_gen_at_spawn, scene)) = done_task {
                 docstate.projection_task = None;
+                // Bug guard: if the new scene is empty but the existing
+                // scene had content, the user almost certainly hit a
+                // transient parse failure (mid-edit, malformed annotation,
+                // etc.). Keep the last good render rather than blanking
+                // the canvas. The next successful parse will swap a
+                // populated scene back in.
+                if scene.node_count() == 0 && docstate.canvas.scene.node_count() > 0 {
+                    bevy::log::info!(
+                        "[CanvasDiagram] dropping empty projection — keeping last good scene ({} nodes)",
+                        docstate.canvas.scene.node_count(),
+                    );
+                    docstate.last_seen_gen = gen;
+                    docstate.last_seen_prewarm_gen = prewarm_gen_at_spawn;
+                    docstate.last_seen_target = target;
+                    docstate.last_seen_source_hash = source_hash;
+                    return;
+                }
                 bevy::log::info!(
                     "[CanvasDiagram] project done: {} nodes, {} edges (initial={})",
                     scene.node_count(),

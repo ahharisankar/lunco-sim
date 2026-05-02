@@ -1,5 +1,4 @@
 // tagline: Rocket stage with acausal fluid — pressurised tank, throttle valve, engine
-// Proper MSL-style fluid architecture:
 //
 //   Tank  ──FluidPort──► Valve ──FluidPort──► Engine
 //      │                   ▲                    │
@@ -7,34 +6,9 @@
 //    mass_out          throttle              thrust
 //      │                                        │
 //      └──────► Airframe ◄─────────────────────┘
-//
-// Fluid is modelled with an acausal `FluidPort` connector carrying a
-// pressure potential and a `flow` mass-flow variable. Mass
-// conservation (Σ m_flow = 0 at every connect-set) is enforced
-// automatically by the compiler.
-//
-// Throttle is a local runtime input on the Valve, exposed at the
-// stage boundary via a `RealInput` connector. Flow magnitude is set
-// by `k · opening · Δp` across the valve, which is well-conditioned
-// index-1 — both ends of the fluid line have pressures anchored
-// (tank at `p_supply`, engine at `p_chamber`), so the solver has no
-// initial-condition ambiguity.
-//
-// Wires drawn on the diagram:
-//   throttle          ──► valve.opening    (magenta — RealInput)
-//   tank.port         ↔   valve.port_a     (teal circle — acausal FluidPort)
-//   valve.port_b      ↔   engine.port      (teal circle — acausal FluidPort)
-//   tank.mass_out     ──► airframe.mass_in (green  — causal mass signal)
-//   engine.thrust     ──► airframe.thrust_in (red — causal thrust signal)
 
 package AnnotatedRocketStage
 
-  // ── Acausal fluid connector ──────────────────────────────────────
-  // Balanced per MLS §9.3.1: one potential (`p`) + one flow (`m_flow`).
-  // Both `FluidPort_a` and `FluidPort_b` share the same interface
-  // via `extends`; the split exists solely to give the visual
-  // renderer a filled vs. unfilled port icon (MSL Modelica.Fluid
-  // convention for "this end is the supplier / consumer intent").
   partial connector FluidPort "Acausal fluid port (pressure + mass-flow)"
     Real p(unit = "Pa") "Line pressure";
     flow Real m_flow(unit = "kg/s") "Mass flow into the connector from this component";
@@ -59,8 +33,6 @@ package AnnotatedRocketStage
         fillColor = {220,235,240},
         fillPattern = FillPattern.Solid)}));
   end FluidPort_b;
-
-  // ── Causal information-signal connectors (unchanged) ─────────────
 
   connector MassSignalOutput = output Real(unit = "kg")
     annotation(Icon(coordinateSystem(extent = {{-100,-100},{100,100}}),
@@ -94,17 +66,12 @@ package AnnotatedRocketStage
         fillColor = {220,70,70},
         fillPattern = FillPattern.Solid)}));
 
-  // ── Composite (declared first so the workbench picks it as the
-  // ── active class when the file is opened) ───────────────────────
   model RocketStage "Single-stage rocket — pressurised tank, throttle valve, engine"
     parameter Real g = 9.81 "Gravity (m/s^2)";
     parameter Real dry_mass = 1000 "Empty stage mass (kg)";
 
     Tank tank(m_initial = 4000, p_supply = 3.0e6)
       annotation(Placement(transformation(extent={{-95,20},{-55,80}})));
-    // The valve's `opening` input IS the stage's throttle — exposed
-    // as `valve.opening` in the flattened model. No wrapper input
-    // on the stage; UI controls bind directly to the valve.
     Valve valve(m_flow_max = 100)
       annotation(Placement(transformation(extent={{-40,-20},{0,20}})));
     Engine engine(p_chamber = 1.0e5)
@@ -116,8 +83,6 @@ package AnnotatedRocketStage
     connect(tank.port, valve.port_a);
     connect(valve.port_b, engine.port);
     connect(tank.mass_out, airframe.mass_in);
-    // Tank tells valve how much fuel is available — gates the
-    // commanded flow so an empty tank can't be siphoned.
     connect(tank.availability, valve.availability);
     connect(engine.thrust, airframe.thrust_in);
 
@@ -125,17 +90,9 @@ package AnnotatedRocketStage
       Diagram(coordinateSystem(extent={{-100,-100},{100,100}}),
         graphics={
           Text(extent={{-100,98},{100,90}},
-            textString="Rocket Stage — pressurised fluid line with throttle valve",
+            textString="AnnotatedRocketStage — pressurised fluid line with throttle valve",
             fontSize=8,
             textColor={0,0,0}),
-          // ── Embedded telemetry plots ──
-          // LunCo vendor extension (`__LunCo_PlotNode`): each entry
-          // becomes a live time-series tile on the diagram canvas
-          // bound to a runtime signal. `signal=` accepts dotted
-          // instance paths and `der(...)` expressions; tiles
-          // round-trip on move/resize/delete via the canvas-edit
-          // pipeline. Other Modelica tools ignore the vendor
-          // annotation entirely (`__` prefix per MLS §18.7).
           __LunCo_PlotNode(extent={{-100,-50},{-60,-90}},
             signal="tank.m", title="Tank mass"),
           __LunCo_PlotNode(extent={{-58,-50},{-18,-90}},
@@ -150,60 +107,27 @@ package AnnotatedRocketStage
       experiment(StartTime=0, StopTime=150, Tolerance=1e-4, Interval=0.1));
   end RocketStage;
 
-  // ── Pressurised propellant tank ──
-  // Anchors the high-pressure side of the fluid line. Mass depletes
-  // at whatever rate the downstream valve demands.
   model Tank "Pressurised propellant tank"
     parameter Real m_initial = 4000 "Initial propellant mass (kg)";
     parameter Real p_supply = 3.0e6 "Regulated supply pressure (Pa)";
-    parameter Real m_eps = 5.0
-      "Empty-cutoff smoothing band (kg)";
-    // `min = 0` declares the physical bound (MLS §4.8.4) — tools
-    // can use it for state scaling and operator displays. The hard
-    // enforcement comes from the `availability` signal below: the
-    // valve multiplies its commanded flow by it, so once the tank
-    // is empty no more mass can be drawn through the connect-set
-    // and `der(m)` settles to zero by conservation. `assert` is a
-    // belt-and-braces sanity check that should fire only if a
-    // future change breaks the availability wiring.
-    Real m(start = m_initial, fixed = true, min = 0)
-      "Propellant mass (kg)";
+    parameter Real m_eps = 5.0 "Empty-cutoff smoothing band (kg)";
+
+    Real m(start = m_initial, fixed = true, min = 0) "Propellant mass (kg)";
     Real fuel_fraction "Remaining propellant fraction (0..1)";
 
     FluidPort_a port "Fluid outlet"
       annotation(Placement(transformation(extent={{-10,-90},{10,-70}})));
     MassSignalOutput mass_out "Current mass (kg)"
       annotation(Placement(transformation(extent={{100,-10},{120,10}})));
-    // Smooth supply availability ∈ [0, 1]: 1 when full, fading
-    // linearly through `m_eps` to 0 at empty. Routed to
-    // `valve.availability` so downstream demand is gated by what's
-    // actually in the tank — no negative-mass simulation, no
-    // unphysical "siphoning empty" behaviour.
-    Modelica.Blocks.Interfaces.RealOutput availability
-      "Supply availability [0..1]"
+    Modelica.Blocks.Interfaces.RealOutput availability "Supply availability [0..1]"
       annotation(Placement(transformation(extent={{100,40},{120,60}})));
   equation
     port.p = p_supply;
-    // Smooth, monotonic saturation: → 1 when m ≫ m_eps, → 0 when
-    // m → 0, with no C0 kinks anywhere. Equivalent to clamping
-    // m / m_eps to [0, 1] but everywhere differentiable, so BDF
-    // sees a continuous Jacobian instead of a min/max kink that
-    // would stall the integrator at the empty boundary.
+    // Smooth saturation — differentiable everywhere so BDF doesn't
+    // stall at the empty boundary.
     availability = m / (m + m_eps);
-    // Algebraic alias of the propellant fraction. Useful for
-    // overlays / telemetry that want a 0..1 readout instead of
-    // raw kg. RHS form (not `m / m_initial` directly assigned to
-    // an alias) so rumoca's alias elimination keeps it in the
-    // published variable set — same trick `airframe.acceleration`
-    // uses.
+    // RHS form keeps the alias visible to rumoca's published signals.
     fuel_fraction = m / m_initial;
-    // MSL Fluid sign convention: `port.m_flow > 0` means mass
-    // enters this component from the line. The tank is losing
-    // mass while the engine burns, so `port.m_flow` is negative
-    // and `der(m)` is therefore negative too — tank depletes.
-    // Once `availability → 0` the valve commands no flow,
-    // `port.m_flow` settles to 0 by connect-set conservation, and
-    // `der(m)` stops draining the tank.
     der(m) = port.m_flow;
     mass_out = m;
     assert(m >= -1e-3, "Tank ran dry — availability gating failed.");
@@ -219,83 +143,27 @@ package AnnotatedRocketStage
           lineColor={20,20,20},
           fillColor={180,195,215},
           fillPattern=FillPattern.Solid),
-        // Blue propellant fluid level. The bottom edge is fixed at -70;
-        // the top edge moves between -70 (empty) and 40 (full)
-        // proportionally to `m / m_initial`. Modelica.Fluid uses
-        // exactly this DynamicSelect-on-extent pattern in its
-        // OpenTank icon for live fluid-level animation.
         Rectangle(extent=DynamicSelect(
             {{-40,40},{40,-70}},
             {{-40, -70 + 110 * (m / m_initial)}, {40, -70}}),
           lineColor={50,80,140},
           fillColor={120,160,220},
           fillPattern=FillPattern.Solid),
-        // Caption stacked into the y=37..58 band at the top of
-        // the tank body. The fluid level rises only up to y=40
-        // (`m / m_initial == 1`), so this strip is always *above*
-        // the propellant — the previous single-line caption sat
-        // in the lower body where the fluid colour fought the
-        // text and the value blurred at low mass. Two lines:
-        // "Propellant" label, dynamic kg value below.
         Text(extent={{-46,58},{46,48}},
           textString="Propellant",
           textColor={0,0,80}),
         Text(extent={{-46,48},{46,37}},
           textString=DynamicSelect("kg", String(m) + " kg"),
           textColor={0,0,80}),
-        // Instance name placed just below the tank body (body
-        // bottom is y=-80) so the gap from icon-bottom to label
-        // matches the Engine/Airframe icons. The previous
-        // -105..-130 extent worked at the bounding-box level but
-        // looked far away for components whose body doesn't fill
-        // the box.
         Text(extent={{-120,-85},{120,-110}},
           textString="%name",
           textColor={40,40,40})
       }));
   end Tank;
 
-  // ── Throttle valve ──
-  // Two-port valve between tank and engine. Runtime input `opening`
-  // sets the fractional valve area [0..1]; mass flow follows
-  // `k · opening · (p_a - p_b)`. Enforces its own internal mass
-  // conservation (port_a.m_flow + port_b.m_flow = 0) because a
-  // single-component acausal element has no connect-set of its own.
   model Valve "Opening-controlled throttle valve"
-    // Linear flow-area model: `m_flow = opening · m_flow_max`. A
-    // proper pressure-driven form (`k · opening · Δp`) is more
-    // physical but introduces enough algebraic stiffness at t=0
-    // that rumoca's BDF initialiser stalls. For the demonstration
-    // rocket the linear form gives the same visible behaviour —
-    // the acausal ports still enforce mass conservation across
-    // the valve, and pressure is still anchored on both sides so
-    // users can inspect tank/chamber Δp in the telemetry.
-    parameter Real m_flow_max(unit = "kg/s") = 20
-      "Mass flow at full opening";
+    parameter Real m_flow_max(unit = "kg/s") = 20 "Mass flow at full opening";
 
-    // `min`/`max` annotations on the input declare the valid range
-    // (MLS §4.8.4). Tools clamp interactive sliders to this range
-    // automatically; the workbench's Telemetry DragValue picks the
-    // bounds up via AST extraction. They are advisory metadata, not
-    // a solver constraint — the equation-side Limiter below is what
-    // physically enforces the bound for any caller (UI, FMI master,
-    // scripted set_input, etc.).
-    // `min`/`max`/`unit` declare the valid range (MLS §4.8.4). Tools
-    // clamp interactive sliders to this range — the workbench's
-    // Telemetry DragValue picks the bounds up via AST extraction.
-    // Per Modelica / FMI convention these are advisory metadata; the
-    // solver does NOT enforce them. Hard enforcement is rumoca's
-    // job — `SimStepper::set_input` rejects out-of-range writes
-    // with an error rather than silently clamping.
-    //
-    // Opening is expressed in percent (0..100) — natural unit for a
-    // control surface; the equation divides by 100 to convert to a
-    // fraction before scaling `m_flow_max`. We deliberately do NOT
-    // add a `Modelica.Blocks.Nonlinear.Limiter` block: the C0 kink
-    // at the bound makes the residual non-differentiable, which BDF
-    // can't traverse cleanly when the user operates exactly at the
-    // boundary (a "full throttle" demo). UI clamping + API rejection
-    // covers the practical envelope.
     Modelica.Blocks.Interfaces.RealInput opening(min = 0, max = 100, unit = "%")
       "Valve opening [0..100 %]"
       annotation(Placement(transformation(extent={{-20,80},{20,120}})));
@@ -303,11 +171,6 @@ package AnnotatedRocketStage
       annotation(Placement(transformation(extent={{-120,-10},{-100,10}})));
     FluidPort_b port_b "Outlet (consumer side)"
       annotation(Placement(transformation(extent={{100,-10},{120,10}})));
-    // Upstream availability ∈ [0, 1]. The tank publishes this as a
-    // smooth function of `m / m_eps`; we multiply commanded flow by
-    // it so an empty tank can't be siphoned through the valve. With
-    // `availability = 1` (default when unwired) the valve behaves
-    // exactly as before — the gating is opt-in via `connect()`.
     Modelica.Blocks.Interfaces.RealInput availability(min = 0, max = 1) = 1.0
       "Upstream availability [0..1]"
       annotation(Placement(transformation(extent={{-120,40},{-100,60}})));
@@ -316,7 +179,6 @@ package AnnotatedRocketStage
     port_a.m_flow + port_b.m_flow = 0;
     annotation(Icon(coordinateSystem(extent={{-100,-100},{100,100}}),
       graphics={
-        // Valve body — "bowtie" between two triangles.
         Polygon(points={{-60,40},{-60,-40},{0,0}},
           lineColor={40,40,40},
           fillColor={180,180,190},
@@ -325,29 +187,17 @@ package AnnotatedRocketStage
           lineColor={40,40,40},
           fillColor={180,180,190},
           fillPattern=FillPattern.Solid),
-        // Stem up to the opening input.
         Line(points={{0,0},{0,80}}, color={60,60,60}, thickness=0.4),
         Rectangle(extent={{-15,80},{15,90}},
           lineColor={40,40,40},
           fillColor={200,200,210},
           fillPattern=FillPattern.Solid),
-        // Instance name right below the bowtie body (body bottom
-        // y=-40). The runtime control gauge already shows the live
-        // opening %, so a redundant caption above the name was
-        // removed — keeps the icon clean.
         Text(extent={{-120,-50},{120,-75}},
           textString="%name",
           textColor={40,40,40})
       }));
   end Valve;
 
-  // ── Liquid rocket engine ──
-  // Combustion chamber anchored at p_chamber. Consumes propellant
-  // drawn through `port` and produces thrust = Isp·g₀·|m_flow|.
-  // Sign: flow INTO the connector from this component is positive
-  // (MLS §9.3) — engine is a sink, so port.m_flow ends up negative
-  // while burning. We use `max(-port.m_flow, 0)` for thrust so it's
-  // never negative (no "reverse thrust" from tiny backflow).
   model Engine "Liquid rocket engine — combustion chamber with throat"
     parameter Real Isp = 300 "Specific impulse (s)";
     parameter Real g0 = 9.81 "Standard gravity (m/s^2)";
@@ -359,12 +209,6 @@ package AnnotatedRocketStage
       annotation(Placement(transformation(extent={{100,-10},{120,10}})));
   equation
     port.p = p_chamber;
-    // MSL Fluid sign convention: `port.m_flow > 0` = mass entering
-    // engine = propellant being consumed. Thrust scales linearly
-    // with flow. A non-smooth `max(port.m_flow, 0)` guard was
-    // previously here to prevent "negative thrust" from numerical
-    // backflow, but its non-differentiable kink makes BDF's Jacobian
-    // NaN at the initial step, stalling the solve.
     thrust = Isp * g0 * port.m_flow;
     annotation(Icon(coordinateSystem(extent={{-100,-100},{100,100}}),
       graphics={
@@ -387,7 +231,6 @@ package AnnotatedRocketStage
       }));
   end Engine;
 
-  // ── Airframe / vehicle body ──
   model Airframe "Vehicle body — 1-D vertical flight dynamics"
     parameter Real g = 9.81 "Gravity (m/s^2)";
     parameter Real dry_mass = 1000 "Empty stage mass (kg)";
@@ -400,14 +243,8 @@ package AnnotatedRocketStage
     Real altitude(start = 0, fixed = true) "m";
     Real velocity(start = 0, fixed = true) "m/s";
     Real total_mass "kg";
-    // Named acceleration so plots can read it as a first-class
-    // algebraic variable. Defined via the equation-of-motion's
-    // right-hand side (not `der(velocity)`) — `acceleration =
-    // der(velocity)` is an exact alias that rumoca's alias
-    // elimination folds away, leaving the variable absent from
-    // the simulator's published outputs and any plot bound to it
-    // empty. The right-hand-side form is the same number but
-    // gives the variable its own slot in the DAE.
+    // RHS form (not der(velocity)) — alias elimination would otherwise
+    // drop this from the published signal stream.
     Real acceleration "m/s2";
   equation
     total_mass = dry_mass + mass_in;
@@ -434,43 +271,10 @@ package AnnotatedRocketStage
           lineColor={40,40,40},
           fillColor={160,60,60},
           fillPattern=FillPattern.Solid),
-        // Body bottom is y=-90 (rocket-fin polygon tips); place the
-        // name just below that for the same icon-to-label gap the
-        // Engine and Tank icons use.
         Text(extent={{-120,-95},{120,-120}},
           textString="%name",
           textColor={40,40,40})
       }));
   end Airframe;
-
-  // ── Gimbal (decorative — not instantiated in RocketStage) ──
-  model Gimbal "Thrust-vector gimbal — visual icon only (not wired)"
-    Modelica.Blocks.Interfaces.RealInput pitch_cmd
-      annotation(Placement(transformation(extent={{-120,40},{-100,60}})));
-    Modelica.Blocks.Interfaces.RealInput yaw_cmd
-      annotation(Placement(transformation(extent={{-120,-60},{-100,-40}})));
-    Modelica.Blocks.Interfaces.RealOutput pitch
-      annotation(Placement(transformation(extent={{100,40},{120,60}})));
-    Modelica.Blocks.Interfaces.RealOutput yaw
-      annotation(Placement(transformation(extent={{100,-60},{120,-40}})));
-  equation
-    pitch = pitch_cmd;
-    yaw = yaw_cmd;
-    annotation(Icon(coordinateSystem(extent={{-100,-100},{100,100}}),
-      graphics={
-        Line(points={{-80,0},{80,0}},
-          color={80,80,80}, thickness=0.6),
-        Line(points={{0,-80},{0,80}},
-          color={80,80,80}, thickness=0.6),
-        Polygon(points={{-15,-15},{15,-15},{15,15},{-15,15}},
-          lineColor={0,0,0},
-          fillColor={255,180,40},
-          fillPattern=FillPattern.Solid),
-        // Cross-axis lines end at ±80; place the name just below.
-        Text(extent={{-120,-85},{120,-110}},
-          textString="%name",
-          textColor={40,40,40})
-      }));
-  end Gimbal;
 
 end AnnotatedRocketStage;
