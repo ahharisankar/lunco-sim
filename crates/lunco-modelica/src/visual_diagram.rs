@@ -240,6 +240,62 @@ pub struct MSLComponentDef {
     pub class_kind: String,
 }
 
+/// One bundled `.mo` file's parsed class tree, captured at index
+/// time so the runtime Package Browser can render bundled examples
+/// with proper kind badges and expandable inner classes — same
+/// shape MSL files get from the disk scan, but pre-baked into
+/// `msl_index.json` since bundled sources are compiled into the
+/// binary (no runtime filesystem to scan).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundledFileTree {
+    /// File name including extension, matches `BundledModel::filename`
+    /// so the runtime can pair the tree with its embedded source.
+    pub filename: String,
+    /// Top-level class declared in the file. For multi-class files
+    /// this is the outer `package`; for single-class files it's the
+    /// model/connector/record itself.
+    pub top: BundledClassTree,
+}
+
+/// Recursive class node inside a [`BundledFileTree`]. Mirrors what
+/// `package_browser::class_def_to_node` produces from a live AST,
+/// minus filesystem paths.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundledClassTree {
+    /// Short name as it appears in the source (`AnnotatedRocketStage`,
+    /// `RocketStage`, `FluidPort_a`, …).
+    pub short_name: String,
+    /// Dotted path *within the file* — empty parent for the top
+    /// class, `<top>.<child>` for nested ones.
+    pub qualified_path: String,
+    /// Lower-case Modelica class keyword: `"package"`, `"model"`,
+    /// `"connector"`, `"record"`, … Drives the kind badge.
+    pub class_kind: String,
+    /// First-line description string from `class Foo "…"`. `None`
+    /// when the class has no doc comment.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Inner classes (non-empty for `package` rows).
+    #[serde(default)]
+    pub children: Vec<BundledClassTree>,
+}
+
+/// On-disk shape of `msl_index.json`. Wraps the legacy
+/// `Vec<MSLComponentDef>` payload alongside the bundled-tree
+/// extension so the indexer can ship both in a single artifact.
+/// The reader accepts both this struct *and* the bare-array
+/// legacy form for backward compatibility.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MslIndex {
+    /// Palette / component metadata — what `MSLComponentDef` has
+    /// always carried.
+    pub components: Vec<MSLComponentDef>,
+    /// Per-bundled-file class tree for the Package Browser. Empty
+    /// when the indexer was run before bundled support landed.
+    #[serde(default)]
+    pub bundled: Vec<BundledFileTree>,
+}
+
 /// A node instance placed on the visual canvas.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagramNode {

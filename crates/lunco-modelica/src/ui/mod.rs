@@ -686,9 +686,15 @@ impl Plugin for ModelicaUiPlugin {
             .register(browser_section::ModelicaSection::default());
         app.init_resource::<loaded_classes::LoadedModelicaClasses>();
         // Default-libraries set: always loaded, not bound to any
-        // Twin. MSL is the foundation; Bundled Examples is
-        // LunCoSim's own learning material. Future implicit libs
-        // (ModelicaServices, Complex) register here too.
+        // Twin. MSL anchors the top, third-party libraries are
+        // discovered dynamically from the `lunco-assets` cache (see
+        // `package_browser::discover_third_party_libs`), and the
+        // bundled "LunCo Examples" row is registered last so newly
+        // downloaded libs surface above it without touching this
+        // file. Adding a library is data-only (`Assets.toml` entry
+        // + download); palette indexing in `msl_indexer.rs` and
+        // drill-in resolution in `class_cache.rs` still need their
+        // own entries.
         let mut loaded = app
             .world_mut()
             .resource_mut::<loaded_classes::LoadedModelicaClasses>();
@@ -697,35 +703,20 @@ impl Plugin for ModelicaUiPlugin {
             "Modelica",
             false,
         )));
+        for (cache_subdir, package_dir) in
+            panels::package_browser::discover_third_party_libs()
+        {
+            loaded.register(Box::new(loaded_classes::SystemLibraryClass::new(
+                format!("{cache_subdir}_root"),
+                package_dir,
+                false,
+            )));
+        }
         loaded.register(Box::new(loaded_classes::SystemLibraryClass::new(
             "bundled_root",
             "LunCo Examples",
             false,
         )));
-        // Third-party Modelica libraries downloaded via lunco-assets.
-        // Each row appears alongside the MSL in the Twin browser as
-        // a top-level system library. The id ties to
-        // `PackageTreeCache::new()`'s extra-library entries — both
-        // use `<cache_subdir>_root` as the key.
-        //
-        // Adding a library means: (1) Assets.toml entry with the
-        // GitHub release tarball, (2) `msl_indexer.rs::extra_libraries`
-        // for palette / parsed-bundle inclusion, (3)
-        // `class_cache.rs` filesystem-resolve roots, (4) browser
-        // tree row in `package_browser.rs::PackageTreeCache::new`,
-        // (5) this registration. All five are tiny one-line
-        // additions with the same `<cache_subdir>` key.
-        if lunco_assets::cache_dir()
-            .join("thermofluidstream")
-            .join("ThermofluidStream")
-            .exists()
-        {
-            loaded.register(Box::new(loaded_classes::SystemLibraryClass::new(
-                "thermofluidstream_root",
-                "ThermofluidStream",
-                false,
-            )));
-        }
     }
 }
 

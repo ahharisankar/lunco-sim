@@ -173,6 +173,33 @@ pub(crate) fn render_workspace_doc(
     });
 
     let (classes, has_parse_errors) = classes_from_syntax(&syntax);
+
+    // Collapse the redundant wrapper when the document holds a
+    // single top-level class whose short name matches the outer
+    // header (e.g. duplicated `AnnotatedRocketStageCopy.mo` whose
+    // sole top class is `package AnnotatedRocketStageCopy`). Without
+    // this, the browser shows the same name twice — once on the
+    // workspace doc row, once on the package row immediately below.
+    // We promote the wrapper's children to the top so the inner
+    // classes (Airframe, Engine, FluidPort, …) sit directly under
+    // the doc header.
+    let doc_display_name: Option<String> = ctx
+        .world
+        .get_resource::<ModelicaDocumentRegistry>()
+        .and_then(|reg| reg.host(doc_id))
+        .map(|host| host.document().origin().display_name());
+    let classes: Vec<ClassEntry> = if classes.len() == 1
+        && doc_display_name
+            .as_deref()
+            .map(|n| n == classes[0].short_name)
+            .unwrap_or(false)
+        && !classes[0].children.is_empty()
+    {
+        classes.into_iter().next().unwrap().children
+    } else {
+        classes
+    };
+
     if classes.is_empty() {
         // Distinguish empty-draft from broken-file. A blank
         // "(no classes yet)" row on a file the user just broke
@@ -261,25 +288,48 @@ fn collect_classes(
         });
     }
     // OMEdit ordering: UsersGuide first, Examples second, then
-    // sub-packages alphabetical, then leaf classes alphabetical.
-    // Same convention the package-browser tree uses (see
-    // `package_browser::omedit_sort_key`); duplicated here to avoid
-    // a cross-module dep on a private helper.
-    out.sort_by_key(|c| {
-        let group: u8 = match c.short_name.as_str() {
-            "UsersGuide" => 0,
-            "Examples" => 1,
-            _ => {
-                if matches!(c.kind, ClassType::Package) {
-                    2
-                } else {
-                    3
-                }
-            }
-        };
-        (group, c.short_name.to_lowercase())
-    });
+    // sub-packages alphabetical, then leaf classes grouped by kind
+    // (model → block → connector → record → function → type →
+    // class → operator), alphabetical within each group. Mirrors
+    // `package_browser::omedit_sort_key`; duplicated here so this
+    // module doesn't reach into a sibling's private helper.
+    out.sort_by_key(|c| (browser_sort_group(c), c.short_name.to_lowercase()));
     out
+}
+
+/// Sort bucket for [`ClassEntry`]. Variant order = display order via
+/// derived `Ord`, so adding a new bucket is a one-line edit.
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+enum BrowserSortGroup {
+    UsersGuide,
+    Examples,
+    SubPackage,
+    LeafModel,
+    LeafBlock,
+    LeafConnector,
+    LeafRecord,
+    LeafFunction,
+    LeafType,
+    LeafClass,
+    LeafOperator,
+}
+
+fn browser_sort_group(c: &ClassEntry) -> BrowserSortGroup {
+    match c.short_name.as_str() {
+        "UsersGuide" => BrowserSortGroup::UsersGuide,
+        "Examples" => BrowserSortGroup::Examples,
+        _ => match c.kind {
+            ClassType::Package => BrowserSortGroup::SubPackage,
+            ClassType::Model => BrowserSortGroup::LeafModel,
+            ClassType::Block => BrowserSortGroup::LeafBlock,
+            ClassType::Connector => BrowserSortGroup::LeafConnector,
+            ClassType::Record => BrowserSortGroup::LeafRecord,
+            ClassType::Function => BrowserSortGroup::LeafFunction,
+            ClassType::Type => BrowserSortGroup::LeafType,
+            ClassType::Class => BrowserSortGroup::LeafClass,
+            ClassType::Operator => BrowserSortGroup::LeafOperator,
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------

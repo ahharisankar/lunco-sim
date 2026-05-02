@@ -1024,9 +1024,17 @@ fn render_docs_view(ui: &mut egui::Ui, world: &mut World) {
                         walk_qualified_class(ast.as_ref(), q)
                     } else {
                         use rumoca_session::parsing::ClassType;
+                        // Prefer the first non-Package class (the model
+                        // a `.mo` file usually advertises). Fall back to
+                        // the first class regardless of kind so that
+                        // package-only files (e.g. third-party
+                        // `UserGuide.mo`, `package.mo`) still surface
+                        // their `Documentation(info=…)` annotation
+                        // instead of rendering as "(no documentation)".
                         ast.classes
                             .iter()
                             .find(|(_, c)| !matches!(c.class_type, ClassType::Package))
+                            .or_else(|| ast.classes.iter().next())
                             .map(|(n, c)| (n.clone(), c))
                     };
                     class

@@ -182,31 +182,24 @@ impl PackageTreeCache {
             is_loading: false,
         });
 
-        // Extra third-party Modelica libraries downloaded via
-        // `lunco-assets`. Each entry mirrors the cache layout written
-        // by `Assets.toml`'s `dest = "<name>"` (the unpacked archive
-        // lands at `<cache>/<name>/<PackageDir>/`). Adding a library
-        // here surfaces it in the Twin browser as a top-level node;
-        // pair with the corresponding entries in `msl_indexer.rs`
+        // Extra third-party Modelica libraries discovered in the
+        // `lunco-assets` cache. Each `Assets.toml` `dest = "<sub>"`
+        // entry unpacks to `<cache>/<sub>/<PackageName>/package.mo`;
+        // the discovery scan picks them up so adding a library is a
+        // pure data change (download + Assets.toml entry) — no code
+        // edit needed in this file. Pairs with `msl_indexer.rs`
         // (palette indexing) and `class_cache.rs` (drill-in path
-        // resolution).
-        for (cache_subdir, package_dir, label) in &[(
-            "thermofluidstream",
-            "ThermofluidStream",
-            "🌊 ThermofluidStream",
-        )] {
-            let cache_root = lunco_assets::cache_dir().join(cache_subdir);
-            let lib_dir = cache_root.join(package_dir);
-            if lib_dir.exists() {
-                roots.push(PackageNode::Category {
-                    id: format!("{}_root", cache_subdir).into(),
-                    name: (*label).into(),
-                    package_path: (*package_dir).into(),
-                    fs_path: lib_dir,
-                    children: None,
-                    is_loading: false,
-                });
-            }
+        // resolution), which still need their own entries.
+        for (cache_subdir, package_dir) in discover_third_party_libs() {
+            let lib_dir = lunco_assets::cache_dir().join(&cache_subdir).join(&package_dir);
+            roots.push(PackageNode::Category {
+                id: format!("{cache_subdir}_root"),
+                name: package_dir.clone(),
+                package_path: package_dir,
+                fs_path: lib_dir,
+                children: None,
+                is_loading: false,
+            });
         }
 
         roots.push(PackageNode::Category {
@@ -387,26 +380,117 @@ fn scan_msl_dir(dir: &std::path::Path, package_path: String) -> Vec<PackageNode>
     results
 }
 
+/// Top-level grouping in the OMEdit-style browser. Variants are
+/// declared in display order, so `derive(Ord)` gives the correct
+/// sort priority.
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+enum SortGroup {
+    UsersGuide,
+    Examples,
+    SubPackage,
+    Leaf(LeafKind),
+}
+
+/// Sub-grouping for leaf classes. Order = sort priority. `Other`
+/// catches unknown kinds so new Modelica keywords don't silently
+/// reshuffle the tree.
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+enum LeafKind {
+    Model,
+    Block,
+    Connector,
+    Record,
+    Function,
+    Type,
+    Constant,
+    Other,
+}
+
+impl LeafKind {
+    fn from_str(kind: Option<&str>) -> Self {
+        match kind {
+            Some("model") => Self::Model,
+            Some("block") => Self::Block,
+            Some("connector") => Self::Connector,
+            Some("record") => Self::Record,
+            Some("function") => Self::Function,
+            Some("type") => Self::Type,
+            Some("constant") => Self::Constant,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// Sort key matching OMEdit's tree convention. Priority order:
 ///
 /// 1. `UsersGuide` — documentation hub, always pinned to the top of
 ///    its parent (every MSL top-level package has one).
 /// 2. `Examples` — runnable example collection, second pin.
 /// 3. Other sub-packages (folders) — alphabetical.
-/// 4. Leaf classes (model / block / connector / ...) — alphabetical.
+/// 4. Leaf classes — grouped by class kind (model → block →
+///    connector → record → function → type → constant → other),
+///    then alphabetical within each group. Reading by kind is how
+///    OMEdit-style browsers surface large packages: all the
+///    instantiable models cluster together, supporting types follow.
 ///
 /// Both the disk scan and the inline AST walk use this same key, so
 /// directory- and single-file-packaged content sort identically.
-fn omedit_sort_key(n: &PackageNode) -> (u8, String) {
-    let group: u8 = match n.name() {
-        "UsersGuide" => 0,
-        "Examples" => 1,
+fn omedit_sort_key(n: &PackageNode) -> (SortGroup, String) {
+    let group = match n.name() {
+        "UsersGuide" => SortGroup::UsersGuide,
+        "Examples" => SortGroup::Examples,
         _ => match n {
-            PackageNode::Category { .. } => 2,
-            PackageNode::Model { .. } => 3,
+            PackageNode::Category { .. } => SortGroup::SubPackage,
+            PackageNode::Model { class_kind, .. } => {
+                SortGroup::Leaf(LeafKind::from_str(class_kind.as_deref()))
+            }
         },
     };
     (group, n.name().to_lowercase())
+}
+
+/// Scan the `lunco-assets` cache for unpacked Modelica libraries.
+///
+/// Returns `(cache_subdir, package_name)` for every top-level cache
+/// entry whose unpacked archive contains a `<PackageName>/package.mo`
+/// — Modelica's canonical structured-library marker (MLS §13.2.2.2).
+/// `msl` is excluded (the MSL pipeline owns it) so the bundled
+/// "LunCo Examples" row stays the last library entry by construction.
+///
+/// Adding a library is therefore data-only: drop a new `Assets.toml`
+/// entry, run `cargo run -p lunco-assets -- download`, and the row
+/// appears next launch — no edit here.
+///
+/// Output is sorted alphabetically by package name so the registration
+/// order is deterministic across runs.
+pub fn discover_third_party_libs() -> Vec<(String, String)> {
+    let cache = lunco_assets::cache_dir();
+    let Ok(entries) = std::fs::read_dir(&cache) else { return Vec::new(); };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let subdir = entry.file_name().to_string_lossy().into_owned();
+        if subdir == "msl" || subdir.starts_with('.') {
+            continue;
+        }
+        // First (and typically only) inner directory containing a
+        // `package.mo` is the unpacked Modelica library root. Other
+        // siblings (READMEs, LICENSE, examples folders) are ignored.
+        let Ok(inner) = std::fs::read_dir(&path) else { continue; };
+        for inner_entry in inner.flatten() {
+            let inner_path = inner_entry.path();
+            if inner_path.is_dir() && inner_path.join("package.mo").is_file() {
+                let pkg = inner_entry.file_name().to_string_lossy().into_owned();
+                out.push((subdir.clone(), pkg));
+                break;
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 fn build_bundled_tree() -> Vec<PackageNode> {
