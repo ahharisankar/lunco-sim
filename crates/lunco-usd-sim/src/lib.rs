@@ -612,10 +612,15 @@ fn setup_physical_wheel(
         },
         RigidBody::Dynamic,
         collider,
-        Mass(25.0),
-        Friction::new(0.8),
-        LinearDamping(0.5),
-        AngularDamping(2.0),
+        // Heavier wheels (100 kg vs the previous 25) damp the
+        // joint↔solver impulse echo that produced visible idle wobble
+        // when the rover was dropped from Y=5 onto the ground. With a
+        // 1000 kg chassis the previous 40:1 mass ratio amplified
+        // lateral float-precision noise into rolling drift.
+        Mass(100.0),
+        Friction::new(1.2),
+        LinearDamping(2.0),
+        AngularDamping(4.0),
         wheel_tf,
     ));
 
@@ -635,15 +640,14 @@ fn setup_physical_wheel(
     let chassis = child_of.parent();
     let anchor_chassis = existing_tf.translation.as_dvec3();
     let chassis_axis = (existing_tf.rotation * Vec3::Y).as_dvec3();
-    // No `JointCollisionDisabled` here — adding it caused the chassis
-    // body to fall through the ground (regression vs HEAD). The wheel
-    // and chassis colliders happen to overlap only at the joint anchor,
-    // and Avian's contact solver handles the overlap fine without JCD.
+    // `JointCollisionDisabled` stops residual contact impulses between
+    // wheel and chassis colliders that would otherwise drift the rover.
     commands.spawn((
         RevoluteJoint::new(chassis, entity)
             .with_local_anchor1(anchor_chassis)
             .with_local_anchor2(DVec3::ZERO)
             .with_hinge_axis(chassis_axis),
+        JointCollisionDisabled,
         Name::new(format!("PhysicalWheelJoint_{}", prim_path.path)),
     ));
 }
