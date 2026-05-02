@@ -2333,6 +2333,10 @@ fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramNodeId, Canv
             ports,
             label: node.instance_name.clone(),
             origin: Some(node.instance_name.clone()),
+            // Modelica icons are sized by their `Icon` annotation; a
+            // user-driven resize would desync from the source. Plot /
+            // dashboard nodes opt into resize via the default `true`.
+            resizable: false,
         });
     }
 
@@ -5485,39 +5489,13 @@ fn render_empty_menu(
         out,
     );
     ui.separator();
-    ui.label(egui::RichText::new("Common").weak().small());
-    for quick_name in ["Resistor", "Capacitor", "Ground", "ConstantVoltage", "Inductor"] {
-        if let Some(comp) = crate::visual_diagram::msl_component_library()
-            .iter()
-            .find(|c| c.name == quick_name)
-        {
-            if ui.button(quick_name).clicked() {
-                if let Some(class) = editing_class {
-                    let instance_name = {
-                        let state = world.resource::<CanvasDiagramState>();
-                        pick_add_instance_name(comp, &state.get(active_doc).canvas.scene)
-                    };
-                    {
-                        let mut state = world.resource_mut::<CanvasDiagramState>();
-                        let docstate = state.get_mut(active_doc);
-                        synthesize_msl_node(
-                            &mut docstate.canvas.scene,
-                            comp,
-                            &instance_name,
-                            click_world,
-                        );
-                    }
-                    out.push(op_add_component_with_name(comp, &instance_name, click_world, class));
-                }
-                ui.close();
-            }
-        }
-    }
-    ui.separator();
     // ── Add Plot ──────────────────────────────────────────────────
-    // In-canvas scope: pick a signal from the active simulator and
-    // drop a `lunco.viz.plot` Scene node at the click position.
-    // Empty submenu means no sim has run yet.
+    // In-canvas scope: drop a `lunco.viz.plot` Scene node at the click
+    // position. The "Empty plot" entry is always available so users
+    // can place a chart while authoring, before any simulation has
+    // run; signal entries appear once the active sim has populated
+    // `SignalRegistry`. An empty plot can be bound later via the
+    // inspector.
     let sigs: Vec<(bevy::prelude::Entity, String)> = world
         .get_resource::<lunco_viz::SignalRegistry>()
         .map(|r| {
@@ -5542,11 +5520,16 @@ fn render_empty_menu(
         // the ScrollArea wrapper too).
         const ROW_PX: f32 = 18.0;
         let max_h = (ui.ctx().screen_rect().height() * 0.7).max(180.0);
-        let wanted = ((sigs.len() + 2) as f32 * ROW_PX).min(max_h);
+        let wanted = ((sigs.len() + 3) as f32 * ROW_PX).min(max_h);
         ui.set_min_height(wanted);
+        if ui.button("Empty plot (bind later)").clicked() {
+            insert_plot_node(world, click_world, 0, "");
+            ui.close();
+        }
+        ui.separator();
         if sigs.is_empty() {
             ui.label(
-                egui::RichText::new("(no signals yet — run a simulation)")
+                egui::RichText::new("(no signals yet — run a simulation to bind)")
                     .weak()
                     .small(),
             );
@@ -5564,39 +5547,7 @@ fn render_empty_menu(
             .show(ui, |ui| {
                 for (entity, path) in &sigs {
                     if ui.button(path).clicked() {
-                        let payload =
-                            lunco_viz::kinds::canvas_plot_node::PlotNodeData {
-                                entity: entity.to_bits(),
-                                signal_path: path.clone(),
-                                title: String::new(),
-                            };
-                        let data: lunco_canvas::NodeData =
-                            std::sync::Arc::new(payload);
-                        let active_doc = active_doc_from_world(world);
-                        let mut state =
-                            world.resource_mut::<CanvasDiagramState>();
-                        let docstate = state.get_mut(active_doc);
-                        let scene = &mut docstate.canvas.scene;
-                        let id = scene.alloc_node_id();
-                        // 60×40 default size in canvas world coords;
-                        // anchor top-left at the click point so the
-                        // plot appears where the menu opened.
-                        scene.insert_node(lunco_canvas::scene::Node {
-                            id,
-                            rect: lunco_canvas::Rect::from_min_max(
-                                click_world,
-                                lunco_canvas::Pos::new(
-                                    click_world.x + 60.0,
-                                    click_world.y + 40.0,
-                                ),
-                            ),
-                            kind: lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND
-                                .into(),
-                            data,
-                            ports: Vec::new(),
-                            label: String::new(),
-                            origin: None,
-                        });
+                        insert_plot_node(world, click_world, entity.to_bits(), path);
                         ui.close();
                     }
                 }
@@ -5635,6 +5586,41 @@ fn active_doc_from_world(world: &World) -> Option<lunco_doc::DocumentId> {
     world
         .resource::<lunco_workbench::WorkspaceResource>()
         .active_document
+}
+
+/// Insert a plot scene node anchored at `click_world`. `entity_bits = 0`
+/// + empty `signal_path` is the unbound form — the visual draws an
+/// empty card the user can resize and bind later from the inspector.
+fn insert_plot_node(
+    world: &mut World,
+    click_world: lunco_canvas::Pos,
+    entity_bits: u64,
+    signal_path: &str,
+) {
+    let payload = lunco_viz::kinds::canvas_plot_node::PlotNodeData {
+        entity: entity_bits,
+        signal_path: signal_path.to_string(),
+        title: String::new(),
+    };
+    let data: lunco_canvas::NodeData = std::sync::Arc::new(payload);
+    let active_doc = active_doc_from_world(world);
+    let mut state = world.resource_mut::<CanvasDiagramState>();
+    let docstate = state.get_mut(active_doc);
+    let scene = &mut docstate.canvas.scene;
+    let id = scene.alloc_node_id();
+    scene.insert_node(lunco_canvas::scene::Node {
+        id,
+        rect: lunco_canvas::Rect::from_min_max(
+            click_world,
+            lunco_canvas::Pos::new(click_world.x + 60.0, click_world.y + 40.0),
+        ),
+        kind: lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND.into(),
+        data,
+        ports: Vec::new(),
+        label: String::new(),
+        origin: None,
+        resizable: true,
+    });
 }
 
 // ─── Drill-in loading overlay ──────────────────────────────────────
@@ -7152,6 +7138,7 @@ fn synthesize_msl_node(
         ports,
         label: instance_name.to_string(),
         origin: Some(instance_name.to_string()),
+        resizable: false,
     });
     id
 }

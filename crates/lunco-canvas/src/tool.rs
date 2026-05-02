@@ -464,6 +464,9 @@ impl DefaultTool {
             const RESIZE_HANDLE_RADIUS: f32 = 9.0;
             let mut handle_hit: Option<NodeId> = None;
             for (nid, node) in ops.scene.nodes() {
+                if !node.resizable {
+                    continue;
+                }
                 let dx = world.x - node.rect.max.x;
                 let dy = world.y - node.rect.max.y;
                 if dx * dx + dy * dy
@@ -960,6 +963,7 @@ mod tests {
             }],
             label: "A".into(),
             origin: None,
+            resizable: true,
         });
         // B: (100,0)-(140,30), port "in" at left edge centre (0,15)
         s.insert_node(Node {
@@ -974,6 +978,7 @@ mod tests {
             }],
             label: "B".into(),
             origin: None,
+            resizable: true,
         });
         s
     }

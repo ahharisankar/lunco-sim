@@ -2976,18 +2976,24 @@ fn entity_for_doc(world: &World, doc: DocumentId) -> Option<Entity> {
 }
 
 /// Drop a Simulink-style "Scope" plot onto the active canvas at
-/// world-space position `(x, y)` with the given size, bound to a
-/// scalar signal. Pure UI overlay — does not emit Modelica source.
-/// Uses the active document's coordinate frame (same as
-/// `MoveComponent`: -100..100 typical, +Y down).
+/// world-space position `(x, y)` with the given size, optionally
+/// bound to a scalar signal. Pure UI overlay — does not emit
+/// Modelica source. Uses the active document's coordinate frame
+/// (same as `MoveComponent`: -100..100 typical, +Y down).
+///
+/// `signal` may be empty: the plot is then created unbound (no
+/// entity, no path) — matching the right-click menu's "Empty plot
+/// (bind later)" entry. Useful for headless / API-driven UI tests
+/// that want to verify a plot lands on the canvas before any sim
+/// has run.
 #[Command(default)]
 pub struct AddCanvasPlot {
     pub x: f32,
     pub y: f32,
     pub width: f32,
     pub height: f32,
-    /// Signal path the plot will display
-    /// (resolved against the active `ModelicaModel` entity).
+    /// Signal path the plot will display, resolved against the
+    /// active `ModelicaModel` entity. Empty ⇒ unbound plot.
     pub signal: String,
 }
 
@@ -3008,20 +3014,28 @@ fn on_add_canvas_plot(trigger: On<AddCanvasPlot>, mut commands: Commands) {
         let h = if ev.height > 0.0 { ev.height } else { 90.0 };
         // Bind to the active simulator entity — same lookup
         // NewPlotPanel uses. Stored as the entity's bit-pattern so
-        // the JSON payload is platform-stable.
-        let model_entity = world
-            .query::<(bevy::prelude::Entity, &crate::ModelicaModel)>()
-            .iter(world)
-            .next()
-            .map(|(e, _)| e)
-            .unwrap_or(bevy::prelude::Entity::PLACEHOLDER);
+        // the JSON payload is platform-stable. When `ev.signal` is
+        // empty the plot is unbound: zero entity + empty path so the
+        // visual draws an "(unbound plot)" placeholder until the user
+        // picks a signal in the inspector.
+        let (entity_bits, signal_path) = if ev.signal.is_empty() {
+            (0, String::new())
+        } else {
+            let model_entity = world
+                .query::<(bevy::prelude::Entity, &crate::ModelicaModel)>()
+                .iter(world)
+                .next()
+                .map(|(e, _)| e)
+                .unwrap_or(bevy::prelude::Entity::PLACEHOLDER);
+            (model_entity.to_bits(), ev.signal.clone())
+        };
         // Scene-node addition: the canvas treats this exactly like a
         // component node (selection, drag, undo all inherit). The
         // visual is reconstructed from `data` via the registered
         // `lunco.viz.plot` factory.
         let payload = lunco_viz::kinds::canvas_plot_node::PlotNodeData {
-            entity: model_entity.to_bits(),
-            signal_path: ev.signal.clone(),
+            entity: entity_bits,
+            signal_path,
             title: String::new(),
         };
         // Typed payload — boxed straight into the canvas Node.data
@@ -3045,6 +3059,7 @@ fn on_add_canvas_plot(trigger: On<AddCanvasPlot>, mut commands: Commands) {
             ports: Vec::new(),
             label: String::new(),
             origin: None,
+            resizable: true,
         });
         bevy::log::info!(
             "[AddCanvasPlot] doc={} signal={} at ({},{}) {}x{} (node id={})",

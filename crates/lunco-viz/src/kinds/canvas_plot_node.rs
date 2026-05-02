@@ -265,15 +265,25 @@ impl NodeVisual for PlotNodeVisual {
             );
         }
 
-        let title = if self.data.title.is_empty() {
+        let title: &str = if !self.data.title.is_empty() {
+            &self.data.title
+        } else if !self.data.signal_path.is_empty() {
             &self.data.signal_path
         } else {
-            &self.data.title
+            "(unbound plot)"
         };
-        let entity = Entity::from_bits(self.data.entity);
+        // Unbound plots store `entity = 0` (invalid bit pattern in
+        // bevy 0.18). `try_from_bits` returns `None` instead of
+        // panicking, and an unbound plot naturally has no samples.
         let snapshot = fetch_signal_snapshot(ctx.ui.ctx());
-        let key = (entity, self.data.signal_path.clone());
-        let points = snapshot.samples.get(&key).cloned().unwrap_or_default();
+        let points: Vec<SamplePoint> = Entity::try_from_bits(self.data.entity)
+            .and_then(|e| {
+                snapshot
+                    .samples
+                    .get(&(e, self.data.signal_path.clone()))
+                    .cloned()
+            })
+            .unwrap_or_default();
 
         // Adaptive density: at extreme zoom-out we drop to a bare
         // sparkline (under 40×30 px). Above that we *always* keep

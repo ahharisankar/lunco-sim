@@ -76,13 +76,14 @@ impl Panel for InspectorPanel {
                 .unwrap_or(false)
         };
 
-        // ── Resolve the selected node's Modelica instance name ──
+        // ── Resolve the selected node ──────────────────────────
         //
         // Edges are not currently inspectable — we only surface
-        // component-level edits. Selecting a wire shows a "no editor
-        // for this selection" message rather than a blank panel.
+        // component-level edits. Plot nodes get a dedicated signal-
+        // binding editor (see `render_plot_node_editor`); component
+        // nodes go through the AST-driven modifications path below.
         let mut selection_kind = "none";
-        let primary_node_origin = world
+        let primary = world
             .get_resource::<crate::ui::panels::canvas_diagram::CanvasDiagramState>()
             .and_then(|cs| {
                 let docstate = cs.get(Some(doc_id));
@@ -90,7 +91,8 @@ impl Panel for InspectorPanel {
                 match primary {
                     SelectItem::Node(node_id) => {
                         selection_kind = "node";
-                        docstate.canvas.scene.node(node_id)?.origin.clone()
+                        let node = docstate.canvas.scene.node(node_id)?;
+                        Some((node_id, node.kind.clone(), node.origin.clone()))
                     }
                     SelectItem::Edge(_) => {
                         selection_kind = "edge";
@@ -99,11 +101,21 @@ impl Panel for InspectorPanel {
                 }
             });
 
-        let Some(instance_name) = primary_node_origin else {
+        let Some((node_id, node_kind, node_origin)) = primary else {
             match selection_kind {
                 "edge" => placeholder(ui, "Wire editing not supported yet."),
                 _ => placeholder(ui, "Select a node on the canvas."),
             }
+            return;
+        };
+
+        if node_kind.as_str() == lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND {
+            render_plot_node_editor(ui, world, doc_id, node_id);
+            return;
+        }
+
+        let Some(instance_name) = node_origin else {
+            placeholder(ui, "Select a node on the canvas.");
             return;
         };
 
@@ -254,4 +266,110 @@ fn placeholder(ui: &mut egui::Ui, msg: &str) {
                 .color(egui::Color32::GRAY),
         );
     });
+}
+
+/// Inspector view for a selected `lunco.viz.plot` node — current
+/// binding plus a clickable list of available signals. Picking a
+/// signal swaps the node's `PlotNodeData` so the visual immediately
+/// renders the new line on the next frame. The list is empty until
+/// the active simulator has populated `SignalRegistry`; that case
+/// shows a short hint instead of a blank panel.
+fn render_plot_node_editor(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    doc_id: lunco_doc::DocumentId,
+    node_id: lunco_canvas::NodeId,
+) {
+    use lunco_viz::kinds::canvas_plot_node::PlotNodeData;
+
+    let current: PlotNodeData = world
+        .get_resource::<crate::ui::panels::canvas_diagram::CanvasDiagramState>()
+        .and_then(|cs| {
+            cs.get(Some(doc_id))
+                .canvas
+                .scene
+                .node(node_id)?
+                .data
+                .downcast_ref::<PlotNodeData>()
+                .cloned()
+        })
+        .unwrap_or_default();
+
+    ui.add_space(4.0);
+    ui.heading("Plot");
+    if current.signal_path.is_empty() {
+        ui.label(
+            egui::RichText::new("Unbound — pick a signal below.")
+                .italics()
+                .color(egui::Color32::GRAY),
+        );
+    } else {
+        ui.label(
+            egui::RichText::new(format!("Bound to: {}", current.signal_path))
+                .small(),
+        );
+        if ui.button("Unbind").clicked() {
+            apply_plot_binding(world, doc_id, node_id, 0, "");
+        }
+    }
+    ui.separator();
+
+    let sigs: Vec<(bevy::prelude::Entity, String)> = world
+        .get_resource::<lunco_viz::SignalRegistry>()
+        .map(|r| {
+            let mut v: Vec<_> = r
+                .iter_scalar()
+                .map(|(s, _)| (s.entity, s.path.clone()))
+                .collect();
+            v.sort_by(|a, b| a.1.cmp(&b.1));
+            v
+        })
+        .unwrap_or_default();
+
+    if sigs.is_empty() {
+        ui.label(
+            egui::RichText::new("(no signals yet — run a simulation to bind)")
+                .weak()
+                .small(),
+        );
+        return;
+    }
+
+    let max_h = ui.ctx().screen_rect().height() * 0.6;
+    egui::ScrollArea::vertical()
+        .max_height(max_h)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for (entity, path) in &sigs {
+                let is_current = entity.to_bits() == current.entity
+                    && path == &current.signal_path;
+                let resp = ui.selectable_label(is_current, path);
+                if resp.clicked() && !is_current {
+                    apply_plot_binding(world, doc_id, node_id, entity.to_bits(), path);
+                }
+            }
+        });
+}
+
+fn apply_plot_binding(
+    world: &mut World,
+    doc_id: lunco_doc::DocumentId,
+    node_id: lunco_canvas::NodeId,
+    entity_bits: u64,
+    signal_path: &str,
+) {
+    use lunco_viz::kinds::canvas_plot_node::PlotNodeData;
+
+    let payload = PlotNodeData {
+        entity: entity_bits,
+        signal_path: signal_path.to_string(),
+        title: String::new(),
+    };
+    let data: lunco_canvas::NodeData = std::sync::Arc::new(payload);
+    let mut state =
+        world.resource_mut::<crate::ui::panels::canvas_diagram::CanvasDiagramState>();
+    let docstate = state.get_mut(Some(doc_id));
+    if let Some(node) = docstate.canvas.scene.node_mut(node_id) {
+        node.data = data;
+    }
 }
