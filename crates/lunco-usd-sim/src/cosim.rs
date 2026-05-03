@@ -32,7 +32,8 @@ use lunco_core::{Command, on_command};
 use lunco_cosim::{SimComponent, SimConnection, SimStatus};
 use lunco_doc::DocumentId;
 use lunco_modelica::{
-    extract_inputs_with_defaults, extract_model_name, extract_parameters, ModelicaChannels,
+    extract_inputs_with_defaults_from_ast, extract_model_name_from_ast,
+    extract_parameters_from_ast, parse_source_best_effort, ModelicaChannels,
     ModelicaCommand, ModelicaModel,
 };
 use lunco_scripting::{
@@ -145,9 +146,17 @@ fn dispatch_modelica(
         }
     };
 
-    let model_name = extract_model_name(&source).unwrap_or_else(|| "Model".into());
-    let parameters = extract_parameters(&source);
-    let inputs = extract_inputs_with_defaults(&source).into_iter().collect();
+    // Single best-effort parse, three AST-driven extracts. The
+    // string-call variants of these helpers re-parse on every call;
+    // `_from_ast` lets us share one parse across all three. Lenient
+    // parsing means a model with a semantic error still produces
+    // usable name/parameter/input snapshots — same recovery
+    // semantics `Session::recovered_file_query` uses on the engine
+    // side.
+    let ast = parse_source_best_effort(&source, "cosim-dispatch.mo");
+    let model_name = extract_model_name_from_ast(&ast).unwrap_or_else(|| "Model".into());
+    let parameters = extract_parameters_from_ast(&ast);
+    let inputs = extract_inputs_with_defaults_from_ast(&ast).into_iter().collect();
 
     commands.entity(entity).insert(ModelicaModel {
         model_path,

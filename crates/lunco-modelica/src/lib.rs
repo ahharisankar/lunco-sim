@@ -2221,9 +2221,13 @@ fn handle_modelica_responses(
 // callers (workbench binaries, UI panels) can import from the crate root.
 pub use ast_extract::{
     extract_model_name,
+    extract_model_name_from_ast,
     extract_parameters,
+    extract_parameters_from_ast,
     extract_inputs_with_defaults,
+    extract_inputs_with_defaults_from_ast,
     extract_input_names,
+    parse_source_best_effort,
     substitute_params_in_source,
     hash_content,
     extract_from_source,

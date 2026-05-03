@@ -32,6 +32,20 @@ fn parse(source: &str) -> Option<StoredDefinition> {
     parse_to_ast(source, "model.mo").ok()
 }
 
+/// Public best-effort parse: returns the strict-parsed AST if it
+/// succeeds, the recovered/lenient AST otherwise. Use this when you
+/// have raw source bytes and want to walk *some* AST regardless of
+/// whether strict parsing fails on a semantic error.
+///
+/// The cosim dispatch path (`lunco-usd-sim::cosim::dispatch_modelica`)
+/// uses this before calling the `_from_ast` extract helpers — one
+/// parse instead of three string-call re-parses. Same engine that
+/// `extract_icon_via_engine` and `Session::recovered_file_query` use.
+pub fn parse_source_best_effort(source: &str, file_label: &str) -> StoredDefinition {
+    let syntax = rumoca_phase_parse::parse_to_syntax(source, file_label);
+    syntax.best_effort().clone()
+}
+
 // ---------------------------------------------------------------------------
 // Public extraction functions (drop-in replacements for regex versions)
 // ---------------------------------------------------------------------------
