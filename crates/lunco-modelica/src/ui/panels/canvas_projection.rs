@@ -90,10 +90,15 @@ struct ScannedComponent {
 }
 
 fn scan_component_declarations(source: &str) -> Vec<ScannedComponent> {
-    let ast = match rumoca_phase_parse::parse_to_ast(source, "scan.mo") {
-        Ok(a) => a,
-        Err(_) => return Vec::new(),
-    };
+    // `parse_to_syntax` never fails — it returns a strict parse when
+    // possible and a best-effort recovered tree otherwise. `best_effort`
+    // hands back whichever is available, so the duplicate-name /
+    // semantic-error case (where strict drops every component) still
+    // produces the salvaged components rumoca's recovery walks. Same
+    // primitive `Session::recovered_file_query` exposes for sessions
+    // that hold the file.
+    let syntax = rumoca_phase_parse::parse_to_syntax(source, "scan.mo");
+    let ast = syntax.best_effort();
     let mut out = Vec::new();
     for (_class_name, class_def) in &ast.classes {
         for (name, comp) in class_def.iter_components() {
