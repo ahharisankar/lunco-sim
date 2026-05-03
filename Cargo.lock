@@ -6459,6 +6459,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lunco-twin-journal"
+version = "0.1.0"
+dependencies = [
+ "lunco-doc",
+ "serde",
+ "serde_json",
+ "web-time",
+]
+
+[[package]]
 name = "lunco-ui"
 version = "0.1.0"
 dependencies = [

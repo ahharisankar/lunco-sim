@@ -98,6 +98,11 @@ pub mod icon_transform;
 /// Visual diagram editor — drag-and-drop component composition.
 pub mod visual_diagram;
 
+/// Per-document UI projection — what panels read instead of the AST.
+/// Skeleton; population happens in the upcoming AST-canonical refactor.
+/// See `docs/architecture/REFACTOR_PLAN.md`.
+pub mod index;
+
 /// Simple wrapper around rumoca-session for compiling Modelica models.
 ///
 /// MSL is preloaded into the session at construction time via

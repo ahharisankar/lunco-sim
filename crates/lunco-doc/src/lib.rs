@@ -62,6 +62,19 @@ use std::path::{Path, PathBuf};
 pub use lunco_core::{Ack, Mutation, OpId, Reject, SessionId};
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Submodules: domain engine abstraction + cross-doc reference index
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub mod domain_engine;
+pub mod refindex;
+
+pub use domain_engine::{
+    Diagnostic, DiagnosticSeverity, DomainEngine, DomainEngineError, NodeId, ResolvedRef,
+    SymbolRef, TextRange,
+};
+pub use refindex::RefIndex;
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SymbolPath — opaque cross-document reference
 // ─────────────────────────────────────────────────────────────────────────────
 

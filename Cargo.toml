@@ -31,6 +31,7 @@ members = [
     "crates/lunco-doc",
     "crates/lunco-doc-bevy",
     "crates/lunco-twin",
+    "crates/lunco-twin-journal",
     "crates/lunco-workbench",
     "crates/lunco-scripting",
     "crates/lunco-viz",

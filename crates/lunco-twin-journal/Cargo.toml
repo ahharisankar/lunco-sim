@@ -1,0 +1,16 @@
+[package]
+name = "lunco-twin-journal"
+version = "0.1.0"
+edition = "2021"
+description = "Twin journal — append-only, author-scoped op log with per-user undo. Local-only today; CRDT-backed (yrs) and network-syncable later via the same API."
+
+[dependencies]
+lunco-doc = { path = "../lunco-doc" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+web-time = "1"
+
+# TODO(crdt): when we move from a local Vec-backed log to a yrs::Doc-backed
+# log (for persistent history, time-travel, and future multi-user sync),
+# add: yrs = "0.21". The public API in this crate is shaped so that swap
+# is internal — callers don't change.
