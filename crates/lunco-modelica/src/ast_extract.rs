@@ -1260,7 +1260,7 @@ end Test;
         assert!(symbols.inputs_with_defaults.is_empty());
     }
 
-    // --- substitute_params_in_source (still regex-based, TODO: AST regen) ---
+    // --- substitute_params_in_source (AST-driven via Component::binding_range_with_equals) ---
 
     #[test]
     fn test_substitute_params_in_source() {
