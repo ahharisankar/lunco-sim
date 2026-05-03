@@ -40,8 +40,16 @@
 //!   so cross-Twin MSL state is shared once multi-Twin lands.
 
 use lunco_doc::DocumentId;
+use rumoca_session::compile::{
+    ClassMemberCausality, ClassMemberInfo, ClassMemberVariability,
+};
 use rumoca_session::Session;
 use std::collections::HashMap;
+
+pub use rumoca_session::compile::{
+    ClassMemberCausality as InheritedCausality, ClassMemberInfo as InheritedMember,
+    ClassMemberVariability as InheritedVariability,
+};
 
 /// Workspace-wide rumoca state for one Twin's Modelica content.
 ///
@@ -118,6 +126,17 @@ impl ModelicaEngine {
         self.session.class_component_members_query(qualified)
     }
 
+    /// Inheritance-merged component members with variability +
+    /// causality preserved. Same `extends` walk as
+    /// [`Self::inherited_components`] but consumers don't have to
+    /// re-walk the AST to bucket parameters / inputs / outputs.
+    ///
+    /// Backed by
+    /// [`rumoca_session::Session::class_component_members_typed_query`].
+    pub fn inherited_members_typed(&mut self, qualified: &str) -> Vec<InheritedMember> {
+        self.session.class_component_members_typed_query(qualified)
+    }
+
     /// Read-only access to the underlying session for advanced queries
     /// not yet wrapped here. Use sparingly — prefer growing this
     /// crate's API over leaking the session through panels.
@@ -178,5 +197,38 @@ mod tests {
         assert!(engine.uri_for_doc.contains_key(&DocumentId::new(1)));
         engine.close_document(DocumentId::new(1));
         assert!(!engine.uri_for_doc.contains_key(&DocumentId::new(1)));
+    }
+
+    #[test]
+    fn inherited_members_typed_preserves_variability_and_causality() {
+        let mut engine = ModelicaEngine::new();
+        let src = "model Base\n  parameter Real k = 1;\n  input Real u;\n  output Real y;\nend Base;\n\nmodel Derived\n  extends Base;\n  Real x;\nend Derived;\n";
+        engine.upsert_document(DocumentId::new(1), src).unwrap();
+
+        let members = engine.inherited_members_typed("Derived");
+        let by_name: HashMap<&str, &InheritedMember> =
+            members.iter().map(|m| (m.name.as_str(), m)).collect();
+
+        assert_eq!(
+            by_name["k"].variability,
+            InheritedVariability::Parameter,
+            "k should be a parameter"
+        );
+        assert_eq!(
+            by_name["u"].causality,
+            InheritedCausality::Input,
+            "u should be an input"
+        );
+        assert_eq!(
+            by_name["y"].causality,
+            InheritedCausality::Output,
+            "y should be an output"
+        );
+        assert_eq!(
+            by_name["x"].variability,
+            InheritedVariability::Continuous,
+            "x should be continuous"
+        );
+        assert_eq!(by_name["x"].causality, InheritedCausality::None);
     }
 }

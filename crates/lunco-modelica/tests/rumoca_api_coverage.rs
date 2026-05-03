@@ -82,6 +82,33 @@ fn rumoca_components_match_regex_scan() {
     assert!(!ast_pairs.is_empty(), "expected non-empty component set");
 }
 
+/// **Rumoca ask #2 lock**: `ClassDef::full_span_with_leading_comments`
+/// returns the class's byte range extended backward through `//` and
+/// `/* */` comments. Matches what `extract_class_byte_range` /
+/// `extract_class_source` (now AST-backed) need.
+#[test]
+fn rumoca_full_span_includes_leading_comments() {
+    let src = "// Header A\n// Header B\nmodel Foo\n  Real x;\nend Foo;\n";
+    let ast = rumoca_phase_parse::parse_to_ast(src, "test.mo").expect("parses");
+    let class = ast.classes.get("Foo").expect("Foo class found");
+    let (start, end) = class
+        .full_span_with_leading_comments(src)
+        .expect("span resolves");
+    let extracted = &src[start..end];
+    assert!(
+        extracted.starts_with("// Header A"),
+        "leading comments included: {extracted:?}"
+    );
+    assert!(
+        extracted.contains("model Foo"),
+        "header included: {extracted:?}"
+    );
+    assert!(
+        extracted.contains("end Foo;"),
+        "footer included: {extracted:?}"
+    );
+}
+
 /// **Commit 3 lock**: AST-driven span splicing produces the expected
 /// renamed source. Same input as the old regex-driven version.
 #[test]

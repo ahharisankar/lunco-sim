@@ -99,32 +99,19 @@ fn scan_component_declarations(source: &str) -> Vec<(String, String)> {
 /// — unordered so `connect(a.p, b.q)` and `connect(b.q, a.p)` hash
 /// to the same key.
 ///
-/// TODO(rumoca-annotation-pr): replace this entire function with an
-/// AST walk once
-/// [`feat/equation-connect-annotation`](https://github.com/LunCoSim/rumoca/tree/feat/equation-connect-annotation)
-/// (local rumoca branch, commit 445d177) lands upstream and the
-/// modelica crate's Cargo.toml picks up a rumoca revision that
-/// carries `Equation::Connect.annotation: Option<Annotation>`.
+/// **Deprecated**: rumoca's `Equation::Connect` now carries
+/// `annotation: Vec<Expression>` (post the
+/// `feat/equation-connect-annotation` merge — landed in this rev).
+/// The per-doc [`crate::index::ModelicaIndex`] populates connection
+/// waypoints from that field via
+/// [`crate::annotations::extract_line_points`] during rebuild.
+/// Panels SHOULD read `index.connections_in_class(class)` and pull
+/// `entry.waypoints` instead of calling this regex scanner.
 ///
-/// The replacement is roughly:
-/// ```ignore
-/// for eq in &class.equations {
-///     let Equation::Connect { lhs, rhs, annotation } = eq else { continue };
-///     let Some(ann) = annotation else { continue };
-///     // Walk `ann.modifications` for the `Line` call, pull
-///     // `points` out of its argument tree, push into `out`.
-/// }
-/// ```
-/// — no regex, no whole-source re-scanning, no escaping pitfalls,
-/// and it picks up every equation-level annotation rumoca parses
-/// (including authored `color`, `thickness`, etc. for free).
-///
-/// Rumoca's `Equation::Connect` has no annotation field today (see
-/// rumoca-ir-ast::Equation), so the only place the authored route
-/// survives is in the raw source. We accept this as a pragmatic
-/// interim: MSL examples nearly all author routes this way, and
-/// users who later drag to rearrange pay the edit cost at
-/// source-write time.
+/// Kept as a fallback for source-only paths (e.g. cache prewarm of
+/// MSL files that haven't been pushed into a `ModelicaEngine`
+/// session). Once those callers route through the engine too,
+/// delete the function.
 pub(crate) fn scan_connect_annotations(
     source: &str,
 ) -> std::collections::HashMap<

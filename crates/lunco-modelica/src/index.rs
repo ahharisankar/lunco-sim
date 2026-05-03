@@ -614,9 +614,17 @@ fn insert_class_recursive(idx: &mut ModelicaIndex, qualified: String, class_def:
     // skipped — diagram-side panels read connections; full equations
     // are inspector territory.
     for eq in &class_def.equations {
-        if let ast::Equation::Connect { lhs, rhs } = eq {
+        if let ast::Equation::Connect { lhs, rhs, annotation } = eq {
             let from = endpoint_from_component_ref(lhs);
             let to = endpoint_from_component_ref(rhs);
+            // Pull authored Line waypoints from the connect's
+            // annotation tree. `annotations::extract_line_points`
+            // walks `Line(points={{x,y},...})` (with `Line` either
+            // as a top-level call or nested inside a graphics-list
+            // `points={{...}}` entry). Empty when the source had no
+            // annotation or only authored colour/thickness without
+            // a points list.
+            let waypoints = crate::annotations::extract_line_points(annotation);
             let key = ConnectionKey(idx.connections.len() as u32);
             let entry = ConnectionEntry {
                 key,
@@ -630,10 +638,7 @@ fn insert_class_recursive(idx: &mut ModelicaIndex, qualified: String, class_def:
                 )),
                 from,
                 to,
-                // TODO(rumoca-annotation-pr): populate from
-                // `connect(...) annotation(Line(points={...}))` once
-                // the rumoca branch lands `Equation::Connect.annotation`.
-                waypoints: Vec::new(),
+                waypoints,
                 source_range: lhs.get_location().map(|l| {
                     TextRange::new(l.start as usize, l.end as usize)
                 }),
@@ -889,5 +894,21 @@ mod tests {
         let mut idx = ModelicaIndex::new();
         idx.patch_class_removed("DoesNotExist");
         // No panic, no state change.
+    }
+
+    #[test]
+    fn rebuild_extracts_connect_annotation_waypoints() {
+        let src = "model M\n  Real a;\n  Real b;\nequation\n  connect(a, b) annotation(Line(points={{0,0},{10,5},{20,10}}));\nend M;\n";
+        let ast = rumoca_phase_parse::parse_to_ast(src, "M.mo").expect("parses");
+        let mut idx = ModelicaIndex::new();
+        idx.rebuild_from_ast(&ast, src);
+
+        let conns: Vec<_> = idx.connections_in_class("M").collect();
+        assert_eq!(conns.len(), 1, "expected one connect equation");
+        assert_eq!(
+            conns[0].waypoints,
+            vec![(0.0, 0.0), (10.0, 5.0), (20.0, 10.0)],
+            "annotation Line points should populate waypoints"
+        );
     }
 }

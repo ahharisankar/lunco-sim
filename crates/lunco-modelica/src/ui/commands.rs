@@ -1131,14 +1131,35 @@ fn on_compile_model(
     // compile (see `ModelicaCommand::Compile`), so any AST staleness
     // here only affects telemetry-panel labels for one debounce
     // cycle, not the compiled model itself.
-    let (source, ast_for_extract) = match registry.host(doc) {
-        Some(h) => {
-            let doc = h.document();
-            let ast = doc.ast().result.as_ref().ok().cloned();
-            (doc.source().to_string(), ast)
-        }
-        None => return,
-    };
+    let (source, ast_for_extract, candidate_classes, detected_first_class) =
+        match registry.host(doc) {
+            Some(h) => {
+                let doc_ref = h.document();
+                let ast = doc_ref.ast().result.as_ref().ok().cloned();
+                // Class candidates + first-non-package detection via
+                // the per-doc Index (sees optimistic patches; no extra
+                // AST walk per call).
+                let index = doc_ref.index();
+                let candidates: Vec<String> = index
+                    .classes
+                    .values()
+                    .filter(|c| !matches!(c.kind, crate::index::ClassKind::Package))
+                    .map(|c| c.name.clone())
+                    .collect();
+                let first_non_package = index
+                    .classes
+                    .values()
+                    .find(|c| !matches!(c.kind, crate::index::ClassKind::Package))
+                    .map(|c| c.name.clone());
+                (
+                    doc_ref.source().to_string(),
+                    ast,
+                    candidates,
+                    first_non_package,
+                )
+            }
+            None => return,
+        };
     let Some(ast) = ast_for_extract else {
         // Parse failure on this doc (rare — rumoca is
         // error-recovering). Fall back to the source-based
@@ -1170,11 +1191,11 @@ fn on_compile_model(
     // surfaces as a structured error in the diagnostics log instead
     // of silently picking the wrong thing.
     let chosen_via_explicit = if let Some(cls) = explicit_class.as_ref() {
-        let candidates = crate::ast_extract::collect_non_package_classes_qualified(&ast);
+        let candidates = &candidate_classes;
         // Match by short name OR full qualified name, so callers can pass
         // either `"RocketStage"` or `"AnnotatedRocketStage.RocketStage"`.
         let matched = candidates.iter().find(|c| {
-            c == &cls || c.rsplit('.').next() == Some(cls.as_str())
+            c.as_str() == cls.as_str() || c.rsplit('.').next() == Some(cls.as_str())
         });
         match matched {
             Some(qname) => Some(qname.clone()),
@@ -1199,24 +1220,23 @@ fn on_compile_model(
     // `render_compile_class_picker` in ui/mod.rs) re-dispatches
     // `CompileModel` once the user confirms.
     if chosen_via_explicit.is_none() && drilled_in_class.is_none() {
-        let candidates = crate::ast_extract::collect_non_package_classes_qualified(&ast);
-        if candidates.len() >= 2 {
+        if candidate_classes.len() >= 2 {
             // If a picker is already open for *this* doc, leave it
             // alone so rapid repeated Compile clicks don't blow away
             // the user's in-progress choice.
             if picker.0.as_ref().map(|p| p.doc) != Some(doc) {
                 picker.0 = Some(CompileClassPickerEntry {
                     doc,
-                    candidates,
+                    candidates: candidate_classes.clone(),
                     preselected: 0,
                 });
             }
             return;
         }
     }
-    let model_name = chosen_via_explicit.or(drilled_in_class).or_else(|| {
-        crate::ast_extract::extract_model_name_from_ast(&ast)
-    });
+    let model_name = chosen_via_explicit
+        .or(drilled_in_class)
+        .or(detected_first_class);
     let Some(model_name) = model_name else {
         let msg = "Could not find a valid model declaration.".to_string();
         workbench.compilation_error = Some(msg.clone());
@@ -1977,63 +1997,55 @@ fn mask_strings_and_comments(src: &str) -> String {
     String::from_utf8(out).expect("masking only emits ASCII for non-code spans")
 }
 
-/// Same regex as `extract_class_source` but returns the byte range
-/// `(start, end)` rather than the substring. Caller slices the
-/// ORIGINAL (unmasked) source with the returned offsets.
+/// Locate the byte range of a class declaration (header through
+/// `end Name;`) plus any leading `//` / `/* */` comment lines.
 ///
-/// TODO(rumoca-class-span): replace with
-/// `ClassDef::full_span_with_leading_comments(source) -> (usize, usize)`
-/// once rumoca exposes it. The leading-comment rewind logic moves
-/// to rumoca where it can use the trivia table directly. See
-/// REFACTOR_PLAN.md upstream ask #2.
+/// Routes through `rumoca`'s
+/// [`ClassDef::full_span_with_leading_comments`]. Caller slices the
+/// ORIGINAL (unmasked) source with the returned offsets.
 fn extract_class_byte_range(source: &str, class_name: &str) -> Option<(usize, usize)> {
-    let safe = regex::escape(class_name);
-    let opener_pat = format!(
-        r"(?m)^\s*(?:partial\s+)?(?:encapsulated\s+)?(?:model|block|class|connector|function|record|package|type)\s+{safe}\b",
-        safe = safe,
-    );
-    let opener = regex::Regex::new(&opener_pat).ok()?;
-    let closer_pat = format!(r"(?m)^\s*end\s+{safe}\s*;", safe = safe);
-    let closer = regex::Regex::new(&closer_pat).ok()?;
-    let raw_start = opener.find(source)?.start();
-    let start = rewind_through_leading_comments(source, raw_start);
-    let rel_end = closer.find(&source[start..])?.end();
-    Some((start, start + rel_end))
+    let ast = rumoca_phase_parse::parse_to_ast(source, "extract.mo").ok()?;
+    let class = find_top_or_nested_class_by_short_name(&ast, class_name)?;
+    class.full_span_with_leading_comments(source)
 }
 
-/// TODO(rumoca-class-span): same upstream blocker as
-/// [`extract_class_byte_range`]. Slices the source with rumoca-derived
-/// offsets when the helper lands. See REFACTOR_PLAN.md upstream ask #2.
 fn extract_class_source(source: &str, class_name: &str) -> Option<String> {
-    let safe = regex::escape(class_name);
-    // Single-line pattern — the earlier multi-line raw-string form
-    // contained a literal `\<newline>` (raw strings don't honour
-    // line continuations), which made regex compile fail and the
-    // caller fall through to copying the whole 152 KB file. Found
-    // via a debug session where the duplicated doc was identical
-    // to the whole package.mo.
-    let opener_pat = format!(
-        r"(?m)^\s*(?:partial\s+)?(?:encapsulated\s+)?(?:model|block|class|connector|function|record|package|type)\s+{safe}\b",
-        safe = safe,
-    );
-    let opener = regex::Regex::new(&opener_pat).ok()?;
-    let closer_pat = format!(r"(?m)^\s*end\s+{safe}\s*;", safe = safe);
-    let closer = regex::Regex::new(&closer_pat).ok()?;
-    let raw_start = opener.find(source)?.start();
-    // Rewind past leading comment lines so class-describing header
-    // comments ride along with the extracted class. Modelica convention:
-    // `//`-line comments and `/* … */` blocks immediately preceding a
-    // class declaration are semantically "about" that class. Stop as
-    // soon as we hit a line that is neither blank nor a comment
-    // (e.g. `within …;`, another class's `end …;`, or stray code).
-    let start = rewind_through_leading_comments(source, raw_start);
-    // Find the first matching `end <ClassName>;` at or after
-    // `start`. Multi-class files can have identically-named nested
-    // classes, but in MSL practice `end <Name>;` pairs cleanly
-    // with the outer opener we just found.
-    let rel_end = closer.find(&source[start..])?.end();
-    let end = start + rel_end;
+    let (start, end) = extract_class_byte_range(source, class_name)?;
     Some(source[start..end].to_string())
+}
+
+/// Find a class by simple name anywhere in the parsed AST — first at
+/// the top level, then walking nested-class trees. Mirrors the
+/// short-name semantics the previous regex matched (it scanned the
+/// whole source, not just top-level openers).
+fn find_top_or_nested_class_by_short_name<'a>(
+    ast: &'a rumoca_session::parsing::ast::StoredDefinition,
+    short: &str,
+) -> Option<&'a rumoca_session::parsing::ast::ClassDef> {
+    if let Some(class) = ast.classes.get(short) {
+        return Some(class);
+    }
+    for class in ast.classes.values() {
+        if let Some(found) = find_nested_by_short_name(class, short) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn find_nested_by_short_name<'a>(
+    class: &'a rumoca_session::parsing::ast::ClassDef,
+    short: &str,
+) -> Option<&'a rumoca_session::parsing::ast::ClassDef> {
+    if let Some(child) = class.classes.get(short) {
+        return Some(child);
+    }
+    for nested in class.classes.values() {
+        if let Some(found) = find_nested_by_short_name(nested, short) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// Given a byte offset at the start of a class `model …` header,

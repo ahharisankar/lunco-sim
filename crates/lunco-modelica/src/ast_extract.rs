@@ -779,7 +779,7 @@ pub fn extract_connections_for_class(
         .equations
         .iter()
         .filter_map(|e| match e {
-            Equation::Connect { lhs, rhs } => {
+            Equation::Connect { lhs, rhs, .. } => {
                 Some((lhs.to_string(), rhs.to_string()))
             }
             _ => None,

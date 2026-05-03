@@ -1253,6 +1253,31 @@ fn extract_dyn_extent(expr: &Expression) -> Option<DynExtent> {
     })
 }
 
+/// Extract `(x, y)` waypoints from a `connect(...) annotation(...)`
+/// modification list. Looks for a `Line(points={...})` call at the
+/// top level — the shape MSL uses for connect routing — and returns
+/// the parsed points as f32 tuples (the canvas's working unit).
+///
+/// Empty Vec when the annotation has no `Line` call or fewer than 2
+/// points. Routes through the same `find_call` / `call_args` helpers
+/// as `extract_placement`, so both `Line(points=...)` (function-call
+/// shape) and `Line(points={...})` (class-modification shape) work.
+pub fn extract_line_points(annotation: &[Expression]) -> Vec<(f32, f32)> {
+    let Some(line_call) = find_call(annotation, "Line") else {
+        return Vec::new();
+    };
+    let Some(line_args) = call_args(line_call) else {
+        return Vec::new();
+    };
+    let Some(line) = extract_line(line_args) else {
+        return Vec::new();
+    };
+    if line.points.len() < 2 {
+        return Vec::new();
+    }
+    line.points.iter().map(|p| (p.x as f32, p.y as f32)).collect()
+}
+
 fn extract_line(args: &[Expression]) -> Option<Line> {
     // `points` may be wrapped in `DynamicSelect(static_matrix,
     // dynamic_matrix)` (MLS §18) — e.g. `Modelica.Blocks.Continuous.Integrator`'s

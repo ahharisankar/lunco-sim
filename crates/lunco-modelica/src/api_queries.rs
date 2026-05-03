@@ -377,29 +377,29 @@ impl ApiQueryProvider for ListCompileCandidatesProvider {
         let Some(host) = registry.host(doc_id) else {
             return err_doc_not_found(doc_id);
         };
-        let document = host.document();
-        let Some(ast) = document.ast().result.as_ref().ok().cloned() else {
-            return ApiResponse::ok(serde_json::json!({
-                "doc_id": doc_id.raw(),
-                "candidates": [],
-                "ast_parsed": false,
-            }));
-        };
-        let candidates: Vec<serde_json::Value> =
-            ast_extract::collect_non_package_classes_qualified(&ast)
-                .into_iter()
-                .map(|qualified| {
-                    let short = qualified
-                        .rsplit('.')
-                        .next()
-                        .unwrap_or(&qualified)
-                        .to_string();
-                    serde_json::json!({
-                        "qualified": qualified,
-                        "short": short,
-                    })
+        // Read non-package classes from the per-doc Index — sees
+        // optimistic structural patches (ClassAdded / ClassRemoved)
+        // and avoids walking the AST. Matches the same convention
+        // the panels use.
+        let candidates: Vec<serde_json::Value> = host
+            .document()
+            .index()
+            .classes
+            .values()
+            .filter(|c| !matches!(c.kind, crate::index::ClassKind::Package))
+            .map(|c| {
+                let qualified = c.name.clone();
+                let short = qualified
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(&qualified)
+                    .to_string();
+                serde_json::json!({
+                    "qualified": qualified,
+                    "short": short,
                 })
-                .collect();
+            })
+            .collect();
         ApiResponse::ok(serde_json::json!({
             "doc_id": doc_id.raw(),
             "candidates": candidates,
@@ -443,12 +443,19 @@ impl ApiQueryProvider for CompileStatusProvider {
         let registry = world.resource::<ModelicaDocumentRegistry>();
         let (candidates, has_ast) = match registry.host(doc_id) {
             Some(host) => {
-                let ast = host.document().ast().result.as_ref().cloned().ok();
-                let cands = ast
-                    .as_ref()
-                    .map(|a| ast_extract::collect_non_package_classes_qualified(a))
-                    .unwrap_or_default();
-                (cands, ast.is_some())
+                let has_ast = host.document().ast().result.is_ok();
+                // Non-package class qualified names from the per-doc
+                // Index — sees optimistic patches and avoids walking
+                // the AST. Same pattern as the candidates query above.
+                let cands: Vec<String> = host
+                    .document()
+                    .index()
+                    .classes
+                    .values()
+                    .filter(|c| !matches!(c.kind, crate::index::ClassKind::Package))
+                    .map(|c| c.name.clone())
+                    .collect();
+                (cands, has_ast)
             }
             None => return err_doc_not_found(doc_id),
         };
@@ -611,9 +618,17 @@ impl ApiQueryProvider for DescribeModelProvider {
         // first non-package class. Match by short name (the same
         // convention `compile_model.class` uses) so the caller can pass
         // either short or qualified.
-        let target_class_name = class_param
-            .or(drilled_in)
-            .or_else(|| ast_extract::extract_model_name_from_ast(&ast));
+        let target_class_name = class_param.or(drilled_in).or_else(|| {
+            // First non-package class via the per-doc Index — same
+            // pattern used across the inspector / palette / canvas
+            // drill-in code paths (see `crate::ui::panels::*`).
+            host.document()
+                .index()
+                .classes
+                .values()
+                .find(|c| !matches!(c.kind, crate::index::ClassKind::Package))
+                .map(|c| c.name.clone())
+        });
         let Some(target_name) = target_class_name else {
             return ApiResponse::error(
                 ApiErrorCode::EntityNotFound,
@@ -653,21 +668,23 @@ impl ApiQueryProvider for DescribeModelProvider {
         // [`crate::engine::ModelicaEngine`]. Walks the `extends`
         // chain across every open Modelica document, so a class that
         // inherits from a base in another open file gets the base's
-        // members in `inherited_components`. Routes through
-        // `rumoca_session::Session::class_component_members_query` —
-        // no panel-side reimplementation of inheritance walking.
+        // members in `inherited_members`. Routes through
+        // `rumoca_session::Session::class_component_members_typed_query`
+        // — no panel-side reimplementation of inheritance walking
+        // and no separate AST pass to bucket
+        // parameters / inputs / outputs.
         //
         // The engine is rebuilt per API call (this handler runs
         // infrequently, on agent / curl-driven `DescribeModel` calls).
         // When other consumers want the same data on a hot path, the
         // engine moves to a long-lived Resource. See the engine
         // module docs for the staging.
-        let inherited_components = {
+        let inherited_members = {
             let mut engine = crate::engine::ModelicaEngine::new();
             for (other_id, other_host) in registry.iter() {
                 let _ = engine.upsert_document(other_id, other_host.document().source());
             }
-            engine.inherited_components(short)
+            engine.inherited_members_typed(short)
         };
 
         ApiResponse::ok(serde_json::json!({
@@ -683,11 +700,39 @@ impl ApiQueryProvider for DescribeModelProvider {
             "inputs": inputs.iter().map(typed_to_json).collect::<Vec<_>>(),
             "parameters": parameters.iter().map(typed_to_json).collect::<Vec<_>>(),
             "outputs": outputs.iter().map(typed_to_json).collect::<Vec<_>>(),
-            "inherited_components": inherited_components
+            "inherited_members": inherited_members
                 .iter()
-                .map(|(name, ty)| serde_json::json!({"name": name, "type_name": ty}))
+                .map(|m| serde_json::json!({
+                    "name": m.name,
+                    "type_name": m.type_name,
+                    "variability": class_member_variability_str(&m.variability),
+                    "causality": class_member_causality_str(&m.causality),
+                }))
                 .collect::<Vec<_>>(),
         }))
+    }
+}
+
+fn class_member_variability_str(
+    v: &crate::engine::InheritedVariability,
+) -> &'static str {
+    use crate::engine::InheritedVariability;
+    match v {
+        InheritedVariability::Continuous => "continuous",
+        InheritedVariability::Discrete => "discrete",
+        InheritedVariability::Parameter => "parameter",
+        InheritedVariability::Constant => "constant",
+    }
+}
+
+fn class_member_causality_str(
+    c: &crate::engine::InheritedCausality,
+) -> &'static str {
+    use crate::engine::InheritedCausality;
+    match c {
+        InheritedCausality::None => "none",
+        InheritedCausality::Input => "input",
+        InheritedCausality::Output => "output",
     }
 }
 
