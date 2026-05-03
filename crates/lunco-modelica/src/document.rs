@@ -1016,9 +1016,39 @@ impl ModelicaDocument {
                 self.index
                     .patch_placement_changed(class, component, *placement);
             }
-            // Connection / Parameter / TextReplaced — Index reconciles
-            // on the next reparse. Adding finer optimistic patches is
-            // a follow-up.
+            ModelicaChange::ConnectionAdded { class, from, to } => {
+                let from_port = if from.port.is_empty() { None } else { Some(from.port.as_str()) };
+                let to_port = if to.port.is_empty() { None } else { Some(to.port.as_str()) };
+                self.index.patch_connection_added(
+                    class,
+                    &from.component,
+                    from_port,
+                    &to.component,
+                    to_port,
+                );
+            }
+            ModelicaChange::ConnectionRemoved { class, from, to } => {
+                let from_port = if from.port.is_empty() { None } else { Some(from.port.as_str()) };
+                let to_port = if to.port.is_empty() { None } else { Some(to.port.as_str()) };
+                self.index.patch_connection_removed(
+                    class,
+                    &from.component,
+                    from_port,
+                    &to.component,
+                    to_port,
+                );
+            }
+            ModelicaChange::ParameterChanged {
+                class,
+                component,
+                param,
+                value,
+            } => {
+                self.index.patch_parameter_changed(class, component, param, value);
+            }
+            // TextReplaced — opaque text edit, Index reconciles on
+            // the next reparse since we don't know what changed
+            // structurally.
             _ => {}
         }
         self.push_change(change);

@@ -306,6 +306,109 @@ impl ModelicaIndex {
         }
     }
 
+    /// Optimistic connect-add. Returns the assigned key.
+    /// `from_port` / `to_port` are `None` for the rare port-less form
+    /// `connect(a, b)` (whole-component connect on a typed connector).
+    pub fn patch_connection_added(
+        &mut self,
+        class: &str,
+        from_component: &str,
+        from_port: Option<&str>,
+        to_component: &str,
+        to_port: Option<&str>,
+    ) -> ConnectionKey {
+        self.generation = self.generation.saturating_add(1);
+        let key = ConnectionKey(self.connections.len() as u32);
+        let entry = ConnectionEntry {
+            key,
+            node_id: NodeId::new(format!(
+                "{}|connect|{}.{}-{}.{}",
+                class,
+                from_component,
+                from_port.unwrap_or(""),
+                to_component,
+                to_port.unwrap_or(""),
+            )),
+            from: ComponentEndpoint {
+                component_name: from_component.to_string(),
+                port: from_port.map(str::to_string),
+            },
+            to: ComponentEndpoint {
+                component_name: to_component.to_string(),
+                port: to_port.map(str::to_string),
+            },
+            waypoints: Vec::new(),
+            source_range: None,
+        };
+        self.connections_by_class
+            .entry(class.to_string())
+            .or_default()
+            .push(key);
+        self.connections.push(entry);
+        key
+    }
+
+    /// Optimistic connect-remove. Matches by `(class, from, to)`.
+    /// No-op if no matching connection is present.
+    pub fn patch_connection_removed(
+        &mut self,
+        class: &str,
+        from_component: &str,
+        from_port: Option<&str>,
+        to_component: &str,
+        to_port: Option<&str>,
+    ) {
+        self.generation = self.generation.saturating_add(1);
+        let from_p = from_port.map(str::to_string);
+        let to_p = to_port.map(str::to_string);
+        // Find the matching connection (within this class only).
+        let target_key = self
+            .connections_by_class
+            .get(class)
+            .into_iter()
+            .flat_map(|keys| keys.iter().copied())
+            .find(|key| {
+                self.connections.iter().any(|c| {
+                    c.key == *key
+                        && c.from.component_name == from_component
+                        && c.from.port == from_p
+                        && c.to.component_name == to_component
+                        && c.to.port == to_p
+                })
+            });
+        let Some(key) = target_key else {
+            return;
+        };
+        if let Some(list) = self.connections_by_class.get_mut(class) {
+            list.retain(|k| *k != key);
+        }
+        if let Some(pos) = self.connections.iter().position(|c| c.key == key) {
+            self.connections.remove(pos);
+        }
+    }
+
+    /// Optimistic parameter-modification update. Inserts or replaces
+    /// `(param → value)` on the target component's modifications map.
+    /// No-op if the component isn't in the Index.
+    pub fn patch_parameter_changed(
+        &mut self,
+        class: &str,
+        component: &str,
+        param: &str,
+        value: &str,
+    ) {
+        self.generation = self.generation.saturating_add(1);
+        let qualified = (class.to_string(), component.to_string());
+        let Some(key) = self.component_by_qualified.get(&qualified).copied() else {
+            return;
+        };
+        if let Some(entry) = self.components.iter_mut().find(|c| c.key == key) {
+            entry
+                .modifications
+                .insert(param.to_string(), value.to_string());
+        }
+    }
+
     /// Look up a component by `(class, name)`. Returns `None` if the
     /// component doesn't exist.
     pub fn find_component(&self, class: &str, name: &str) -> Option<&ComponentEntry> {
@@ -624,5 +727,56 @@ mod tests {
         assert!(idx.classes.contains_key("Tiny"));
         assert!(!idx.classes.contains_key("RC"));
         assert_eq!(idx.within_path, None);
+    }
+
+    #[test]
+    fn patch_connection_added_then_removed() {
+        let mut idx = ModelicaIndex::new();
+        idx.patch_component_added("RC", "r1", "Resistor");
+        idx.patch_component_added("RC", "c1", "Capacitor");
+
+        let key = idx.patch_connection_added("RC", "r1", Some("p"), "c1", Some("n"));
+        let conns: Vec<_> = idx.connections_in_class("RC").collect();
+        assert_eq!(conns.len(), 1);
+        assert_eq!(conns[0].key, key);
+        assert_eq!(conns[0].from.component_name, "r1");
+        assert_eq!(conns[0].from.port.as_deref(), Some("p"));
+
+        idx.patch_connection_removed("RC", "r1", Some("p"), "c1", Some("n"));
+        assert_eq!(idx.connections_in_class("RC").count(), 0);
+    }
+
+    #[test]
+    fn patch_connection_remove_nonmatching_is_noop() {
+        let mut idx = ModelicaIndex::new();
+        idx.patch_component_added("RC", "r1", "R");
+        idx.patch_component_added("RC", "c1", "C");
+        idx.patch_connection_added("RC", "r1", Some("p"), "c1", Some("n"));
+
+        // Mismatched ports — should not remove the existing one.
+        idx.patch_connection_removed("RC", "r1", Some("X"), "c1", Some("Y"));
+        assert_eq!(idx.connections_in_class("RC").count(), 1);
+    }
+
+    #[test]
+    fn patch_parameter_changed_writes_modification() {
+        let mut idx = ModelicaIndex::new();
+        idx.patch_component_added("RC", "r1", "Resistor");
+
+        idx.patch_parameter_changed("RC", "r1", "R", "1000");
+        let entry = idx.find_component("RC", "r1").unwrap();
+        assert_eq!(entry.modifications.get("R"), Some(&"1000".to_string()));
+
+        // Overwrite.
+        idx.patch_parameter_changed("RC", "r1", "R", "2200");
+        let entry = idx.find_component("RC", "r1").unwrap();
+        assert_eq!(entry.modifications.get("R"), Some(&"2200".to_string()));
+    }
+
+    #[test]
+    fn patch_parameter_on_missing_component_is_noop() {
+        let mut idx = ModelicaIndex::new();
+        idx.patch_parameter_changed("RC", "nope", "R", "100");
+        // No panic, no changes.
     }
 }
