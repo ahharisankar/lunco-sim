@@ -6191,6 +6191,7 @@ version = "0.1.0"
 dependencies = [
  "bevy_reflect",
  "lunco-core",
+ "serde",
 ]
 
 [[package]]

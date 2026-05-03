@@ -90,7 +90,10 @@ pub use refindex::RefIndex;
 /// Document's job via the [`Resolver`] trait. This type exists so that
 /// **binding documents** (cross-format links) can store
 /// `(DocumentId, SymbolPath)` pairs without depending on domain crates.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord,
+    serde::Serialize, serde::Deserialize,
+)]
 pub struct SymbolPath(String);
 
 impl SymbolPath {
@@ -168,6 +171,7 @@ pub trait Resolver {
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord,
     bevy_reflect::Reflect,
+    serde::Serialize, serde::Deserialize,
 )]
 pub struct DocumentId(pub u64);
 
@@ -209,7 +213,7 @@ impl fmt::Display for DocumentId {
 /// Architectural seed: when documents can come from a remote Nucleus
 /// server or a URL-addressed library, a `Remote { url }` variant slots
 /// in here without touching Document trait surface.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DocumentOrigin {
     /// Never written to disk; `name` is the in-session display id
     /// (e.g. `"Untitled1"`). Saving requires Save-As to bind a path.

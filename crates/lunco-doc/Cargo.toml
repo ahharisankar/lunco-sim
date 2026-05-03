@@ -17,6 +17,11 @@ lunco-core = { path = "../lunco-core" }
 # derive `Reflect` so commands and other API-facing types can carry
 # it directly instead of degrading to `u64` at every reflect boundary.
 bevy_reflect = "0.18"
+# Serde for stable disk + wire formats: journal entries, save/restore,
+# future network sync, lunco-api command payloads. Public lunco-doc
+# types derive Serialize/Deserialize so consumers don't hand-roll u64
+# shims at the boundary.
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 # Only for tests. The toy TextDocument needs no external crates.

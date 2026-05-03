@@ -30,7 +30,10 @@ use crate::{DocumentId, DocumentOp, SymbolPath};
 /// `"Rocket.engine|component|thrust"`; USD uses prim+attr paths.
 /// Stability across re-parses is what lets the [`DomainEngine::Index`]
 /// reconcile incrementally instead of rebuilding from scratch.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord,
+    serde::Serialize, serde::Deserialize,
+)]
 pub struct NodeId(pub String);
 
 impl NodeId {
@@ -48,7 +51,7 @@ impl NodeId {
 
 /// A reference from a node in this document to a symbol that may live in
 /// another document.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SymbolRef {
     /// Fully-qualified target symbol.
     pub path: SymbolPath,
@@ -58,7 +61,7 @@ pub struct SymbolRef {
 
 /// A resolved cross-document reference — the document and node a
 /// [`SymbolPath`] resolves to.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedRef {
     pub doc: DocumentId,
     pub node: NodeId,
@@ -69,7 +72,7 @@ pub struct ResolvedRef {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Half-open byte range in document source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TextRange {
     pub start: usize,
     pub end: usize,
@@ -81,7 +84,7 @@ impl TextRange {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DiagnosticSeverity {
     Error,
     Warning,
@@ -89,7 +92,7 @@ pub enum DiagnosticSeverity {
     Hint,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Diagnostic {
     pub severity: DiagnosticSeverity,
     pub message: String,

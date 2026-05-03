@@ -63,10 +63,6 @@ impl AuthorTag {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// A single recorded event.
-///
-/// `doc` is stored as raw `u64` so the entry is `Serialize`/`Deserialize`
-/// without forcing serde onto `lunco_doc::DocumentId`. Use [`Self::doc_id`]
-/// for the typed view.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JournalEntry {
     /// Monotonic per-Journal id. Stable across this Journal's lifetime.
@@ -74,16 +70,8 @@ pub struct JournalEntry {
     /// Wall-clock timestamp in ms since UNIX epoch.
     pub timestamp_ms: u64,
     pub author: AuthorTag,
-    /// Raw [`DocumentId`] value. Use [`Self::doc_id`] for the typed view.
-    pub doc: u64,
+    pub doc: DocumentId,
     pub kind: EntryKind,
-}
-
-impl JournalEntry {
-    /// Typed view of the associated document.
-    pub fn doc_id(&self) -> DocumentId {
-        DocumentId::new(self.doc)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,7 +125,7 @@ impl Journal {
             id,
             timestamp_ms: now_ms(),
             author,
-            doc: doc.raw(),
+            doc,
             kind,
         });
         id
@@ -304,7 +292,7 @@ mod tests {
 
         // Per-doc undo on doc 1: should skip the doc-2 entry on top of stack.
         let undone = um
-            .take_undo(|id| j.get(id).map(|e| e.doc_id() == DocumentId::new(1)).unwrap_or(false))
+            .take_undo(|id| j.get(id).map(|e| e.doc == DocumentId::new(1)).unwrap_or(false))
             .unwrap();
         assert_eq!(undone, id_a);
     }
