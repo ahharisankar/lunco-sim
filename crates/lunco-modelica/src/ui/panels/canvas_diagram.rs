@@ -573,23 +573,19 @@ impl NodeVisual for IconNodeVisual {
             } else {
                 Vec::new()
             };
-            let resolved = candidates
-                .into_iter()
-                .find_map(|c| {
-                    crate::class_cache::peek_or_load_msl_class(&c).map(|class| (c, class))
-                });
-            if let Some((resolved_path, class)) = resolved {
-                use std::sync::Arc;
-                let mut resolver = |lookup: &str| -> Option<Arc<rumoca_session::parsing::ast::ClassDef>> {
-                    crate::class_cache::peek_or_load_msl_class(lookup)
-                };
-                let mut visited = std::collections::HashSet::new();
-                if let Some(icon) = crate::annotations::extract_icon_inherited(
-                    &resolved_path,
-                    class.as_ref(),
-                    &mut resolver,
-                    &mut visited,
-                ) {
+            // Force-load each candidate via `peek_or_load_msl_class`
+            // (engine-backed; no-op for already-loaded classes), then
+            // merge its inherited Icon through the unified engine via
+            // `extract_icon_via_engine`. Lock-load-and-extract is split
+            // so the load step doesn't hold the engine mutex while it
+            // does file I/O.
+            let resolved_icon = candidates.into_iter().find_map(|c| {
+                let _ = crate::class_cache::peek_or_load_msl_class(&c);
+                let handle = crate::engine_resource::global_engine_handle()?;
+                crate::annotations::extract_icon_via_engine(&c, &mut handle.lock())
+            });
+            if let Some(icon) = resolved_icon {
+                {
                         // Render the connector's icon at the port
                         // location, sized to the port's authored
                         // `Placement(extent=...)` in the parent's icon

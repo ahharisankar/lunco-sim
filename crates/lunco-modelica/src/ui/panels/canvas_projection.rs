@@ -724,29 +724,23 @@ pub fn import_model_to_diagram_from_ast(
             });
         }
 
-        // Re-extract the icon at runtime through the same code path
-        // the standalone Icon view uses. The pre-baked
-        // `MSLComponentDef.icon_graphics` from `msl_index.json` drops
-        // primitives whose `extends` base sits in a sibling package
-        // the indexer's resolver doesn't reach (SpeedSensor extends
-        // PartialAbsoluteSensor extends Icons.RoundSensor — only the
-        // last hop survives the index in some cases). Going through
-        // `class_cache::peek_or_load_msl_class` for each base means
-        // both views render the same primitives, and instance-time
-        // changes to the inheritance chain don't require a re-index.
+        // Re-extract the icon at runtime via the unified workspace
+        // engine. The pre-baked `MSLComponentDef.icon_graphics` from
+        // `msl_index.json` drops primitives whose `extends` base sits
+        // in a sibling package the indexer's resolver doesn't reach
+        // (SpeedSensor extends PartialAbsoluteSensor extends
+        // Icons.RoundSensor — only the last hop survives the index
+        // in some cases). The engine's
+        // `class_inherited_annotations_query` walks the chain
+        // through rumoca's session, including MSL bases, so both
+        // views render the same primitives without per-base
+        // resolver-lambda plumbing.
         if let Some(def) = component_def.as_mut() {
             let qualified = def.msl_path.clone();
-            if let Some(class) = crate::class_cache::peek_or_load_msl_class(&qualified) {
-                use std::sync::Arc;
-                let mut resolver = |lookup: &str| -> Option<Arc<rumoca_session::parsing::ast::ClassDef>> {
-                    crate::class_cache::peek_or_load_msl_class(lookup)
-                };
-                let mut visited = std::collections::HashSet::new();
-                if let Some(icon) = crate::annotations::extract_icon_inherited(
+            if let Some(handle) = crate::engine_resource::global_engine_handle() {
+                if let Some(icon) = crate::annotations::extract_icon_via_engine(
                     &qualified,
-                    class.as_ref(),
-                    &mut resolver,
-                    &mut visited,
+                    &mut handle.lock(),
                 ) {
                     def.icon_graphics = Some(icon);
                 }
@@ -1090,7 +1084,7 @@ fn extract_local_class_ports(
                 &sub_type,
                 class_qualified_path,
                 ast,
-                &crate::class_cache::peek_or_load_msl_class,
+                crate::class_cache::MslLookupMode::Loading,
             );
         if !causality_is_port && !type_is_connector {
             continue;
@@ -1110,19 +1104,19 @@ fn extract_local_class_ports(
         // renderer needs directly from its AST: wire color
         // (Icon.graphics), causality (variable prefixes or class-
         // level causality), and flow-variable metadata.
-        let msl_resolve = &crate::class_cache::peek_or_load_msl_class;
+        let msl_mode = crate::class_cache::MslLookupMode::Loading;
         let class = crate::diagram::resolve_class_by_scope_pub(
             &sub_type,
             class_qualified_path,
             ast,
-            msl_resolve,
+            msl_mode,
         );
         let (color, kind, flow_vars) = class
             .as_ref()
             .map(|c| {
                 let color = connector_icon_color(c);
                 let (kind, flow_vars) =
-                    classify_connector(c, class_qualified_path, ast, msl_resolve);
+                    classify_connector(c, class_qualified_path, ast, msl_mode);
                 (color, kind, flow_vars)
             })
             .unwrap_or_default();
@@ -1159,7 +1153,7 @@ fn classify_connector(
     class: &rumoca_session::parsing::ast::ClassDef,
     owner_qualified_path: &str,
     ast: &rumoca_session::parsing::ast::StoredDefinition,
-    msl_resolve: &dyn Fn(&str) -> Option<std::sync::Arc<rumoca_session::parsing::ast::ClassDef>>,
+    msl_mode: crate::class_cache::MslLookupMode,
 ) -> (crate::visual_diagram::PortKind, Vec<crate::visual_diagram::FlowVarMeta>) {
     use crate::visual_diagram::{FlowVarMeta, PortKind};
     use rumoca_session::parsing::ast::{Causality, Connection};
@@ -1205,12 +1199,12 @@ fn classify_connector(
             &base_name,
             owner_qualified_path,
             ast,
-            msl_resolve,
+            msl_mode,
         ) else {
             continue;
         };
         let (base_kind, base_flows) =
-            classify_connector(&base_class, owner_qualified_path, ast, msl_resolve);
+            classify_connector(&base_class, owner_qualified_path, ast, msl_mode);
         for fv in base_flows {
             if !flow_vars.iter().any(|f| f.name == fv.name) {
                 flow_vars.push(fv);

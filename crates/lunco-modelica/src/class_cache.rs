@@ -34,6 +34,41 @@ use std::sync::Arc;
 
 use crate::library_fs::{locate_library_file, resolve_class_path_indexed};
 
+/// MSL class-lookup behaviour for resolver helpers in `diagram` and
+/// `canvas_projection`. Replaces the `&dyn Fn(&str) -> Option<...>`
+/// parameter that used to thread one of two static fn pointers
+/// through every helper.
+///
+/// Both modes route through the workspace [`crate::engine::ModelicaEngine`]
+/// (engine consolidation) — they differ only in what to do on a miss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MslLookupMode {
+    /// Cache-only: a miss returns `None`. Use from off-thread tasks
+    /// that must not block on rumoca parses (notably the canvas
+    /// projection task on `AsyncComputeTaskPool`). The icon
+    /// resolver falls back to defaults until a later edit / drill-in
+    /// warms the engine session.
+    Cached,
+    /// Load on miss: the call blocks the thread to read + parse the
+    /// missing file into the engine session. Safe from the main
+    /// thread / tests / observers; risky from off-thread tasks
+    /// where the lock contention can stall the deadline.
+    Loading,
+}
+
+impl MslLookupMode {
+    /// Resolve `qualified` using this mode's policy.
+    pub fn lookup(
+        self,
+        qualified: &str,
+    ) -> Option<Arc<rumoca_session::parsing::ast::ClassDef>> {
+        match self {
+            Self::Cached => peek_msl_class_cached(qualified),
+            Self::Loading => peek_or_load_msl_class(qualified),
+        }
+    }
+}
+
 /// Read MSL source bytes for a relative path, going through the
 /// process-wide [`lunco_assets::msl::MslAssetSource`]. Returns
 /// `None` if the source hasn't been installed yet (web boot before
