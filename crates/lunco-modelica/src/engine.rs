@@ -191,6 +191,31 @@ impl ModelicaEngine {
         &mut self.session
     }
 
+    /// Resolve `qualified` to its `ClassDef` inside the session's
+    /// already-parsed sources. Walks the dotted path through nested
+    /// classes the same way rumoca's internal lookup does.
+    ///
+    /// Returns `None` if no document containing the class has been
+    /// upserted (or loaded via `load_library_files`). Callers that
+    /// need filesystem-backed lazy loading should check `has_class`
+    /// first, push the file via `session_mut().add_document`, then
+    /// call `class_def`.
+    pub fn class_def(
+        &mut self,
+        qualified: &str,
+    ) -> Option<rumoca_session::parsing::ast::ClassDef> {
+        let uri = self.session.class_lookup_query(qualified)?;
+        let parsed = self.session.parsed_file_query(&uri)?;
+        let mut parts = qualified.split('.');
+        let first = parts.next()?;
+        let mut current = parsed.classes.get(first)?.clone();
+        for part in parts {
+            let next = current.classes.get(part)?.clone();
+            current = next;
+        }
+        Some(current)
+    }
+
     /// Whether `qualified` resolves to a class currently in the
     /// session. Cheap — uses rumoca's existing
     /// `class_lookup_query`. Used as the first step in lazy MSL

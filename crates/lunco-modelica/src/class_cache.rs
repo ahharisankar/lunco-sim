@@ -734,40 +734,46 @@ pub fn resolve_msl_head_prefix(qualified: &str) -> Option<String> {
 /// Used by the icon-inheritance resolver so `SpeedSensor extends
 /// Modelica.Mechanics.Rotational.Icons.RelativeSensor` pulls in the
 /// parent's rectangle/text primitives the first time it renders.
-/// Shared cache for MSL class lookups. Used by both
-/// [`peek_or_load_msl_class`] (loads on miss) and
-/// [`peek_msl_class_cached`] (returns None on miss).
-fn msl_class_cache() -> &'static std::sync::Mutex<
-    std::collections::HashMap<String, Option<Arc<rumoca_session::parsing::ast::ClassDef>>>,
-> {
-    use std::collections::HashMap;
+/// Process-wide [`ModelicaEngine`] holding every MSL class that's
+/// been touched in this session. Replaces the prior parallel
+/// `HashMap<qualified, Arc<ClassDef>>` — the engine's rumoca session
+/// IS the cache. Misses load the file from
+/// [`lunco_assets::msl::global_msl_source`] (filesystem on native,
+/// in-memory bundle on web) and feed it into the session via
+/// `add_document`; subsequent lookups hit rumoca's per-file
+/// fingerprint cache.
+fn msl_engine() -> &'static std::sync::Mutex<crate::engine::ModelicaEngine> {
     use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<
-        Mutex<HashMap<String, Option<Arc<rumoca_session::parsing::ast::ClassDef>>>>,
-    > = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    static ENGINE: OnceLock<Mutex<crate::engine::ModelicaEngine>> = OnceLock::new();
+    ENGINE.get_or_init(|| Mutex::new(crate::engine::ModelicaEngine::new()))
+}
+
+/// Read the source bytes for an MSL relative path, going through the
+/// process-wide [`MslAssetSource`]. Returns `None` if the source
+/// hasn't been installed yet (web boot before fetch completes) or
+/// the path isn't present.
+fn read_msl_source_bytes(path: &std::path::Path) -> Option<String> {
+    let source = lunco_assets::msl::global_msl_source()?;
+    let bytes = source.read(path)?;
+    String::from_utf8(bytes).ok()
 }
 
 pub fn peek_or_load_msl_class(
     qualified: &str,
 ) -> Option<Arc<rumoca_session::parsing::ast::ClassDef>> {
-    let cache = msl_class_cache();
-
-    if let Ok(map) = cache.lock() {
-        if let Some(slot) = map.get(qualified) {
-            return slot.clone();
-        }
+    let mut engine = msl_engine().lock().ok()?;
+    if !engine.has_class(qualified) {
+        let path = resolve_msl_class_path(qualified).or_else(|| locate_msl_file(qualified))?;
+        let source = read_msl_source_bytes(&path)?;
+        let uri = path.to_string_lossy().replace('\\', "/");
+        engine.session_mut().add_document(&uri, &source).ok()?;
     }
-    let resolved = load_msl_class_uncached(qualified);
-    if let Ok(mut map) = cache.lock() {
-        map.insert(qualified.to_string(), resolved.clone());
-    }
-    resolved
+    engine.class_def(qualified).map(Arc::new)
 }
 
 /// Non-blocking variant of [`peek_or_load_msl_class`] — returns the
-/// cached `Arc<ClassDef>` if present (positive or negative), and
-/// `None` *without triggering a load* on a cache miss.
+/// `Arc<ClassDef>` if the engine session already holds it, and
+/// `None` *without triggering a load* on a miss.
 ///
 /// Use this from hot paths that must not block on rumoca parse —
 /// notably the projection task running on Bevy's AsyncComputeTaskPool,
@@ -776,8 +782,11 @@ pub fn peek_or_load_msl_class(
 pub fn peek_msl_class_cached(
     qualified: &str,
 ) -> Option<Arc<rumoca_session::parsing::ast::ClassDef>> {
-    let map = msl_class_cache().lock().ok()?;
-    map.get(qualified).and_then(|slot| slot.clone())
+    let mut engine = msl_engine().lock().ok()?;
+    if !engine.has_class(qualified) {
+        return None;
+    }
+    engine.class_def(qualified).map(Arc::new)
 }
 
 /// Monotonic counter bumped whenever an MSL pre-warm completes.
@@ -862,137 +871,6 @@ fn prewarm_extends_chain_inner(class_qualified_path: &str, bases: &[String], dep
             }
         }
     }
-}
-
-/// File-level parse cache for `peek_or_load_msl_class`. Without this,
-/// drilling into a single class triggers a chain of MSL file loads
-/// (one per `extends` target), and a package-aggregated source file
-/// like `Continuous.mo` (184 KB, 20+ classes) gets re-parsed once per
-/// qualified-name request — pushing icon-extends inheritance from
-/// ~ms to seconds per drill-in. Keying by absolute path ensures
-/// every class inside the same file shares one parse.
-fn parse_msl_file_cached(
-    path: &std::path::Path,
-) -> Option<Arc<rumoca_session::parsing::ast::StoredDefinition>> {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<
-        Mutex<HashMap<std::path::PathBuf, Option<Arc<rumoca_session::parsing::ast::StoredDefinition>>>>,
-    > = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(map) = cache.lock() {
-        if let Some(slot) = map.get(path) {
-            return slot.clone();
-        }
-    }
-
-    // 1. In-memory pre-parsed bundle (web). `path` is the relative
-    //    URI returned by `locate_msl_file`'s in-memory branch (e.g.
-    //    `Modelica/Blocks/package.mo`). `GLOBAL_PARSED_MSL` keys are
-    //    forward-slash strings produced by `MslInMemory::as_source_pairs`,
-    //    so we look up by the same shape.
-    if let Some(parsed) = lookup_in_pre_parsed_bundle(path) {
-        let arc = Some(Arc::new(parsed));
-        if let Ok(mut map) = cache.lock() {
-            map.insert(path.to_path_buf(), arc.clone());
-        }
-        return arc;
-    }
-
-    // 2. Disk-based parse (native). Use rumoca-session's cached
-    //    parallel parse instead of the lower-level `parse_to_syntax`.
-    //    The session-cache hits the already-parsed file (FileCache
-    //    populates it on drill-in), so this is a hashmap lookup in
-    //    practice. Calling `parse_to_syntax` directly here can stall
-    //    for tens of seconds on a 180 KB MSL file, presumably due to
-    //    parol's recovery loop.
-    #[cfg(not(target_arch = "wasm32"))]
-    let parsed: Option<Arc<rumoca_session::parsing::ast::StoredDefinition>> = (|| {
-        if std::env::var_os("LUNCO_NO_PARSE").is_some() {
-            return None;
-        }
-        let pairs = rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()])
-            .ok()?;
-        let (_, stored) = pairs.into_iter().next()?;
-        Some(Arc::new(stored))
-    })();
-    #[cfg(target_arch = "wasm32")]
-    let parsed: Option<Arc<rumoca_session::parsing::ast::StoredDefinition>> = None;
-
-    if let Ok(mut map) = cache.lock() {
-        map.insert(path.to_path_buf(), parsed.clone());
-    }
-    parsed
-}
-
-/// Look up a parsed MSL `StoredDefinition` by relative path in the
-/// process-wide pre-parsed bundle (`crate::msl_remote::global_parsed_msl`).
-/// Returns `None` if the bundle isn't installed yet or the path isn't
-/// present. Linear scan over ~2670 entries — cheap (<1 ms) and only
-/// happens once per path because `parse_msl_file_cached` memoises.
-fn lookup_in_pre_parsed_bundle(
-    path: &std::path::Path,
-) -> Option<rumoca_session::parsing::ast::StoredDefinition> {
-    let parsed = crate::msl_remote::global_parsed_msl()?;
-    let key = path.to_string_lossy().replace('\\', "/");
-    parsed
-        .iter()
-        .find(|(uri, _)| uri.as_str() == key)
-        .map(|(_, def)| def.clone())
-}
-
-fn load_msl_class_uncached(
-    qualified: &str,
-) -> Option<Arc<rumoca_session::parsing::ast::ClassDef>> {
-    let path = resolve_msl_class_path(qualified)
-        .or_else(|| locate_msl_file(qualified))?;
-    let stored = parse_msl_file_cached(&path)?;
-    find_class_in_stored_def(&stored, qualified)
-        .map(|c| Arc::new(c.clone()))
-}
-
-/// Walk a parsed `StoredDefinition` down the qualified dotted path
-/// to locate a specific class. Handles the common MSL-file shape:
-/// a top-level `package.mo` containing nested classes N layers deep,
-/// and flat `.mo` files where the leaf class sits at the top level.
-fn find_class_in_stored_def<'a>(
-    ast: &'a rumoca_session::parsing::ast::StoredDefinition,
-    qualified: &str,
-) -> Option<&'a rumoca_session::parsing::ast::ClassDef> {
-    let parts: Vec<&str> = qualified.split('.').collect();
-
-    // Strategy: walk every top-level class and treat its name as a
-    // prefix; if the qualified path starts with it, recurse into
-    // its nested classes. When the last segment matches the current
-    // level, return. Tries flat (leaf-at-top-level) too.
-    for (top_name, top_class) in ast.classes.iter() {
-        // Flat: the top-level class name IS the qualified tail.
-        let tail = parts.last().copied().unwrap_or("");
-        if top_name.as_str() == qualified || top_name.as_str() == tail {
-            return Some(top_class);
-        }
-        // Prefix: top-level name matches a middle segment of the
-        // qualified path, walk nested classes for the rest.
-        if let Some(pos) = parts.iter().position(|p| *p == top_name.as_str()) {
-            let remaining = &parts[pos + 1..];
-            if let Some(c) = walk_nested_classes(top_class, remaining) {
-                return Some(c);
-            }
-        }
-    }
-    None
-}
-
-fn walk_nested_classes<'a>(
-    class: &'a rumoca_session::parsing::ast::ClassDef,
-    path: &[&str],
-) -> Option<&'a rumoca_session::parsing::ast::ClassDef> {
-    if path.is_empty() {
-        return Some(class);
-    }
-    let (head, rest) = (path[0], &path[1..]);
-    let child = class.classes.get(head)?;
-    walk_nested_classes(child, rest)
 }
 
 // ═══════════════════════════════════════════════════════════════════
