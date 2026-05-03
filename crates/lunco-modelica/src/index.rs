@@ -125,6 +125,18 @@ pub struct ClassEntry {
     pub kind: ClassKind,
     pub source_range: Option<TextRange>,
     pub extends: Vec<String>,
+    /// Description string from the class header
+    /// (`model X "description"`). Empty when none was authored.
+    pub description: String,
+    /// Qualified names of nested classes declared inside this one,
+    /// in declaration order. Used for tree assembly in browsers.
+    pub children: Vec<String>,
+    /// Authored Icon annotation, if present. Populated from
+    /// [`crate::annotations::extract_icon`] during rebuild.
+    pub icon: Option<crate::annotations::Icon>,
+    /// `(info, revisions)` from the class's `Documentation(...)`
+    /// annotation. Both are `None` when no documentation was authored.
+    pub documentation: (Option<String>, Option<String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,6 +314,27 @@ impl ModelicaIndex {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn insert_class_recursive(idx: &mut ModelicaIndex, qualified: String, class_def: &ast::ClassDef) {
+    // Description from the class header (`model X "desc"`).
+    let description = class_def
+        .description
+        .iter()
+        .next()
+        .map(|t| t.text.as_ref().trim_matches('"').to_string())
+        .unwrap_or_default();
+
+    // Direct child class qualified names — rebuild's recursion fills
+    // them in below.
+    let children: Vec<String> = class_def
+        .iter_classes()
+        .map(|(name, _)| format!("{}.{}", qualified, name))
+        .collect();
+
+    // Annotation extraction reuses the existing helpers so Index stays
+    // in lockstep with the model_view / canvas_diagram extractors.
+    let icon = crate::annotations::extract_icon(&class_def.annotation);
+    let documentation =
+        crate::ui::panels::model_view::extract_documentation(&class_def.annotation);
+
     let entry = ClassEntry {
         name: qualified.clone(),
         kind: map_class_type(&class_def.class_type),
@@ -314,6 +347,10 @@ fn insert_class_recursive(idx: &mut ModelicaIndex, qualified: String, class_def:
             .iter()
             .map(|e| format!("{}", e.base_name))
             .collect(),
+        description,
+        children,
+        icon,
+        documentation,
     };
     idx.classes.insert(qualified.clone(), entry);
 
@@ -334,6 +371,13 @@ fn insert_class_recursive(idx: &mut ModelicaIndex, qualified: String, class_def:
         let (description, modifications) = info
             .map(|i| (i.description, i.modifications))
             .unwrap_or_default();
+        // Placement extraction reuses the metamodel
+        // [`crate::annotations::extract_placement`] and converts the
+        // annotation-shaped `Placement(transformation(...))` to the
+        // simpler `pretty::Placement` (centre+size) that the wire
+        // format uses.
+        let placement = crate::annotations::extract_placement(&comp.annotation)
+            .map(annotation_placement_to_pretty);
         let entry = ComponentEntry {
             key,
             node_id: NodeId::new(format!("{}|component|{}", qualified, name)),
@@ -346,7 +390,7 @@ fn insert_class_recursive(idx: &mut ModelicaIndex, qualified: String, class_def:
                 comp.name_token.location.start as usize,
                 comp.name_token.location.end as usize,
             )),
-            placement: None, // populated by annotation_parse in a follow-up
+            placement,
             causality: map_causality(&comp.causality),
             variability: map_variability(&comp.variability),
             binding: comp.binding.as_ref().map(|_| String::new()),
@@ -367,6 +411,23 @@ fn insert_class_recursive(idx: &mut ModelicaIndex, qualified: String, class_def:
     for (nested_name, nested_def) in class_def.iter_classes() {
         let nested_qualified = format!("{}.{}", qualified, nested_name);
         insert_class_recursive(idx, nested_qualified, nested_def);
+    }
+}
+
+fn annotation_placement_to_pretty(p: crate::annotations::Placement) -> Placement {
+    let extent = p.transformation.extent;
+    let origin = p.transformation.origin;
+    let x_min = extent.p1.x.min(extent.p2.x);
+    let x_max = extent.p1.x.max(extent.p2.x);
+    let y_min = extent.p1.y.min(extent.p2.y);
+    let y_max = extent.p1.y.max(extent.p2.y);
+    let cx = (x_min + x_max) * 0.5 + origin.x;
+    let cy = (y_min + y_max) * 0.5 + origin.y;
+    Placement {
+        x: cx as f32,
+        y: cy as f32,
+        width: (x_max - x_min) as f32,
+        height: (y_max - y_min) as f32,
     }
 }
 

@@ -1343,7 +1343,11 @@ fn unescape_modelica_string(s: &str) -> String {
 
 /// Extract `Documentation(info="…", revisions="…")` — both are HTML
 /// string payloads. Returns `(info, revisions)`.
-fn extract_documentation(
+/// Extract `(info, revisions)` HTML/text strings from a class's
+/// `Documentation(info="...", revisions="...")` annotation.
+/// Pulled out as `pub` so the per-doc Index can populate
+/// [`crate::index::ClassEntry::documentation`] during rebuild.
+pub fn extract_documentation(
     annotations: &[rumoca_session::parsing::ast::Expression],
 ) -> (Option<String>, Option<String>) {
     use rumoca_session::parsing::ast::{Expression, TerminalType};
