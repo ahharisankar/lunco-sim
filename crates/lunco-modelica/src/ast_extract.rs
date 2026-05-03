@@ -390,6 +390,14 @@ pub fn strip_input_defaults(source: &str) -> (String, HashMap<String, f64>) {
     //   2: the component name
     //   3: optional `(…mods…)` — preserved
     //   4: the `= literal` — dropped
+    //
+    // TODO(rumoca-runtime-override): rumoca doesn't accept runtime
+    // input/parameter overrides without source mutation today. This
+    // regex strip is the workaround. When rumoca grows
+    // `Session::set_runtime_overrides(HashMap<SymbolPath, Value>)`
+    // (or equivalent) we delete this whole function and pass overrides
+    // through Session config instead. See REFACTOR_PLAN.md upstream
+    // ask #7.
     let re = regex::Regex::new(
         r"(?m)(^\s*input\s+[\w\.]+\s+)([A-Za-z_][A-Za-z0-9_]*)(\s*\([^)]*\))?(\s*=\s*[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)",
     )
@@ -412,7 +420,10 @@ pub fn strip_input_defaults(source: &str) -> (String, HashMap<String, f64>) {
 /// Replaces `parameter <type> <name> = <value>` lines with the given values,
 /// enabling recompilation with different parameter values.
 ///
-/// This is a drop-in replacement for the regex-based `substitute_params_in_source`.
+/// TODO(rumoca-runtime-override): same upstream blocker as
+/// [`strip_input_defaults`]. Source mutation goes away when rumoca
+/// accepts parameter overrides at simulation time. See
+/// REFACTOR_PLAN.md upstream ask #7.
 pub fn substitute_params_in_source(source: &str, parameters: &HashMap<String, f64>) -> String {
     let mut modified = source.to_string();
     for (name, value) in parameters {

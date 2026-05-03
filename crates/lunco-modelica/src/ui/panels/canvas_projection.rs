@@ -240,6 +240,14 @@ fn build_visual_diagram_from_scan(
         };
 
         // Placement from annotation (best-effort regex); fall back to grid.
+        //
+        // TODO(metamodel-placement): the per-doc Index already extracts
+        // typed `Placement` via `crate::annotations::extract_placement`
+        // during rebuild. This fallback path doesn't have class
+        // context (called from `build_visual_diagram_from_scan` which
+        // operates on raw source), so migrating requires plumbing the
+        // active class through. Defer until placements move to the
+        // metamodel layer (REFACTOR_PLAN.md "stays" list — H).
         let safe_name = regex::escape(instance_name);
         let pattern = safe_name
             + r"(?:\s*\([^)]*\))?\s*annotation\s*\(\s*Placement\s*\(\s*transformation\s*\(\s*extent\s*=\s*\{\{\s*([-\d\.]+)\s*,\s*([-\d\.]+)\s*\}\s*,\s*\{\s*([-\d\.]+)\s*,\s*([-\d\.]+)\s*\}\}";

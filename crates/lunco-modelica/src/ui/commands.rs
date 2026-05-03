@@ -1980,6 +1980,12 @@ fn mask_strings_and_comments(src: &str) -> String {
 /// Same regex as `extract_class_source` but returns the byte range
 /// `(start, end)` rather than the substring. Caller slices the
 /// ORIGINAL (unmasked) source with the returned offsets.
+///
+/// TODO(rumoca-class-span): replace with
+/// `ClassDef::full_span_with_leading_comments(source) -> (usize, usize)`
+/// once rumoca exposes it. The leading-comment rewind logic moves
+/// to rumoca where it can use the trivia table directly. See
+/// REFACTOR_PLAN.md upstream ask #2.
 fn extract_class_byte_range(source: &str, class_name: &str) -> Option<(usize, usize)> {
     let safe = regex::escape(class_name);
     let opener_pat = format!(
@@ -1995,6 +2001,9 @@ fn extract_class_byte_range(source: &str, class_name: &str) -> Option<(usize, us
     Some((start, start + rel_end))
 }
 
+/// TODO(rumoca-class-span): same upstream blocker as
+/// [`extract_class_byte_range`]. Slices the source with rumoca-derived
+/// offsets when the helper lands. See REFACTOR_PLAN.md upstream ask #2.
 fn extract_class_source(source: &str, class_name: &str) -> Option<String> {
     let safe = regex::escape(class_name);
     // Single-line pattern — the earlier multi-line raw-string form
@@ -2139,6 +2148,13 @@ fn collect_parent_imports(class_file: &std::path::Path) -> Vec<String> {
             // Modelica.Math.Distributions.X.density;` — lifting
             // two of those into one class yields a duplicate-alias
             // parse error).
+            // TODO(ast-migrate): walk the parent's parsed AST instead
+            // of regex-scanning lines. Today this reads sibling
+            // package.mo files outside the active document, which
+            // means we'd need to either route them through the
+            // workspace `ModelicaEngine` (lazy upsert pattern) or
+            // hand-parse via `rumoca_phase_parse::parse_to_ast`.
+            // Either is more involved than a TODO marker — defer.
             let class_opener = regex::Regex::new(
                 r"^\s*(?:partial\s+)?(?:encapsulated\s+)?(?:model|block|class|connector|function|record|package|type)\s+",
             );
@@ -2189,6 +2205,11 @@ fn inject_class_imports(src: &str, imports: &[String]) -> String {
     // Match the first class header line (including any trailing
     // description string) and capture through to its newline. Same
     // header shapes as `extract_class_source` / `rewrite_*`.
+    //
+    // TODO(rumoca-class-span): once `ClassDef::full_span_with_leading_comments`
+    // lands (REFACTOR_PLAN.md ask #2), use the AST class span to
+    // locate the header end and splice imports — no header regex,
+    // no description-string handling.
     let header_re = regex::Regex::new(
         r"(?m)^(\s*(?:partial\s+)?(?:encapsulated\s+)?(?:model|block|class|connector|function|record|package|type)\s+[A-Za-z_]\w*[^\n]*)\n",
     )

@@ -2219,6 +2219,13 @@ fn recover_edges_from_source(source: &str, diagram: &mut VisualDiagram) {
     //   3 = tgt component, 4 = tgt port
     // Port names allow `.` so we catch qualified sub-ports
     // (`flange.phi`), though most cases are one dot deep.
+    // TODO(index-migrate): the per-doc Index now populates
+    // `connections` from `Equation::Connect` AST nodes during rebuild
+    // (and patches them optimistically on `ConnectionAdded` /
+    // `ConnectionRemoved`). This regex pre-dates the Index. Switching
+    // to `index.connections_in_class(class)` would drop the regex
+    // here entirely; deferred because the call site receives raw
+    // `source` and needs class plumbing.
     static CONNECT_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = CONNECT_RE.get_or_init(|| {
         regex::Regex::new(
@@ -6775,6 +6782,19 @@ fn paint_class_type_badge(
 /// drill-ins where the overlay fires 5× per frame at 60 Hz. Cached
 /// here via `OnceLock` so compile cost is paid once at first use
 /// and the per-frame work collapses to scan-only.
+// TODO(index-migrate): replace the regex scan with an Index read.
+// The per-doc [`crate::index::ModelicaIndex`] already tracks
+// components (variability/causality), connections, and (after
+// further growth) equations — counts can be derived directly:
+//   - parameters: components_in_class().filter(|c| c.variability == Parameter).count()
+//   - inputs:     components_in_class().filter(|c| c.causality == Input).count()
+//   - outputs:    components_in_class().filter(|c| c.causality == Output).count()
+//   - connects:   connections_in_class().count()
+//   - equations:  Index doesn't track algebraic equations yet — needs growth.
+// Migrating this saves the 5-pattern-per-frame scan and removes the
+// hand-rolled BLAKE3 cache below. Deferred: the existing OnceLock
+// cache makes per-frame cost low, and `equations` needs Index growth
+// first.
 fn empty_overlay_regexes() -> &'static [(&'static str, regex::Regex); 5] {
     use std::sync::OnceLock;
     static RE: OnceLock<[(&str, regex::Regex); 5]> = OnceLock::new();

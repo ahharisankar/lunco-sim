@@ -374,95 +374,47 @@ struct MSLIndexer {
 /// the **plain-text first paragraph** of its
 /// `annotation(Documentation(info="…"))`, if any.
 ///
-/// Strategy: stack-match `model|block|…|function NAME` openers against
-/// `end NAME;` tokens to build class byte-ranges, then for every
-/// `Documentation(info="…")` pick the **innermost** enclosing range.
-/// This handles nested classes (MSL's `protected model Internal …`
-/// inside a larger example) correctly.
+/// Walks the rumoca AST: parses the source, recursively visits every
+/// nested class (`iter_classes`), and pulls the class-level
+/// Documentation via the same `extract_documentation` helper that
+/// the workbench's model_view panel uses. Consistent path for
+/// boundary detection + doc extraction; no regex.
 ///
 /// After matching, strip HTML tags and common entities, collapse
 /// whitespace, and keep only the first paragraph (`</p>` boundary,
 /// falling back to a double-newline). Dropping the rest means the
 /// index stays small (~200 examples × < 200 chars each).
+///
+/// Last-write wins on duplicate short names (different MSL files can
+/// define classes with the same simple name; the indexer keys by
+/// short name for the palette tagline lookup, full qualified names
+/// are matched elsewhere).
 fn extract_documentation_infos(source: &str) -> HashMap<String, String> {
-    // Openers we care about. `operator` covers `operator record` /
-    // `operator function` (MLS §14.4) and `type` covers typedefs that
-    // occasionally carry their own Documentation block.
-    let opener_re = regex::Regex::new(
-        r"(?m)\b(?:partial\s+)?(?:model|block|class|connector|record|package|function|type|operator)\s+(\w+)\b",
-    )
-    .expect("opener regex");
-    let end_re = regex::Regex::new(r"(?m)\bend\s+(\w+)\s*;").expect("end regex");
-    // Greedy-aware info capture. Modelica strings can contain escaped
-    // quotes (`\"`); the `(?:[^"\\]|\\.)*` alternation handles that.
-    let doc_re = regex::Regex::new(
-        r#"(?s)Documentation\s*\(\s*info\s*=\s*"((?:[^"\\]|\\.)*)""#,
-    )
-    .expect("doc regex");
-
-    #[derive(Debug)]
-    enum Ev {
-        Open(String, usize),
-        End(String, usize),
-    }
-    let mut events: Vec<Ev> = Vec::new();
-    for m in opener_re.captures_iter(source) {
-        events.push(Ev::Open(
-            m.get(1).unwrap().as_str().to_string(),
-            m.get(0).unwrap().start(),
-        ));
-    }
-    for m in end_re.captures_iter(source) {
-        events.push(Ev::End(
-            m.get(1).unwrap().as_str().to_string(),
-            m.get(0).unwrap().start(),
-        ));
-    }
-    events.sort_by_key(|e| match e {
-        Ev::Open(_, p) | Ev::End(_, p) => *p,
-    });
-
-    struct Range {
-        name: String,
-        start: usize,
-        end: usize,
-    }
-    let mut ranges: Vec<Range> = Vec::new();
-    let mut stack: Vec<(String, usize)> = Vec::new();
-    for e in events {
-        match e {
-            Ev::Open(n, p) => stack.push((n, p)),
-            Ev::End(n, p) => {
-                // Match against the nearest open with the same name —
-                // tolerant of MLS-legal re-openings of identically-named
-                // nested classes inside sibling branches.
-                if let Some(idx) = stack.iter().rposition(|(sn, _)| sn == &n) {
-                    let (name, start) = stack.remove(idx);
-                    ranges.push(Range { name, start, end: p });
-                }
-            }
-        }
-    }
-
+    let Ok(ast) = rumoca_phase_parse::parse_to_ast(source, "msl.mo") else {
+        return HashMap::new();
+    };
     let mut out: HashMap<String, String> = HashMap::new();
-    for caps in doc_re.captures_iter(source) {
-        let pos = caps.get(0).unwrap().start();
-        let raw = caps.get(1).unwrap().as_str();
-        // Innermost range containing the Documentation opener.
-        let inner = ranges
-            .iter()
-            .filter(|r| r.start <= pos && pos <= r.end)
-            .min_by_key(|r| r.end.saturating_sub(r.start));
-        if let Some(r) = inner {
-            // Keep the FIRST Documentation per class — MSL sometimes
-            // nests `Documentation` inside per-component annotations
-            // (rare) and we want the class-level one, which comes
-            // first in source order within the class body.
-            out.entry(r.name.clone())
-                .or_insert_with(|| clean_info_text(raw));
-        }
+    for (name, class_def) in &ast.classes {
+        collect_documentation(name, class_def, &mut out);
     }
     out
+}
+
+/// Recursively visit a class and its nested classes, recording each
+/// one's `Documentation(info=…)` keyed by short name.
+fn collect_documentation(
+    short_name: &str,
+    class_def: &rumoca_session::parsing::ast::ClassDef,
+    out: &mut HashMap<String, String>,
+) {
+    let (info, _revisions) =
+        lunco_modelica::ui::panels::model_view::extract_documentation(&class_def.annotation);
+    if let Some(info) = info {
+        out.insert(short_name.to_string(), clean_info_text(&info));
+    }
+    for (nested_name, nested_def) in class_def.iter_classes() {
+        collect_documentation(nested_name, nested_def, out);
+    }
 }
 
 /// Turn a raw Modelica `info="…"` string into UI-ready plain text.
@@ -1035,14 +987,20 @@ impl MSLIndexer {
                     &class.annotation,
                 );
 
-                // Tiny `%name` / `textString="..."` extraction kept
-                // for the palette text fallback when a class has no
-                // graphics primitives at all.
-                let ann_str = format!("{:?}", class.annotation);
-                let mut icon_text = None;
-                if let Some(caps) = regex::Regex::new("textString=\"([^\"]+)\"").unwrap().captures(&ann_str) {
-                    icon_text = Some(caps.get(1).unwrap().as_str().to_string());
-                }
+                // Pull the first authored Text graphic's string for the
+                // palette text fallback (used when a class has no
+                // structural icon primitives but still labels itself).
+                // Walks the typed Icon via `extract_icon` — same path
+                // the workbench uses, no regex over Debug output.
+                let icon_text = lunco_modelica::annotations::extract_icon(&class.annotation)
+                    .and_then(|icon| {
+                        icon.graphics.iter().find_map(|g| match g {
+                            lunco_modelica::annotations::GraphicItem::Text(t) => {
+                                Some(t.text_string.clone())
+                            }
+                            _ => None,
+                        })
+                    });
 
                 let short_description = clean_short_description(&class.description);
                 let documentation_info = self.doc_infos.get(&short_name).cloned();
