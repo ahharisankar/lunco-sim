@@ -510,11 +510,10 @@ impl Plugin for ModelicaUiPlugin {
         // adding the plugin multiple times is a no-op on `init_resource`.
         app.add_plugins(lunco_doc_bevy::TwinJournalPlugin);
 
-        // Shared Modelica class cache — drill-in, preload, and
-        // (later) compile dep-walk all funnel through this one
-        // Arc-shared store so every .mo file is read once and
-        // parsed once per session.
-        app.add_plugins(crate::class_cache::ClassCachePlugin);
+        // MSL class cache lives inside `class_cache::msl_engine` —
+        // no Bevy plugin / resource needed. `peek_or_load_msl_class`
+        // routes through the static engine; drill-in spawns its own
+        // task that ultimately consults the same session.
 
         // Intent layer: key chords → EditorIntent. Domain resolvers
         // (installed by ModelicaCommandsPlugin below) translate intents

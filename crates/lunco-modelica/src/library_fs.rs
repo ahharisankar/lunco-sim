@@ -108,6 +108,11 @@ pub fn locate_library_file(qualified: &str) -> Option<std::path::PathBuf> {
         // for new third-party libs.
         let mut roots: Vec<std::path::PathBuf> = vec![lunco_assets::msl_dir()];
         let cache_root = lunco_assets::cache_dir();
+        // TODO(library-auto-discovery): replace this hardcoded list
+        // with `lunco_assets::extra_library_roots()` that scans
+        // `cache_dir` for installed libraries. Each lands at
+        // `cache_dir/<dest>/<package>/package.mo` per Assets.toml.
+        // Mirror the change in `bin/msl_indexer.rs::extra_libraries`.
         for cache_subdir in ["thermofluidstream"] {
             let p = cache_root.join(cache_subdir);
             if p.exists() {

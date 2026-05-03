@@ -6946,6 +6946,12 @@ pub struct DrillInBinding {
     /// loading overlay so the user sees work is happening even when
     /// rumoca takes tens of seconds on large package files.
     pub started: web_time::Instant,
+    /// Off-thread document load. Built via
+    /// [`crate::document::ModelicaDocument::load_msl_file`] which
+    /// hits rumoca's content-hash artifact cache, so a class whose
+    /// containing file the engine session has already parsed
+    /// installs in milliseconds. Driven by [`drive_drill_in_loads`].
+    pub task: bevy::tasks::Task<Result<crate::document::ModelicaDocument, String>>,
 }
 
 /// Tab-to-task binding for duplicate-to-workspace operations whose
@@ -7138,94 +7144,75 @@ pub fn drive_duplicate_loads(
 pub fn drive_drill_in_loads(
     mut loads: bevy::prelude::ResMut<DrillInLoads>,
     mut registry: bevy::prelude::ResMut<ModelicaDocumentRegistry>,
-    cache: Option<bevy::prelude::Res<crate::class_cache::ClassCache>>,
     mut tabs: bevy::prelude::ResMut<crate::ui::panels::model_view::ModelTabs>,
     mut class_names: bevy::prelude::ResMut<DrilledInClassNames>,
+    mut egui_q: bevy::prelude::Query<&mut bevy_egui::EguiContext>,
 ) {
     use bevy::prelude::*;
-    let Some(cache) = cache else { return };
-    // Snapshot pairs first so we can mutate `pending` in the loop.
-    let pending: Vec<(lunco_doc::DocumentId, String)> = loads
-        .pending
-        .iter()
-        .map(|(k, v)| (*k, v.qualified.clone()))
-        .collect();
-    for (doc_id, qualified) in pending {
-        // Still loading?
-        if cache.is_loading(&qualified) {
-            continue;
+    // Keep egui awake while loads are in flight so the "Loading…"
+    // overlay actually animates. Mirrors the duplicate-loads driver
+    // — without this the canvas paints once and sleeps until input.
+    if !loads.pending.is_empty() {
+        for mut ctx in egui_q.iter_mut() {
+            ctx.get_mut().request_repaint();
         }
-        // Ready?
-        if let Some(entry) = cache.peek(&qualified) {
-            let origin = lunco_doc::DocumentOrigin::File {
-                path: entry.file_path.clone(),
-                writable: false,
+    }
+    let doc_ids: Vec<lunco_doc::DocumentId> = loads.pending.keys().copied().collect();
+    for doc_id in doc_ids {
+        let Some(binding) = loads.pending.get_mut(&doc_id) else {
+            continue;
+        };
+        let Some(result) = futures_lite::future::block_on(
+            futures_lite::future::poll_once(&mut binding.task),
+        ) else {
+            continue;
+        };
+        let qualified = binding.qualified.clone();
+        loads.pending.remove(&doc_id);
+        let doc = match result {
+            Ok(doc) => doc,
+            Err(msg) => {
+                warn!(
+                    "[CanvasDiagram] drill-in: class `{}` load failed: {}",
+                    qualified, msg
+                );
+                continue;
+            }
+        };
+        // Capture file path for the install log + smart-view decision
+        // before moving the doc into the registry.
+        let (file_path_display, has_components) = {
+            let path = match doc.origin() {
+                lunco_doc::DocumentOrigin::File { path, .. } => path.display().to_string(),
+                _ => String::from("<no path>"),
             };
-            // Both the strict and the lenient AST are pre-parsed
-            // off-thread by the FileCache loader; install path is now
-            // O(string clone), no parse on the main thread.
-            let doc = crate::document::ModelicaDocument::from_parts(
-                doc_id,
-                entry.source.to_string(),
-                origin,
-                std::sync::Arc::clone(&entry.ast),
-                std::sync::Arc::clone(&entry.syntax),
-            );
-            registry.install_prebuilt(doc_id, doc);
-            loads.pending.remove(&doc_id);
-            // Persistent binding so projection can scope to this
-            // class even after `loads` is cleared. Required for
-            // multi-class package files where
-            // `ModelicaDocument.canonical_path` only tells us the
-            // `.mo` file, not which class inside the user meant.
-            class_names.set(doc_id, qualified.clone());
             // Smart default view for the drilled-in tab. Matches
-            // OMEdit/Dymola's "all three views always visible, but
-            // land in the one the user probably wants" behaviour:
-            //
-            //   - Icon-only class (`.Icons.*` subtree) → Icon. No
-            //     connectors, no diagram content ever.
-            //   - Class with zero instantiated components (primitive
-            //     `block` like `CriticalDamping`, `partial` templates,
-            //     pure-equation `model`s) → Icon. The Diagram layer
-            //     is legitimately empty; Icon shows the visual
-            //     symbol the user expects.
-            //   - Composed model with components → Canvas (stay on
-            //     the default). Drill-in was the user asking "what's
-            //     inside?" and there's something to show.
-            //
-            // `find_class_by_qualified_name` walks the (already
-            // parsed) AST from the cache entry — no extra parsing.
-            let has_components = entry.ast.ast().and_then(|ast| {
+            // OMEdit/Dymola: icon-only class or class with zero
+            // instantiated components → Icon view; otherwise Canvas
+            // (the user drilled FROM a canvas, expects a canvas).
+            let has_components = doc.ast().ast().and_then(|ast| {
                 crate::diagram::find_class_by_qualified_name(ast, &qualified)
                     .map(|c| !c.components.is_empty())
             });
-            let land_in_icon_view =
-                crate::ui::loaded_classes::is_icon_only_class(&qualified)
-                    || has_components == Some(false);
-            if land_in_icon_view {
-                if let Some(tab) = tabs.get_mut(doc_id) {
-                    tab.view_mode =
-                        crate::ui::panels::model_view::ModelViewMode::Icon;
-                }
+            (path, has_components)
+        };
+        registry.install_prebuilt(doc_id, doc);
+        // Persistent binding so projection can scope to this class
+        // after `loads` is cleared — required for multi-class package
+        // files where `canonical_path` only tells us the `.mo` file.
+        class_names.set(doc_id, qualified.clone());
+        let land_in_icon_view =
+            crate::ui::loaded_classes::is_icon_only_class(&qualified)
+                || has_components == Some(false);
+        if land_in_icon_view {
+            if let Some(tab) = tabs.get_mut(doc_id) {
+                tab.view_mode = crate::ui::panels::model_view::ModelViewMode::Icon;
             }
-            info!(
-                "[CanvasDiagram] drill-in: installed `{}` from `{}` (cache hit)",
-                qualified,
-                entry.file_path.display()
-            );
-            // Engine session is the cache; no off-thread prewarm.
-            continue;
         }
-        // Failed — log once and drop the binding. Tab will show
-        // the empty-diagram overlay; user can close it.
-        if let Some(msg) = cache.failure_message(&qualified) {
-            warn!(
-                "[CanvasDiagram] drill-in: class `{}` load failed: {}",
-                qualified, msg
-            );
-            loads.pending.remove(&doc_id);
-        }
+        info!(
+            "[CanvasDiagram] drill-in: installed `{}` from `{}`",
+            qualified, file_path_display,
+        );
     }
 }
 
@@ -7350,18 +7337,22 @@ fn open_drill_in_tab(
     };
 
     if needs_load {
-        // Kick (or piggyback on) a class cache load. If AddComponent
-        // preloaded this class earlier, the entry is already cached
-        // and the tab installs on the very next `drive` tick — no
-        // file read, no parse. Concurrent tabs opening the same
-        // class dedupe onto one load automatically.
-        crate::class_cache::request_class(world, qualified);
+        // Spawn the off-thread load. `ModelicaDocument::load_msl_file`
+        // routes through rumoca's content-hash artifact cache, so
+        // every class drilled into the same file (Continuous.mo holds
+        // Der/Integrator/PID/...) shares one parse the second time
+        // around. Driver: `drive_drill_in_loads`.
+        let path_for_task = file_path.to_path_buf();
+        let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
+            crate::document::ModelicaDocument::load_msl_file(doc_id, &path_for_task)
+        });
         let mut loads = world.resource_mut::<DrillInLoads>();
         loads.pending.insert(
             doc_id,
             DrillInBinding {
                 qualified: qualified.to_string(),
                 started: web_time::Instant::now(),
+                task,
             },
         );
     }
@@ -7949,19 +7940,23 @@ fn apply_ops(world: &mut World, doc_id: lunco_doc::DocumentId, ops: Vec<Modelica
     let mut any_applied = false;
     let mut hit_read_only = false;
 
-    // Preload any class the user just referenced. Fire-and-forget —
-    // the two-tier cache (FileCache + ClassCache) dedupes by file,
-    // so adding ten Resistors triggers at most one parse of the
-    // Resistor.mo file across this session.
-    let t_preload_start = web_time::Instant::now();
+    // Preload any newly-referenced MSL class on a background task
+    // so the engine session is warm by the time the projection
+    // re-runs. Fire-and-forget; rumoca's content-hash artifact
+    // cache dedupes repeated requests for the same file.
     for op in &ops {
         if let ModelicaOp::AddComponent { decl, .. } = op {
             if decl.type_name.starts_with("Modelica.") {
-                crate::class_cache::request_class(world, &decl.type_name);
+                let qualified = decl.type_name.clone();
+                bevy::tasks::AsyncComputeTaskPool::get()
+                    .spawn(async move {
+                        let _ = crate::class_cache::peek_or_load_msl_class(&qualified);
+                    })
+                    .detach();
             }
         }
     }
-    let preload_ms = t_preload_start.elapsed().as_secs_f64() * 1000.0;
+    let preload_ms = 0.0_f64;
 
     let t_apply_start = web_time::Instant::now();
     {

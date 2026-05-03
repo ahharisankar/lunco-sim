@@ -316,6 +316,95 @@ impl ModelicaDocument {
         Self::from_parts(id, source, origin, ast, syntax)
     }
 
+    /// Load a `.mo` file from disk or the in-memory MSL bundle and
+    /// build a fresh document. Uses rumoca's content-hash artifact
+    /// cache via `parse_files_parallel`, so subsequent loads of a
+    /// file the engine session has already parsed return the same
+    /// `Arc<StoredDefinition>` as a cache hit.
+    ///
+    /// `path` may be either an absolute filesystem path (native) or
+    /// an MSL-relative URI like `Modelica/Blocks/Continuous.mo`
+    /// resolved against the in-memory bundle (web). Source bytes
+    /// come from `lunco_assets::msl::global_msl_source().read(...)`
+    /// when available, falling back to `std::fs::read_to_string`.
+    ///
+    /// This is the canonical async-friendly loader: spawn it inside
+    /// an `AsyncComputeTaskPool::spawn` and install the result via
+    /// `ModelicaDocumentRegistry::install_prebuilt` on the main
+    /// thread. The drill-in flow uses exactly this pattern.
+    pub fn load_msl_file(
+        id: DocumentId,
+        path: &std::path::Path,
+    ) -> Result<Self, String> {
+        // 1. Source bytes — try the in-memory bundle first (web),
+        //    then fall back to a filesystem read (native). Mirrors
+        //    `class_cache::read_msl_source_bytes`.
+        let source = if let Some(bytes) = lunco_assets::msl::global_msl_source()
+            .and_then(|s| s.read(path))
+        {
+            String::from_utf8(bytes)
+                .map_err(|e| format!("non-utf8 source `{}`: {e}", path.display()))?
+        } else {
+            std::fs::read_to_string(path).map_err(|e| {
+                format!("read failed `{}`: {e}", path.display())
+            })?
+        };
+
+        // 2. Strict parse via rumoca-session's content-hash artifact
+        //    cache — re-opening a file the engine session has parsed
+        //    is essentially free.
+        let ast = if std::env::var_os("LUNCO_NO_PARSE").is_some() {
+            Arc::new(AstCache {
+                generation: 0,
+                result: Err("LUNCO_NO_PARSE diagnostic — parse skipped".into()),
+            })
+        } else {
+            match rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()]) {
+                Ok(mut pairs) if !pairs.is_empty() => {
+                    let (_, stored) = pairs.remove(0);
+                    Arc::new(AstCache {
+                        generation: 0,
+                        result: Ok(Arc::new(stored)),
+                    })
+                }
+                Ok(_) => Arc::new(AstCache {
+                    generation: 0,
+                    result: Err("rumoca returned no parse result".into()),
+                }),
+                Err(e) => Arc::new(AstCache {
+                    generation: 0,
+                    result: Err(e.to_string()),
+                }),
+            }
+        };
+
+        // 3. Lenient `SyntaxCache` reuses the strict StoredDef when
+        //    parsing succeeded — same reasoning as the previous
+        //    `ModelicaFileLoader` path: re-running `parse_to_syntax`
+        //    on a 184 KB MSL file (Continuous.mo) costs minutes in
+        //    debug because it bypasses rumoca's cache. On strict
+        //    failure we ship an empty SyntaxCache; the doc's
+        //    edit-driven `ast_refresh` will rebuild it.
+        let syntax = Arc::new(match ast.result.as_ref() {
+            Ok(strict) => SyntaxCache {
+                generation: 0,
+                ast: Arc::clone(strict),
+                has_errors: false,
+            },
+            Err(_) => SyntaxCache {
+                generation: 0,
+                ast: Arc::new(StoredDefinition::default()),
+                has_errors: true,
+            },
+        });
+
+        let origin = lunco_doc::DocumentOrigin::File {
+            path: path.to_path_buf(),
+            writable: false,
+        };
+        Ok(Self::from_parts(id, source, origin, ast, syntax))
+    }
+
     /// Build a document from pre-computed parts. Skips the rumoca
     /// parses — callers must supply an [`AstCache`] **and** a
     /// [`SyntaxCache`] whose `generation` fields are both `0`. Used
