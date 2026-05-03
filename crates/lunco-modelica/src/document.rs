@@ -577,9 +577,46 @@ impl ModelicaDocument {
     }
 
     /// Rebuild the UI projection [`Index`](crate::index::ModelicaIndex)
-    /// from the current [`SyntaxCache`]. Called automatically after
-    /// every parse install; manual callers shouldn't need this.
+    /// from the **engine's** view of this document.
+    ///
+    /// Contract (Shape C of the engine-as-Index migration): the per-doc
+    /// `Index` is a derived projection over the workspace
+    /// [`crate::engine::ModelicaEngine`] session, with the per-doc
+    /// optimistic-patch overlay layered on top. To keep that contract
+    /// honest, we upsert this doc's current source into the engine
+    /// before reading the parsed AST back — guaranteeing the Index is
+    /// computed against engine-canonical state, not just a transient
+    /// local parse that might disagree with what cross-doc queries
+    /// see.
+    ///
+    /// Rumoca's content-hash artifact cache makes the upsert O(1) for
+    /// unchanged source (the common case: install_parse_results just
+    /// produced the same StoredDef the engine already has).
+    ///
+    /// **Fallback**: when the global engine handle isn't installed
+    /// yet (early boot before `ModelicaEnginePlugin::build`, or
+    /// headless tests that don't add the plugin), we fall back to
+    /// rebuilding from the local `SyntaxCache::ast`. Behaviour is
+    /// equivalent for in-doc fields because the engine-canonical AST
+    /// for a single doc is the same parse result as the local one.
     fn rebuild_index(&mut self) {
+        if let Some(handle) = crate::engine_resource::global_engine_handle() {
+            let mut engine = handle.lock();
+            // Upsert keeps the engine in lockstep with the doc's
+            // current source. Errors here mean the parse failed
+            // server-side (same condition as `self.ast.result.is_err()`)
+            // — we still want to rebuild from whatever AST shape the
+            // engine recovered, so we ignore the result and fall
+            // through to the query.
+            let _ = engine.upsert_document(self.id, &self.source);
+            if let Some(ast) = engine.parsed_for_doc(self.id) {
+                self.index
+                    .rebuild_with_errors(ast, &self.source, self.syntax.has_errors);
+                return;
+            }
+        }
+        // Fallback path — no engine handle or no parsed AST in
+        // session. Walk the local lenient cache directly.
         self.index.rebuild_with_errors(
             &self.syntax.ast,
             &self.source,

@@ -103,6 +103,22 @@ impl ModelicaEngine {
             .map_err(|e| e.to_string())
     }
 
+    /// The engine's view of `doc_id`'s parsed AST, or `None` if the
+    /// document hasn't been upserted yet (or its parse failed).
+    ///
+    /// This is the canonical accessor for code that wants the
+    /// engine-canonical AST of a doc — replaces direct
+    /// `ModelicaDocument::ast()` reads in code paths that should
+    /// follow the engine as source of truth (notably the per-doc
+    /// `Index` rebuild in `Document::rebuild_index`).
+    pub fn parsed_for_doc(
+        &mut self,
+        doc_id: DocumentId,
+    ) -> Option<&rumoca_session::parsing::ast::StoredDefinition> {
+        let uri = self.uri_for_doc.get(&doc_id)?.clone();
+        self.session.parsed_file_query(&uri)
+    }
+
     /// Forget a document. Drops the URI map entry **and** removes the
     /// document from rumoca's session — its parsed AST, per-file
     /// caches, and any resolved-tree state referencing it are
