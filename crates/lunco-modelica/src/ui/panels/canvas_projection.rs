@@ -79,7 +79,17 @@ impl Default for DiagramAutoLayoutSettings {
 /// keyword reject-list). Kept behavior-compatible — see
 /// `tests/rumoca_api_coverage.rs::rumoca_components_match_regex_scan`
 /// for the equivalence check.
-fn scan_component_declarations(source: &str) -> Vec<(String, String)> {
+/// Scanned component with its typed `Placement` annotation
+/// (already extracted at AST-walk time, no per-instance regex on
+/// raw source). `placement` is `None` when the source either
+/// authored none or the rumoca-recovery parse couldn't salvage it.
+struct ScannedComponent {
+    type_name: String,
+    instance_name: String,
+    placement: Option<crate::annotations::Placement>,
+}
+
+fn scan_component_declarations(source: &str) -> Vec<ScannedComponent> {
     let ast = match rumoca_phase_parse::parse_to_ast(source, "scan.mo") {
         Ok(a) => a,
         Err(_) => return Vec::new(),
@@ -87,7 +97,11 @@ fn scan_component_declarations(source: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (_class_name, class_def) in &ast.classes {
         for (name, comp) in class_def.iter_components() {
-            out.push((format!("{}", comp.type_name), name.to_string()));
+            out.push(ScannedComponent {
+                type_name: format!("{}", comp.type_name),
+                instance_name: name.to_string(),
+                placement: crate::annotations::extract_placement(&comp.annotation),
+            });
         }
     }
     out
@@ -168,15 +182,14 @@ fn canonical_edge_key(
     if a <= b { (a, b) } else { (b, a) }
 }
 
-/// Build a `VisualDiagram` from scanner-extracted `(type, name)`
-/// pairs. Used only when the AST-based path returned nothing — i.e.
-/// rumoca failed to produce components for the class. Placement
-/// annotations are looked up per-instance via the existing
-/// regex-based extractor inside [`import_model_to_diagram`]; here
-/// we build a plain grid-layout fallback.
+/// Build a `VisualDiagram` from [`ScannedComponent`] entries
+/// (typed `Placement` already extracted at scan time). Used only
+/// when the AST-based projection path returned nothing — i.e.
+/// the strict parse passed but the typed Index walker couldn't
+/// produce a target-class graph. Falls back to grid layout for
+/// components without authored placements.
 fn build_visual_diagram_from_scan(
-    source: &str,
-    scanned: &[(String, String)],
+    scanned: &[ScannedComponent],
     layout: &DiagramAutoLayoutSettings,
 ) -> VisualDiagram {
     let mut diagram = VisualDiagram::default();
@@ -186,50 +199,41 @@ fn build_visual_diagram_from_scan(
         .map(|c| (c.msl_path.as_str(), c))
         .collect();
 
-    for (idx, (type_path, instance_name)) in scanned.iter().enumerate() {
+    for (idx, comp) in scanned.iter().enumerate() {
         // Only render components whose type resolves against the MSL
         // index. Unresolved types stay in the source — the user sees
         // them in the code editor and the parse-error badge — but
         // aren't rendered here because we don't have port info for
         // an unknown type.
-        let Some(def) = msl_lookup_by_path.get(type_path.as_str()).cloned() else {
+        let Some(def) = msl_lookup_by_path.get(comp.type_name.as_str()).cloned() else {
             continue;
         };
 
-        // Placement from annotation (best-effort regex); fall back to grid.
-        //
-        // TODO(metamodel-placement): the per-doc Index already extracts
-        // typed `Placement` via `crate::annotations::extract_placement`
-        // during rebuild. This fallback path doesn't have class
-        // context (called from `build_visual_diagram_from_scan` which
-        // operates on raw source), so migrating requires plumbing the
-        // active class through. Defer until placements move to the
-        // metamodel layer (REFACTOR_PLAN.md "stays" list — H).
-        let safe_name = regex::escape(instance_name);
-        let pattern = safe_name
-            + r"(?:\s*\([^)]*\))?\s*annotation\s*\(\s*Placement\s*\(\s*transformation\s*\(\s*extent\s*=\s*\{\{\s*([-\d\.]+)\s*,\s*([-\d\.]+)\s*\}\s*,\s*\{\s*([-\d\.]+)\s*,\s*([-\d\.]+)\s*\}\}";
-        let annotation_pos = regex::Regex::new(&pattern).ok().and_then(|re| {
-            re.captures(source).and_then(|cap| {
-                let x1 = cap[1].parse::<f32>().ok()?;
-                let y1 = cap[2].parse::<f32>().ok()?;
-                let x2 = cap[3].parse::<f32>().ok()?;
-                let y2 = cap[4].parse::<f32>().ok()?;
-                Some(egui::Pos2::new((x1 + x2) / 2.0, -((y1 + y2) / 2.0)))
-            })
-        });
-        let pos = annotation_pos.unwrap_or_else(|| {
-            let cols = layout.cols.max(1);
-            let row = idx / cols;
-            let col = idx % cols;
-            egui::Pos2::new(
-                col as f32 * layout.spacing_x,
-                row as f32 * layout.spacing_y,
-            )
-        });
+        // Placement from the typed annotation captured at scan-time
+        // (no per-instance regex). Modelica's transformation extent
+        // is in MLS coordinate units (Y-up); the canvas uses Y-down,
+        // so flip the centre's Y the same way the main projector does.
+        let pos = match &comp.placement {
+            Some(p) => {
+                let e = &p.transformation.extent;
+                let cx = (e.p1.x + e.p2.x) / 2.0;
+                let cy = (e.p1.y + e.p2.y) / 2.0;
+                egui::Pos2::new(cx as f32, -(cy as f32))
+            }
+            None => {
+                let cols = layout.cols.max(1);
+                let row = idx / cols;
+                let col = idx % cols;
+                egui::Pos2::new(
+                    col as f32 * layout.spacing_x,
+                    row as f32 * layout.spacing_y,
+                )
+            }
+        };
 
         let node_id = diagram.add_node(def.clone(), pos);
         if let Some(n) = diagram.get_node_mut(node_id) {
-            n.instance_name = instance_name.clone();
+            n.instance_name = comp.instance_name.clone();
         }
     }
     diagram
@@ -322,7 +326,7 @@ pub fn import_model_to_diagram_from_ast(
         }
         let scanned = scan_component_declarations(source);
         if !scanned.is_empty() {
-            return Some(build_visual_diagram_from_scan(source, &scanned, layout));
+            return Some(build_visual_diagram_from_scan(&scanned, layout));
         }
         return None;
     }

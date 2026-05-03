@@ -2148,47 +2148,55 @@ fn collect_parent_imports(class_file: &std::path::Path) -> Vec<String> {
         if !pkg.exists() {
             break;
         }
-        if let Ok(src) = std::fs::read_to_string(&pkg) {
-            // Only scan the **package preamble** — the region
-            // between the enclosing `package Foo` header and the
-            // first nested class declaration. MSL package.mo files
-            // routinely inline whole example models, whose own
-            // local `import` statements must NOT be promoted into
-            // the duplicated class (seen in the wild:
-            // `Blocks/Examples/package.mo` contains multiple
-            // nested examples each doing `import distribution =
-            // Modelica.Math.Distributions.X.density;` — lifting
-            // two of those into one class yields a duplicate-alias
-            // parse error).
-            // TODO(ast-migrate): walk the parent's parsed AST instead
-            // of regex-scanning lines. Today this reads sibling
-            // package.mo files outside the active document, which
-            // means we'd need to either route them through the
-            // workspace `ModelicaEngine` (lazy upsert pattern) or
-            // hand-parse via `rumoca_phase_parse::parse_to_ast`.
-            // Either is more involved than a TODO marker — defer.
-            let class_opener = regex::Regex::new(
-                r"^\s*(?:partial\s+)?(?:encapsulated\s+)?(?:model|block|class|connector|function|record|package|type)\s+",
-            );
-            let mut entered_package = false;
-            let mut level: Vec<String> = Vec::new();
-            for line in src.lines() {
-                let is_opener = class_opener
-                    .as_ref()
-                    .map(|re| re.is_match(line))
-                    .unwrap_or(false);
-                if is_opener {
-                    if entered_package {
-                        break;
-                    }
-                    entered_package = true;
+        // Parse the package.mo and walk the outer package class's
+        // typed `imports` list. Nested-class imports stay scoped to
+        // their own ClassDef.imports — only the package preamble's
+        // imports leak into duplicated children, matching the prior
+        // regex's "first opener through second opener" boundary.
+        // `parse_files_parallel` hits rumoca's content-hash artifact
+        // cache, so walking up a deep MSL hierarchy is cheap on
+        // repeat duplications.
+        let pairs = if std::env::var_os("LUNCO_NO_PARSE").is_some() {
+            None
+        } else {
+            rumoca_session::parsing::parse_files_parallel(&[pkg.clone()]).ok()
+        };
+        if let Some(mut pairs) = pairs {
+            // Re-read source so we can slice each import's location
+            // back into its original `import ...;` text — preserves
+            // alias / wildcard / selective forms verbatim.
+            let src = match std::fs::read_to_string(&pkg) {
+                Ok(s) => s,
+                Err(_) => {
+                    dir = d.parent();
                     continue;
                 }
-                if entered_package {
-                    let t = line.trim();
-                    if t.starts_with("import ") && t.ends_with(';') {
-                        level.push(t.to_string());
+            };
+            let stored = pairs.pop().map(|(_, s)| s);
+            let pkg_class = stored.as_ref().and_then(|s| s.classes.values().next());
+            let mut level: Vec<String> = Vec::new();
+            if let Some(class) = pkg_class {
+                use rumoca_session::parsing::ast::Import;
+                for imp in &class.imports {
+                    let loc = match imp {
+                        Import::Qualified { location, .. }
+                        | Import::Renamed { location, .. }
+                        | Import::Unqualified { location, .. }
+                        | Import::Selective { location, .. } => location,
+                    };
+                    let start = loc.start as usize;
+                    let end = loc.end as usize;
+                    let Some(slice) = src.get(start..end) else {
+                        continue;
+                    };
+                    let mut text = slice.trim().to_string();
+                    // Rumoca's import location ranges sometimes omit
+                    // the trailing `;`. Normalise so the injected
+                    // `import ...;` lines parse uniformly downstream.
+                    if !text.ends_with(';') {
+                        text.push(';');
                     }
+                    level.push(text);
                 }
             }
             // Level is the outer-relative-to-previous step. Prepend
@@ -2317,16 +2325,65 @@ fn rewrite_duplicated_source(
     buf.push_str(new_name);
     buf.push_str(&src[e_end..]);
 
-    // TODO(rumoca: within-clause editor) — once rumoca exposes a typed
-    // within-rewrite helper, drop this regex. Within-strip is the only
-    // remaining regex in the rename/duplicate flow.
-    let within_re =
-        regex::Regex::new(r"(?m)^\s*within\s*[A-Za-z_][\w\.]*\s*;\s*\n?").ok();
-    if let Some(re) = within_re {
-        re.replace(&buf, "").into_owned()
-    } else {
-        buf
+    // Within-clause strip via the parsed AST: rumoca's
+    // `StoredDefinition::within` carries the clause's `Name` with
+    // per-token byte locations. We bracket the clause by walking
+    // backward from the first name-token to the `within` keyword
+    // and forward from the last name-token to the closing `;`
+    // (plus an optional trailing newline). Within byte offsets are
+    // valid against `buf` because the only earlier splice — header
+    // rename — occurs strictly *after* the within clause, so the
+    // clause's offsets in `src` carry through unchanged.
+    strip_within_clause(&buf, &ast.within)
+}
+
+fn strip_within_clause(
+    buf: &str,
+    within: &Option<rumoca_session::parsing::ast::Name>,
+) -> String {
+    let Some(name) = within else {
+        return buf.to_string();
+    };
+    let Some(first) = name.name.first() else {
+        return buf.to_string();
+    };
+    let Some(last) = name.name.last() else {
+        return buf.to_string();
+    };
+    let name_start = first.location.start as usize;
+    let name_end = last.location.end as usize;
+    if name_end > buf.len() || name_start > name_end {
+        return buf.to_string();
     }
+    // Scan backward for the `within` keyword sitting before the name.
+    let Some(kw_pos) = buf[..name_start].rfind("within") else {
+        return buf.to_string();
+    };
+    // Consume leading whitespace on the same line so the clause's
+    // indent disappears with it. Don't cross a newline — preserve
+    // any blank line authored above the within.
+    let mut clause_start = kw_pos;
+    let bytes = buf.as_bytes();
+    while clause_start > 0 {
+        let c = bytes[clause_start - 1];
+        if c == b' ' || c == b'\t' {
+            clause_start -= 1;
+        } else {
+            break;
+        }
+    }
+    // Forward to the `;` terminator after the name.
+    let Some(semi_offset) = buf[name_end..].find(';') else {
+        return buf.to_string();
+    };
+    let mut clause_end = name_end + semi_offset + 1;
+    if clause_end < buf.len() && bytes[clause_end] == b'\n' {
+        clause_end += 1;
+    }
+    let mut out = String::with_capacity(buf.len() - (clause_end - clause_start));
+    out.push_str(&buf[..clause_start]);
+    out.push_str(&buf[clause_end..]);
+    out
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
