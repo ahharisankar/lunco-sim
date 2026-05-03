@@ -6227,7 +6227,37 @@ fn render_empty_diagram_overlay(
         .clone()
         .unwrap_or_else(|| "(unnamed)".into());
 
-    let counts = empty_overlay_counts_cached(source.as_ref());
+    // Read counts from the per-doc Index. Falls back to all-zeros
+    // when the document hasn't installed yet (e.g. drill-in tab still
+    // loading) or the active class isn't in the index.
+    let counts = {
+        let active_doc = active_doc_from_world(world);
+        let drilled = active_doc.and_then(|doc| {
+            world
+                .get_resource::<DrilledInClassNames>()
+                .and_then(|m| m.get(doc).map(str::to_string))
+        });
+        let registry = world.resource::<ModelicaDocumentRegistry>();
+        active_doc
+            .and_then(|doc| registry.host(doc))
+            .and_then(|host| {
+                let document = host.document();
+                let index = document.index();
+                let qualified = drilled.clone().or_else(|| {
+                    index
+                        .classes
+                        .values()
+                        .find(|c| !matches!(c.kind, crate::index::ClassKind::Package))
+                        .map(|c| c.name.clone())
+                })?;
+                Some(empty_overlay_counts_from_index(
+                    index,
+                    &qualified,
+                    document.source(),
+                ))
+            })
+            .unwrap_or_default()
+    };
 
     // Pull the live class info out of the document registry so we
     // can show real symbol names + (when authored) the class's own
@@ -6767,51 +6797,17 @@ fn paint_class_type_badge(
 
 /// One-time-compiled regexes used by the empty-diagram summary.
 ///
-/// Previously [`count_matches`] compiled a fresh `Regex` on every
-/// call — fine for small user sources, catastrophic for 184 KB
-/// drill-ins where the overlay fires 5× per frame at 60 Hz. Cached
-/// here via `OnceLock` so compile cost is paid once at first use
-/// and the per-frame work collapses to scan-only.
-// TODO(index-migrate): replace the regex scan with an Index read.
-// The per-doc [`crate::index::ModelicaIndex`] already tracks
-// components (variability/causality), connections, and (after
-// further growth) equations — counts can be derived directly:
-//   - parameters: components_in_class().filter(|c| c.variability == Parameter).count()
-//   - inputs:     components_in_class().filter(|c| c.causality == Input).count()
-//   - outputs:    components_in_class().filter(|c| c.causality == Output).count()
-//   - connects:   connections_in_class().count()
-//   - equations:  Index doesn't track algebraic equations yet — needs growth.
-// Migrating this saves the 5-pattern-per-frame scan and removes the
-// hand-rolled BLAKE3 cache below. Deferred: the existing OnceLock
-// cache makes per-frame cost low, and `equations` needs Index growth
-// first.
-fn empty_overlay_regexes() -> &'static [(&'static str, regex::Regex); 5] {
-    use std::sync::OnceLock;
-    static RE: OnceLock<[(&str, regex::Regex); 5]> = OnceLock::new();
-    RE.get_or_init(|| {
-        [
-            ("parameters", regex::Regex::new(r"(?m)^\s*parameter\s+").unwrap()),
-            ("inputs", regex::Regex::new(r"(?m)^\s*input\s+").unwrap()),
-            ("outputs", regex::Regex::new(r"(?m)^\s*output\s+").unwrap()),
-            (
-                "equations",
-                regex::Regex::new(
-                    r"(?m)^\s*(?:der\s*\(|[A-Za-z_]\w*\s*=\s*[^=])",
-                )
-                .unwrap(),
-            ),
-            (
-                "connects",
-                regex::Regex::new(r"\bconnect\s*\(").unwrap(),
-            ),
-        ]
-    })
-}
-
-/// Counts for the empty-diagram overlay, cached per source so the
-/// ~5 regex scans on large MSL files aren't re-run every frame.
-/// Key is `(source length, blake3 hash of the first 4 KB)` — cheap
-/// to compute, collision rate negligible for this use.
+/// Counts for the empty-diagram overlay. Read from the per-doc
+/// [`crate::index::ModelicaIndex`] — components by variability /
+/// causality, connections by class. `equations` falls back to a
+/// regex scan against the class's source slice because Index
+/// doesn't track algebraic equations yet (would require growing
+/// `ClassEntry` with an equation count during rebuild).
+///
+/// O(components_in_class) per call. The Index is rebuilt on every
+/// successful parse install, so callers see fresh counts as soon
+/// as the AST refreshes — same staleness contract as every other
+/// Index reader.
 #[derive(Clone, Copy, Default)]
 struct EmptyOverlayCounts {
     params: usize,
@@ -6821,43 +6817,51 @@ struct EmptyOverlayCounts {
     connects: usize,
 }
 
-fn empty_overlay_counts_cached(source: &str) -> EmptyOverlayCounts {
-    use std::sync::Mutex;
-    use std::sync::OnceLock;
-    // Source-len keyed cache is intentionally small (1 slot). The
-    // overlay only shows one source at a time per active tab; if
-    // two tabs alternate, worst case is we rescan once on switch.
-    // Can be promoted to a HashMap keyed by DocumentId if tab
-    // switching turns out to be frequent.
-    static CACHE: OnceLock<Mutex<Option<(usize, u64, EmptyOverlayCounts)>>> =
-        OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(None));
-    let prefix_hash = {
-        let mut h: u64 = source.len() as u64;
-        for b in source.as_bytes().iter().take(4096) {
-            h = h.wrapping_mul(0x100000001b3).wrapping_add(*b as u64);
+fn empty_overlay_counts_from_index(
+    index: &crate::index::ModelicaIndex,
+    qualified: &str,
+    source: &str,
+) -> EmptyOverlayCounts {
+    use crate::index::{Causality, Variability};
+    let mut counts = EmptyOverlayCounts::default();
+    for comp in index.components_in_class(qualified) {
+        if matches!(comp.variability, Variability::Parameter) {
+            counts.params += 1;
         }
-        h
-    };
-    if let Ok(guard) = cache.lock() {
-        if let Some((len, hash, counts)) = *guard {
-            if len == source.len() && hash == prefix_hash {
-                return counts;
-            }
+        match comp.causality {
+            Causality::Input => counts.inputs += 1,
+            Causality::Output => counts.outputs += 1,
+            Causality::None => {}
         }
     }
-    let regexes = empty_overlay_regexes();
-    let counts = EmptyOverlayCounts {
-        params: regexes[0].1.find_iter(source).count(),
-        inputs: regexes[1].1.find_iter(source).count(),
-        outputs: regexes[2].1.find_iter(source).count(),
-        equations: regexes[3].1.find_iter(source).count(),
-        connects: regexes[4].1.find_iter(source).count(),
-    };
-    if let Ok(mut guard) = cache.lock() {
-        *guard = Some((source.len(), prefix_hash, counts));
-    }
+    counts.connects = index.connections_in_class(qualified).count();
+    // TODO(index-migrate): track an equation count on `ClassEntry`
+    // during rebuild so this falls out of the Index too. Today the
+    // empty-diagram overlay's "X equations" tile is the only reader,
+    // so a class-scoped regex over the source slice is acceptable —
+    // it runs once per render and only on the source bytes belonging
+    // to the active class (when the class entry has a `source_range`).
+    let scan_target = index
+        .classes
+        .get(qualified)
+        .and_then(|e| e.source_range.as_ref())
+        .and_then(|r| {
+            let start = r.start as usize;
+            let end = r.end as usize;
+            source.get(start..end)
+        })
+        .unwrap_or(source);
+    counts.equations = equation_count_regex(scan_target);
     counts
+}
+
+fn equation_count_regex(source: &str) -> usize {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"(?m)^\s*(?:der\s*\(|[A-Za-z_]\w*\s*=\s*[^=])").unwrap()
+    });
+    re.find_iter(source).count()
 }
 
 // ─── Drill-in ───────────────────────────────────────────────────────
