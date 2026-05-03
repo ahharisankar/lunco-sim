@@ -42,10 +42,24 @@
 
 use bevy::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use crate::engine::ModelicaEngine;
 use lunco_doc::{Document, DocumentId};
+
+/// Process-wide accessor for the workbench's engine handle. Set
+/// once during plugin init and read from non-Bevy contexts (static
+/// helpers in `class_cache`, async tasks, etc.) that can't take a
+/// `Res<ModelicaEngineHandle>` parameter.
+///
+/// Returns `None` before `ModelicaEnginePlugin::build` has run —
+/// callers should treat that as "no engine yet" (same as MSL bundle
+/// loading: a query before boot returns empty).
+static GLOBAL_ENGINE: OnceLock<ModelicaEngineHandle> = OnceLock::new();
+
+pub fn global_engine_handle() -> Option<&'static ModelicaEngineHandle> {
+    GLOBAL_ENGINE.get()
+}
 
 /// Process-wide handle to the workbench's [`ModelicaEngine`].
 ///
@@ -153,8 +167,87 @@ pub struct ModelicaEnginePlugin;
 
 impl Plugin for ModelicaEnginePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ModelicaEngineHandle>()
+        // Install the resource and mirror it into the process-wide
+        // `GLOBAL_ENGINE` slot so static helpers (`class_cache`,
+        // off-thread projection tasks) read the same handle the
+        // resource exposes. The clone is `Arc`-cheap.
+        let handle = ModelicaEngineHandle::default();
+        let _ = GLOBAL_ENGINE.set(handle.clone());
+        app.insert_resource(handle)
             .init_resource::<EngineSyncCursor>()
-            .add_systems(Update, drive_engine_sync);
+            .init_resource::<MslBootstrapState>()
+            .add_systems(Update, (drive_engine_sync, drive_msl_bootstrap));
     }
+}
+
+/// Tracks whether the MSL bundle has been bootstrapped into the
+/// workspace engine. Once `Done`, `drive_msl_bootstrap` becomes a
+/// no-op for the rest of the session.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+enum MslBootstrapState {
+    #[default]
+    Pending,
+    Done,
+}
+
+/// Bevy system: when the MSL bundle becomes ready, install it as a
+/// `DurableExternal` source root in the workspace engine in one
+/// bulk operation. Runs once per session — flips
+/// [`MslBootstrapState`] to `Done` and idles thereafter.
+///
+/// **Web fast path**: when `msl_remote::global_parsed_msl()` returns
+/// pre-parsed `Vec<(uri, StoredDefinition)>` from the asset bundle,
+/// we route through [`rumoca_session::Session::replace_parsed_source_set`]
+/// — zero re-parsing, just register the parsed defs as a source root.
+///
+/// **Native path**: when the bundle is filesystem-resident
+/// (`MslAssetSource::Filesystem`), we leave the source root unbootstrapped
+/// here. The lazy fallback in `class_cache::peek_or_load_msl_class`
+/// reads individual files into the session via `add_document` on
+/// first miss. Tradeoff: native pays per-class parse cost amortised
+/// over the session, vs eager full-MSL parse at boot.
+fn drive_msl_bootstrap(
+    handle: Res<ModelicaEngineHandle>,
+    msl_state: Option<Res<lunco_assets::msl::MslLoadState>>,
+    mut bootstrap: ResMut<MslBootstrapState>,
+) {
+    if matches!(*bootstrap, MslBootstrapState::Done) {
+        return;
+    }
+    let Some(state) = msl_state else { return };
+    if !matches!(*state, lunco_assets::msl::MslLoadState::Ready { .. }) {
+        return;
+    }
+    // Pre-parsed bundle path (web): bulk-install via the parsed-set
+    // API. Both the source bytes and the strict AST live in
+    // `GLOBAL_PARSED_MSL`; we just hand the AST half over.
+    let parsed = crate::msl_remote::global_parsed_msl();
+    if let Some(docs) = parsed {
+        let defs: Vec<(String, rumoca_session::parsing::ast::StoredDefinition)> =
+            docs.iter().map(|(u, d)| (u.clone(), d.clone())).collect();
+        let count = defs.len();
+        let mut engine = handle.lock();
+        engine.session_mut().replace_parsed_source_set(
+            "msl",
+            rumoca_session::compile::SourceRootKind::DurableExternal,
+            defs,
+            None,
+        );
+        bevy::log::info!(
+            "[EngineBootstrap] installed MSL into workspace engine: {} pre-parsed docs",
+            count
+        );
+        *bootstrap = MslBootstrapState::Done;
+        return;
+    }
+    // Native filesystem path: leave eager bulk load deferred — the
+    // lazy fallback in `class_cache::peek_or_load_msl_class` covers
+    // it. Mark as `Done` so we don't re-check every tick; if a
+    // `MslAssetSource::Filesystem` user later wants eager preload,
+    // an explicit command can call `engine.load_library_files`
+    // against `lunco_assets::msl_dir()`.
+    bevy::log::info!(
+        "[EngineBootstrap] MSL ready; native fs path stays lazy (workspace engine populated on demand)"
+    );
+    *bootstrap = MslBootstrapState::Done;
 }
