@@ -1018,51 +1018,32 @@ fn render_docs_view(ui: &mut egui::Ui, world: &mut World) {
             let drilled = world
                 .get_resource::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
                 .and_then(|m| m.get(doc).map(str::to_string));
-            let ast = world
+            // All four fields read from the per-doc Index. Description
+            // and Documentation(info=, revisions=) are pre-extracted
+            // during rebuild — no AST walk per render.
+            world
                 .resource::<crate::ui::state::ModelicaDocumentRegistry>()
                 .host(doc)
-                .and_then(|h| h.document().ast().result.as_ref().ok().cloned());
-            match ast {
-                Some(ast) => {
-                    let class = if let Some(q) = drilled.as_deref() {
-                        walk_qualified_class(ast.as_ref(), q)
+                .and_then(|h| {
+                    let index = h.document().index();
+                    let entry = if let Some(q) = drilled.as_deref() {
+                        index.classes.get(q)
                     } else {
-                        use rumoca_session::parsing::ClassType;
-                        // Prefer the first non-Package class (the model
-                        // a `.mo` file usually advertises). Fall back to
-                        // the first class regardless of kind so that
-                        // package-only files (e.g. third-party
-                        // `UserGuide.mo`, `package.mo`) still surface
-                        // their `Documentation(info=…)` annotation
-                        // instead of rendering as "(no documentation)".
-                        ast.classes
-                            .iter()
-                            .find(|(_, c)| !matches!(c.class_type, ClassType::Package))
-                            .or_else(|| ast.classes.iter().next())
-                            .map(|(n, c)| (n.clone(), c))
+                        index
+                            .classes
+                            .values()
+                            .find(|c| !matches!(c.kind, crate::index::ClassKind::Package))
+                            .or_else(|| index.classes.values().next())
+                    }?;
+                    let desc = if entry.description.is_empty() {
+                        None
+                    } else {
+                        Some(entry.description.clone())
                     };
-                    class
-                        .map(|(name, class)| {
-                            let (info, revs) =
-                                extract_documentation(&class.annotation);
-                            // Class docstring (Modelica's "comment
-                            // string" — first quoted string after
-                            // the class header). Lives on the AST
-                            // class node as `description: Vec<Token>`;
-                            // we take the first token, strip the
-                            // surrounding quotes, drop empties.
-                            let desc = class
-                                .description
-                                .iter()
-                                .next()
-                                .map(|t| t.text.as_ref().trim_matches('"').to_string())
-                                .filter(|s| !s.is_empty());
-                            (Some(name), desc, info, revs)
-                        })
-                        .unwrap_or((None, None, None, None))
-                }
-                None => (None, None, None, None),
-            }
+                    let (info, revs) = entry.documentation.clone();
+                    Some((Some(entry.name.clone()), desc, info, revs))
+                })
+                .unwrap_or((None, None, None, None))
         }
     };
 

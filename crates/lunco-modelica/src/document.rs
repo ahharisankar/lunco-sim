@@ -328,7 +328,7 @@ impl ModelicaDocument {
             Some(0)
         };
         let mut index = crate::index::ModelicaIndex::new();
-        index.rebuild_from_ast(&syntax.ast, &source);
+        index.rebuild_with_errors(&syntax.ast, &source, syntax.has_errors);
         Self {
             id,
             source,
@@ -477,7 +477,11 @@ impl ModelicaDocument {
     /// from the current [`SyntaxCache`]. Called automatically after
     /// every parse install; manual callers shouldn't need this.
     fn rebuild_index(&mut self) {
-        self.index.rebuild_from_ast(&self.syntax.ast, &self.source);
+        self.index.rebuild_with_errors(
+            &self.syntax.ast,
+            &self.source,
+            self.syntax.has_errors,
+        );
     }
 
     /// A clone of the source text (used by the off-thread parse task).

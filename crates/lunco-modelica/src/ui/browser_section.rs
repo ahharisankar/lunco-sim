@@ -131,21 +131,21 @@ impl BrowserSection for ModelicaSection {
 /// the outer `CollapsingHeader` row carrying this doc's name has
 /// already been drawn; we just paint the children inline.
 ///
-/// Source-of-truth read of [`ModelicaDocumentRegistry`] derived
-/// through the doc's [`SyntaxCache`]. Stateless; the registry's
-/// off-thread refresh keeps the AST current.
+/// Source-of-truth read of [`ModelicaDocumentRegistry`] via the doc's
+/// [`crate::index::ModelicaIndex`]. Stateless; the registry's
+/// off-thread refresh + per-op optimistic patches keep the Index current.
 pub(crate) fn render_workspace_doc(
     ui: &mut egui::Ui,
     ctx: &mut BrowserCtx<'_>,
     doc_id: DocumentId,
 ) {
-    let syntax: std::sync::Arc<SyntaxCache> = match ctx
+    let (classes, has_parse_errors) = match ctx
         .world
         .get_resource::<ModelicaDocumentRegistry>()
         .and_then(|reg| reg.host(doc_id))
-        .map(|host| std::sync::Arc::clone(&host.document().syntax_arc()))
+        .map(|host| classes_from_index(host.document().index()))
     {
-        Some(s) => s,
+        Some(t) => t,
         None => {
             ui.label(
                 egui::RichText::new("(document not in registry)")
@@ -171,8 +171,6 @@ pub(crate) fn render_workspace_doc(
             .get_resource::<DrilledInClassNames>()
             .and_then(|m| m.get(d).map(str::to_string))
     });
-
-    let (classes, has_parse_errors) = classes_from_syntax(&syntax);
 
     // Collapse the redundant wrapper when the document holds a
     // single top-level class whose short name matches the outer
@@ -243,6 +241,69 @@ pub(crate) fn render_workspace_doc(
 /// no allocation beyond the per-class string clones inside the tree.
 fn classes_from_syntax(syntax: &SyntaxCache) -> (Vec<ClassEntry>, bool) {
     (collect_classes(&syntax.ast.classes, ""), syntax.has_errors)
+}
+
+/// Build the same class tree from the per-doc Index. Reads only the
+/// [`crate::index::ClassEntry`]s (no AST walk). Used by the live
+/// renderer; `classes_from_syntax` is kept for the test fixtures
+/// below until those migrate.
+fn classes_from_index(index: &crate::index::ModelicaIndex) -> (Vec<ClassEntry>, bool) {
+    use crate::index::ClassKind;
+    fn map_kind(k: ClassKind) -> ClassType {
+        match k {
+            ClassKind::Model => ClassType::Model,
+            ClassKind::Block => ClassType::Block,
+            ClassKind::Connector => ClassType::Connector,
+            ClassKind::Package => ClassType::Package,
+            ClassKind::Function => ClassType::Function,
+            ClassKind::Class => ClassType::Class,
+            ClassKind::Type => ClassType::Type,
+            ClassKind::Record => ClassType::Record,
+            ClassKind::ExpandableConnector => ClassType::Connector,
+            ClassKind::Operator => ClassType::Operator,
+            ClassKind::OperatorRecord => ClassType::Record,
+        }
+    }
+    fn build_subtree(
+        index: &crate::index::ModelicaIndex,
+        qualified: &str,
+    ) -> Option<ClassEntry> {
+        let entry = index.classes.get(qualified)?;
+        let short = entry
+            .name
+            .rsplit('.')
+            .next()
+            .unwrap_or(&entry.name)
+            .to_string();
+        let description = if entry.description.is_empty() {
+            None
+        } else {
+            Some(entry.description.clone())
+        };
+        let mut children: Vec<ClassEntry> = entry
+            .children
+            .iter()
+            .filter_map(|child_qual| build_subtree(index, child_qual))
+            .collect();
+        children.sort_by_key(|c| (browser_sort_group(c), c.short_name.to_lowercase()));
+        Some(ClassEntry {
+            short_name: short,
+            qualified_path: entry.name.clone(),
+            kind: map_kind(entry.kind),
+            description,
+            children,
+        })
+    }
+
+    // Top-level classes: Index keys whose qualified name has no `.`
+    let mut top: Vec<ClassEntry> = index
+        .classes
+        .keys()
+        .filter(|k| !k.contains('.'))
+        .filter_map(|k| build_subtree(index, k))
+        .collect();
+    top.sort_by_key(|c| (browser_sort_group(c), c.short_name.to_lowercase()));
+    (top, index.has_errors)
 }
 
 // ---------------------------------------------------------------------------

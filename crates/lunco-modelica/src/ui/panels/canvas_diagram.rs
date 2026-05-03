@@ -7073,22 +7073,19 @@ pub fn drive_duplicate_loads(
         // placeholder card and has to click into the package tree
         // manually.
         if let Some(host) = registry.host(doc_id) {
-            if let Some(ast) = host.document().ast().result.as_ref().ok() {
-                // Prefer the explicit `inner_drill` from the binding
-                // — that's the path the user was viewing when they
-                // hit Duplicate, expressed relative to the original
-                // top class. Re-base it onto the renamed top
-                // (e.g. `RocketStage` → `AnnotatedRocketStageCopy.RocketStage`)
-                // so the canvas projects the same inner class on the
-                // new doc. Falls back to the AST-derived first model
-                // when the user duplicated the top class itself.
-                let qualified = match inner_drill.as_deref() {
-                    Some(rest) => Some(format!("{dup_display_name}.{rest}")),
-                    None => crate::ast_extract::extract_model_name_from_ast(ast),
-                };
-                if let Some(q) = qualified {
-                    class_names.set(doc_id, q);
-                }
+            // Read first non-package class from the per-doc Index;
+            // sees optimistic patches and avoids walking the AST.
+            let index = host.document().index();
+            let qualified = match inner_drill.as_deref() {
+                Some(rest) => Some(format!("{dup_display_name}.{rest}")),
+                None => index
+                    .classes
+                    .values()
+                    .find(|c| !matches!(c.kind, crate::index::ClassKind::Package))
+                    .map(|c| c.name.clone()),
+            };
+            if let Some(q) = qualified {
+                class_names.set(doc_id, q);
             }
         }
         // Pre-warm the MSL inheritance chain on a dedicated thread so
@@ -7099,33 +7096,36 @@ pub fn drive_duplicate_loads(
         // scope-chain resolver enough context to walk up to
         // `Modelica.Blocks.Interfaces.SISO`.
         if let Some(host) = registry.host(doc_id) {
-            if let Some(ast) = host.document().ast().result.as_ref().ok() {
-                let within_prefix = ast
-                    .within
-                    .as_ref()
-                    .map(|w| w.to_string())
-                    .unwrap_or_default();
-                let qpath = if within_prefix.is_empty() {
-                    dup_display_name.clone()
-                } else {
-                    format!("{within_prefix}.{dup_display_name}")
-                };
-                if let Some(class) =
-                    crate::diagram::find_class_by_qualified_name(ast, &qpath)
-                {
-                    let bases: Vec<String> = class
-                        .extends
-                        .iter()
-                        .map(|e| e.base_name.to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    if !bases.is_empty() {
-                        bevy::tasks::AsyncComputeTaskPool::get()
-                            .spawn(async move {
-                                crate::class_cache::prewarm_extends_chain(&qpath, &bases);
-                            })
-                            .detach();
-                    }
+            // Read within-prefix + extends from the Index. Both are
+            // pre-extracted during rebuild, so no AST walk per drill-in.
+            let index = host.document().index();
+            let within_prefix = index.within_path.clone().unwrap_or_default();
+            let qpath = if within_prefix.is_empty() {
+                dup_display_name.clone()
+            } else {
+                format!("{within_prefix}.{dup_display_name}")
+            };
+            // Fall back to the short name when the qualified path
+            // isn't directly indexed (e.g. user-typed un-`within`'d
+            // top-level classes).
+            let entry = index
+                .classes
+                .get(&qpath)
+                .or_else(|| index.classes.get(&dup_display_name));
+            if let Some(entry) = entry {
+                let bases: Vec<String> = entry
+                    .extends
+                    .iter()
+                    .filter(|s| !s.is_empty())
+                    .cloned()
+                    .collect();
+                if !bases.is_empty() {
+                    let qpath_for_warm = qpath.clone();
+                    bevy::tasks::AsyncComputeTaskPool::get()
+                        .spawn(async move {
+                            crate::class_cache::prewarm_extends_chain(&qpath_for_warm, &bases);
+                        })
+                        .detach();
                 }
             }
         }

@@ -77,6 +77,12 @@ pub struct ModelicaIndex {
 
     /// Within-clause path, if any (e.g. `"Modelica.Mechanics"`).
     pub within_path: Option<String>,
+
+    /// Whether the lenient parse reported any errors. Mirrors
+    /// [`crate::document::SyntaxCache::has_errors`] so panels can
+    /// surface a "broken file" badge without reaching for the
+    /// syntax cache directly.
+    pub has_errors: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +209,7 @@ impl ModelicaIndex {
     pub fn rebuild_from_ast(&mut self, ast: &ast::StoredDefinition, source: &str) {
         self.generation = self.generation.saturating_add(1);
         self.source = source.to_string();
+        self.has_errors = false; // overwritten by `rebuild_with_errors` when caller knows
         self.components.clear();
         self.component_by_qualified.clear();
         self.components_by_class.clear();
@@ -219,6 +226,19 @@ impl ModelicaIndex {
         for (qualified, class_def) in &ast.classes {
             insert_class_recursive(self, qualified.clone(), class_def);
         }
+    }
+
+    /// Same as [`Self::rebuild_from_ast`] but also records the
+    /// lenient-parse error flag. Use when caller is rebuilding from
+    /// a [`crate::document::SyntaxCache`] (which carries the flag).
+    pub fn rebuild_with_errors(
+        &mut self,
+        ast: &ast::StoredDefinition,
+        source: &str,
+        has_errors: bool,
+    ) {
+        self.rebuild_from_ast(ast, source);
+        self.has_errors = has_errors;
     }
 
     /// Optimistic component-add. Called from
@@ -306,6 +326,18 @@ impl ModelicaIndex {
             .into_iter()
             .flat_map(|keys| keys.iter())
             .filter_map(move |key| self.components.iter().find(|c| c.key == *key))
+    }
+
+    /// Iterate connections in `class` in declaration order.
+    pub fn connections_in_class<'a>(
+        &'a self,
+        class: &str,
+    ) -> impl Iterator<Item = &'a ConnectionEntry> + 'a {
+        self.connections_by_class
+            .get(class)
+            .into_iter()
+            .flat_map(|keys| keys.iter())
+            .filter_map(move |key| self.connections.iter().find(|c| c.key == *key))
     }
 }
 
@@ -407,11 +439,59 @@ fn insert_class_recursive(idx: &mut ModelicaIndex, qualified: String, class_def:
         idx.components.push(entry);
     }
 
+    // Connect equations — `connect(a.p, b.q)` becomes a
+    // [`ConnectionEntry`] with the component+port endpoints split out.
+    // Non-connect equations (algebraic, when, if) are intentionally
+    // skipped — diagram-side panels read connections; full equations
+    // are inspector territory.
+    for eq in &class_def.equations {
+        if let ast::Equation::Connect { lhs, rhs } = eq {
+            let from = endpoint_from_component_ref(lhs);
+            let to = endpoint_from_component_ref(rhs);
+            let key = ConnectionKey(idx.connections.len() as u32);
+            let entry = ConnectionEntry {
+                key,
+                node_id: NodeId::new(format!(
+                    "{}|connect|{}.{}-{}.{}",
+                    qualified,
+                    from.component_name,
+                    from.port.as_deref().unwrap_or(""),
+                    to.component_name,
+                    to.port.as_deref().unwrap_or(""),
+                )),
+                from,
+                to,
+                // TODO(rumoca-annotation-pr): populate from
+                // `connect(...) annotation(Line(points={...}))` once
+                // the rumoca branch lands `Equation::Connect.annotation`.
+                waypoints: Vec::new(),
+                source_range: lhs.get_location().map(|l| {
+                    TextRange::new(l.start as usize, l.end as usize)
+                }),
+            };
+            idx.connections_by_class
+                .entry(qualified.clone())
+                .or_default()
+                .push(key);
+            idx.connections.push(entry);
+        }
+    }
+
     // Recurse nested classes (e.g. examples inside a package).
     for (nested_name, nested_def) in class_def.iter_classes() {
         let nested_qualified = format!("{}.{}", qualified, nested_name);
         insert_class_recursive(idx, nested_qualified, nested_def);
     }
+}
+
+fn endpoint_from_component_ref(cr: &ast::ComponentReference) -> ComponentEndpoint {
+    let component_name = cr
+        .parts
+        .first()
+        .map(|p| p.ident.text.to_string())
+        .unwrap_or_default();
+    let port = cr.parts.get(1).map(|p| p.ident.text.to_string());
+    ComponentEndpoint { component_name, port }
 }
 
 fn annotation_placement_to_pretty(p: crate::annotations::Placement) -> Placement {

@@ -103,6 +103,10 @@ pub mod visual_diagram;
 /// See `docs/architecture/REFACTOR_PLAN.md`.
 pub mod index;
 
+/// Per-Twin Modelica domain engine: long-lived `rumoca_session::Session`
+/// + per-doc URI mapping. Provides cross-file inheritance-merged queries.
+pub mod engine;
+
 /// Simple wrapper around rumoca-session for compiling Modelica models.
 ///
 /// MSL is preloaded into the session at construction time via
