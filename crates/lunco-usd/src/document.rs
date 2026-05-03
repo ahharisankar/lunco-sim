@@ -52,7 +52,7 @@ const CHANGE_HISTORY_CAPACITY: usize = 256;
 /// In Phase 1 every document is a single root layer and every op
 /// targets [`LayerId::root`]. The newtype exists now so future
 /// sublayer-aware editing can extend without changing op shapes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Reflect)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Reflect, serde::Serialize, serde::Deserialize)]
 pub struct LayerId(String);
 
 impl LayerId {
@@ -132,7 +132,7 @@ pub enum UsdChange {
 /// survive). Inverses are recorded as the previous full source via
 /// [`UsdOp::ReplaceSource`] — coarse but always correct, and good
 /// enough until per-op tighter inverses become a profiling target.
-#[derive(Debug, Clone, Reflect)]
+#[derive(Debug, Clone, Reflect, serde::Serialize, serde::Deserialize)]
 pub enum UsdOp {
     /// Replace the entire source buffer with `text`. Inverse is the
     /// previous source as another `ReplaceSource`. Used as the

@@ -41,6 +41,12 @@ pub use commands::{Ack, Mutation, OpId, Reject, Replication, SessionId};
 
 pub use lunco_command_macro::{Command, on_command, register_commands};
 
+/// Re-exported `serde` so the `#[Command]` proc-macro can reference it
+/// via an absolute path (`::lunco_core::serde::*`). Crates using
+/// `#[Command]` do not need their own `serde` dependency — they get it
+/// transitively through `lunco-core`.
+pub use serde;
+
 use bevy::prelude::*;
 
 /// The central plugin for the LunCo simulation core.

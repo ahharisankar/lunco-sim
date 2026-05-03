@@ -657,7 +657,7 @@ fn parse_port_ref(s: &str) -> Option<PortRef> {
 // AGENTS.md §4.1 rule 3).
 
 /// Reflect-friendly placement payload.
-#[derive(Reflect, Clone, Debug, Default)]
+#[derive(Reflect, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ApiPlacement {
     pub x: f32,
     pub y: f32,
@@ -669,7 +669,7 @@ pub struct ApiPlacement {
 /// [`ComponentDecl`] holds these as `Vec<(String, String)>` — the
 /// tuple shape doesn't deserialise cleanly from the JSON callers
 /// actually send, so this struct is the wire form.
-#[derive(Reflect, Clone, Debug, Default)]
+#[derive(Reflect, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ApiModification {
     pub name: String,
     pub value: String,
@@ -683,7 +683,7 @@ pub struct ApiModification {
 /// Connection variants encode `from`/`to` as separate `component` +
 /// `port` strings rather than dot-paths so the Reflect deserializer
 /// can validate fields directly without parsing string syntax.
-#[derive(Reflect, Clone, Debug, Default)]
+#[derive(Reflect, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub enum ApiOp {
     /// Default value for Reflect — never appears in real payloads.
     #[default]

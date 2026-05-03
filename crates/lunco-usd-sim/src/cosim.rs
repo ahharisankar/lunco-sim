@@ -162,6 +162,7 @@ fn dispatch_modelica(
         session_id: 0,
         model_name,
         source,
+        extra_sources: Vec::new(),
         stream: None,
     });
 }

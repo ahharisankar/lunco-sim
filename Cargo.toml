@@ -98,6 +98,8 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "wayland",                     # Linux Wayland backend (avoids XWayland stalls on Wayland sessions)
     "bevy_picking",                # picking core (sub-backends are opt-in)
     "trace_tracy",                 # Tracy profiler client — connect with tracy-profiler
+    "serialize",                   # serde Serialize/Deserialize for Entity, Vec3, Quat, Handle, etc.
+                                   # Enables `#[Command]` to always derive serde without per-field worry.
 ] }
 lunco-assets = { path = "crates/lunco-assets" }
 avian3d = { version = "0.6.1", default-features = false, features = ["3d", "f64", "parry-f64", "parallel", "debug-plugin", "default-collider", "collider-from-mesh", "bevy_diagnostic", "xpbd_joints"] }

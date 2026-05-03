@@ -43,15 +43,24 @@ use syn::{
 
 /// Attribute macro that marks a struct as a typed simulation command.
 ///
-/// Replaces the struct with one that has `Event + Reflect + Clone + Debug` derives.
+/// Always derives:
+/// - `bevy::Event` — dispatchable on the Bevy command bus.
+/// - `bevy::Reflect` + `#[reflect(Event)]` — ad-hoc dispatch from the
+///   HTTP API's reflection-based deserializer.
+/// - `Clone, Debug`.
+/// - `serde::Serialize, serde::Deserialize` — typed roundtrip for
+///   journals, network sync, CLI clients, AI-agent flows. Requires the
+///   workspace's bevy `serialize` feature so `Entity`, `Vec3`, `Handle`
+///   etc. cooperate.
 ///
-/// Use `#[Command(default)]` to also derive `Default` for reflect-based construction:
-/// ```ignore
-/// #[Command(default)]  // Adds Default derive + #[reflect(Default)]
-/// pub struct CaptureScreenshot {
-///     pub target: Option<Entity>,
-/// }
-/// ```
+/// Optional keyword:
+///
+/// - `default` — also derive `Default` and emit `#[serde(default)]` so
+///   JSON with omitted fields fills in defaults.
+///   ```ignore
+///   #[Command(default)]
+///   pub struct OpenFile { pub path: String, pub doc: DocumentId }
+///   ```
 #[proc_macro_attribute]
 pub fn Command(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
@@ -60,9 +69,29 @@ pub fn Command(attr: TokenStream, item: TokenStream) -> TokenStream {
     let generics = &input.generics;
     let (_impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
 
-    // Check for "default" keyword in attributes
+    // Parse comma-separated keywords from the attribute.
     let attr_str = attr.to_string();
-    let wants_default = attr_str.trim() == "default";
+    let keywords: std::collections::HashSet<&str> = attr_str
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let wants_default = keywords.contains("default");
+
+    // Reject unknown keywords so typos don't silently no-op.
+    // `serde` was previously opt-in; it's now always on. Accept it as
+    // a no-op for one release to avoid breaking callers that already
+    // wrote `#[Command(default, serde)]`.
+    for kw in &keywords {
+        if !matches!(*kw, "default" | "serde") {
+            return syn::Error::new_spanned(
+                &input,
+                format!("unknown #[Command] keyword: `{}` (expected `default`)", kw),
+            )
+            .to_compile_error()
+            .into();
+        }
+    }
 
     let fields = match &input.data {
         Data::Struct(ds) => match &ds.fields {
@@ -75,21 +104,42 @@ pub fn Command(attr: TokenStream, item: TokenStream) -> TokenStream {
             .to_compile_error().into(),
     };
 
-    let (derive, reflect) = if wants_default {
-        (
-            quote!(bevy::prelude::Event, bevy::prelude::Reflect, Clone, Debug, Default),
-            quote!(#[reflect(Event, Default)]),
-        )
+    let mut derives: Vec<TokenStream2> = vec![
+        quote!(bevy::prelude::Event),
+        quote!(bevy::prelude::Reflect),
+        quote!(Clone),
+        quote!(Debug),
+        // Fully-qualified through lunco-core's re-export so callers
+        // don't need their own `serde` dependency.
+        quote!(::lunco_core::serde::Serialize),
+        quote!(::lunco_core::serde::Deserialize),
+    ];
+    if wants_default {
+        derives.push(quote!(Default));
+    }
+
+    let reflect = if wants_default {
+        quote!(#[reflect(Event, Default)])
     } else {
-        (
-            quote!(bevy::prelude::Event, bevy::prelude::Reflect, Clone, Debug),
-            quote!(#[reflect(Event)]),
-        )
+        quote!(#[reflect(Event)])
+    };
+
+    // `#[serde(crate = "...")]` tells the serde derive where to find
+    // the `serde` crate items it generates references to. Required
+    // because we route through lunco-core's re-export instead of a
+    // direct `serde` dependency at every call site.
+    let serde_crate_attr = quote!(#[serde(crate = "::lunco_core::serde")]);
+    let serde_default_attr = if wants_default {
+        quote!(#[serde(default)])
+    } else {
+        quote!()
     };
 
     let expanded = quote! {
-        #[derive(#derive)]
+        #[derive(#(#derives),*)]
         #reflect
+        #serde_crate_attr
+        #serde_default_attr
         #vis struct #name #generics #where_clause {
             #fields
         }
