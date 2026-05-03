@@ -991,10 +991,10 @@ fn register_local_class(
             // projection task (see telemetry: `[Projection] import
             // done in 39879ms: 4 nodes 5 edges`). The non-blocking
             // path returns None for cold-cache classes; the icon
-            // resolver falls back to defaults (rectangle + label),
-            // and the next prewarm-driven re-projection picks up the
-            // inherited graphics once `prewarm_extends_chain` has
-            // populated the cache off-thread.
+            // resolver falls back to defaults (rectangle + label).
+            // A subsequent edit / drill-in cycle warms the engine
+            // session and the next projection picks up inherited
+            // graphics.
             crate::class_cache::peek_msl_class_cached(name)
         };
     let mut visited = std::collections::HashSet::new();

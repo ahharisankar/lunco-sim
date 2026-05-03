@@ -2824,11 +2824,6 @@ pub struct CanvasDocState {
     /// node identity (already true). 30 % of edits hit the partial
     /// path — see <follow-up issue> when ready.
     pub last_seen_source_hash: u64,
-    /// MSL pre-warm generation observed at the last successful
-    /// projection. When `class_cache::msl_prewarm_generation()`
-    /// advances past this, the projection is forced to re-run so
-    /// inherited components surfaced by the warm cache appear.
-    pub last_seen_prewarm_gen: u64,
     /// Set by the [`crate::ui::commands::FitCanvas`] observer; the
     /// canvas render system consumes it next frame and runs Fit
     /// against the *actual* widget rect (rather than the hardcoded
@@ -2905,7 +2900,6 @@ impl Default for CanvasDocState {
             last_seen_gen: 0,
             canvas_acked_gen: 0,
             last_seen_source_hash: 0,
-            last_seen_prewarm_gen: 0,
             pending_fit: false,
             last_seen_target: None,
             context_menu: None,
@@ -3958,12 +3952,6 @@ pub struct ProjectionTask {
     /// task completes — used by the next gen-bump check to skip
     /// reprojection on no-op edits (whitespace, comments).
     pub source_hash: u64,
-    /// MSL pre-warm generation observed at spawn time. Saved onto
-    /// `CanvasDocState::last_seen_prewarm_gen` when the task
-    /// completes — *not* the live value at completion time, so a
-    /// pre-warm that landed mid-projection still triggers a
-    /// follow-up reproject.
-    pub prewarm_gen_at_spawn: u64,
 }
 
 /// Snapshot of a right-click: where to anchor the popup + what it
@@ -4071,8 +4059,6 @@ impl Panel for CanvasDiagramPanel {
                 .get_resource::<DrilledInClassNames>()
                 .and_then(|m| m.get(doc_id).map(str::to_string));
             let target_changed = live_target != docstate.last_seen_target;
-            let prewarm_advanced = crate::class_cache::msl_prewarm_generation()
-                != docstate.last_seen_prewarm_gen;
             // Hash-skip: when the gen bumped but the projection-
             // relevant source slice (whitespace-collapsed, comment-
             // stripped) is unchanged, mark the gen as seen and bail
@@ -4101,7 +4087,7 @@ impl Panel for CanvasDiagramPanel {
                 ui.ctx().request_repaint();
             }
 
-            let needs_project = !ast_stale_for_doc && (first_render || target_changed || prewarm_advanced || {
+            let needs_project = !ast_stale_for_doc && (first_render || target_changed || {
                 if !gen_advanced {
                     false
                 } else {
@@ -4346,7 +4332,6 @@ impl Panel for CanvasDiagramPanel {
                         cancel,
                         task,
                         source_hash: source_hash_at_spawn,
-                        prewarm_gen_at_spawn: crate::class_cache::msl_prewarm_generation(),
                     });
                 }
             }
@@ -4423,7 +4408,6 @@ impl Panel for CanvasDiagramPanel {
                             t.gen_at_spawn,
                             t.target_at_spawn.clone(),
                             t.source_hash,
-                            t.prewarm_gen_at_spawn,
                             scene,
                         )
                     })
@@ -4437,9 +4421,8 @@ impl Panel for CanvasDiagramPanel {
             // the optimistic-synth path; swapping in the stale
             // projected scene wipes those nodes. We KEEP the
             // optimistic scene as-is; the next projection (gated by
-            // `prewarm_advanced` / `gen_advanced` on a fresher
-            // source) will reconcile.
-            let done_task = done_task.and_then(|(gen, target, source_hash, prewarm_gen_at_spawn, scene)| {
+            // `gen_advanced` on a fresher source) will reconcile.
+            let done_task = done_task.and_then(|(gen, target, source_hash, scene)| {
                 if gen < docstate.canvas_acked_gen {
                     bevy::log::info!(
                         "[CanvasDiagram] discarding stale projection: \
@@ -4449,17 +4432,13 @@ impl Panel for CanvasDiagramPanel {
                         scene.node_count(),
                         scene.edge_count(),
                     );
-                    // Record the prewarm gen we observed at spawn so
-                    // the project_now check doesn't keep re-spawning
-                    // for the same prewarm bump.
-                    docstate.last_seen_prewarm_gen = prewarm_gen_at_spawn;
                     docstate.projection_task = None;
                     None
                 } else {
-                    Some((gen, target, source_hash, prewarm_gen_at_spawn, scene))
+                    Some((gen, target, source_hash, scene))
                 }
             });
-            if let Some((gen, target, source_hash, prewarm_gen_at_spawn, scene)) = done_task {
+            if let Some((gen, target, source_hash, scene)) = done_task {
                 docstate.projection_task = None;
                 // Bug guard: if the new scene is empty but the existing
                 // scene had content, the user almost certainly hit a
@@ -4473,7 +4452,6 @@ impl Panel for CanvasDiagramPanel {
                         docstate.canvas.scene.node_count(),
                     );
                     docstate.last_seen_gen = gen;
-                    docstate.last_seen_prewarm_gen = prewarm_gen_at_spawn;
                     docstate.last_seen_target = target;
                     docstate.last_seen_source_hash = source_hash;
                     return;
@@ -4611,13 +4589,6 @@ impl Panel for CanvasDiagramPanel {
                 // current source — gen-advanced check will then
                 // trigger the follow-up projection, correct.
                 docstate.last_seen_source_hash = source_hash;
-                // Use the value captured at SPAWN — if a pre-warm
-                // landed mid-projection, the live counter has
-                // advanced past this and the next frame's
-                // `prewarm_advanced` check will trigger the
-                // follow-up reproject that picks up the new
-                // inherited components.
-                docstate.last_seen_prewarm_gen = prewarm_gen_at_spawn;
                 if is_initial_projection {
                     let physical_zoom =
                         lunco_canvas::Viewport::physical_mm_zoom(ui.ctx());
@@ -7151,22 +7122,10 @@ pub fn drive_duplicate_loads(
                 .classes
                 .get(&qpath)
                 .or_else(|| index.classes.get(&dup_display_name));
-            if let Some(entry) = entry {
-                let bases: Vec<String> = entry
-                    .extends
-                    .iter()
-                    .filter(|s| !s.is_empty())
-                    .cloned()
-                    .collect();
-                if !bases.is_empty() {
-                    let qpath_for_warm = qpath.clone();
-                    bevy::tasks::AsyncComputeTaskPool::get()
-                        .spawn(async move {
-                            crate::class_cache::prewarm_extends_chain(&qpath_for_warm, &bases);
-                        })
-                        .detach();
-                }
-            }
+            // Engine session caches across calls; the projection task
+            // resolves inherited components on demand. No off-thread
+            // prewarm needed.
+            let _ = entry;
         }
     }
     if had_install {
@@ -7255,28 +7214,7 @@ pub fn drive_drill_in_loads(
                 qualified,
                 entry.file_path.display()
             );
-            // Pre-warm the MSL inheritance chain on a dedicated thread
-            // so the projection task (which uses the cache-only
-            // resolver to avoid stalling its own worker pool) finds
-            // base classes already loaded.
-            if let Some(ast) = entry.ast.ast() {
-                if let Some(class) =
-                    crate::diagram::find_class_by_qualified_name(ast, &qualified)
-                {
-                    let bases: Vec<String> = class
-                        .extends
-                        .iter()
-                        .map(|e| e.base_name.to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    let qpath = qualified.clone();
-                    bevy::tasks::AsyncComputeTaskPool::get()
-                        .spawn(async move {
-                            crate::class_cache::prewarm_extends_chain(&qpath, &bases);
-                        })
-                        .detach();
-                }
-            }
+            // Engine session is the cache; no off-thread prewarm.
             continue;
         }
         // Failed — log once and drop the binding. Tab will show
