@@ -379,63 +379,109 @@ pub fn strip_input_defaults(source: &str) -> (String, HashMap<String, f64>) {
     let mut defaults = HashMap::new();
     collect_inputs_with_defaults_from_classes(&ast.classes, &mut defaults);
 
-    // Rebuild source with input defaults stripped. The regex has to
-    // cope with modifications between the name and the binding —
-    // `input Real throttle(min=0, max=100, unit="%") = 100;` is
-    // common once users add bounds, and the old pattern skipped such
-    // declarations, so rumoca baked `throttle` in as a constant and
-    // `set_input()` silently no-op'd. Capture groups:
-    //   1: everything up to the component name (`input Type `), with
-    //      dotted types like `Modelica.Blocks.Interfaces.RealInput`
-    //   2: the component name
-    //   3: optional `(…mods…)` — preserved
-    //   4: the `= literal` — dropped
+    // Walk the AST for every input component with an explicit
+    // binding, collect the source byte range covering `= <expr>` via
+    // `Component::binding_range_with_equals`, then splice them out
+    // back-to-front so earlier offsets stay valid.
     //
-    // TODO(rumoca-runtime-override): rumoca doesn't accept runtime
-    // input/parameter overrides without source mutation today. This
-    // regex strip is the workaround. When rumoca grows
-    // `Session::set_runtime_overrides(HashMap<SymbolPath, Value>)`
-    // (or equivalent) we delete this whole function and pass overrides
-    // through Session config instead. See REFACTOR_PLAN.md upstream
-    // ask #7.
-    let re = regex::Regex::new(
-        r"(?m)(^\s*input\s+[\w\.]+\s+)([A-Za-z_][A-Za-z0-9_]*)(\s*\([^)]*\))?(\s*=\s*[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)",
-    )
-    .unwrap();
-
-    let modified = re
-        .replace_all(source, |caps: &regex::Captures| {
-            let prefix = &caps[1];
-            let name = &caps[2];
-            let mods = caps.get(3).map(|m| m.as_str()).unwrap_or("");
-            format!("{prefix}{name}{mods}")
-        })
-        .to_string();
+    // TODO(rumoca-runtime-override): even AST-driven, this is still
+    // a *workaround* for rumoca compiling `input Real g = 9.81` as
+    // a constant rather than a runtime slot with that default.
+    // The right long-term fix is to either change rumoca's input
+    // semantics or expose `Session::set_runtime_overrides`. Until
+    // then, the splice keeps the source compilable as a runtime
+    // input and `set_input()` works. See REFACTOR_PLAN.md ask #7.
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    collect_input_binding_ranges(&ast.classes, source, &mut ranges);
+    // Sort + apply in reverse so the splice doesn't shift indices.
+    ranges.sort_by_key(|(s, _)| *s);
+    let mut modified = source.to_string();
+    for (start, end) in ranges.into_iter().rev() {
+        if end <= modified.len() && start <= end {
+            modified.replace_range(start..end, "");
+        }
+    }
 
     (modified, defaults)
 }
 
+fn collect_input_binding_ranges(
+    classes: &indexmap::IndexMap<String, ClassDef>,
+    source: &str,
+    out: &mut Vec<(usize, usize)>,
+) {
+    for class in classes.values() {
+        for component in class.components.values() {
+            if !matches!(component.causality, Causality::Input(_)) {
+                continue;
+            }
+            if let Some(range) = component.binding_range_with_equals(source) {
+                out.push(range);
+            }
+        }
+        collect_input_binding_ranges(&class.classes, source, out);
+    }
+}
+
 /// Substitute parameter values into Modelica source code.
 ///
-/// Replaces `parameter <type> <name> = <value>` lines with the given values,
-/// enabling recompilation with different parameter values.
+/// Replaces `parameter <type> <name> = <value>` declarations with the
+/// given numeric values, enabling recompilation with different
+/// parameter values. Walks the parsed AST to find each parameter
+/// component matching `parameters`'s keys and splices its
+/// `= <expr>` range with `= <new_value>` (via
+/// [`rumoca_session::parsing::ast::Component::binding_range_with_equals`]).
 ///
-/// TODO(rumoca-runtime-override): same upstream blocker as
-/// [`strip_input_defaults`]. Source mutation goes away when rumoca
-/// accepts parameter overrides at simulation time. See
+/// TODO(rumoca-runtime-override): even AST-driven, this is a
+/// workaround for rumoca not accepting parameter overrides at
+/// simulation time. The cleanest fix exposes
+/// `Session::set_runtime_overrides(HashMap<SymbolPath, Value>)` — at
+/// which point this function disappears entirely. See
 /// REFACTOR_PLAN.md upstream ask #7.
 pub fn substitute_params_in_source(source: &str, parameters: &HashMap<String, f64>) -> String {
+    if parameters.is_empty() {
+        return source.to_string();
+    }
+    let Some(ast) = parse(source) else {
+        return source.to_string();
+    };
+    // Collect (range, new-value) pairs, then splice in reverse order
+    // so earlier offsets stay valid.
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    collect_param_substitution_edits(&ast.classes, source, parameters, &mut edits);
+    edits.sort_by_key(|(start, _, _)| *start);
     let mut modified = source.to_string();
-    for (name, value) in parameters {
-        let pattern = format!(
-            r"(?m)(^\s*parameter\s+\w+\s+{}\s*=\s*)[-+]?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?",
-            regex::escape(name)
-        );
-        if let Ok(re) = regex::Regex::new(&pattern) {
-            modified = re.replace_all(&modified, format!("${{1}}{}", value)).to_string();
+    for (start, end, replacement) in edits.into_iter().rev() {
+        if end <= modified.len() && start <= end {
+            modified.replace_range(start..end, &replacement);
         }
     }
     modified
+}
+
+fn collect_param_substitution_edits(
+    classes: &indexmap::IndexMap<String, ClassDef>,
+    source: &str,
+    parameters: &HashMap<String, f64>,
+    out: &mut Vec<(usize, usize, String)>,
+) {
+    for class in classes.values() {
+        for component in class.components.values() {
+            if !matches!(component.variability, Variability::Parameter(_)) {
+                continue;
+            }
+            let Some(new_value) = parameters.get(&component.name) else {
+                continue;
+            };
+            let Some((start, end)) = component.binding_range_with_equals(source) else {
+                continue;
+            };
+            // Replace the whole `= <old>` range with `= <new>` —
+            // single space matches the formatter convention.
+            out.push((start, end, format!(" = {}", new_value)));
+        }
+        collect_param_substitution_edits(&class.classes, source, parameters, out);
+    }
 }
 
 // ---------------------------------------------------------------------------

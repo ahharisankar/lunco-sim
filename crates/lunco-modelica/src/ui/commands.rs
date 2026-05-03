@@ -2214,25 +2214,18 @@ fn inject_class_imports(src: &str, imports: &[String]) -> String {
     if imports.is_empty() {
         return src.to_string();
     }
-    // Match the first class header line (including any trailing
-    // description string) and capture through to its newline. Same
-    // header shapes as `extract_class_source` / `rewrite_*`.
-    //
-    // TODO(rumoca-class-span): once `ClassDef::full_span_with_leading_comments`
-    // lands (REFACTOR_PLAN.md ask #2), use the AST class span to
-    // locate the header end and splice imports — no header regex,
-    // no description-string handling.
-    let header_re = regex::Regex::new(
-        r"(?m)^(\s*(?:partial\s+)?(?:encapsulated\s+)?(?:model|block|class|connector|function|record|package|type)\s+[A-Za-z_]\w*[^\n]*)\n",
-    )
-    .ok();
-    let Some(re) = header_re else {
+    // Find the first class via rumoca AST and start the
+    // insertion-point search right after its name token. The
+    // existing scanner below then walks past whitespace + any
+    // quoted description strings to land just before the class
+    // body — same behaviour the regex had, AST-anchored.
+    let Ok(ast) = rumoca_phase_parse::parse_to_ast(src, "inject.mo") else {
         return src.to_string();
     };
-    let Some(m) = re.find(src) else {
+    let Some(class) = ast.classes.values().next() else {
         return src.to_string();
     };
-    let mut insert_at = m.end();
+    let mut insert_at = class.name.location.end as usize;
     // Per MLS the class name may be followed by a description string
     // (optionally split across lines, or even broken over multiple
     // adjacent quoted strings). Imports must land *after* it — the

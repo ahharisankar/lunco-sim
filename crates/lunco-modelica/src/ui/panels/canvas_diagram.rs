@@ -2213,29 +2213,17 @@ fn port_fallback_offset_for_size(
 /// care about the line-continuation form, doesn't consult
 /// annotations. "Text says A.x ↔ B.y; show a line between A and B".
 fn recover_edges_from_source(source: &str, diagram: &mut VisualDiagram) {
-    // (?m) lets `.` not cross newlines by default; we explicitly
-    // allow whitespace/newline runs via `\s*`. Capture groups:
-    //   1 = src component, 2 = src port
-    //   3 = tgt component, 4 = tgt port
-    // Port names allow `.` so we catch qualified sub-ports
-    // (`flange.phi`), though most cases are one dot deep.
-    // TODO(index-migrate): the per-doc Index now populates
-    // `connections` from `Equation::Connect` AST nodes during rebuild
-    // (and patches them optimistically on `ConnectionAdded` /
-    // `ConnectionRemoved`). This regex pre-dates the Index. Switching
-    // to `index.connections_in_class(class)` would drop the regex
-    // here entirely; deferred because the call site receives raw
-    // `source` and needs class plumbing.
-    static CONNECT_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let re = CONNECT_RE.get_or_init(|| {
-        regex::Regex::new(
-            r"connect\s*\(\s*([A-Za-z_]\w*)\s*\.\s*([A-Za-z_][\w\.]*)\s*,\s*([A-Za-z_]\w*)\s*\.\s*([A-Za-z_][\w\.]*)\s*\)",
-        )
-        .expect("connect regex compiles")
-    });
+    // Walk every class's `Equation::Connect` via rumoca AST and add
+    // any edges the diagram-build path missed (typically connects on
+    // top-level connectors that the component-graph builder skips
+    // because they aren't sub-components). Iterating the AST gives
+    // us proper handling of dotted port paths (`flange.phi`) without
+    // a separate regex.
+    let Ok(ast) = rumoca_phase_parse::parse_to_ast(source, "recover.mo") else {
+        return;
+    };
 
     // Build (instance_name → DiagramNodeId) index once per call.
-    // Own the keys so we can freely mutate `diagram` below.
     let index: HashMap<String, DiagramNodeId> = diagram
         .nodes
         .iter()
@@ -2267,28 +2255,59 @@ fn recover_edges_from_source(source: &str, diagram: &mut VisualDiagram) {
         })
         .collect();
 
-    for cap in re.captures_iter(source) {
-        let src_comp = &cap[1];
-        let src_port = cap[2].to_string();
-        let tgt_comp = &cap[3];
-        let tgt_port = cap[4].to_string();
-
-        let (Some(&src_id), Some(&tgt_id)) =
-            (index.get(src_comp), index.get(tgt_comp))
-        else {
-            continue;
-        };
-
-        let pair = {
-            let a = (src_comp.to_string(), src_port.clone());
-            let b = (tgt_comp.to_string(), tgt_port.clone());
-            if a <= b { (a, b) } else { (b, a) }
-        };
-        if existing.contains(&pair) {
-            continue;
+    fn walk(
+        class: &rumoca_session::parsing::ast::ClassDef,
+        diagram: &mut VisualDiagram,
+        index: &HashMap<String, DiagramNodeId>,
+        existing: &std::collections::HashSet<((String, String), (String, String))>,
+    ) {
+        use rumoca_session::parsing::ast::Equation;
+        for eq in &class.equations {
+            let Equation::Connect { lhs, rhs, .. } = eq else { continue };
+            // Only handle 2+ part references (`inst.port[.subport]`);
+            // single-part bare-connector connects are caught by the
+            // primary AST path that builds the component graph.
+            let (src_comp, src_port) = match lhs.parts.as_slice() {
+                [first, rest @ ..] if !rest.is_empty() => (
+                    first.ident.text.to_string(),
+                    rest.iter()
+                        .map(|p| p.ident.text.as_ref())
+                        .collect::<Vec<_>>()
+                        .join("."),
+                ),
+                _ => continue,
+            };
+            let (tgt_comp, tgt_port) = match rhs.parts.as_slice() {
+                [first, rest @ ..] if !rest.is_empty() => (
+                    first.ident.text.to_string(),
+                    rest.iter()
+                        .map(|p| p.ident.text.as_ref())
+                        .collect::<Vec<_>>()
+                        .join("."),
+                ),
+                _ => continue,
+            };
+            let (Some(&src_id), Some(&tgt_id)) =
+                (index.get(&src_comp), index.get(&tgt_comp))
+            else {
+                continue;
+            };
+            let pair = {
+                let a = (src_comp.clone(), src_port.clone());
+                let b = (tgt_comp.clone(), tgt_port.clone());
+                if a <= b { (a, b) } else { (b, a) }
+            };
+            if existing.contains(&pair) {
+                continue;
+            }
+            diagram.add_edge(src_id, src_port, tgt_id, tgt_port);
         }
-
-        diagram.add_edge(src_id, src_port, tgt_id, tgt_port);
+        for nested in class.classes.values() {
+            walk(nested, diagram, index, existing);
+        }
+    }
+    for class in ast.classes.values() {
+        walk(class, diagram, &index, &existing);
     }
 }
 

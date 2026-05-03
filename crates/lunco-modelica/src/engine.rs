@@ -261,4 +261,39 @@ mod tests {
         );
         assert_eq!(by_name["x"].causality, InheritedCausality::None);
     }
+
+    #[test]
+    fn inherited_members_typed_carries_default_values() {
+        let mut engine = ModelicaEngine::new();
+        let src = "model Base\n  parameter Real R = 100;\n  parameter Real C = 0.001;\n  Real free;\nend Base;\n\nmodel Derived\n  extends Base;\n  parameter Real extra = 42;\nend Derived;\n";
+        engine.upsert_document(DocumentId::new(1), src).unwrap();
+
+        let members = engine.inherited_members_typed("Derived");
+        let by_name: HashMap<&str, &InheritedMember> =
+            members.iter().map(|m| (m.name.as_str(), m)).collect();
+
+        // Inherited parameter values come through the extends chain.
+        assert_eq!(
+            by_name["R"].default_value.as_deref(),
+            Some("100"),
+            "R from Base should carry its default"
+        );
+        assert_eq!(
+            by_name["C"].default_value.as_deref(),
+            Some("0.001"),
+            "C from Base should carry its default"
+        );
+        // Local Derived members.
+        assert_eq!(
+            by_name["extra"].default_value.as_deref(),
+            Some("42"),
+            "Derived.extra has its own default"
+        );
+        // Free variables (no binding) report None.
+        assert!(
+            by_name["free"].default_value.is_none(),
+            "free has no default: {:?}",
+            by_name["free"].default_value
+        );
+    }
 }
