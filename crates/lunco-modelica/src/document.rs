@@ -251,6 +251,10 @@ pub struct ModelicaDocument {
     /// Lenient parse cache. Populated by the same off-thread refresh
     /// as [`Self::ast`] — see [`SyntaxCache`] for why we keep both.
     syntax: Arc<SyntaxCache>,
+    /// UI-projection of the current AST. Rebuilt from `syntax` on every
+    /// successful parse install. Panels read this instead of the AST
+    /// directly. See `crate::index::ModelicaIndex`.
+    index: crate::index::ModelicaIndex,
     generation: u64,
     origin: DocumentOrigin,
     /// Generation at which the document was last persisted to disk.
@@ -323,17 +327,29 @@ impl ModelicaDocument {
         } else {
             Some(0)
         };
+        let mut index = crate::index::ModelicaIndex::new();
+        index.rebuild_from_ast(&syntax.ast, &source);
         Self {
             id,
             source,
             ast,
             syntax,
+            index,
             generation: 0,
             origin,
             last_saved_generation,
             changes: VecDeque::with_capacity(CHANGE_HISTORY_CAPACITY),
             last_source_edit_at: None,
         }
+    }
+
+    /// Read-only access to the per-document UI projection. Panels read
+    /// this instead of touching the AST directly. The Index is rebuilt
+    /// on every successful parse install; between installs (during
+    /// rapid typing) it lags the source — same staleness contract as
+    /// the AST cache itself.
+    pub fn index(&self) -> &crate::index::ModelicaIndex {
+        &self.index
     }
 
     /// The current source text.
@@ -430,6 +446,7 @@ impl ModelicaDocument {
             return;
         }
         self.syntax = Arc::new(syntax);
+        self.rebuild_index();
     }
 
     /// Atomically install both the strict and the lenient parse
@@ -452,7 +469,15 @@ impl ModelicaDocument {
         }
         self.ast = Arc::new(ast);
         self.syntax = Arc::new(syntax);
+        self.rebuild_index();
         self.last_source_edit_at = None;
+    }
+
+    /// Rebuild the UI projection [`Index`](crate::index::ModelicaIndex)
+    /// from the current [`SyntaxCache`]. Called automatically after
+    /// every parse install; manual callers shouldn't need this.
+    fn rebuild_index(&mut self) {
+        self.index.rebuild_from_ast(&self.syntax.ast, &self.source);
     }
 
     /// A clone of the source text (used by the off-thread parse task).
@@ -479,6 +504,7 @@ impl ModelicaDocument {
         let bytes = self.source.len();
         self.ast = Arc::new(AstCache::from_source(&self.source, self.generation));
         self.syntax = Arc::new(SyntaxCache::from_source(&self.source, self.generation));
+        self.rebuild_index();
         let elapsed_ms = t.elapsed().as_secs_f64() * 1000.0;
         if elapsed_ms > 5.0 {
             bevy::log::info!(

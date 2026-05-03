@@ -66,46 +66,29 @@ impl Default for DiagramAutoLayoutSettings {
 }
 
 
+/// Scan component declarations across a `.mo` source.
+///
+/// Returns `(type_name, instance_name)` pairs for every component decl in
+/// every top-level class. Used as the *fallback* when the AST-based
+/// component-graph builder produced an empty graph (rumoca's error
+/// recovery sometimes drops every component of a class on a parse error
+/// elsewhere in the file). This walk is over the same rumoca AST so it
+/// agrees with the projection when the AST is healthy.
+///
+/// Replaces the legacy regex scanner (`(?m)^\s*…(\w+)\s+(\w+)\b` with a
+/// keyword reject-list). Kept behavior-compatible — see
+/// `tests/rumoca_api_coverage.rs::rumoca_components_match_regex_scan`
+/// for the equivalence check.
 fn scan_component_declarations(source: &str) -> Vec<(String, String)> {
-    // Matches an optional run of modifier prefixes, then a dotted
-    // type path, then the instance name. Uses `\b` (word boundary,
-    // zero-width) at the instance-name end so the match doesn't
-    // consume any whitespace past the identifier — otherwise a
-    // `\s*[\(;\s]` tail will eat the indentation of the *next* line,
-    // pulling the iterator past that line's `^` anchor and silently
-    // skipping its component. `captures_iter` is non-overlapping, so
-    // any whitespace we consume here is unavailable to the next
-    // candidate match.
-    // `redeclare` is a legal prefix on component decls: it appears on
-    // the overriding-form `redeclare <Class> inst;` (inside a modifier
-    // block or as a top-level decl inside a class extending a
-    // replaceable base). Swallow it so the regex moves on to the
-    // actual `<Class>` that follows — otherwise the first segment
-    // becomes "redeclare", gets shunted into the KEYWORDS reject
-    // list, and the component disappears from the diagram.
-    let re = regex::Regex::new(
-        r"(?m)^\s*(?:(?:redeclare|flow|stream|input|output|parameter|constant|discrete|inner|outer|replaceable|final)\s+)*((?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*)\s+([A-Za-z_]\w*)\b"
-    ).expect("scan regex compiles");
-    // Keywords that can appear at column 0 inside a class body and
-    // therefore look like "type name" starts under a naive regex.
-    // When the captured "type" matches one, the match is discarded.
-    const KEYWORDS: &[&str] = &[
-        "model", "block", "connector", "package", "function", "record", "class", "type",
-        "extends", "import", "equation", "algorithm", "initial", "protected", "public",
-        "annotation", "connect", "if", "for", "when", "end", "within", "and", "or", "not",
-        "true", "false", "else", "elseif", "elsewhen", "while", "loop", "break", "return",
-        "then", "external", "encapsulated", "partial", "expandable", "operator", "pure",
-        "impure", "redeclare",
-    ];
+    let ast = match rumoca_phase_parse::parse_to_ast(source, "scan.mo") {
+        Ok(a) => a,
+        Err(_) => return Vec::new(),
+    };
     let mut out = Vec::new();
-    for cap in re.captures_iter(source) {
-        let ty = cap[1].to_string();
-        let inst = cap[2].to_string();
-        let first_segment = ty.split('.').next().unwrap_or(&ty);
-        if KEYWORDS.contains(&first_segment) {
-            continue;
+    for (_class_name, class_def) in &ast.classes {
+        for (name, comp) in class_def.iter_components() {
+            out.push((format!("{}", comp.type_name), name.to_string()));
         }
-        out.push((ty, inst));
     }
     out
 }

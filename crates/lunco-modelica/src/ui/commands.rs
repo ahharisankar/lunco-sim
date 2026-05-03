@@ -2245,44 +2245,62 @@ fn inject_class_imports(src: &str, imports: &[String]) -> String {
 
 /// Rename the class and strip any `within` clause so the copy is a
 /// standalone Untitled model. Conservative: if anything doesn't
-/// match exactly once, returns the input unmodified — a user-
-/// visible but working "not quite renamed" copy beats a mangled
-/// source.
+/// match exactly, returns the input unmodified — a user-visible but
+/// working "not quite renamed" copy beats a mangled source.
+///
+/// Uses rumoca's typed AST (`ClassDef::name` + `ClassDef::end_name_token`)
+/// to locate the header and end-token spans precisely, no regex. Falls
+/// back to the input string when the parse fails.
+///
+/// `within`-clause strip stays as a one-liner regex
+/// (`TODO(rumoca: within-clause editor)` — rumoca doesn't expose a
+/// typed within-rewrite helper today).
 fn rewrite_duplicated_source(
     src: &str,
     old_name: &str,
     new_name: &str,
 ) -> String {
-    let safe_old = regex::escape(old_name);
-    // Single-line patterns for the same reason noted in
-    // `extract_class_source` — raw strings don't do line
-    // continuation.
-    let header_pat = format!(
-        r"(?m)^(\s*(?:partial\s+)?(?:encapsulated\s+)?(?:model|block|class|connector|function|record|package|type)\s+){safe}\b",
-        safe = safe_old,
-    );
-    let header_re = regex::Regex::new(&header_pat).ok();
-    let footer_pat = format!(r"(?m)^(\s*end\s+){safe}(\s*;)", safe = safe_old);
-    let footer_re = regex::Regex::new(&footer_pat).ok();
+    let Ok(ast) = rumoca_phase_parse::parse_to_ast(src, "duplicate.mo") else {
+        return src.to_string();
+    };
+    let Some(class_def) = ast.classes.values().find(|c| c.name.text.as_ref() == old_name) else {
+        return src.to_string();
+    };
+
+    // Header name span — guaranteed present.
+    let header_loc = &class_def.name.location;
+    // End-token span — present whenever the source has `end Name;`. If
+    // not, the source is malformed; bail.
+    let Some(end_token) = class_def.end_name_token.as_ref() else {
+        return src.to_string();
+    };
+    let end_loc = &end_token.location;
+
+    // Splice end-token first so header-token byte offsets stay valid.
+    let mut buf = String::with_capacity(src.len() + new_name.len());
+    let h_start = header_loc.start as usize;
+    let h_end = header_loc.end as usize;
+    let e_start = end_loc.start as usize;
+    let e_end = end_loc.end as usize;
+    if !(h_start <= h_end && h_end <= e_start && e_start <= e_end && e_end <= src.len()) {
+        return src.to_string();
+    }
+    buf.push_str(&src[..h_start]);
+    buf.push_str(new_name);
+    buf.push_str(&src[h_end..e_start]);
+    buf.push_str(new_name);
+    buf.push_str(&src[e_end..]);
+
+    // TODO(rumoca: within-clause editor) — once rumoca exposes a typed
+    // within-rewrite helper, drop this regex. Within-strip is the only
+    // remaining regex in the rename/duplicate flow.
     let within_re =
         regex::Regex::new(r"(?m)^\s*within\s*[A-Za-z_][\w\.]*\s*;\s*\n?").ok();
-
-    let mut out: std::borrow::Cow<'_, str> = src.into();
     if let Some(re) = within_re {
-        out = re.replace(&out, "").into_owned().into();
+        re.replace(&buf, "").into_owned()
+    } else {
+        buf
     }
-    if let (Some(hr), Some(fr)) = (header_re, footer_re) {
-        if hr.find(&out).is_some() && fr.find(&out).is_some() {
-            let stepped = hr.replace(&out, |caps: &regex::Captures| {
-                format!("{}{new_name}", &caps[1])
-            });
-            let stepped = fr.replace(&stepped, |caps: &regex::Captures| {
-                format!("{}{new_name}{}", &caps[1], &caps[2])
-            });
-            out = stepped.into_owned().into();
-        }
-    }
-    out.into_owned()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
