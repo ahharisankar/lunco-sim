@@ -958,49 +958,9 @@ fn register_local_class(
     class_def: &rumoca_session::parsing::ast::ClassDef,
     ast: &rumoca_session::parsing::ast::StoredDefinition,
 ) {
-    use crate::annotations::extract_icon_inherited;
-    use std::sync::Arc;
     if out.contains_key(short_name) {
         return;
     }
-    // Resolve `extends` targets by searching the local AST first,
-    // then falling through to the MSL class cache. This is what
-    // makes `SpeedSensor extends Modelica.Mechanics.Rotational.Icons
-    // .RelativeSensor` pull in the parent icon's rectangle + text
-    // primitives, even though `RelativeSensor` lives in a separate
-    // MSL file outside this document.
-    let mut resolver =
-        |name: &str| -> Option<Arc<rumoca_session::parsing::ast::ClassDef>> {
-            let leaf = name.rsplit('.').next().unwrap_or(name);
-            // Local AST first.
-            if let Some(c) = ast
-                .classes
-                .get(name)
-                .or_else(|| ast.classes.get(leaf))
-                .or_else(|| {
-                    ast.classes
-                        .values()
-                        .flat_map(|c| c.classes.values())
-                        .find(|c| c.name.text.as_ref() == leaf)
-                })
-            {
-                return Some(Arc::new(c.clone()));
-            }
-            // Cross-file: peek the MSL class cache *without* loading
-            // on miss. Using the blocking `peek_or_load_msl_class`
-            // here cascaded into 40-second projections when the user
-            // duplicated a model with many extends-chains — each
-            // unresolved base did a sync rumoca parse inside the
-            // projection task (see telemetry: `[Projection] import
-            // done in 39879ms: 4 nodes 5 edges`). The non-blocking
-            // path returns None for cold-cache classes; the icon
-            // resolver falls back to defaults (rectangle + label).
-            // A subsequent edit / drill-in cycle warms the engine
-            // session and the next projection picks up inherited
-            // graphics.
-            crate::class_cache::peek_msl_class_cached(name)
-        };
-    let mut visited = std::collections::HashSet::new();
     // Build the qualified name from the document's `within` so
     // scope-chain resolution can walk enclosing packages for bare
     // `extends Foo` references.
@@ -1020,8 +980,27 @@ fn register_local_class(
         }
         None => short_name.to_string(),
     };
-    let icon = extract_icon_inherited(&class_context, class_def, &mut resolver, &mut visited);
+    // Inheritance-merged Icon via the unified workspace engine.
+    // The engine session sees both the active doc (synced via
+    // `drive_engine_sync`) and MSL libraries (bulk-installed by
+    // `drive_msl_bootstrap`), so `extends`-chain walks like
+    // `SpeedSensor → Modelica.Mechanics.Rotational.Icons.RelativeSensor`
+    // resolve in one query without panel-side resolver lambdas.
+    //
+    // Off-thread context: this runs inside the projection task on
+    // `AsyncComputeTaskPool`. The engine mutex is taken briefly —
+    // the merge logic is in-memory after `inherited_annotations`
+    // returns. If the engine handle isn't installed yet (very early
+    // boot before `ModelicaEnginePlugin::build`) or the class isn't
+    // yet in the session, the icon resolves to None and the caller
+    // skips registration; the next projection (after the sync system
+    // catches up) picks it up.
+    let icon = crate::engine_resource::global_engine_handle()
+        .and_then(|handle| {
+            crate::annotations::extract_icon_via_engine(&class_context, &mut handle.lock())
+        });
     if icon.is_none() {
+        let _ = class_def;
         return;
     }
     use rumoca_session::parsing::ast::ClassType;
