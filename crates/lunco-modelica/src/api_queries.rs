@@ -649,6 +649,27 @@ impl ApiQueryProvider for DescribeModelProvider {
         let connections = ast_extract::extract_connections_for_class(class);
         let extends = ast_extract::extract_extends_for_class(class);
 
+        // Inheritance-merged member list via the per-Twin
+        // [`crate::engine::ModelicaEngine`]. Walks the `extends`
+        // chain across every open Modelica document, so a class that
+        // inherits from a base in another open file gets the base's
+        // members in `inherited_components`. Routes through
+        // `rumoca_session::Session::class_component_members_query` —
+        // no panel-side reimplementation of inheritance walking.
+        //
+        // The engine is rebuilt per API call (this handler runs
+        // infrequently, on agent / curl-driven `DescribeModel` calls).
+        // When other consumers want the same data on a hot path, the
+        // engine moves to a long-lived Resource. See the engine
+        // module docs for the staging.
+        let inherited_components = {
+            let mut engine = crate::engine::ModelicaEngine::new();
+            for (other_id, other_host) in registry.iter() {
+                let _ = engine.upsert_document(other_id, other_host.document().source());
+            }
+            engine.inherited_components(short)
+        };
+
         ApiResponse::ok(serde_json::json!({
             "doc_id": doc_id.raw(),
             "class_name": short,
@@ -662,6 +683,10 @@ impl ApiQueryProvider for DescribeModelProvider {
             "inputs": inputs.iter().map(typed_to_json).collect::<Vec<_>>(),
             "parameters": parameters.iter().map(typed_to_json).collect::<Vec<_>>(),
             "outputs": outputs.iter().map(typed_to_json).collect::<Vec<_>>(),
+            "inherited_components": inherited_components
+                .iter()
+                .map(|(name, ty)| serde_json::json!({"name": name, "type_name": ty}))
+                .collect::<Vec<_>>(),
         }))
     }
 }

@@ -126,40 +126,11 @@ impl ModelicaEngine {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Bevy adapter
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// Below: thin `Resource` wrapper + plugin so Bevy users get the
-// usual `ResMut<ModelicaEngineRes>` ergonomics. Everything above is
-// plain Rust and reusable without Bevy.
-
-use bevy::prelude::*;
-
-/// Bevy `Resource` adapter wrapping a [`ModelicaEngine`].
-///
-/// Systems take `ResMut<ModelicaEngineRes>` and call engine methods
-/// through `Deref`/`DerefMut`:
-/// ```ignore
-/// fn my_system(mut engine: ResMut<ModelicaEngineRes>) {
-///     let members = engine.inherited_components("Vehicle.Engine");
-/// }
-/// ```
-#[derive(Resource, Default, Deref, DerefMut)]
-pub struct ModelicaEngineRes(pub ModelicaEngine);
-
-/// Plugin that registers [`ModelicaEngineRes`] in the Bevy world.
-///
-/// Today added explicitly by tests and by the integration that
-/// wants engine-backed inheritance queries. Once the auto-sync
-/// system lands this plugin will also schedule it.
-pub struct ModelicaEnginePlugin;
-
-impl Plugin for ModelicaEnginePlugin {
-    fn build(&self, app: &mut App) {
-        app.init_resource::<ModelicaEngineRes>();
-    }
-}
+// No Bevy adapter here yet. When the auto-sync system lands (it
+// needs `ResMut<...>` to mirror document changes into the engine),
+// the right home is a sibling crate `lunco-modelica-bevy` — same
+// pattern as the existing `lunco-doc` / `lunco-doc-bevy` split.
+// Until then this file stays plain Rust and headless-friendly.
 
 #[cfg(test)]
 mod tests {
