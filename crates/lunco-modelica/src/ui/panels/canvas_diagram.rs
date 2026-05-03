@@ -7241,8 +7241,8 @@ pub fn drill_into_class(world: &mut World, qualified: &str) {
     // doc whose AST contains the requested class — handles non-MSL
     // user-opened files (e.g. `assets/models/AnnotatedRocketStage.mo`)
     // where the qualified name lives only in a workspace document.
-    let file_path = crate::class_cache::resolve_msl_class_path(qualified)
-        .or_else(|| crate::class_cache::locate_msl_file(qualified));
+    let file_path = crate::library_fs::resolve_class_path_indexed(qualified)
+        .or_else(|| crate::library_fs::locate_library_file(qualified));
     if let Some(file_path) = file_path {
         open_drill_in_tab(world, qualified, &file_path);
         return;

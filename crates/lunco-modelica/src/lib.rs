@@ -61,6 +61,7 @@ pub mod document;
 /// read once, parsed once, and shared as `Arc<AstCache>` across tabs
 /// and compile jobs.
 pub mod class_cache;
+pub mod library_fs;
 
 /// Subset Modelica pretty-printer — emits source snippets for *new* AST
 /// nodes (component declarations, connect equations, placement / line

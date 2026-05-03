@@ -1628,7 +1628,7 @@ fn on_duplicate_model_from_read_only(
         //     for non-MSL sources (FQN unknown → no path → empty).
         let imports = origin_fqn_for_task
             .as_deref()
-            .and_then(crate::class_cache::resolve_msl_class_path)
+            .and_then(crate::library_fs::resolve_class_path_indexed)
             .map(|p| collect_parent_imports(&p))
             .unwrap_or_default();
         let renamed = inject_class_imports(&renamed, &imports);
@@ -1756,7 +1756,7 @@ fn on_open_example_in_workspace(
         // 1. Resolve MSL file path (static HashMap probe). If the
         //    class isn't indexed, build an empty doc so the user
         //    still gets a tab with a clear error marker.
-        let Some(path) = crate::class_cache::resolve_msl_class_path(&qualified_for_task) else {
+        let Some(path) = crate::library_fs::resolve_class_path_indexed(&qualified_for_task) else {
             return crate::document::ModelicaDocument::with_origin(
                 doc_id,
                 format!("// Could not locate MSL file for {qualified_for_task}\n"),
