@@ -43,7 +43,7 @@ use lunco_core::{Command, on_command, register_commands};
 use lunco_doc::DocumentId;
 
 use crate::document::ModelicaOp;
-use crate::pretty::{ComponentDecl, ConnectEquation, Line, Placement, PortRef};
+use crate::pretty::{ComponentDecl, ConnectEquation, Line, LunCoPlotNodeSpec, Placement, PortRef};
 use crate::ui::state::ModelicaDocumentRegistry;
 
 /// Plugin that registers the Modelica edit events + observers.
@@ -675,10 +675,11 @@ pub struct ApiModification {
     pub value: String,
 }
 
-/// One structural op against a Modelica document, in a Reflect-friendly
-/// shape. Variants mirror the structural subset of
-/// [`crate::document::ModelicaOp`] — text-level ops are out of scope
-/// here and use [`SetDocumentSource`] instead.
+/// One op against a Modelica document, in a Reflect-friendly shape.
+/// Variants mirror [`crate::document::ModelicaOp`] one-for-one (minus
+/// `ReplaceSource`, which has its own typed [`SetDocumentSource`]
+/// command). Authoring an entire model from an empty doc is an
+/// `ApplyModelicaOps` carrying a sequence of these.
 ///
 /// Connection variants encode `from`/`to` as separate `component` +
 /// `port` strings rather than dot-paths so the Reflect deserializer
@@ -727,6 +728,67 @@ pub enum ApiOp {
         component: String,
         param: String,
         value: String,
+    },
+
+    // ── Plot-node ops (vendor `__LunCo_PlotNode` annotations) ───────────────
+    /// Append or replace a `__LunCo_PlotNode(...)` entry inside the
+    /// class's `Diagram(graphics)` array. Identification key is
+    /// `signal`; an existing entry with the same signal is updated.
+    AddPlotNode {
+        class: String,
+        signal: String,
+        title: String,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+    },
+    RemovePlotNode {
+        class: String,
+        signal: String,
+    },
+    SetPlotNodeExtent {
+        class: String,
+        signal: String,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+    },
+    SetPlotNodeTitle {
+        class: String,
+        signal: String,
+        title: String,
+    },
+
+    // ── Diagram Text ops (free-form `Text(...)` in Diagram annotation) ──────
+    SetDiagramTextExtent {
+        class: String,
+        /// Source-order index of the Text entry within `Diagram(graphics={...})`.
+        index: u32,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+    },
+    SetDiagramTextString {
+        class: String,
+        index: u32,
+        text: String,
+    },
+    RemoveDiagramText {
+        class: String,
+        index: u32,
+    },
+
+    // ── Generic byte-range splice (escape hatch) ────────────────────────────
+    /// Replace a byte range in the document source. Use only when no
+    /// typed op fits — every typed op is preferable because it survives
+    /// reparses without span drift.
+    EditText {
+        range_start: u32,
+        range_end: u32,
+        replacement: String,
     },
 }
 
@@ -872,6 +934,86 @@ fn api_op_to_internal(op: &ApiOp) -> Option<ModelicaOp> {
                 value: value.clone(),
             })
         }
+        ApiOp::AddPlotNode { class, signal, title, x1, y1, x2, y2 } => {
+            if class.is_empty() || signal.is_empty() {
+                return None;
+            }
+            Some(ModelicaOp::AddPlotNode {
+                class: class.clone(),
+                plot: LunCoPlotNodeSpec {
+                    x1: *x1, y1: *y1, x2: *x2, y2: *y2,
+                    signal: signal.clone(),
+                    title: title.clone(),
+                },
+            })
+        }
+        ApiOp::RemovePlotNode { class, signal } => {
+            if class.is_empty() || signal.is_empty() {
+                return None;
+            }
+            Some(ModelicaOp::RemovePlotNode {
+                class: class.clone(),
+                signal_path: signal.clone(),
+            })
+        }
+        ApiOp::SetPlotNodeExtent { class, signal, x1, y1, x2, y2 } => {
+            if class.is_empty() || signal.is_empty() {
+                return None;
+            }
+            Some(ModelicaOp::SetPlotNodeExtent {
+                class: class.clone(),
+                signal_path: signal.clone(),
+                x1: *x1, y1: *y1, x2: *x2, y2: *y2,
+            })
+        }
+        ApiOp::SetPlotNodeTitle { class, signal, title } => {
+            if class.is_empty() || signal.is_empty() {
+                return None;
+            }
+            Some(ModelicaOp::SetPlotNodeTitle {
+                class: class.clone(),
+                signal_path: signal.clone(),
+                title: title.clone(),
+            })
+        }
+        ApiOp::SetDiagramTextExtent { class, index, x1, y1, x2, y2 } => {
+            if class.is_empty() {
+                return None;
+            }
+            Some(ModelicaOp::SetDiagramTextExtent {
+                class: class.clone(),
+                index: *index as usize,
+                x1: *x1, y1: *y1, x2: *x2, y2: *y2,
+            })
+        }
+        ApiOp::SetDiagramTextString { class, index, text } => {
+            if class.is_empty() {
+                return None;
+            }
+            Some(ModelicaOp::SetDiagramTextString {
+                class: class.clone(),
+                index: *index as usize,
+                text: text.clone(),
+            })
+        }
+        ApiOp::RemoveDiagramText { class, index } => {
+            if class.is_empty() {
+                return None;
+            }
+            Some(ModelicaOp::RemoveDiagramText {
+                class: class.clone(),
+                index: *index as usize,
+            })
+        }
+        ApiOp::EditText { range_start, range_end, replacement } => {
+            if range_end < range_start {
+                return None;
+            }
+            Some(ModelicaOp::EditText {
+                range: (*range_start as usize)..(*range_end as usize),
+                replacement: replacement.clone(),
+            })
+        }
     }
 }
 
@@ -897,10 +1039,9 @@ fn port_ref_or_none(component: &str, port: &str) -> Option<PortRef> {
 /// command pipeline for both UI and external API callers (per
 /// AGENTS.md §4.1).
 ///
-/// Returns `None` for non-structural ops (`ReplaceSource`, `EditText`)
-/// — those go through [`SetDocumentSource`] / typed-event paths
-/// instead, so a UI accidentally trying to fire them via the
-/// structural pipeline is a no-op rather than a silent corruption.
+/// Returns `None` only for [`ModelicaOp::ReplaceSource`] — full-buffer
+/// replace has no ApiOp mirror; callers use the [`SetDocumentSource`]
+/// typed command instead.
 pub(crate) fn internal_op_to_api(op: &ModelicaOp) -> Option<ApiOp> {
     match op {
         ModelicaOp::AddComponent { class, decl } => Some(ApiOp::AddComponent {
@@ -966,21 +1107,57 @@ pub(crate) fn internal_op_to_api(op: &ModelicaOp) -> Option<ApiOp> {
             param: param.clone(),
             value: value.clone(),
         }),
-        // Text-level ops are intentionally excluded from this pipeline.
-        ModelicaOp::ReplaceSource { .. }
-        | ModelicaOp::EditText { .. }
-        // Plot-node ops are vendor-extension layout edits — no
-        // public API surface today, so the structural-pipeline
-        // bridge intentionally drops them. UI / canvas callers
-        // dispatch them directly via `apply_ops_public` (the same
-        // way SetParameter does for typed events).
-        | ModelicaOp::AddPlotNode { .. }
-        | ModelicaOp::RemovePlotNode { .. }
-        | ModelicaOp::SetPlotNodeExtent { .. }
-        | ModelicaOp::SetPlotNodeTitle { .. }
-        | ModelicaOp::SetDiagramTextExtent { .. }
-        | ModelicaOp::SetDiagramTextString { .. }
-        | ModelicaOp::RemoveDiagramText { .. } => None,
+        ModelicaOp::AddPlotNode { class, plot } => Some(ApiOp::AddPlotNode {
+            class: class.clone(),
+            signal: plot.signal.clone(),
+            title: plot.title.clone(),
+            x1: plot.x1, y1: plot.y1, x2: plot.x2, y2: plot.y2,
+        }),
+        ModelicaOp::RemovePlotNode { class, signal_path } => Some(ApiOp::RemovePlotNode {
+            class: class.clone(),
+            signal: signal_path.clone(),
+        }),
+        ModelicaOp::SetPlotNodeExtent { class, signal_path, x1, y1, x2, y2 } => {
+            Some(ApiOp::SetPlotNodeExtent {
+                class: class.clone(),
+                signal: signal_path.clone(),
+                x1: *x1, y1: *y1, x2: *x2, y2: *y2,
+            })
+        }
+        ModelicaOp::SetPlotNodeTitle { class, signal_path, title } => {
+            Some(ApiOp::SetPlotNodeTitle {
+                class: class.clone(),
+                signal: signal_path.clone(),
+                title: title.clone(),
+            })
+        }
+        ModelicaOp::SetDiagramTextExtent { class, index, x1, y1, x2, y2 } => {
+            Some(ApiOp::SetDiagramTextExtent {
+                class: class.clone(),
+                index: *index as u32,
+                x1: *x1, y1: *y1, x2: *x2, y2: *y2,
+            })
+        }
+        ModelicaOp::SetDiagramTextString { class, index, text } => {
+            Some(ApiOp::SetDiagramTextString {
+                class: class.clone(),
+                index: *index as u32,
+                text: text.clone(),
+            })
+        }
+        ModelicaOp::RemoveDiagramText { class, index } => Some(ApiOp::RemoveDiagramText {
+            class: class.clone(),
+            index: *index as u32,
+        }),
+        ModelicaOp::EditText { range, replacement } => Some(ApiOp::EditText {
+            range_start: range.start as u32,
+            range_end: range.end as u32,
+            replacement: replacement.clone(),
+        }),
+        // ReplaceSource is the one ModelicaOp without an ApiOp mirror —
+        // callers wanting full-buffer replace use `SetDocumentSource`
+        // (a separate typed command, not an op).
+        ModelicaOp::ReplaceSource { .. } => None,
     }
 }
 
