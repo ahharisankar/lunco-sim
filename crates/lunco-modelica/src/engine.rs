@@ -103,15 +103,14 @@ impl ModelicaEngine {
             .map_err(|e| e.to_string())
     }
 
-    /// Forget a document. The current rumoca public API has no
-    /// remove-document hook, so the session retains the previous
-    /// content until something else overwrites the URI; that's
-    /// benign for cross-doc queries (the URI is unique per
-    /// `DocumentId` and `DocumentId`s aren't recycled). The map
-    /// entry is dropped so reopening the same id starts fresh.
+    /// Forget a document. Drops the URI map entry **and** removes the
+    /// document from rumoca's session — its parsed AST, per-file
+    /// caches, and any resolved-tree state referencing it are
+    /// invalidated. Reopening the same `DocumentId` starts fresh.
     pub fn close_document(&mut self, doc_id: DocumentId) {
-        self.uri_for_doc.remove(&doc_id);
-        // TODO(rumoca): public Session::remove_document(uri).
+        if let Some(uri) = self.uri_for_doc.remove(&doc_id) {
+            self.session.remove_document(&uri);
+        }
     }
 
     /// Inheritance-merged component members for a fully-qualified
@@ -197,6 +196,37 @@ mod tests {
         assert!(engine.uri_for_doc.contains_key(&DocumentId::new(1)));
         engine.close_document(DocumentId::new(1));
         assert!(!engine.uri_for_doc.contains_key(&DocumentId::new(1)));
+    }
+
+    #[test]
+    fn close_document_purges_session_state() {
+        let mut engine = ModelicaEngine::new();
+        // Two docs, where Derived inherits from Base across files.
+        engine
+            .upsert_document(DocumentId::new(1), "model Base\n  Real x;\nend Base;\n")
+            .unwrap();
+        engine
+            .upsert_document(
+                DocumentId::new(2),
+                "model Derived\n  extends Base;\n  Real y;\nend Derived;\n",
+            )
+            .unwrap();
+        // Sanity: inheritance resolves while Base is still open.
+        let before = engine.inherited_components("Derived");
+        assert!(
+            before.iter().any(|(n, _)| n == "x"),
+            "x should be inherited before close: {before:?}"
+        );
+
+        // Close Base — its source must actually leave rumoca's
+        // session, not just our URI map. After this, Derived's
+        // inherited member walk shouldn't find `x` anymore.
+        engine.close_document(DocumentId::new(1));
+        let after = engine.inherited_components("Derived");
+        assert!(
+            !after.iter().any(|(n, _)| n == "x"),
+            "x should NOT be inherited after Base is closed: {after:?}"
+        );
     }
 
     #[test]

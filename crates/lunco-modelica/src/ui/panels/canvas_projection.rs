@@ -93,97 +93,67 @@ fn scan_component_declarations(source: &str) -> Vec<(String, String)> {
     out
 }
 
-/// Regex-extract authored `connect(...) annotation(Line(points=...))`
-/// waypoints from a class source. Returns a lookup keyed by the
-/// canonicalised edge endpoints `((a_inst, a_port), (b_inst, b_port))`
-/// — unordered so `connect(a.p, b.q)` and `connect(b.q, a.p)` hash
-/// to the same key.
+/// Build a lookup of `connect(...) annotation(Line(points=...))`
+/// waypoints, keyed by canonicalised edge endpoints
+/// `((a_inst, a_port), (b_inst, b_port))` — unordered so
+/// `connect(a.p, b.q)` and `connect(b.q, a.p)` hash to the same key.
 ///
-/// **Deprecated**: rumoca's `Equation::Connect` now carries
-/// `annotation: Vec<Expression>` (post the
-/// `feat/equation-connect-annotation` merge — landed in this rev).
-/// The per-doc [`crate::index::ModelicaIndex`] populates connection
-/// waypoints from that field via
-/// [`crate::annotations::extract_line_points`] during rebuild.
-/// Panels SHOULD read `index.connections_in_class(class)` and pull
-/// `entry.waypoints` instead of calling this regex scanner.
-///
-/// Kept as a fallback for source-only paths (e.g. cache prewarm of
-/// MSL files that haven't been pushed into a `ModelicaEngine`
-/// session). Once those callers route through the engine too,
-/// delete the function.
+/// Walks every class's `equations` Vec across the whole AST (matches
+/// the previous regex's whole-source semantics) and pulls
+/// `Equation::Connect.annotation` via
+/// [`crate::annotations::extract_line_points`]. The bare-connector
+/// case (`connect(u, P.u)` where `u` is a top-level connector with
+/// no `.port` part) is preserved: when a `ComponentReference` has
+/// only one part, its instance string is empty and the port string
+/// holds the identifier — matches the way `canonical_edge_key`
+/// indexes those endpoints.
 pub(crate) fn scan_connect_annotations(
-    source: &str,
+    ast: &rumoca_session::parsing::ast::StoredDefinition,
 ) -> std::collections::HashMap<
     ((String, String), (String, String)),
     Vec<(f32, f32)>,
 > {
-    // `connect( a.p , b.q )   annotation( … Line(points={{x,y},…}) … ) ;`
-    // The outer `.*?` after `annotation(` is non-greedy, and the
-    // inner `points=\{…\}` uses a balanced-ish approach: match
-    // everything up to the outermost `}}` after `points={{`. That
-    // handles Line(points={{x1,y1},{x2,y2}}) and longer runs, as
-    // long as no other `}}` is nested inside a points literal —
-    // which it isn't per MLS grammar for `Real[2]` points.
-    // Bounds to `[^;]*?` where the previous version used `.*?`.
-    // Two reasons:
-    //   1. Each `connect(...);` equation is `;`-terminated, so the
-    //      regex must not cross equation boundaries — crossing into
-    //      the next `connect` would mis-attribute waypoints.
-    //   2. The prior `(?s).*?` was catastrophically backtracking on
-    //      the 184KB `Continuous.mo` (importing took 128s) because
-    //      `.` was matching newlines and the lazy quantifier had to
-    //      walk the entire file for each failed-to-match connect.
-    //      `[^;]` hard-caps backtracking to one equation's worth.
-    //
-    // The final capture grabs the `{{…}}` point list verbatim
-    // (including both outer braces). `pt_re` below walks it with a
-    // simple `\{x,y\}` pattern — handling the outer braces inside
-    // the outer regex proved fragile (the earlier `.*?\}\s*\}`
-    // clipped the final point's closing brace).
-    // A connect endpoint is either `inst.port` (sub-component's
-    // connector) or a bare `port` (connector at the enclosing
-    // class's level, e.g. `connect(u, P.u)` where `u` is the model's
-    // own input connector). Express both shapes with a single
-    // alternation. The captured groups are always `(inst, port)` —
-    // for bare-connector endpoints `inst` is empty and `port` holds
-    // the identifier; `canonical_edge_key` below treats `("", id)`
-    // as the lookup key, matching the way edges are built.
-    let re = regex::Regex::new(
-        r#"connect\s*\(\s*(?:([A-Za-z_]\w*)\s*\.\s*)?([A-Za-z_]\w*(?:\s*\[[^\]]*\])?)\s*,\s*(?:([A-Za-z_]\w*)\s*\.\s*)?([A-Za-z_]\w*(?:\s*\[[^\]]*\])?)\s*\)\s*annotation\s*\([^;]*?Line\s*\(\s*points\s*=\s*(\{\{[^;]*?\}\s*\})"#
-    ).expect("connect annotation regex compiles");
-    let pt_re = regex::Regex::new(
-        r"\{\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\}",
-    )
-    .expect("point regex compiles");
     let mut out = std::collections::HashMap::new();
-    for cap in re.captures_iter(source) {
-        let a_inst = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
-        let a_port = cap[2].split_whitespace().collect::<String>();
-        let b_inst = cap.get(3).map(|m| m.as_str().to_string()).unwrap_or_default();
-        let b_port = cap[4].split_whitespace().collect::<String>();
-        let pts_src = &cap[5];
-        let mut pts = Vec::new();
-        for p in pt_re.captures_iter(pts_src) {
-            let x: f32 = p[1].parse().unwrap_or(0.0);
-            let y: f32 = p[2].parse().unwrap_or(0.0);
-            pts.push((x, y));
-        }
-        if pts.len() < 2 {
-            continue;
-        }
-        // Keep ALL authored points including the endpoints — for
-        // top-level connectors the renderer anchors on the node's
-        // centre (it has no real port to anchor on), and dropping
-        // the first/last point made the wire zigzag from the centre
-        // diagonally to the authored entry point. With the endpoints
-        // preserved the polyline actually traces the route the
-        // model author drew.
-        let interior: Vec<(f32, f32)> = pts.clone();
-        let key = canonical_edge_key(&a_inst, &a_port, &b_inst, &b_port);
-        out.entry(key).or_insert(interior);
+    for class in ast.classes.values() {
+        collect_connect_waypoints_recursive(class, &mut out);
     }
     out
+}
+
+fn collect_connect_waypoints_recursive(
+    class: &rumoca_session::parsing::ast::ClassDef,
+    out: &mut std::collections::HashMap<
+        ((String, String), (String, String)),
+        Vec<(f32, f32)>,
+    >,
+) {
+    use rumoca_session::parsing::ast::Equation;
+    for eq in &class.equations {
+        let Equation::Connect { lhs, rhs, annotation } = eq else { continue };
+        let waypoints = crate::annotations::extract_line_points(annotation);
+        if waypoints.len() < 2 {
+            continue;
+        }
+        // ComponentReference parts: 2-part is `inst.port`,
+        // 1-part is bare `port` (treat inst as empty).
+        let split = |cr: &rumoca_session::parsing::ast::ComponentReference| -> (String, String) {
+            match cr.parts.as_slice() {
+                [only] => (String::new(), only.ident.text.to_string()),
+                [first, second, ..] => (
+                    first.ident.text.to_string(),
+                    second.ident.text.to_string(),
+                ),
+                [] => (String::new(), String::new()),
+            }
+        };
+        let (a_inst, a_port) = split(lhs);
+        let (b_inst, b_port) = split(rhs);
+        let key = canonical_edge_key(&a_inst, &a_port, &b_inst, &b_port);
+        out.entry(key).or_insert(waypoints);
+    }
+    for nested in class.classes.values() {
+        collect_connect_waypoints_recursive(nested, out);
+    }
 }
 
 fn canonical_edge_key(
@@ -323,7 +293,7 @@ pub fn import_model_to_diagram_from_ast(
     // Authored connection-route waypoints (from `connect(...) annotation(Line(
     // points=...))`) are lost by the AST path, so we regex them out of the
     // raw source and use the (instance,port)-pair lookup below.
-    let waypoint_map = scan_connect_annotations(source);
+    let waypoint_map = scan_connect_annotations(&ast);
 
     // If the AST-based graph has no components, fall back to a
     // source-text scan before concluding the model is equation-only.
