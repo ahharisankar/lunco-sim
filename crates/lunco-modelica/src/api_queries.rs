@@ -664,28 +664,14 @@ impl ApiQueryProvider for DescribeModelProvider {
         let connections = ast_extract::extract_connections_for_class(class);
         let extends = ast_extract::extract_extends_for_class(class);
 
-        // Inheritance-merged member list via the per-Twin
-        // [`crate::engine::ModelicaEngine`]. Walks the `extends`
-        // chain across every open Modelica document, so a class that
-        // inherits from a base in another open file gets the base's
-        // members in `inherited_members`. Routes through
-        // `rumoca_session::Session::class_component_members_typed_query`
-        // — no panel-side reimplementation of inheritance walking
-        // and no separate AST pass to bucket
-        // parameters / inputs / outputs.
-        //
-        // The engine is rebuilt per API call (this handler runs
-        // infrequently, on agent / curl-driven `DescribeModel` calls).
-        // When other consumers want the same data on a hot path, the
-        // engine moves to a long-lived Resource. See the engine
-        // module docs for the staging.
-        let inherited_members = {
-            let mut engine = crate::engine::ModelicaEngine::new();
-            for (other_id, other_host) in registry.iter() {
-                let _ = engine.upsert_document(other_id, other_host.document().source());
-            }
-            engine.inherited_members_typed(short)
-        };
+        // Inheritance-merged member list via the long-lived workspace
+        // [`ModelicaEngineHandle`]. The engine is kept in sync with
+        // the document registry by `drive_engine_sync` so this query
+        // sees every open document without a per-call upsert loop.
+        let inherited_members = world
+            .get_resource::<crate::engine_resource::ModelicaEngineHandle>()
+            .map(|handle| handle.lock().inherited_members_typed(short))
+            .unwrap_or_default();
 
         ApiResponse::ok(serde_json::json!({
             "doc_id": doc_id.raw(),

@@ -970,6 +970,82 @@ where
     })
 }
 
+/// Engine-driven Icon extraction with full inheritance merge.
+///
+/// Drop-in replacement for the resolver-lambda variant
+/// [`extract_icon_inherited`]. The merge logic is identical
+/// (graphics in base→derived order, deepest coordinate system,
+/// falsy-bool-parameter filter for `visible=...` clauses); the
+/// difference is **how the inheritance chain is walked**:
+///
+/// - The lambda variant calls a caller-supplied closure for each
+///   `extends` target, recursing through the chain on the lunco
+///   side. The closure must implement scope-chain resolution and
+///   handle MSL cross-file lookup itself.
+/// - This variant queries
+///   [`ModelicaEngine::inherited_annotations`] and
+///   [`ModelicaEngine::inherited_members_typed`], which run inside
+///   rumoca's session — scope-chain resolution, cross-file walks,
+///   and per-file fingerprint caching all happen there. The lunco
+///   side just merges the layers it gets back.
+///
+/// Use this from any code path that already has a
+/// [`crate::engine_resource::ModelicaEngineHandle`]; reach for the
+/// lambda variant only when you need to extract from a raw
+/// `ClassDef` outside any engine session (rare).
+pub fn extract_icon_via_engine(
+    qualified: &str,
+    engine: &mut crate::engine::ModelicaEngine,
+) -> Option<Icon> {
+    // Falsy `parameter Boolean` set — every member in the chain
+    // whose default is the literal `false`. Drives `visible=`
+    // filtering so e.g. `Line(visible=useHeatPort, ...)` disappears
+    // when an inherited `parameter Boolean useHeatPort = false`
+    // hasn't been overridden. Mirrors `collect_falsy_bool_params_recursive`.
+    let falsy_params: std::collections::HashSet<String> = engine
+        .inherited_members_typed(qualified)
+        .into_iter()
+        .filter(|m| {
+            matches!(
+                m.variability,
+                crate::engine::InheritedVariability::Parameter
+            )
+        })
+        .filter(|m| m.default_value.as_deref() == Some("false"))
+        .map(|m| m.name)
+        .collect();
+
+    // Annotation layers in base→derived order. The deriving class
+    // is last; coordinate system from the *deriving* layer wins, then
+    // falls back to the deepest authored base.
+    let layers = engine.inherited_annotations(qualified);
+    if layers.is_empty() {
+        return None;
+    }
+    let mut merged_graphics: Vec<GraphicItem> = Vec::new();
+    let mut inherited_cs: Option<CoordinateSystem> = None;
+    let mut local_cs: Option<CoordinateSystem> = None;
+    let last_idx = layers.len() - 1;
+    for (i, ann) in layers.iter().enumerate() {
+        let Some(icon) = extract_icon_with_visibility(ann, &falsy_params) else {
+            continue;
+        };
+        if i == last_idx {
+            local_cs = Some(icon.coordinate_system);
+        } else {
+            inherited_cs = Some(icon.coordinate_system);
+        }
+        merged_graphics.extend(icon.graphics);
+    }
+    if merged_graphics.is_empty() && local_cs.is_none() && inherited_cs.is_none() {
+        return None;
+    }
+    Some(Icon {
+        coordinate_system: local_cs.or(inherited_cs).unwrap_or_default(),
+        graphics: merged_graphics,
+    })
+}
+
 /// Extract the `Diagram(...)` annotation from a class's annotation list.
 pub fn extract_diagram(annotations: &[Expression]) -> Option<Diagram> {
     let diagram_call = find_call(annotations, "Diagram")?;

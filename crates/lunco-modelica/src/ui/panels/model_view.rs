@@ -1437,94 +1437,63 @@ fn render_icon_view(ui: &mut egui::Ui, world: &mut World) {
     // user-authored classes that aren't in the MSL palette (e.g.
     // `InertiaCopy`) still get `%paramName` substitution.
     let (authored_icon, parameters) = {
+        // Build the qualified class context for engine queries. The
+        // engine resolves cross-file inheritance via rumoca's session
+        // — no resolver lambda, no local-AST walk — so we just hand
+        // it the fully-qualified name and read back merged Icon +
+        // typed members. The within-prefixing logic is preserved so
+        // bare class names (single-file workspace docs without
+        // `within`) still resolve.
         let registry = world.resource::<ModelicaDocumentRegistry>();
-        let ast = world
+        let class_context: Option<String> = world
             .get_resource::<lunco_workbench::WorkspaceResource>()
             .and_then(|ws| ws.active_document)
             .and_then(|doc| registry.host(doc))
-            .and_then(|host| host.document().ast().result.as_ref().ok().cloned());
-        let extracted: Option<(crate::annotations::Icon, Vec<(String, String)>)> = ast.and_then(|ast| {
-            // Walk the package tree by qualified path so drill-ins
-            // into a nested class (e.g. `Modelica.Blocks.Continuous.Integrator`
-            // sitting inside the `Continuous` package) actually find
-            // the class. The short-name fallback covers single-class
-            // workspace files that don't have a `within` prefix.
-            let short = qualified.rsplit('.').next().unwrap_or(&qualified);
-            let class_ref = crate::diagram::find_class_by_qualified_name(&ast, &qualified)
-                .or_else(|| crate::diagram::find_class_by_qualified_name(&ast, short));
-            let class = class_ref?;
-            let name = short;
-            // Use the inheritance-merged extractor so classes with
-            // authored icons that extend a partial base (or sibling
-            // Icon mixin) render the inherited layer too.
-            use std::sync::Arc;
-            let mut resolver = |lookup: &str| -> Option<Arc<rumoca_session::parsing::ast::ClassDef>> {
-                let leaf = lookup.rsplit('.').next().unwrap_or(lookup);
-                if let Some(c) = ast
-                    .classes
-                    .get(lookup)
-                    .or_else(|| ast.classes.get(leaf))
-                    .or_else(|| {
-                        ast.classes
-                            .values()
-                            .flat_map(|c| c.classes.values())
-                            .find(|c| c.name.text.as_ref() == leaf)
+            .and_then(|host| {
+                let document = host.document();
+                if qualified.contains('.') {
+                    return Some(qualified.clone());
+                }
+                let ast = document.ast().result.as_ref().ok().cloned()?;
+                let short = qualified.as_str();
+                let pkg = ast
+                    .within
+                    .as_ref()
+                    .map(|w| {
+                        w.name
+                            .iter()
+                            .map(|t| t.text.as_ref())
+                            .collect::<Vec<_>>()
+                            .join(".")
                     })
-                {
-                    return Some(Arc::new(c.clone()));
-                }
-                // Cross-file: MSL class cache — enables extends
-                // inheritance from `Modelica.*.Icons.*` partials.
-                crate::class_cache::peek_or_load_msl_class(lookup)
-            };
-            let mut visited = std::collections::HashSet::new();
-            // Pass the qualified name so `extract_icon_inherited`'s
-            // scope-chain can walk enclosing packages when resolving
-            // bare `extends Foo`. `name` alone is just the short key.
-            let class_context = if qualified.contains('.') {
-                qualified.clone()
-            } else if let Some(within) = ast.within.as_ref() {
-                let pkg = within
-                    .name
-                    .iter()
-                    .map(|t| t.text.as_ref())
-                    .collect::<Vec<_>>()
-                    .join(".");
+                    .unwrap_or_default();
                 if pkg.is_empty() {
-                    name.to_string()
+                    Some(short.to_string())
                 } else {
-                    format!("{pkg}.{name}")
+                    Some(format!("{pkg}.{short}"))
                 }
-            } else {
-                name.to_string()
-            };
-            let icon = crate::annotations::extract_icon_inherited(
-                &class_context,
-                class,
-                &mut resolver,
-                &mut visited,
-            )?;
-            // Walk class.components for parameters with their
-            // formatted defaults (literal value or `start=` fallback,
-            // matching the indexer logic). Also recursively pull in
-            // parameters from extends-chain classes via the same
-            // resolver. Empty list when the class has no parameters.
-            let mut params_out: Vec<(String, String)> = Vec::new();
-            let mut params_visited: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
-            let mut resolver_for_params = resolver;
-            collect_parameters_from_class(
-                &class_context,
-                class,
-                &mut resolver_for_params,
-                &mut params_visited,
-                &mut params_out,
-            );
-            Some((icon, params_out))
-        });
-        match extracted {
-            Some((i, p)) => (Some(i), p),
-            None => (None, Vec::new()),
+            });
+        match (class_context, world.get_resource::<crate::engine_resource::ModelicaEngineHandle>()) {
+            (Some(qpath), Some(handle)) => {
+                let mut engine = handle.lock();
+                let icon = crate::annotations::extract_icon_via_engine(&qpath, &mut engine);
+                let parameters: Vec<(String, String)> = engine
+                    .inherited_members_typed(&qpath)
+                    .into_iter()
+                    .filter(|m| {
+                        matches!(
+                            m.variability,
+                            crate::engine::InheritedVariability::Parameter
+                        )
+                    })
+                    .map(|m| {
+                        let default = m.default_value.unwrap_or_default();
+                        (m.name, default)
+                    })
+                    .collect();
+                (icon, parameters)
+            }
+            _ => (None, Vec::new()),
         }
     };
 
@@ -1599,115 +1568,5 @@ fn render_icon_view(ui: &mut egui::Ui, world: &mut World) {
             );
         },
     );
-}
-
-/// Walk a class's components for parameter declarations and append
-/// `(name, formatted_default)` pairs to `out`. Recurses into the
-/// `extends` chain via the same resolver `extract_icon_inherited`
-/// uses, so parameters declared on partial bases (e.g.
-/// `PartialCompliantWithRelativeStates` for SpringDamper) are
-/// included. Cycle-safe via `visited`.
-fn collect_parameters_from_class<F>(
-    class_name: &str,
-    class: &rumoca_session::parsing::ast::ClassDef,
-    resolver: &mut F,
-    visited: &mut std::collections::HashSet<String>,
-    out: &mut Vec<(String, String)>,
-) where
-    F: FnMut(&str)
-        -> Option<std::sync::Arc<rumoca_session::parsing::ast::ClassDef>>,
-{
-    if !visited.insert(class_name.to_string()) {
-        return;
-    }
-    // Walk this class's components first.
-    for (name, comp) in class.components.iter() {
-        use rumoca_session::parsing::ast::Variability;
-        if !matches!(comp.variability, Variability::Parameter(_)) {
-            continue;
-        }
-        if out.iter().any(|(n, _)| n == name) {
-            continue;
-        }
-        // Mirror the indexer's logic: prefer explicit binding,
-        // fall back to `start=` modification.
-        let default = comp
-            .binding
-            .as_ref()
-            .map(format_param_default)
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| format_param_default(&comp.start));
-        out.push((name.clone(), default));
-    }
-    // Recurse into extends.
-    for ext in &class.extends {
-        let base_name: String = ext
-            .base_name
-            .name
-            .iter()
-            .map(|t| t.text.as_ref())
-            .collect::<Vec<&str>>()
-            .join(".");
-        // Try as-given first, then a few qualified candidates.
-        let candidates = [
-            base_name.clone(),
-            format!("Modelica.{}", base_name),
-        ];
-        for cand in candidates {
-            if let Some(base) = resolver(&cand) {
-                collect_parameters_from_class(
-                    &cand,
-                    base.as_ref(),
-                    resolver,
-                    visited,
-                    out,
-                );
-                break;
-            }
-        }
-    }
-}
-
-/// Format a parameter's default expression to a short display
-/// string. Mirror of `msl_indexer::format_default_expr` so the Icon
-/// view substitutes `%paramName` the same way the canvas (which
-/// reads pre-formatted defaults from the MSL palette) does.
-fn format_param_default(expr: &rumoca_session::parsing::ast::Expression) -> String {
-    use rumoca_session::parsing::ast::{Expression, OpUnary, TerminalType};
-    match expr {
-        Expression::Terminal { terminal_type, token } => {
-            let raw = token.text.as_ref();
-            match terminal_type {
-                TerminalType::String => raw.trim_matches('"').to_string(),
-                _ => raw.to_string(),
-            }
-        }
-        Expression::ComponentReference(cref) => cref
-            .parts
-            .last()
-            .map(|p| p.ident.text.as_ref().to_string())
-            .unwrap_or_default(),
-        Expression::Unary { op, rhs } => match (op, rhs.as_ref()) {
-            (OpUnary::Minus(_), inner) => {
-                let inner = format_param_default(inner);
-                if inner.is_empty() {
-                    String::new()
-                } else {
-                    format!("-{}", inner)
-                }
-            }
-            _ => String::new(),
-        },
-        Expression::Parenthesized { inner } => format_param_default(inner),
-        Expression::Array { elements, .. } => {
-            let parts: Vec<String> = elements.iter().map(format_param_default).collect();
-            if parts.iter().any(|s| s.is_empty()) {
-                String::new()
-            } else {
-                format!("{{{}}}", parts.join(","))
-            }
-        }
-        _ => String::new(),
-    }
 }
 

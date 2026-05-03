@@ -515,6 +515,12 @@ impl Plugin for ModelicaUiPlugin {
         // routes through the static engine; drill-in spawns its own
         // task that ultimately consults the same session.
 
+        // Long-lived workspace `ModelicaEngine` mirrored from
+        // `ModelicaDocumentRegistry`. Panel render code, API
+        // observers, and async tasks query the same warm session
+        // instead of rebuilding one per call.
+        app.add_plugins(crate::engine_resource::ModelicaEnginePlugin);
+
         // Intent layer: key chords → EditorIntent. Domain resolvers
         // (installed by ModelicaCommandsPlugin below) translate intents
         // into concrete commands for the docs they own.

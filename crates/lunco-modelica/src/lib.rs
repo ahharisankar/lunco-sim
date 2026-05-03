@@ -107,6 +107,7 @@ pub mod index;
 /// Per-Twin Modelica domain engine: long-lived `rumoca_session::Session`
 /// + per-doc URI mapping. Provides cross-file inheritance-merged queries.
 pub mod engine;
+pub mod engine_resource;
 
 /// Simple wrapper around rumoca-session for compiling Modelica models.
 ///
