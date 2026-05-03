@@ -2395,7 +2395,7 @@ fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramNodeId, Canv
             kind: "modelica.icon".into(),
             data: std::sync::Arc::new(IconNodeData {
                 qualified_type: node.component_def.msl_path.clone(),
-                icon_only: crate::class_cache::is_icon_only_class(
+                icon_only: crate::ui::loaded_classes::is_icon_only_class(
                     &node.component_def.msl_path,
                 ),
                 expandable_connector: node.component_def.is_expandable_connector,
@@ -5518,7 +5518,7 @@ impl MslPackageNode {
 #[derive(Resource, Debug, Clone)]
 pub struct PaletteSettings {
     /// When `true`, pure-icon classes (matched by
-    /// [`crate::class_cache::is_icon_only_class`]) appear in the
+    /// [`crate::ui::loaded_classes::is_icon_only_class`]) appear in the
     /// MSL add-component submenus. Default `false` — matches
     /// Dymola's "hide `.Icons.*`" default.
     pub show_icon_only_classes: bool,
@@ -5617,7 +5617,7 @@ fn finalize_tree(node: &mut MslPackageNode) {
     let mut any_visible = node
         .classes
         .iter()
-        .any(|c| !crate::class_cache::is_icon_only_class(&c.msl_path));
+        .any(|c| !crate::ui::loaded_classes::is_icon_only_class(&c.msl_path));
     for child in node.subpackages.values_mut() {
         finalize_tree(child);
         any_visible = any_visible || child.has_non_icon_class;
@@ -5668,7 +5668,7 @@ fn render_msl_package_menu(
         // Hide icon-only classes unless the user explicitly enabled
         // them in Settings. Path-based detection via `is_icon_only_class`
         // (currently `.Icons.` subpackage check).
-        if !show_icons && crate::class_cache::is_icon_only_class(&comp.msl_path) {
+        if !show_icons && crate::ui::loaded_classes::is_icon_only_class(&comp.msl_path) {
             continue;
         }
         // Display: icon character (if any) + short name. The
@@ -7242,7 +7242,7 @@ pub fn drive_drill_in_loads(
                     .map(|c| !c.components.is_empty())
             });
             let land_in_icon_view =
-                crate::class_cache::is_icon_only_class(&qualified)
+                crate::ui::loaded_classes::is_icon_only_class(&qualified)
                     || has_components == Some(false);
             if land_in_icon_view {
                 if let Some(tab) = tabs.get_mut(doc_id) {
@@ -7858,7 +7858,7 @@ fn synthesize_msl_node(
         kind: "modelica.icon".into(),
         data: std::sync::Arc::new(IconNodeData {
             qualified_type: comp.msl_path.clone(),
-            icon_only: crate::class_cache::is_icon_only_class(&comp.msl_path),
+            icon_only: crate::ui::loaded_classes::is_icon_only_class(&comp.msl_path),
             expandable_connector: comp.is_expandable_connector,
             icon_graphics: comp.icon_graphics.clone(),
             diagram_graphics: if comp.class_kind == "connector" {

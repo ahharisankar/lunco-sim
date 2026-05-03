@@ -41,7 +41,7 @@
 
 use lunco_doc::DocumentId;
 use rumoca_session::compile::{
-    ClassMemberCausality, ClassMemberInfo, ClassMemberVariability,
+    ClassMemberCausality, ClassMemberInfo, ClassMemberVariability, SourceRootKind,
 };
 use rumoca_session::Session;
 use std::collections::HashMap;
@@ -113,6 +113,37 @@ impl ModelicaEngine {
         }
     }
 
+    /// Load a library (MSL or third-party) into the session as a
+    /// `DurableExternal` source root. Once loaded, every class in
+    /// `files` is resolvable through the session's normal queries —
+    /// no separate cache, no path lookup. Cross-file inheritance
+    /// walks user docs + this library uniformly.
+    ///
+    /// `set_id` is a stable identifier (e.g. `"msl"`); `label` is a
+    /// log-friendly name (e.g. `"in-memory:msl"`); `files` is the
+    /// already-loaded `(uri, source)` pairs (typically decoded from
+    /// the `msl_indexer` bincode bundle).
+    ///
+    /// Diagnostics from per-file parse failures are returned via the
+    /// session's load report; we surface only the high-level
+    /// "files inserted" count for callers that just want to know if
+    /// it worked.
+    pub fn load_library_files(
+        &mut self,
+        set_id: &str,
+        label: &str,
+        files: Vec<(String, String)>,
+    ) -> usize {
+        let report = self.session.load_source_root_in_memory(
+            set_id,
+            SourceRootKind::DurableExternal,
+            label,
+            files,
+            None,
+        );
+        report.inserted_file_count
+    }
+
     /// Inheritance-merged component members for a fully-qualified
     /// class. Returns `(name, type)` pairs walking the `extends`
     /// chain — including across files when the bases are in other
@@ -136,11 +167,39 @@ impl ModelicaEngine {
         self.session.class_component_members_typed_query(qualified)
     }
 
+    /// Inheritance chain of annotation lists for a class.
+    ///
+    /// Returns each class's `annotation: Vec<Expression>` in
+    /// **base → derived** order — the deriving class is last. Empty
+    /// layers (classes with no annotation) are still included so
+    /// callers can correlate the chain length.
+    ///
+    /// Use case: `extract_icon_inherited` — walk the layers, run the
+    /// per-layer Icon extractor, merge graphics in order. Replaces
+    /// the lunco-side resolver-lambda + class_cache plumbing.
+    pub fn inherited_annotations(
+        &mut self,
+        qualified: &str,
+    ) -> Vec<Vec<rumoca_session::parsing::ast::Expression>> {
+        self.session.class_inherited_annotations_query(qualified)
+    }
+
     /// Read-only access to the underlying session for advanced queries
     /// not yet wrapped here. Use sparingly — prefer growing this
     /// crate's API over leaking the session through panels.
     pub fn session_mut(&mut self) -> &mut Session {
         &mut self.session
+    }
+
+    /// Whether `qualified` resolves to a class currently in the
+    /// session. Cheap — uses rumoca's existing
+    /// `class_lookup_query`. Used as the first step in lazy MSL
+    /// loading: if the class isn't here, the caller resolves a
+    /// file path, reads it, and pushes via
+    /// `session_mut().add_document(...)`. Subsequent calls then
+    /// return `true` without touching the filesystem.
+    pub fn has_class(&mut self, qualified: &str) -> bool {
+        self.session.class_lookup_query(qualified).is_some()
     }
 }
 
@@ -196,6 +255,74 @@ mod tests {
         assert!(engine.uri_for_doc.contains_key(&DocumentId::new(1)));
         engine.close_document(DocumentId::new(1));
         assert!(!engine.uri_for_doc.contains_key(&DocumentId::new(1)));
+    }
+
+    #[test]
+    fn has_class_reflects_session_contents() {
+        let mut engine = ModelicaEngine::new();
+        assert!(!engine.has_class("Foo"), "empty session reports no class");
+
+        engine
+            .upsert_document(DocumentId::new(1), "model Foo\nend Foo;\n")
+            .unwrap();
+        assert!(engine.has_class("Foo"), "Foo present after upsert");
+
+        engine.close_document(DocumentId::new(1));
+        assert!(!engine.has_class("Foo"), "Foo gone after close");
+    }
+
+    #[test]
+    fn load_library_files_makes_classes_resolvable() {
+        let mut engine = ModelicaEngine::new();
+        // Pretend we have a tiny "library" with a Base class.
+        let library_files = vec![(
+            "lib/Base.mo".to_string(),
+            "model Base\n  parameter Real k = 5;\n  Real x;\nend Base;\n".to_string(),
+        )];
+        let inserted = engine.load_library_files("test_lib", "in-memory:test", library_files);
+        assert_eq!(inserted, 1, "library file should be inserted");
+
+        // A user doc that extends a class from the library — without
+        // any explicit upsert wiring it together. Cross-file inheritance
+        // walks user + library uniformly through the same session.
+        engine
+            .upsert_document(
+                DocumentId::new(99),
+                "model UserMod\n  extends Base;\n  Real y;\nend UserMod;\n",
+            )
+            .expect("user doc parses");
+
+        let members = engine.inherited_components("UserMod");
+        let names: Vec<&str> = members.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"k"),
+            "library Base.k must be resolved across the user doc + library: {names:?}"
+        );
+        assert!(names.contains(&"x"), "library Base.x must be resolved");
+        assert!(names.contains(&"y"), "user-doc UserMod.y must be present");
+    }
+
+    #[test]
+    fn inherited_annotations_walks_extends_in_order() {
+        let mut engine = ModelicaEngine::new();
+        let src = "model Base\n  annotation(Icon(graphics={Rectangle(extent={{-10,-10},{10,10}})}));\nend Base;\n\nmodel Mid\n  extends Base;\n  annotation(Icon(graphics={Line(points={{0,0},{5,5}})}));\nend Mid;\n\nmodel Derived\n  extends Mid;\n  annotation(Icon(graphics={Text(extent={{0,0},{10,10}}, textString=\"hi\")}));\nend Derived;\n";
+        engine.upsert_document(DocumentId::new(1), src).unwrap();
+
+        let layers = engine.inherited_annotations("Derived");
+        // Three classes in the chain: Base, Mid, Derived (in that order).
+        assert_eq!(
+            layers.len(),
+            3,
+            "expected 3 layers (Base, Mid, Derived), got {}",
+            layers.len()
+        );
+        for (i, layer) in layers.iter().enumerate() {
+            assert!(
+                !layer.is_empty(),
+                "layer {} should have at least one annotation expression",
+                i
+            );
+        }
     }
 
     #[test]

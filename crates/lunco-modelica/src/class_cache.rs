@@ -706,33 +706,6 @@ pub fn resolve_msl_head_prefix(qualified: &str) -> Option<String> {
     None
 }
 
-/// Heuristic: "is this class a pure icon / visual symbol, not a
-/// functional component?"
-///
-/// **Current rule**: the qualified name contains a `.Icons.` segment.
-/// That matches the conventional Modelica Standard Library subtree
-/// (`Modelica.Icons.*`, `Modelica.Electrical.Analog.Icons.*`,
-/// `Modelica.Mechanics.Rotational.Icons.*`, …) where every class is
-/// a partial shell with `annotation(Icon(...))` and no connectors.
-///
-/// **Why not just count connectors.** A zero-connector class could
-/// legitimately be a self-contained simulation model (a sandbox
-/// with only equations, no external I/O). Path-based matches MSL's
-/// own naming intent, so the false-positive rate is tiny.
-///
-/// **TODO**: upgrade to AST-based detection. The accurate signal is
-/// "has `Icon` annotation + no `Diagram` annotation + no
-/// placed components + class is `partial`". That catches custom
-/// user icon libraries outside the MSL naming convention. Needs an
-/// AST walk at projection time, not just a string check, so deferred
-/// until we're sure the cheaper rule doesn't suffice.
-///
-/// Reference: [Modelica.Icons](https://doc.modelica.org/Modelica%204.0.0/Resources/helpOM/Modelica.Icons.html)
-/// is how the MSL itself organises its graphical-only classes.
-pub fn is_icon_only_class(qualified: &str) -> bool {
-    qualified.contains(".Icons.")
-}
-
 // ═══════════════════════════════════════════════════════════════════
 // Sync MSL class loader — for callers that need a class *right now*
 // ═══════════════════════════════════════════════════════════════════

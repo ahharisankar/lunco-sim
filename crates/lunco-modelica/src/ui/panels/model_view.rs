@@ -633,7 +633,7 @@ fn render_unified_toolbar(
         .open_model
         .as_ref()
         .map(|m| {
-            crate::class_cache::is_icon_only_class(&m.model_path)
+            crate::ui::loaded_classes::is_icon_only_class(&m.model_path)
                 || m.model_path.contains("/Icons/")
         })
         .unwrap_or(false);
