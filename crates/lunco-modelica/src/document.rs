@@ -814,6 +814,62 @@ pub enum ModelicaOp {
         /// Index of the Text item within `Diagram(graphics={...})`.
         index: usize,
     },
+
+    // ── Layer 2: full class authoring ───────────────────────────────────────
+    /// Add a new empty class (model/connector/package/...) inside `parent`
+    /// (or at top level when `parent` is empty).
+    AddClass {
+        parent: String,
+        name: String,
+        kind: pretty::ClassKindSpec,
+        description: String,
+        partial: bool,
+    },
+    /// Remove a class by qualified name (and its trailing whitespace).
+    RemoveClass { qualified: String },
+    /// Add a short-class definition: `connector X = Y(...)`,
+    /// `connector Out = output Real(unit="N")`, etc.
+    AddShortClass {
+        parent: String,
+        name: String,
+        kind: pretty::ClassKindSpec,
+        base: String,
+        prefixes: Vec<String>,
+        modifications: Vec<(String, String)>,
+    },
+    /// Add a variable declaration to a class body.
+    AddVariable {
+        class: String,
+        decl: pretty::VariableDecl,
+    },
+    /// Remove a variable declaration by name.
+    RemoveVariable { class: String, name: String },
+    /// Append an equation to a class equation section, creating one if needed.
+    AddEquation {
+        class: String,
+        eq: pretty::EquationDecl,
+    },
+    /// Append a graphic to the class's `annotation(Icon(graphics={...}))`,
+    /// creating the wrapper if needed.
+    AddIconGraphic {
+        class: String,
+        graphic: pretty::GraphicSpec,
+    },
+    /// Append a graphic to the class's `annotation(Diagram(graphics={...}))`,
+    /// creating the wrapper if needed.
+    AddDiagramGraphic {
+        class: String,
+        graphic: pretty::GraphicSpec,
+    },
+    /// Set or replace the `experiment(...)` argument inside the class
+    /// annotation.
+    SetExperimentAnnotation {
+        class: String,
+        start_time: f64,
+        stop_time: f64,
+        tolerance: f64,
+        interval: f64,
+    },
 }
 
 impl DocumentOp for ModelicaOp {}
@@ -1016,6 +1072,47 @@ fn op_to_patch(
         }
         ModelicaOp::RemoveDiagramText { class, index } => {
             let (r, rp) = compute_remove_diagram_text_patch(source, ast, &class, index)?;
+            Ok((r, rp, ModelicaChange::TextReplaced))
+        }
+        ModelicaOp::AddClass { parent, name, kind, description, partial } => {
+            let (r, rp) = compute_add_class_patch(source, ast, &parent, &name, kind, &description, partial)?;
+            Ok((r, rp, ModelicaChange::TextReplaced))
+        }
+        ModelicaOp::RemoveClass { qualified } => {
+            let (r, rp) = compute_remove_class_patch(source, ast, &qualified)?;
+            Ok((r, rp, ModelicaChange::TextReplaced))
+        }
+        ModelicaOp::AddShortClass { parent, name, kind, base, prefixes, modifications } => {
+            let (r, rp) = compute_add_short_class_patch(
+                source, ast, &parent, &name, kind, &base, &prefixes, &modifications,
+            )?;
+            Ok((r, rp, ModelicaChange::TextReplaced))
+        }
+        ModelicaOp::AddVariable { class, decl } => {
+            let (r, rp) = compute_add_variable_patch(source, ast, &class, &decl)?;
+            Ok((r, rp, ModelicaChange::TextReplaced))
+        }
+        ModelicaOp::RemoveVariable { class, name } => {
+            // Variables and components share the same AST table — reuse.
+            let (r, rp) = compute_remove_component_patch(source, ast, &class, &name)?;
+            Ok((r, rp, ModelicaChange::TextReplaced))
+        }
+        ModelicaOp::AddEquation { class, eq } => {
+            let (r, rp) = compute_add_equation_patch(source, ast, &class, &eq)?;
+            Ok((r, rp, ModelicaChange::TextReplaced))
+        }
+        ModelicaOp::AddIconGraphic { class, graphic } => {
+            let (r, rp) = compute_add_named_graphic_patch(source, ast, &class, "Icon", &graphic)?;
+            Ok((r, rp, ModelicaChange::TextReplaced))
+        }
+        ModelicaOp::AddDiagramGraphic { class, graphic } => {
+            let (r, rp) = compute_add_named_graphic_patch(source, ast, &class, "Diagram", &graphic)?;
+            Ok((r, rp, ModelicaChange::TextReplaced))
+        }
+        ModelicaOp::SetExperimentAnnotation { class, start_time, stop_time, tolerance, interval } => {
+            let (r, rp) = compute_set_experiment_patch(
+                source, ast, &class, start_time, stop_time, tolerance, interval,
+            )?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
     }
@@ -2506,6 +2603,299 @@ fn match_entry(
         return Some((value_start..value_end, replacement));
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// Layer 2 writers — class / variable / equation / graphic / experiment
+// ---------------------------------------------------------------------------
+
+/// Insert an empty class block inside `parent` (or top level if empty).
+fn compute_add_class_patch(
+    source: &str,
+    ast: &AstCache,
+    parent: &str,
+    name: &str,
+    kind: pretty::ClassKindSpec,
+    description: &str,
+    partial: bool,
+) -> Result<(Range<usize>, String), DocumentError> {
+    if name.is_empty() {
+        return Err(DocumentError::ValidationFailed("class name is empty".into()));
+    }
+    let block = pretty::class_block_empty(name, kind, description, partial);
+    if parent.is_empty() {
+        // Top-level: append at end of file with a leading blank line if needed.
+        let prefix = if source.is_empty() || source.ends_with("\n\n") {
+            String::new()
+        } else if source.ends_with('\n') {
+            "\n".to_string()
+        } else {
+            "\n\n".to_string()
+        };
+        let pos = source.len();
+        return Ok((pos..pos, format!("{prefix}{block}")));
+    }
+    let parent_def = resolve_class(ast, parent)?;
+    let end_byte = parent_def
+        .end_name_token
+        .as_ref()
+        .map(|t| t.location.start as usize)
+        .ok_or_else(|| {
+            DocumentError::ValidationFailed(format!(
+                "parent class `{}` has no `end` clause location",
+                parent
+            ))
+        })?;
+    let line_start = line_start_byte(source, end_byte);
+    // Indent the block's own first line and `end`-line with the parent's
+    // body indent (one `options().indent` level).
+    let body_indent = pretty::options().indent;
+    let indented: String = block
+        .lines()
+        .enumerate()
+        .map(|(i, l)| {
+            if l.is_empty() && i + 1 == block.lines().count() {
+                String::new()
+            } else {
+                format!("{}{}\n", body_indent, l)
+            }
+        })
+        .collect();
+    Ok((line_start..line_start, indented))
+}
+
+/// Remove a class by qualified name. Span = first token of the class
+/// header through the trailing `;` of `end <Name>;`, line-extended.
+fn compute_remove_class_patch(
+    source: &str,
+    ast: &AstCache,
+    qualified: &str,
+) -> Result<(Range<usize>, String), DocumentError> {
+    let class_def = resolve_class(ast, qualified)?;
+    let raw_start = class_def.location.start as usize;
+    // class_def.location.end stops before `end`; advance to past the
+    // terminating `;` of `end <Name>;`.
+    let end_token_start = class_def
+        .end_name_token
+        .as_ref()
+        .map(|t| t.location.start as usize)
+        .unwrap_or(class_def.location.end as usize);
+    let term = find_statement_terminator(source, end_token_start)
+        .ok_or_else(|| {
+            DocumentError::ValidationFailed(format!(
+                "could not find `;` terminating class `{qualified}`"
+            ))
+        })?;
+    let span = extend_span_to_whole_lines(source, raw_start..(term + 1));
+    Ok((span, String::new()))
+}
+
+/// Insert a short-class definition inside `parent` (or top level).
+fn compute_add_short_class_patch(
+    source: &str,
+    ast: &AstCache,
+    parent: &str,
+    name: &str,
+    kind: pretty::ClassKindSpec,
+    base: &str,
+    prefixes: &[String],
+    modifications: &[(String, String)],
+) -> Result<(Range<usize>, String), DocumentError> {
+    if name.is_empty() || base.is_empty() {
+        return Err(DocumentError::ValidationFailed(
+            "short class name or base is empty".into(),
+        ));
+    }
+    let line = pretty::short_class_decl(name, kind, base, prefixes, modifications);
+    if parent.is_empty() {
+        let prefix = if source.is_empty() || source.ends_with('\n') {
+            String::new()
+        } else {
+            "\n".to_string()
+        };
+        let pos = source.len();
+        // Strip the `options().indent` prefix so top-level lines aren't
+        // body-indented.
+        let body_indent = pretty::options().indent;
+        let unindented = line.strip_prefix(&body_indent).unwrap_or(&line).to_string();
+        return Ok((pos..pos, format!("{prefix}{unindented}")));
+    }
+    let parent_def = resolve_class(ast, parent)?;
+    let end_byte = parent_def
+        .end_name_token
+        .as_ref()
+        .map(|t| t.location.start as usize)
+        .ok_or_else(|| {
+            DocumentError::ValidationFailed(format!(
+                "parent class `{}` has no `end` clause location",
+                parent
+            ))
+        })?;
+    let line_start = line_start_byte(source, end_byte);
+    Ok((line_start..line_start, line))
+}
+
+/// Insert a variable declaration into a class body, just before the
+/// equation/algorithm section or `end <Name>`.
+fn compute_add_variable_patch(
+    source: &str,
+    ast: &AstCache,
+    class: &str,
+    decl: &pretty::VariableDecl,
+) -> Result<(Range<usize>, String), DocumentError> {
+    let class_def = resolve_class(ast, class)?;
+    let insertion_byte = class_section_insertion_point(class_def).ok_or_else(|| {
+        DocumentError::ValidationFailed(format!(
+            "could not locate insertion point in class `{class}`"
+        ))
+    })?;
+    let line_start = line_start_byte(source, insertion_byte);
+    Ok((line_start..line_start, pretty::variable_decl(decl)))
+}
+
+/// Append an equation to a class equation section, creating one if needed.
+fn compute_add_equation_patch(
+    source: &str,
+    ast: &AstCache,
+    class: &str,
+    eq: &pretty::EquationDecl,
+) -> Result<(Range<usize>, String), DocumentError> {
+    let class_def = resolve_class(ast, class)?;
+    let end_name_byte = class_def
+        .end_name_token
+        .as_ref()
+        .map(|t| t.location.start as usize)
+        .ok_or_else(|| {
+            DocumentError::ValidationFailed(format!(
+                "class `{class}` has no `end` clause location"
+            ))
+        })?;
+    let end_line_start = line_start_byte(source, end_name_byte);
+    let eq_line = pretty::equation_decl(eq);
+    let replacement = if class_def.equation_keyword.is_some() {
+        eq_line
+    } else {
+        format!("equation\n{}", eq_line)
+    };
+    Ok((end_line_start..end_line_start, replacement))
+}
+
+/// Append a graphic to `Icon(graphics={...})` or `Diagram(graphics={...})`,
+/// creating the wrapper if needed. Mirrors `compute_add_plot_node_patch`'s
+/// shape for Diagram, generalised to accept the layer name.
+fn compute_add_named_graphic_patch(
+    source: &str,
+    ast: &AstCache,
+    class: &str,
+    layer: &str,
+    graphic: &pretty::GraphicSpec,
+) -> Result<(Range<usize>, String), DocumentError> {
+    let class_def = resolve_class(ast, class)?;
+    let body = (class_def.location.start as usize)..(class_def.location.end as usize);
+    let new_entry = pretty::graphic_inner(graphic);
+
+    if let Some(layer_inner) = find_class_named_graphics_layer(source, body.clone(), layer) {
+        if let Some(graphics_inner) = find_diagram_graphics_inner(source, layer_inner.clone()) {
+            // graphics={...} exists — append.
+            let array_text = &source[graphics_inner.clone()];
+            let prefix = if array_text.trim().is_empty() { "" } else { ",\n        " };
+            let leading = if array_text.trim().is_empty() { "\n        " } else { "" };
+            let trailing = "\n      ";
+            let trimmed_end = trim_trailing_ws_back(source, graphics_inner.clone());
+            return Ok((
+                trimmed_end..graphics_inner.end,
+                format!("{prefix}{leading}{new_entry}{trailing}"),
+            ));
+        }
+        // <Layer>() with no graphics= argument — prepend.
+        let insert = if source[layer_inner.clone()].trim().is_empty() {
+            format!("graphics={{\n        {new_entry}\n      }}")
+        } else {
+            format!("graphics={{\n        {new_entry}\n      }}, ")
+        };
+        return Ok((layer_inner.start..layer_inner.start, insert));
+    }
+    // No <Layer>(...) yet. Look for an existing class-level annotation
+    // to extend.
+    if let Some(ann) = find_annotation_span(source, body.clone()) {
+        let inner_start = ann.start + "annotation(".len();
+        let payload = format!(
+            "{layer}(graphics={{\n        {new_entry}\n      }})"
+        );
+        let insert = if source[inner_start..ann.end - 1].trim().is_empty() {
+            payload
+        } else {
+            format!("{}, ", payload)
+        };
+        return Ok((inner_start..inner_start, insert));
+    }
+    // No annotation at all — insert one before `end <Name>;`.
+    let insert_at = class_def.location.end as usize;
+    let payload = format!(
+        "  annotation({layer}(graphics={{\n        {new_entry}\n      }}));\n  "
+    );
+    Ok((insert_at..insert_at, payload))
+}
+
+/// Locate `<layer>(...)` (Icon or Diagram) inside any class-level
+/// annotation. Returns the byte span between the parens, *excluding*
+/// the parens themselves. Counterpart to `find_class_diagram` that's
+/// generalised over the layer keyword.
+fn find_class_named_graphics_layer(
+    source: &str,
+    body: Range<usize>,
+    layer: &str,
+) -> Option<Range<usize>> {
+    let mut cursor = body.start;
+    while cursor < body.end {
+        let ann = find_annotation_span(source, cursor..body.end)?;
+        let ann_inner_start = ann.start + "annotation(".len();
+        let ann_inner_end = ann.end - 1;
+        if let Some(span) = find_named_call_span(source, ann_inner_start..ann_inner_end, layer) {
+            let inner_start = span.start + layer.len() + 1; // `<layer>(`
+            let inner_end = span.end - 1;                   // before `)`
+            return Some(inner_start..inner_end);
+        }
+        cursor = ann.end;
+    }
+    None
+}
+
+/// Set or insert the `experiment(...)` annotation on a class.
+fn compute_set_experiment_patch(
+    source: &str,
+    ast: &AstCache,
+    class: &str,
+    start_time: f64,
+    stop_time: f64,
+    tolerance: f64,
+    interval: f64,
+) -> Result<(Range<usize>, String), DocumentError> {
+    let class_def = resolve_class(ast, class)?;
+    let body = (class_def.location.start as usize)..(class_def.location.end as usize);
+    let new_inner = pretty::experiment_inner(start_time, stop_time, tolerance, interval);
+
+    if let Some(ann) = find_annotation_span(source, body.clone()) {
+        let ann_inner_start = ann.start + "annotation(".len();
+        let ann_inner_end = ann.end - 1;
+        if let Some(span) = find_named_call_span(source, ann_inner_start..ann_inner_end, "experiment") {
+            // Replace whole experiment(...) call.
+            return Ok((span, new_inner));
+        }
+        // Prepend the experiment(...) entry to the existing annotation.
+        let insert = if source[ann_inner_start..ann_inner_end].trim().is_empty() {
+            new_inner
+        } else {
+            format!("{new_inner}, ")
+        };
+        return Ok((ann_inner_start..ann_inner_start, insert));
+    }
+    // No annotation — create one before `end <Name>;`.
+    let insert_at = class_def.location.end as usize;
+    Ok((
+        insert_at..insert_at,
+        format!("  annotation({new_inner});\n  "),
+    ))
 }
 
 #[cfg(test)]

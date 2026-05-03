@@ -8005,6 +8005,30 @@ fn apply_ops(world: &mut World, doc_id: lunco_doc::DocumentId, ops: Vec<Modelica
         };
         for op in ops {
             bevy::log::info!("[CanvasDiagram] applying {:?}", op);
+            // Layer 2 authoring ops can resolve a class that a previous
+            // op in the same batch just created. The AST cache is
+            // debounced (refresh deferred until idle), so the resolver
+            // would see a stale snapshot and reject the second op.
+            // Force a synchronous reparse for the structural ops where
+            // a stale AST means a wrong insertion point or a spurious
+            // "class not found" error. Cheap on small docs (a few ms);
+            // canvas-driven AddComponent batches don't trip this branch.
+            let needs_fresh_ast = matches!(
+                &op,
+                ModelicaOp::AddClass { .. }
+                    | ModelicaOp::RemoveClass { .. }
+                    | ModelicaOp::AddShortClass { .. }
+                    | ModelicaOp::AddVariable { .. }
+                    | ModelicaOp::RemoveVariable { .. }
+                    | ModelicaOp::AddEquation { .. }
+                    | ModelicaOp::AddIconGraphic { .. }
+                    | ModelicaOp::AddDiagramGraphic { .. }
+                    | ModelicaOp::SetExperimentAnnotation { .. }
+                    | ModelicaOp::ReplaceSource { .. }
+            );
+            if needs_fresh_ast {
+                host.document_mut().refresh_ast_now();
+            }
             match host.apply(op) {
                 Ok(_) => any_applied = true,
                 Err(lunco_doc::Reject::ReadOnly) => {

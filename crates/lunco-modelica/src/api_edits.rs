@@ -43,7 +43,11 @@ use lunco_core::{Command, on_command, register_commands};
 use lunco_doc::DocumentId;
 
 use crate::document::ModelicaOp;
-use crate::pretty::{ComponentDecl, ConnectEquation, Line, LunCoPlotNodeSpec, Placement, PortRef};
+use crate::pretty::{
+    CausalitySpec, ClassKindSpec, ComponentDecl, ConnectEquation, EquationDecl, FillPattern,
+    GraphicSpec, Line, LinePattern, LunCoPlotNodeSpec, Placement, PortRef, VariabilitySpec,
+    VariableDecl,
+};
 use crate::ui::state::ModelicaDocumentRegistry;
 
 /// Plugin that registers the Modelica edit events + observers.
@@ -70,7 +74,13 @@ impl Plugin for ModelicaApiEditPlugin {
         // (the macro registers the outer command, not nested fields).
         app.register_type::<ApiOp>()
             .register_type::<ApiPlacement>()
-            .register_type::<ApiModification>();
+            .register_type::<ApiModification>()
+            .register_type::<ApiClassKind>()
+            .register_type::<ApiCausality>()
+            .register_type::<ApiVariability>()
+            .register_type::<ApiGraphic>()
+            .register_type::<ApiFillPattern>()
+            .register_type::<ApiLinePattern>();
         register_all_commands(app);
     }
 }
@@ -790,6 +800,230 @@ pub enum ApiOp {
         range_end: u32,
         replacement: String,
     },
+
+    // ── Layer 2: full class authoring ───────────────────────────────────────
+    /// Add an empty class block. `parent` is "" for top-level, else the
+    /// dotted FQN of the enclosing class/package.
+    AddClass {
+        parent: String,
+        name: String,
+        kind: ApiClassKind,
+        description: String,
+        partial: bool,
+    },
+    RemoveClass { qualified: String },
+    AddShortClass {
+        parent: String,
+        name: String,
+        kind: ApiClassKind,
+        base: String,
+        prefixes: Vec<String>,
+        modifications: Vec<ApiModification>,
+    },
+    AddVariable {
+        class: String,
+        name: String,
+        type_name: String,
+        causality: ApiCausality,
+        variability: ApiVariability,
+        flow: bool,
+        modifications: Vec<ApiModification>,
+        /// RHS of `= ...`; empty string omits the binding.
+        value: String,
+        description: String,
+    },
+    RemoveVariable { class: String, name: String },
+    AddEquation {
+        class: String,
+        /// LHS expression; empty string emits a statement-only equation
+        /// (e.g. `assert(...)`).
+        lhs: String,
+        rhs: String,
+    },
+    AddIconGraphic    { class: String, graphic: ApiGraphic },
+    AddDiagramGraphic { class: String, graphic: ApiGraphic },
+    SetExperimentAnnotation {
+        class: String,
+        start_time: f64,
+        stop_time: f64,
+        tolerance: f64,
+        interval: f64,
+    },
+}
+
+/// Class-restriction keyword for [`ApiOp::AddClass`] / [`ApiOp::AddShortClass`].
+#[derive(Reflect, Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub enum ApiClassKind {
+    #[default]
+    Model,
+    Block,
+    Connector,
+    Package,
+    Record,
+    Function,
+    Type,
+}
+
+impl ApiClassKind {
+    fn to_pretty(self) -> ClassKindSpec {
+        match self {
+            Self::Model => ClassKindSpec::Model,
+            Self::Block => ClassKindSpec::Block,
+            Self::Connector => ClassKindSpec::Connector,
+            Self::Package => ClassKindSpec::Package,
+            Self::Record => ClassKindSpec::Record,
+            Self::Function => ClassKindSpec::Function,
+            Self::Type => ClassKindSpec::Type,
+        }
+    }
+}
+
+#[derive(Reflect, Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub enum ApiCausality {
+    #[default]
+    None,
+    Input,
+    Output,
+}
+
+impl ApiCausality {
+    fn to_pretty(self) -> CausalitySpec {
+        match self {
+            Self::None => CausalitySpec::None,
+            Self::Input => CausalitySpec::Input,
+            Self::Output => CausalitySpec::Output,
+        }
+    }
+}
+
+#[derive(Reflect, Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub enum ApiVariability {
+    #[default]
+    Continuous,
+    Discrete,
+    Parameter,
+    Constant,
+}
+
+impl ApiVariability {
+    fn to_pretty(self) -> VariabilitySpec {
+        match self {
+            Self::Continuous => VariabilitySpec::Continuous,
+            Self::Discrete => VariabilitySpec::Discrete,
+            Self::Parameter => VariabilitySpec::Parameter,
+            Self::Constant => VariabilitySpec::Constant,
+        }
+    }
+}
+
+/// Reflect-friendly graphic primitive for [`ApiOp::AddIconGraphic`] /
+/// [`ApiOp::AddDiagramGraphic`]. Mirrors [`crate::pretty::GraphicSpec`].
+#[derive(Reflect, Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub enum ApiGraphic {
+    Rectangle {
+        x1: f32, y1: f32, x2: f32, y2: f32,
+        line_color: [u8; 3],
+        fill_color: [u8; 3],
+        fill_pattern: ApiFillPattern,
+    },
+    Polygon {
+        /// Flattened `[x0, y0, x1, y1, ...]` waypoints.
+        points: Vec<f32>,
+        line_color: [u8; 3],
+        fill_color: [u8; 3],
+        fill_pattern: ApiFillPattern,
+    },
+    Line {
+        points: Vec<f32>,
+        color: [u8; 3],
+        thickness: f32,
+        pattern: ApiLinePattern,
+    },
+    Text {
+        x1: f32, y1: f32, x2: f32, y2: f32,
+        text: String,
+        color: [u8; 3],
+        font_size: f32,
+    },
+}
+
+impl Default for ApiGraphic {
+    fn default() -> Self {
+        Self::Rectangle {
+            x1: 0.0, y1: 0.0, x2: 0.0, y2: 0.0,
+            line_color: [0, 0, 0], fill_color: [0, 0, 0],
+            fill_pattern: ApiFillPattern::None,
+        }
+    }
+}
+
+#[derive(Reflect, Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub enum ApiFillPattern {
+    #[default]
+    None,
+    Solid,
+}
+
+impl ApiFillPattern {
+    fn to_pretty(self) -> FillPattern {
+        match self {
+            Self::None => FillPattern::None,
+            Self::Solid => FillPattern::Solid,
+        }
+    }
+}
+
+#[derive(Reflect, Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub enum ApiLinePattern {
+    #[default]
+    Solid,
+    Dash,
+    Dot,
+}
+
+impl ApiLinePattern {
+    fn to_pretty(self) -> LinePattern {
+        match self {
+            Self::Solid => LinePattern::Solid,
+            Self::Dash => LinePattern::Dash,
+            Self::Dot => LinePattern::Dot,
+        }
+    }
+}
+
+fn flat_to_points(flat: &[f32]) -> Vec<(f32, f32)> {
+    flat.chunks(2)
+        .filter(|c| c.len() == 2)
+        .map(|c| (c[0], c[1]))
+        .collect()
+}
+
+fn api_graphic_to_pretty(g: &ApiGraphic) -> GraphicSpec {
+    match g {
+        ApiGraphic::Rectangle { x1, y1, x2, y2, line_color, fill_color, fill_pattern } => {
+            GraphicSpec::Rectangle {
+                x1: *x1, y1: *y1, x2: *x2, y2: *y2,
+                line_color: *line_color, fill_color: *fill_color,
+                fill_pattern: fill_pattern.to_pretty(),
+            }
+        }
+        ApiGraphic::Polygon { points, line_color, fill_color, fill_pattern } => {
+            GraphicSpec::Polygon {
+                points: flat_to_points(points),
+                line_color: *line_color, fill_color: *fill_color,
+                fill_pattern: fill_pattern.to_pretty(),
+            }
+        }
+        ApiGraphic::Line { points, color, thickness, pattern } => GraphicSpec::Line {
+            points: flat_to_points(points),
+            color: *color, thickness: *thickness,
+            pattern: pattern.to_pretty(),
+        },
+        ApiGraphic::Text { x1, y1, x2, y2, text, color, font_size } => GraphicSpec::Text {
+            x1: *x1, y1: *y1, x2: *x2, y2: *y2,
+            text: text.clone(), color: *color, font_size: *font_size,
+        },
+    }
 }
 
 /// Batched edit event — primary entry point for both the GUI canvas
@@ -1014,6 +1248,106 @@ fn api_op_to_internal(op: &ApiOp) -> Option<ModelicaOp> {
                 replacement: replacement.clone(),
             })
         }
+        ApiOp::AddClass { parent, name, kind, description, partial } => {
+            if name.is_empty() {
+                return None;
+            }
+            Some(ModelicaOp::AddClass {
+                parent: parent.clone(),
+                name: name.clone(),
+                kind: kind.to_pretty(),
+                description: description.clone(),
+                partial: *partial,
+            })
+        }
+        ApiOp::RemoveClass { qualified } => {
+            if qualified.is_empty() {
+                return None;
+            }
+            Some(ModelicaOp::RemoveClass { qualified: qualified.clone() })
+        }
+        ApiOp::AddShortClass { parent, name, kind, base, prefixes, modifications } => {
+            if name.is_empty() || base.is_empty() {
+                return None;
+            }
+            Some(ModelicaOp::AddShortClass {
+                parent: parent.clone(),
+                name: name.clone(),
+                kind: kind.to_pretty(),
+                base: base.clone(),
+                prefixes: prefixes.clone(),
+                modifications: modifications.iter().map(|m| (m.name.clone(), m.value.clone())).collect(),
+            })
+        }
+        ApiOp::AddVariable {
+            class, name, type_name, causality, variability, flow,
+            modifications, value, description,
+        } => {
+            if class.is_empty() || name.is_empty() || type_name.is_empty() {
+                return None;
+            }
+            Some(ModelicaOp::AddVariable {
+                class: class.clone(),
+                decl: VariableDecl {
+                    name: name.clone(),
+                    type_name: type_name.clone(),
+                    causality: causality.to_pretty(),
+                    variability: variability.to_pretty(),
+                    flow: *flow,
+                    modifications: modifications.iter().map(|m| (m.name.clone(), m.value.clone())).collect(),
+                    value: if value.is_empty() { None } else { Some(value.clone()) },
+                    description: description.clone(),
+                },
+            })
+        }
+        ApiOp::RemoveVariable { class, name } => {
+            if class.is_empty() || name.is_empty() {
+                return None;
+            }
+            Some(ModelicaOp::RemoveVariable { class: class.clone(), name: name.clone() })
+        }
+        ApiOp::AddEquation { class, lhs, rhs } => {
+            if class.is_empty() || rhs.is_empty() {
+                return None;
+            }
+            Some(ModelicaOp::AddEquation {
+                class: class.clone(),
+                eq: EquationDecl {
+                    lhs: if lhs.is_empty() { None } else { Some(lhs.clone()) },
+                    rhs: rhs.clone(),
+                },
+            })
+        }
+        ApiOp::AddIconGraphic { class, graphic } => {
+            if class.is_empty() {
+                return None;
+            }
+            Some(ModelicaOp::AddIconGraphic {
+                class: class.clone(),
+                graphic: api_graphic_to_pretty(graphic),
+            })
+        }
+        ApiOp::AddDiagramGraphic { class, graphic } => {
+            if class.is_empty() {
+                return None;
+            }
+            Some(ModelicaOp::AddDiagramGraphic {
+                class: class.clone(),
+                graphic: api_graphic_to_pretty(graphic),
+            })
+        }
+        ApiOp::SetExperimentAnnotation { class, start_time, stop_time, tolerance, interval } => {
+            if class.is_empty() {
+                return None;
+            }
+            Some(ModelicaOp::SetExperimentAnnotation {
+                class: class.clone(),
+                start_time: *start_time,
+                stop_time: *stop_time,
+                tolerance: *tolerance,
+                interval: *interval,
+            })
+        }
     }
 }
 
@@ -1158,6 +1492,19 @@ pub(crate) fn internal_op_to_api(op: &ModelicaOp) -> Option<ApiOp> {
         // callers wanting full-buffer replace use `SetDocumentSource`
         // (a separate typed command, not an op).
         ModelicaOp::ReplaceSource { .. } => None,
+        // Layer 2 authoring ops are API-only today (no canvas gesture
+        // produces them) — the bridge intentionally drops them so a UI
+        // attempting a round-trip surfaces the gap explicitly. Add
+        // arms here when a canvas path starts emitting them.
+        ModelicaOp::AddClass { .. }
+        | ModelicaOp::RemoveClass { .. }
+        | ModelicaOp::AddShortClass { .. }
+        | ModelicaOp::AddVariable { .. }
+        | ModelicaOp::RemoveVariable { .. }
+        | ModelicaOp::AddEquation { .. }
+        | ModelicaOp::AddIconGraphic { .. }
+        | ModelicaOp::AddDiagramGraphic { .. }
+        | ModelicaOp::SetExperimentAnnotation { .. } => None,
     }
 }
 

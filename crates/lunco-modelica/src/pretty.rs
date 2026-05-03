@@ -367,6 +367,318 @@ pub fn connect_equation(eq: &ConnectEquation) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Class-level authoring (Layer 2)
+// ---------------------------------------------------------------------------
+
+/// Modelica class restriction keyword.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassKindSpec {
+    Model,
+    Block,
+    Connector,
+    Package,
+    Record,
+    Function,
+    Type,
+}
+
+impl ClassKindSpec {
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Block => "block",
+            Self::Connector => "connector",
+            Self::Package => "package",
+            Self::Record => "record",
+            Self::Function => "function",
+            Self::Type => "type",
+        }
+    }
+}
+
+/// Variable causality flag (Modelica `input`/`output` prefix).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CausalitySpec {
+    #[default]
+    None,
+    Input,
+    Output,
+}
+
+/// Variable variability prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VariabilitySpec {
+    #[default]
+    Continuous,
+    Discrete,
+    Parameter,
+    Constant,
+}
+
+/// One variable declaration in a class body. Renders as one line:
+/// `{prefixes} <Type> <name>(modifications) = <value> "<description>";`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariableDecl {
+    pub name: String,
+    pub type_name: String,
+    pub causality: CausalitySpec,
+    pub variability: VariabilitySpec,
+    pub flow: bool,
+    pub modifications: Vec<(String, String)>,
+    /// RHS of the `= ...` binding (e.g. `"4000"`, `"m_initial"`). `None` omits the binding.
+    pub value: Option<String>,
+    pub description: String,
+}
+
+/// One equation in a class equation section. `lhs = None` emits a
+/// statement (e.g. `assert(...)`) without an `=`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EquationDecl {
+    pub lhs: Option<String>,
+    pub rhs: String,
+}
+
+/// Modelica diagram graphic primitive (Icon or Diagram layer).
+#[derive(Debug, Clone, PartialEq)]
+pub enum GraphicSpec {
+    Rectangle {
+        x1: f32, y1: f32, x2: f32, y2: f32,
+        line_color: [u8; 3],
+        fill_color: [u8; 3],
+        fill_pattern: FillPattern,
+    },
+    Polygon {
+        points: Vec<(f32, f32)>,
+        line_color: [u8; 3],
+        fill_color: [u8; 3],
+        fill_pattern: FillPattern,
+    },
+    Line {
+        points: Vec<(f32, f32)>,
+        color: [u8; 3],
+        thickness: f32,
+        pattern: LinePattern,
+    },
+    Text {
+        x1: f32, y1: f32, x2: f32, y2: f32,
+        text: String,
+        color: [u8; 3],
+        font_size: f32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FillPattern {
+    #[default]
+    None,
+    Solid,
+}
+
+impl FillPattern {
+    fn keyword(self) -> &'static str {
+        match self {
+            Self::None => "FillPattern.None",
+            Self::Solid => "FillPattern.Solid",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinePattern {
+    #[default]
+    Solid,
+    Dash,
+    Dot,
+}
+
+impl LinePattern {
+    fn keyword(self) -> &'static str {
+        match self {
+            Self::Solid => "LinePattern.Solid",
+            Self::Dash => "LinePattern.Dash",
+            Self::Dot => "LinePattern.Dot",
+        }
+    }
+}
+
+fn fmt_color(c: [u8; 3]) -> String {
+    format!("{{{},{},{}}}", c[0], c[1], c[2])
+}
+
+fn escape_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Render the body of one graphic without surrounding whitespace.
+pub fn graphic_inner(g: &GraphicSpec) -> String {
+    match g {
+        GraphicSpec::Rectangle { x1, y1, x2, y2, line_color, fill_color, fill_pattern } => {
+            format!(
+                "Rectangle(extent={{{},{}}}, lineColor={}, fillColor={}, fillPattern={})",
+                fmt_point(*x1, *y1), fmt_point(*x2, *y2),
+                fmt_color(*line_color), fmt_color(*fill_color),
+                fill_pattern.keyword(),
+            )
+        }
+        GraphicSpec::Polygon { points, line_color, fill_color, fill_pattern } => {
+            format!(
+                "Polygon(points={}, lineColor={}, fillColor={}, fillPattern={})",
+                fmt_points(points),
+                fmt_color(*line_color), fmt_color(*fill_color),
+                fill_pattern.keyword(),
+            )
+        }
+        GraphicSpec::Line { points, color, thickness, pattern } => {
+            format!(
+                "Line(points={}, color={}, thickness={}, pattern={})",
+                fmt_points(points),
+                fmt_color(*color), fmt_num(*thickness),
+                pattern.keyword(),
+            )
+        }
+        GraphicSpec::Text { x1, y1, x2, y2, text, color, font_size } => {
+            format!(
+                "Text(extent={{{},{}}}, textString=\"{}\", textColor={}, fontSize={})",
+                fmt_point(*x1, *y1), fmt_point(*x2, *y2),
+                escape_string(text),
+                fmt_color(*color), fmt_num(*font_size),
+            )
+        }
+    }
+}
+
+/// Emit a class header `<kind> <Name> "<desc>"` on one line — caller
+/// is responsible for body content and the trailing `end <Name>;`.
+pub fn class_header(name: &str, kind: ClassKindSpec, description: &str, partial: bool) -> String {
+    let mut s = String::new();
+    if partial {
+        s.push_str("partial ");
+    }
+    s.push_str(kind.keyword());
+    s.push(' ');
+    s.push_str(name);
+    if !description.is_empty() {
+        let _ = write!(s, " \"{}\"", escape_string(description));
+    }
+    s
+}
+
+/// Emit a complete empty class block: header + `end <Name>;` separated by
+/// a single newline. Used by `AddClass`.
+pub fn class_block_empty(name: &str, kind: ClassKindSpec, description: &str, partial: bool) -> String {
+    format!(
+        "{}\n{}end {};\n",
+        class_header(name, kind, description, partial),
+        options().indent,
+        name,
+    )
+}
+
+/// Emit a short-class definition (one line with trailing newline).
+/// Form: `<kind> <Name> = [prefixes...] <Base>(modifications);`
+pub fn short_class_decl(
+    name: &str,
+    kind: ClassKindSpec,
+    base: &str,
+    prefixes: &[String],
+    modifications: &[(String, String)],
+) -> String {
+    let opts = options();
+    let mut s = String::new();
+    s.push_str(&opts.indent);
+    s.push_str(kind.keyword());
+    s.push(' ');
+    s.push_str(name);
+    s.push_str(" = ");
+    for p in prefixes {
+        s.push_str(p);
+        s.push(' ');
+    }
+    s.push_str(base);
+    if !modifications.is_empty() {
+        s.push('(');
+        for (i, (k, v)) in modifications.iter().enumerate() {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            let _ = write!(s, "{}={}", k, v);
+        }
+        s.push(')');
+    }
+    s.push_str(";\n");
+    s
+}
+
+/// Emit a variable declaration (one logical line + trailing newline).
+pub fn variable_decl(decl: &VariableDecl) -> String {
+    let opts = options();
+    let mut s = String::new();
+    s.push_str(&opts.indent);
+    if decl.flow {
+        s.push_str("flow ");
+    }
+    match decl.variability {
+        VariabilitySpec::Continuous => {}
+        VariabilitySpec::Discrete => s.push_str("discrete "),
+        VariabilitySpec::Parameter => s.push_str("parameter "),
+        VariabilitySpec::Constant => s.push_str("constant "),
+    }
+    match decl.causality {
+        CausalitySpec::None => {}
+        CausalitySpec::Input => s.push_str("input "),
+        CausalitySpec::Output => s.push_str("output "),
+    }
+    s.push_str(&decl.type_name);
+    s.push(' ');
+    s.push_str(&decl.name);
+    if !decl.modifications.is_empty() {
+        s.push('(');
+        for (i, (k, v)) in decl.modifications.iter().enumerate() {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            let _ = write!(s, "{}={}", k, v);
+        }
+        s.push(')');
+    }
+    if let Some(value) = &decl.value {
+        let _ = write!(s, " = {}", value);
+    }
+    if !decl.description.is_empty() {
+        let _ = write!(s, " \"{}\"", escape_string(&decl.description));
+    }
+    s.push_str(";\n");
+    s
+}
+
+/// Emit one equation line. `lhs = None` emits the RHS verbatim as a
+/// statement (e.g. `assert(...)`).
+pub fn equation_decl(eq: &EquationDecl) -> String {
+    let opts = options();
+    let mut s = String::new();
+    s.push_str(&opts.indent);
+    if let Some(lhs) = &eq.lhs {
+        let _ = write!(s, "{} = {}", lhs, eq.rhs);
+    } else {
+        s.push_str(&eq.rhs);
+    }
+    s.push_str(";\n");
+    s
+}
+
+/// Render the `experiment(...)` annotation body without the
+/// `annotation(...)` wrapper.
+pub fn experiment_inner(start_time: f64, stop_time: f64, tolerance: f64, interval: f64) -> String {
+    format!(
+        "experiment(StartTime={}, StopTime={}, Tolerance={}, Interval={})",
+        fmt_num(start_time as f32),
+        fmt_num(stop_time as f32),
+        fmt_num(tolerance as f32),
+        fmt_num(interval as f32),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
