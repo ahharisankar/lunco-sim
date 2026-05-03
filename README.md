@@ -60,6 +60,26 @@ The USD-based rover sandbox loads the entire scene — rovers, terrain, and came
 cargo run --release -p lunco-client --bin rover_sandbox_usd
 ```
 
+### Lunica — the Modelica workbench
+
+**Lunica** is a Modelica-only subset of LunCoSim packaged as its own
+app. Same Modelica/Rumoca core as the full client (code editor,
+schematic diagram, package browser, simulator, plots), without the
+celestial / terrain / rover physics layers — small enough to ship as
+both a desktop binary and a wasm32 web build from one source tree.
+
+```bash
+# Desktop
+cargo run --bin lunica
+cargo run --bin lunica -- --api 3000     # also exposes the typed-command HTTP API
+
+# Web (wasm32)
+./scripts/build_web.sh all lunica_web    # builds and serves on http://localhost:8080
+```
+
+Full guide — what Lunica includes, MSL cache bootstrap, and the
+`msl_indexer` step: [`docs/lunica.md`](docs/lunica.md).
+
 ### Headless Modelica simulation
 
 For automated runs, regression sweeps, and CI: `modelica_run` compiles a

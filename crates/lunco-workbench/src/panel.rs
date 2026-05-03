@@ -28,7 +28,7 @@ pub enum PanelSlot {
     /// Typical: Scene Tree, Library Browser, Mission Outline.
     SideBrowser,
     /// Central tabbed region — where the primary content lives in apps
-    /// without a 3D viewport (e.g. `modelica_workbench` shows Code /
+    /// without a 3D viewport (e.g. `lunica` shows Code /
     /// Diagram / Documentation as central tabs). 3D apps leave this
     /// empty so their world renders through.
     ///

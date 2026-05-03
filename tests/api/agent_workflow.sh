@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end agent workflow smoke test — exercises specs 032 + 033 against
-# a running modelica_workbench. Drives the full
+# a running lunica. Drives the full
 #   find → open → compile → describe → set_input → snapshot
 # loop with no GUI interaction. Fails loudly on the first regression.
 #
@@ -8,7 +8,7 @@
 #   ./tests/api/agent_workflow.sh [PORT]
 #
 # Workbench must already be running with --api:
-#   cargo run --bin modelica_workbench -- --api 3000
+#   cargo run --bin lunica -- --api 3000
 #
 # IMPORTANT: this script DOES NOT pkill or send Exit at the end. It walks
 # in, drives the workflow, and walks out — leaving the user's session

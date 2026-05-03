@@ -13,7 +13,7 @@
 #     BIN=rover_sandbox_web ./scripts/deploy_web.sh user@host:/path
 #
 # Environment variables:
-#     BIN              binary name (default: modelica_workbench_web)
+#     BIN              binary name (default: lunica_web)
 #     DEPLOY_TARGET    rsync destination (overrides positional arg)
 #     SSH_PORT         non-default SSH port (passed via -e "ssh -p N")
 #     EXTRA_RSYNC      extra rsync args, e.g. "-n" for dry-run
@@ -45,7 +45,7 @@ error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-BIN="${BIN:-modelica_workbench_web}"
+BIN="${BIN:-lunica_web}"
 TARGET="${DEPLOY_TARGET:-${1:-}}"
 SSH_PORT="${SSH_PORT:-}"
 EXTRA_RSYNC="${EXTRA_RSYNC:-}"
@@ -195,6 +195,6 @@ on every request, or not at all):
 After config change: `sudo nginx -t && sudo systemctl reload nginx`.
 
 Verify the .gz is actually served:
-    curl -I -H "Accept-Encoding: gzip" https://lunco.example/modelica_workbench_web_bg.wasm
+    curl -I -H "Accept-Encoding: gzip" https://lunco.example/lunica_web_bg.wasm
     # expect:  Content-Encoding: gzip
 EOF

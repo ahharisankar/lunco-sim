@@ -210,7 +210,7 @@ fn execute_request(
                 // hoped a `CaptureScreenshot` observer downstream would
                 // call `Screenshot::primary_window()`. That observer
                 // only ships in `lunco-avatar`; binaries that don't pull
-                // it in (modelica_workbench, hello_workbench) silently
+                // it in (lunica, hello_workbench) silently
                 // never produced a screenshot — curl would just hang.
                 // Doing the spawn here keeps the screenshot path
                 // self-contained in lunco-api.

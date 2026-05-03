@@ -5,7 +5,7 @@ edition = "2021"
 description = "Native Modelica simulation integration for LunCoSim using Rumoca"
 
 [features]
-# `lunco-api` is on by default so `cargo run --bin modelica_workbench --
+# `lunco-api` is on by default so `cargo run --bin lunica --
 # --api` Just Works for screenshot-driven debugging. Building without it
 # (`cargo build --no-default-features`) drops the axum/tokio web stack,
 # which matters for the wasm32 binary.
@@ -13,12 +13,12 @@ default = ["lunco-api"]
 lunco-api = ["dep:lunco-api"]
 
 [[bin]]
-name = "modelica_workbench"
-path = "src/bin/modelica_workbench.rs"
+name = "lunica"
+path = "src/bin/lunica.rs"
 
 [[bin]]
-name = "modelica_workbench_web"
-path = "src/bin/modelica_workbench_web.rs"
+name = "lunica_web"
+path = "src/bin/lunica_web.rs"
 
 [[bin]]
 name = "msl_indexer"
@@ -70,7 +70,7 @@ arc-swap = "1"
 lyon_tessellation = "1"
 lyon_path = "1"
 lyon_geom = "1"
-# Direct rayon dependency so `modelica_workbench` can configure the
+# Direct rayon dependency so `lunica` can configure the
 # global rayon pool BEFORE rumoca's `parse_files_parallel` initialises
 # it with `num_cpus - 1` threads. With rumoca's default, every
 # parse-on-Add saturates all-but-one core for ~1.5 s and starves

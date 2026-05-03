@@ -13,7 +13,7 @@
 #   help              Show this help message
 #
 # Available binaries:
-#   modelica_workbench_web  - Modelica Workbench IDE
+#   lunica_web  - Modelica Workbench IDE
 #   rover_sandbox_web       - Rover Physics Sandbox
 # ============================================================================
 
@@ -51,7 +51,7 @@ error() {
 get_binary_config() {
     local binary="$1"
     case "$binary" in
-        modelica_workbench_web)
+        lunica_web)
             echo "lunco-modelica"
             ;;
         rover_sandbox_web)
@@ -59,7 +59,7 @@ get_binary_config() {
             ;;
         *)
             error "Unknown binary: $binary"
-            error "Available binaries: modelica_workbench_web, rover_sandbox_web"
+            error "Available binaries: lunica_web, rover_sandbox_web"
             exit 1
             ;;
     esac
@@ -221,7 +221,7 @@ generate_bindings() {
 # (rover_sandbox_web).
 build_msl_bundle() {
     local binary="$1"
-    if [ "$binary" != "modelica_workbench_web" ]; then
+    if [ "$binary" != "lunica_web" ]; then
         return 0
     fi
     local dist_dir="$PROJECT_DIR/dist/$binary"
@@ -300,13 +300,13 @@ show_help() {
     echo "  help              Show this help message"
     echo ""
     echo "Available binaries:"
-    echo "  modelica_workbench_web  - Modelica Workbench IDE (default port: 8080)"
+    echo "  lunica_web  - Modelica Workbench IDE (default port: 8080)"
     echo "  rover_sandbox_web       - Rover Physics Sandbox (default port: 8081)"
     echo ""
     echo "Examples:"
-    echo "  $0 build modelica_workbench_web    # Build Modelica Workbench"
+    echo "  $0 build lunica_web    # Build Modelica Workbench"
     echo "  $0 serve rover_sandbox_web         # Serve Rover Sandbox"
-    echo "  $0 all modelica_workbench_web      # Build and serve Modelica Workbench"
+    echo "  $0 all lunica_web      # Build and serve Modelica Workbench"
     echo "  $0 all rover_sandbox_web 8082      # Build and serve on custom port"
     echo "  $0 clean                           # Clean all artifacts"
     echo ""

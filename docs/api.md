@@ -329,7 +329,7 @@ that want a runtime-toggleable opt-out.
 | Binary | Flag | Default Port |
 |---|---|---|
 | `rover_sandbox_usd` | `--api [PORT]` | 3000 |
-| `modelica_workbench` | `--api [PORT]` | 3000 |
+| `lunica` | `--api [PORT]` | 3000 |
 | `model_viewer` | `--api [PORT]` | 3000 |
 
 ## Troubleshooting

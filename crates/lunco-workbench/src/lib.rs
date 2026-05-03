@@ -517,7 +517,7 @@ impl WorkbenchLayout {
     /// rebuild, user drags persist until the next call.
     ///
     /// **Two-mode rendering** — the dock is only used when there are
-    /// central tabs (i.e. apps like `modelica_workbench` that have
+    /// central tabs (i.e. apps like `lunica` that have
     /// Code/Diagram in the centre). In 3D apps where the centre is
     /// reserved for the Bevy viewport, the dock is left empty and the
     /// side panels render via plain `egui::SidePanel`/`TopBottomPanel`
@@ -956,7 +956,7 @@ fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut 
 
     // ── Menu bar ────────────────────────────────────────────────────
     // Doubles as the OS title bar (window chrome is disabled in the
-    // binary's `Window` setup — see `modelica_workbench.rs`). Bare
+    // binary's `Window` setup — see `lunica.rs`). Bare
     // areas of the row drag the window; double-click toggles maximize;
     // window control buttons (─ ▢ ✕) sit on the far right on
     // Linux/Windows. macOS keeps native traffic lights — we just inset

@@ -1,14 +1,14 @@
 ---
 name: test-via-api
 description: >
-  How to verify modelica_workbench changes end-to-end without asking the
+  How to verify lunica changes end-to-end without asking the
   user to click. Trigger whenever a UI flow needs verification — a new
   diagram, a fix to drill-in, a screenshot to confirm a regression, a
   smoke test of any reflect-registered Event command. The workbench
   exposes a small HTTP API on `--api PORT`; this skill is the runbook
   for driving it from curl, capturing screenshots, diagnosing failures,
   and adding new commands when the existing surface isn't enough. Also
-  trigger when you catch yourself about to `pkill modelica_workbench`,
+  trigger when you catch yourself about to `pkill lunica`,
   write a temp `.rs` test binary to inspect rumoca state, chain a
   `sleep 30 && tail` poll, or ask the user "can you check the
   screenshot?". The right move is always: send a command, take a
@@ -17,7 +17,7 @@ description: >
 
 # Test the workbench via API
 
-The modelica_workbench exposes a reflect-registered Event API on
+The lunica exposes a reflect-registered Event API on
 `--api PORT` (default 3000). UI verification — diagrams rendering,
 drill-ins, simulations, file ops — should be driven from this API
 rather than asking the user to click.
@@ -52,7 +52,7 @@ restart to "start clean."
 ```bash
 # 1. Start. MUST use run_in_background:true of the Bash tool, otherwise
 #    the bash wrapper exits and the workbench dies with it.
-cargo run --bin modelica_workbench -- --api 3000   # run_in_background:true
+cargo run --bin lunica -- --api 3000   # run_in_background:true
 
 # 2. Wait for API. Use a Monitor with an until-loop, NOT chained sleeps:
 until curl -s -o /dev/null -X POST http://127.0.0.1:3000/api/commands \
@@ -173,7 +173,7 @@ rather than asking the user:
 
 ## What NOT to do
 
-- Don't `pkill -f modelica_workbench`. The user has to confirm; use
+- Don't `pkill -f lunica`. The user has to confirm; use
   `Exit` command.
 - Don't write standalone test binaries / temp `.rs` files to verify
   rumoca behaviour. Add an `Inspect*` command if the workbench can't

@@ -364,6 +364,30 @@ impl ModelicaCompiler {
         self.compile_loaded(model_name)
     }
 
+    /// Like [`compile_str`], but seats additional `(filename, source)`
+    /// pairs into the rumoca session before compiling so the resolver
+    /// can satisfy cross-doc class references (e.g. a fresh untitled
+    /// `RocketStage` referencing `AnnotatedRocketStage.Tank` from a
+    /// sibling untitled doc that holds the package). Each extra is
+    /// loaded via the same `update_document` path; rumoca dedups by
+    /// filename so re-loading the same file is harmless.
+    pub fn compile_str_multi(
+        &mut self,
+        model_name: &str,
+        source: &str,
+        filename: &str,
+        extras: &[(String, String)],
+    ) -> Result<Box<rumoca_session::compile::DaeCompilationResult>, String> {
+        for (extra_filename, extra_source) in extras {
+            if extra_filename == filename {
+                continue;
+            }
+            self.session.update_document(extra_filename, extra_source);
+        }
+        self.session.update_document(filename, source);
+        self.compile_loaded(model_name)
+    }
+
     /// Compile an MSL class that is already loaded into the session
     /// (no `update_document` call). Used by the `msl_indexer --warm`
     /// pass to populate rumoca's semantic-summary cache for common
@@ -791,6 +815,13 @@ pub enum ModelicaCommand {
         session_id: u64,
         model_name: String,
         source: String,
+        /// Sources from other open Modelica documents, as
+        /// `(filename, source)` pairs. Loaded into the rumoca
+        /// session before the primary `source` so cross-doc class
+        /// references (e.g. an untitled `RocketStage` referencing
+        /// `AnnotatedRocketStage.Tank` from a sibling untitled
+        /// package) resolve. Empty when only one doc is open.
+        extra_sources: Vec<(String, String)>,
         /// Lock-free snapshot handle the worker publishes into after
         /// every successful Step (Phase A of the multi-sim arch).
         /// `None` = legacy path; main thread still receives per-sample
@@ -1108,7 +1139,7 @@ fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>) {
                             }
                         }
                     }
-                    ModelicaCommand::Compile { entity, session_id, model_name, source, stream } => {
+                    ModelicaCommand::Compile { entity, session_id, model_name, source, extra_sources, stream } => {
                         current_sessions.insert(entity, session_id);
                         if let Some(stream) = stream {
                             // Register the new lock-free publish target
@@ -1148,7 +1179,11 @@ fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>) {
                             model_name, stripped_source.len(),
                         );
                         let t_compile = web_time::Instant::now();
-                        let _compile_outcome = compiler.compile_str(&model_name, &stripped_source, "model.mo");
+                        let _compile_outcome = if extra_sources.is_empty() {
+                            compiler.compile_str(&model_name, &stripped_source, "model.mo")
+                        } else {
+                            compiler.compile_str_multi(&model_name, &stripped_source, "model.mo", &extra_sources)
+                        };
                         bevy::log::info!(
                             "[worker] compile_str returned for `{}` in {:.2}s ({})",
                             model_name,
@@ -1570,7 +1605,7 @@ fn inline_worker_process(
                 });
             }
         }
-        ModelicaCommand::Compile { entity, session_id, model_name, source, stream: _stream } => {
+        ModelicaCommand::Compile { entity, session_id, model_name, source, extra_sources, stream: _stream } => {
             // NB: the wasm inline worker runs on the Bevy main thread
             // today and does not publish to a lock-free SimStream.
             // Phase A lands on desktop first; TODO(arch-phase-b) wire
@@ -1583,7 +1618,12 @@ fn inline_worker_process(
             let tx = &channels.tx_res;
 
             let compiler = w.compiler.get_or_insert_with(ModelicaCompiler::new);
-            match compiler.compile_str(&model_name, &stripped_source, "model.mo") {
+            let compile_outcome = if extra_sources.is_empty() {
+                compiler.compile_str(&model_name, &stripped_source, "model.mo")
+            } else {
+                compiler.compile_str_multi(&model_name, &stripped_source, "model.mo", &extra_sources)
+            };
+            match compile_outcome {
                 Ok(comp_res) => {
                     match SimStepper::new(&comp_res.dae, opts) {
                         Ok(mut stepper) => {

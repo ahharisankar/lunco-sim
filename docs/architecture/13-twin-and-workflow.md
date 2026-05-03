@@ -275,7 +275,7 @@ the controller that mounts that truth into live simulation state.
 Users can open any Document without creating a Twin:
 
 ```sh
-$ modelica_workbench balloon.mo
+$ lunica balloon.mo
 $ rover_sandbox_usd scene.usda
 ```
 
@@ -566,7 +566,7 @@ system) reads and writes through it.
 
 ## 6. Startup flow
 
-All three apps (`rover_sandbox_usd`, `lunco_client`, `modelica_workbench`)
+All three apps (`rover_sandbox_usd`, `lunco_client`, `lunica`)
 share the same logic:
 
 ```
@@ -623,7 +623,7 @@ The Examples list is **filtered per app** to what it knows how to open:
 
 | App | Examples shown |
 |-----|----------------|
-| `modelica_workbench` | Modelica-only models |
+| `lunica` | Modelica-only models |
 | `rover_sandbox_usd` | 3D sandbox scenarios |
 | `lunco_client` | All examples |
 
@@ -924,7 +924,7 @@ Three categories:
 
 ### Key insight: apps differentiate by plugins, not by hardcoded scenes
 
-The three binaries — `modelica_workbench`, `rover_sandbox_usd`,
+The three binaries — `lunica`, `rover_sandbox_usd`,
 `lunco_client` — share the **same Twin-loading machinery** from
 `lunco-workbench` and `lunco-twin`. They differ only in:
 
@@ -940,7 +940,7 @@ uniformly for all of them.
 
 | App | Default Workspace | Domain plugins registered | Welcome examples shown |
 |-----|-------------------|---------------------------|------------------------|
-| `modelica_workbench` | **Analyze** | `ModelicaPlugin` + `ModelicaInspectorPlugin` | Modelica examples only (circuit, spring-mass, thermal, …) |
+| `lunica` | **Analyze** | `ModelicaPlugin` + `ModelicaInspectorPlugin` | Modelica examples only (circuit, spring-mass, thermal, …) |
 | `rover_sandbox_usd` | **Build** | `CoSimPlugin`, `ModelicaCorePlugin`, `SandboxEditPlugin`, `EnvironmentPlugin`, `UsdPlugins`, `Mobility`, `Controller`, `Avatar`, … | Sandbox examples (rover-on-moon, balloon-test, …) |
 | `lunco_client` | **Build** (or last-used) | All of the above + `CelestialPlugin` + `LuncoUiPlugin` (MissionControl) | All examples, categorized |
 
@@ -960,7 +960,7 @@ a specific `ModelicaModel` component, etc. Under the new model, **all of
 that goes away**. Startup belongs to `lunco-workbench`:
 
 ```rust
-// modelica_workbench (before)
+// lunica (before)
 fn main() {
     app.add_plugins(DefaultPlugins)
        .add_plugins(EguiPlugin::default())
@@ -969,7 +969,7 @@ fn main() {
        .add_systems(Startup, setup_sandbox);   // hardcodes Battery.mo
 }
 
-// modelica_workbench (after)
+// lunica (after)
 fn main() {
     app.add_plugins(DefaultPlugins)
        .add_plugins(EguiPlugin::default())
@@ -993,7 +993,7 @@ Each app exposes relevant `File → New →` items based on what it can edit:
 
 | App | New menu items |
 |-----|---------------|
-| `modelica_workbench` | New Modelica Model, New Modelica Package |
+| `lunica` | New Modelica Model, New Modelica Package |
 | `rover_sandbox_usd` | New Scene (USD), New Twin, New Modelica Model |
 | `lunco_client` | New Scene, New Modelica Model, New Mission, New SysML Block, New Twin |
 

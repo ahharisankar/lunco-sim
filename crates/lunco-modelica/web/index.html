@@ -81,7 +81,7 @@
     </div>
     <canvas id="bevy"></canvas>
     <script type="module">
-        import init from './modelica_workbench_web.js';
+        import init from './lunica_web.js';
 
         const root   = document.getElementById('loading');
         const phaseE = root.querySelector('.phase');
@@ -205,7 +205,7 @@
         };
 
         try {
-            const wasmResp = await streamWasmResponse('./modelica_workbench_web_bg.wasm');
+            const wasmResp = await streamWasmResponse('./lunica_web_bg.wasm');
             setPhase('Starting workbench');
             setDetail('initialising…');
             setIndeterminate();

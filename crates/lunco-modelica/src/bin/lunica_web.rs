@@ -30,10 +30,10 @@ use lunco_modelica::{
 use wasm_bindgen::prelude::*;
 
 /// Desktop stub — this binary only works on wasm32.
-/// Use `modelica_workbench` for desktop.
+/// Use `lunica` for desktop.
 fn main() {
     #[cfg(not(target_arch = "wasm32"))]
-    panic!("modelica_workbench_web is a wasm32-only binary. Use `cargo run --bin modelica_workbench` for desktop.");
+    panic!("lunica_web is a wasm32-only binary. Use `cargo run --bin lunica` for desktop.");
 }
 
 /// Browser entry point. Called automatically when the WASM module loads.

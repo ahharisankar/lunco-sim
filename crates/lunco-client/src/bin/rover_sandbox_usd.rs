@@ -48,7 +48,7 @@ mod models_palette;
 /// 
 /// Supports:
 fn main() {
-    // Match modelica_workbench's pattern: scan argv for `--api <port>`
+    // Match lunica's pattern: scan argv for `--api <port>`
     // so the window title can advertise the listening port. Saves
     // confusion when several instances run side-by-side.
     //

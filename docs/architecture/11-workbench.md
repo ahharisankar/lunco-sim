@@ -144,7 +144,7 @@ In this workspace, most docks auto-hide. Toggle back with standard keybinds.
 ### Analyze — Modelica / subsystem deep dive
 
 Purpose: study and tune an individual subsystem model. This is the
-"modelica_workbench" layout, consolidated.
+"lunica" layout, consolidated.
 
 | Slot | Default content |
 |------|-----------------|
@@ -523,13 +523,13 @@ lunco_client          = workbench + all sandbox panels + MissionControl +
                         CelestialBrowser + full 3D world
                         (main client, everything enabled)
 
-modelica_workbench    = workbench + CodeEditor + Diagram + PackageBrowser +
+lunica    = workbench + CodeEditor + Diagram + PackageBrowser +
                         Telemetry + Graphs + LibraryBrowser
                         (Modelica modeling only, no 3D world needed)
 ```
 
 Same workbench shell, different panel sets, different default workspaces.
-`modelica_workbench` opens in the Analyze workspace; `rover_sandbox_usd`
+`lunica` opens in the Analyze workspace; `rover_sandbox_usd`
 in Build; `lunco_client` in Observe with quick access to all others.
 
 ## 13. Migration strategy (from bevy_workbench)

@@ -1340,11 +1340,30 @@ fn on_compile_model(
         // the same Arc so plot panels / telemetry can read via
         // `ArcSwap::load()` on the UI thread without locking.
         let stream = sim_streams.get_or_insert(target_entity);
+        // Collect sources from EVERY OTHER open Modelica doc and
+        // hand them to the worker so rumoca's resolver can satisfy
+        // cross-doc class references (e.g. an untitled `RocketStage`
+        // referencing `AnnotatedRocketStage.Tank` from a sibling
+        // untitled package). Filenames are derived from each doc's
+        // origin; rumoca dedups by filename so the worker overlaying
+        // the primary source as `model.mo` later is harmless.
+        let extra_sources: Vec<(String, String)> = registry
+            .iter()
+            .filter_map(|(other_doc, host)| {
+                if other_doc == doc {
+                    return None;
+                }
+                let document = host.document();
+                let filename = format!("doc_{}.mo", other_doc.raw());
+                Some((filename, document.source().to_string()))
+            })
+            .collect();
         let _ = channels.tx.send(ModelicaCommand::Compile {
             entity: target_entity,
             session_id,
             model_name,
             source,
+            extra_sources,
             stream: Some(stream),
         });
     } else {

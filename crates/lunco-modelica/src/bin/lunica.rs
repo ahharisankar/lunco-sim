@@ -34,10 +34,10 @@ fn main() {
         .build_global();
     match rayon_init {
         Ok(()) => eprintln!(
-            "[modelica_workbench] rayon global pool capped at {rayon_threads} threads (of {n_cpus} CPUs)"
+            "[lunica] rayon global pool capped at {rayon_threads} threads (of {n_cpus} CPUs)"
         ),
         Err(e) => eprintln!(
-            "[modelica_workbench] WARN: rayon already initialised, our cap LOST: {e}"
+            "[lunica] WARN: rayon already initialised, our cap LOST: {e}"
         ),
     }
 
