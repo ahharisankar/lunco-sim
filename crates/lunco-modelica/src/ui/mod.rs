@@ -344,13 +344,12 @@ fn derive_doc_title(
     }
 }
 
-/// Pure helper: read the first AST class name out of a Modelica doc,
+/// Pure helper: read the first class name out of the per-doc Index,
 /// fall back to the origin's display name. Kept separate so future
 /// drilled-in / multi-class logic plugs in without re-deriving the
 /// fallback chain.
 fn derive_title_from_doc(doc: &crate::document::ModelicaDocument) -> String {
-    let syntax = doc.syntax();
-    if let Some((name, _)) = syntax.ast().classes.iter().next() {
+    if let Some(name) = doc.index().classes.keys().next() {
         if !name.is_empty() {
             return name.clone();
         }

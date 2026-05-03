@@ -446,10 +446,14 @@ pub(crate) fn sync_active_tab_to_doc(world: &mut World, doc: DocumentId) {
             // User files are both editable.
             let read_only =
                 matches!(library, crate::ui::state::ModelLibrary::Bundled);
+            // First non-package class via the Index. Sees optimistic
+            // patches and avoids walking the AST.
             let detected_name = document
-                .ast()
-                .ast()
-                .and_then(crate::ast_extract::extract_model_name_from_ast);
+                .index()
+                .classes
+                .values()
+                .find(|c| !matches!(c.kind, crate::index::ClassKind::Package))
+                .map(|c| c.name.clone());
             (
                 path_str,
                 display_name,

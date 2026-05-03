@@ -503,10 +503,17 @@ pub(crate) fn place_component(
         .and_then(|m| m.get(doc_id).map(str::to_string));
     let class = drilled_in
         .or_else(|| {
+            // Fallback to the document's first non-package class, read
+            // via the per-doc Index (sees optimistic structural patches
+            // and avoids walking the AST every palette click).
             let registry = world.resource::<crate::ui::state::ModelicaDocumentRegistry>();
             let host = registry.host(doc_id)?;
-            let ast = host.document().ast().result.as_ref().ok().cloned()?;
-            crate::ast_extract::extract_model_name_from_ast(&ast)
+            host.document()
+                .index()
+                .classes
+                .values()
+                .find(|c| !matches!(c.kind, crate::index::ClassKind::Package))
+                .map(|c| c.name.clone())
         })
         .unwrap_or_default();
     if class.is_empty() {

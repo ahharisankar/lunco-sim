@@ -133,38 +133,37 @@ impl Panel for InspectorPanel {
             .get_resource::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
             .and_then(|m| m.get(doc_id).map(str::to_string));
 
-        // Scope the registry borrow tightly so we can free it before
-        // any subsequent `world.commands()` calls.
+        // Resolve the target class + component via the per-document
+        // [`crate::index::ModelicaIndex`]. The Index is patched
+        // optimistically on every structural op (see
+        // `ModelicaDocument::apply_patch`) so this read sees fresh
+        // state even during the 2.5 s AST-reparse debounce.
         let (component_info, class) = {
             let registry = world.resource::<crate::ui::state::ModelicaDocumentRegistry>();
             let Some(host) = registry.host(doc_id) else {
                 placeholder(ui, "Document not in registry.");
                 return;
             };
-            let Some(ast) = host.document().ast().result.as_ref().ok().cloned() else {
-                placeholder(ui, "Document has no parsed AST.");
-                return;
-            };
+            let index = host.document().index();
+            // Resolve the target class. Drilled-in pin first; otherwise
+            // pick the first non-package class in the Index (mirrors
+            // `extract_model_name_from_ast`'s behaviour, but reading
+            // the projection rather than walking the AST).
             let Some(class) = drilled_in.or_else(|| {
-                crate::ast_extract::extract_model_name_from_ast(&ast)
+                index
+                    .classes
+                    .values()
+                    .find(|c| !matches!(c.kind, crate::index::ClassKind::Package))
+                    .map(|c| c.name.clone())
             }) else {
                 placeholder(ui, "Could not resolve target class.");
                 return;
             };
-            let short = class.rsplit('.').next().unwrap_or(&class).to_string();
-            let Some(class_def) = crate::ast_extract::find_class_by_short_name(&ast, &short) else {
-                placeholder(
-                    ui,
-                    &format!("Class `{short}` not found in document."),
-                );
-                return;
-            };
-            // Pick the matching component, project to a Reflect-friendly
-            // owned struct so we can drop the AST borrow immediately.
-            let Some(info) = crate::ast_extract::extract_components_for_class(class_def)
-                .into_iter()
-                .find(|c| c.name == instance_name)
-            else {
+            // The Index keys components by qualified-class. The
+            // drilled-in pin is already qualified; the fallback above
+            // returns a qualified path. Look up directly.
+            let Some(entry) = index.find_component(&class, &instance_name) else {
+                let short = class.rsplit('.').next().unwrap_or(&class);
                 placeholder(
                     ui,
                     &format!(
@@ -172,6 +171,15 @@ impl Panel for InspectorPanel {
                     ),
                 );
                 return;
+            };
+            // Project the Index entry into the inspector's
+            // [`ComponentInfo`] shape so the rest of this function
+            // (rendering, edit collection) doesn't have to change.
+            let info = crate::ast_extract::ComponentInfo {
+                name: entry.name.clone(),
+                type_name: entry.type_name.clone(),
+                description: entry.description.clone(),
+                modifications: entry.modifications.clone(),
             };
             (info, class)
         };

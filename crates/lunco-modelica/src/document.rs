@@ -987,6 +987,36 @@ impl ModelicaDocument {
         //     (Compile) check `ast().generation == self.generation`
         //     and force a reparse via `refresh_ast_now()`.
         self.last_source_edit_at = Some(web_time::Instant::now());
+        // Optimistic Index patch BEFORE push_change so panel-side
+        // observers reading the Index see the new entries by the time
+        // they get the change notification. Reconcile happens on the
+        // next AST refresh; structural ops here never disagree with
+        // the eventual reparse result.
+        match &change {
+            ModelicaChange::ComponentAdded { class, name } => {
+                // The op-to-patch step doesn't carry the type name into
+                // the change event today (it's encoded in the spliced
+                // text). Best-effort: stash an empty placeholder; the
+                // reconcile fills it in. Panels that need the type
+                // immediately read the change event payload.
+                self.index.patch_component_added(class, name, "");
+            }
+            ModelicaChange::ComponentRemoved { class, name } => {
+                self.index.patch_component_removed(class, name);
+            }
+            ModelicaChange::PlacementChanged {
+                class,
+                component,
+                placement,
+            } => {
+                self.index
+                    .patch_placement_changed(class, component, *placement);
+            }
+            // Connection / Parameter / TextReplaced — Index reconciles
+            // on the next reparse. Adding finer optimistic patches is
+            // a follow-up.
+            _ => {}
+        }
         self.push_change(change);
         let inverse_range = range.start..(range.start + replacement.len());
         Ok(ModelicaOp::EditText {

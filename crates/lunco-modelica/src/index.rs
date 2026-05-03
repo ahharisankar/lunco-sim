@@ -21,6 +21,7 @@
 //! component-keyed connection lookups, BBox caches, anything panels need
 //! to render without traversal.
 
+use crate::pretty::Placement;
 use lunco_doc::{NodeId, TextRange};
 use rumoca_session::parsing::ast::{
     self as ast,
@@ -44,6 +45,10 @@ pub struct ComponentKey(pub u32);
 pub struct ConnectionKey(pub u32);
 
 /// Per-document projection that UI consumes.
+///
+/// Patched optimistically by `apply_patch` (see [`crate::document::ModelicaDocument`])
+/// in response to structural [`crate::document::ModelicaChange`] events, so panels
+/// see edits in the same frame. Reconciled to the AST on every parse-success.
 #[derive(Debug, Default, Clone)]
 pub struct ModelicaIndex {
     /// Bumped on every patch. Panels can fingerprint to skip rerender.
@@ -52,12 +57,20 @@ pub struct ModelicaIndex {
     /// The current authoritative source text (synced after parse-success).
     pub source: String,
 
-    /// Components in the active class. Vec for ordered iteration.
+    /// All component entries across every class, in arbitrary order.
     pub components: Vec<ComponentEntry>,
-    pub component_by_name: HashMap<String, ComponentKey>,
 
-    /// Connections in the active class.
+    /// `(qualified_class, instance_name)` → key.
+    pub component_by_qualified: HashMap<(String, String), ComponentKey>,
+
+    /// `qualified_class` → ordered keys (declaration order).
+    pub components_by_class: HashMap<String, Vec<ComponentKey>>,
+
+    /// Connections in arbitrary order.
     pub connections: Vec<ConnectionEntry>,
+
+    /// `qualified_class` → ordered keys.
+    pub connections_by_class: HashMap<String, Vec<ConnectionKey>>,
 
     /// All classes defined in this document, by qualified name.
     pub classes: HashMap<String, ClassEntry>,
@@ -70,8 +83,16 @@ pub struct ModelicaIndex {
 pub struct ComponentEntry {
     pub key: ComponentKey,
     pub node_id: NodeId,
+    /// Qualified class this component belongs to (e.g. `"RC_Circuit"`).
+    pub class: String,
     pub name: String,
     pub type_name: String,
+    /// Description string from the declaration (e.g. `"Resistance"` in
+    /// `Real R "Resistance";`). Empty when none was provided.
+    pub description: String,
+    /// Modifications attached to the declaration
+    /// (e.g. `{"min": "0", "max": "100"}` for `Real x(min=0, max=100)`).
+    pub modifications: HashMap<String, String>,
     pub source_range: Option<TextRange>,
     pub placement: Option<Placement>,
     /// Causality: input/output/none.
@@ -138,14 +159,9 @@ pub enum Variability {
     Constant,
 }
 
-/// Pre-extracted Placement annotation. Until rumoca grows a typed Placement,
-/// this struct is populated by `lunco-modelica`'s annotation parser.
-#[derive(Debug, Clone, Default)]
-pub struct Placement {
-    pub origin: (f32, f32),
-    pub extent: ((f32, f32), (f32, f32)),
-    pub rotation: f32,
-}
+// Placement is re-exported from `crate::pretty::Placement` to keep the
+// Index in lockstep with the wire / change-event format. UI panels read
+// `entry.placement: Option<Placement>` directly.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Build / patch / reconcile
@@ -176,8 +192,10 @@ impl ModelicaIndex {
         self.generation = self.generation.saturating_add(1);
         self.source = source.to_string();
         self.components.clear();
-        self.component_by_name.clear();
+        self.component_by_qualified.clear();
+        self.components_by_class.clear();
         self.connections.clear();
+        self.connections_by_class.clear();
         self.classes.clear();
         self.within_path = ast
             .within
@@ -191,35 +209,91 @@ impl ModelicaIndex {
         }
     }
 
-    /// Optimistic component-add. Returns the assigned key so callers can
-    /// reference it before the authoritative reparse confirms.
-    pub fn patch_component_added(&mut self, _entry: ComponentEntry) -> ComponentKey {
+    /// Optimistic component-add. Called from
+    /// [`crate::document::ModelicaDocument::apply_patch`] in response
+    /// to a [`crate::document::ModelicaChange::ComponentAdded`].
+    /// Returns the assigned key.
+    ///
+    /// `class` is fully qualified (e.g. `"Rocket.Engine"`). The Index
+    /// stores a placeholder entry with no source range / placement —
+    /// those fill in on the next AST reconcile.
+    pub fn patch_component_added(&mut self, class: &str, name: &str, type_name: &str) -> ComponentKey {
         self.generation = self.generation.saturating_add(1);
-        // Stub.
-        ComponentKey(0)
+        let key = ComponentKey(self.components.len() as u32);
+        let entry = ComponentEntry {
+            key,
+            node_id: NodeId::new(format!("{}|component|{}", class, name)),
+            class: class.to_string(),
+            name: name.to_string(),
+            type_name: type_name.to_string(),
+            description: String::new(),
+            modifications: HashMap::new(),
+            source_range: None,
+            placement: None,
+            causality: Causality::None,
+            variability: Variability::Continuous,
+            binding: None,
+        };
+        self.component_by_qualified
+            .insert((class.to_string(), name.to_string()), key);
+        self.components_by_class
+            .entry(class.to_string())
+            .or_default()
+            .push(key);
+        self.components.push(entry);
+        key
     }
 
-    pub fn patch_component_removed(&mut self, _key: ComponentKey) {
+    /// Optimistic component-remove. No-op when not present (the apply
+    /// pipeline guarantees the change events match reality, but the
+    /// reconcile-on-reparse path makes a stale call benign).
+    pub fn patch_component_removed(&mut self, class: &str, name: &str) {
         self.generation = self.generation.saturating_add(1);
+        let qualified = (class.to_string(), name.to_string());
+        let Some(key) = self.component_by_qualified.remove(&qualified) else {
+            return;
+        };
+        if let Some(list) = self.components_by_class.get_mut(class) {
+            list.retain(|k| *k != key);
+        }
+        if let Some(pos) = self.components.iter().position(|c| c.key == key) {
+            self.components.remove(pos);
+        }
     }
 
-    pub fn patch_placement_changed(&mut self, _key: ComponentKey, _placement: Placement) {
+    /// Optimistic placement-set. No-op if the (class, name) doesn't
+    /// resolve in the Index (lazy reconcile-on-reparse will re-sync).
+    pub fn patch_placement_changed(&mut self, class: &str, name: &str, placement: Placement) {
         self.generation = self.generation.saturating_add(1);
+        let qualified = (class.to_string(), name.to_string());
+        let Some(key) = self.component_by_qualified.get(&qualified).copied() else {
+            return;
+        };
+        if let Some(entry) = self.components.iter_mut().find(|c| c.key == key) {
+            entry.placement = Some(placement);
+        }
     }
 
-    pub fn patch_connection_added(&mut self, _entry: ConnectionEntry) -> ConnectionKey {
-        self.generation = self.generation.saturating_add(1);
-        ConnectionKey(0)
+    /// Look up a component by `(class, name)`. Returns `None` if the
+    /// component doesn't exist.
+    pub fn find_component(&self, class: &str, name: &str) -> Option<&ComponentEntry> {
+        let key = self
+            .component_by_qualified
+            .get(&(class.to_string(), name.to_string()))
+            .copied()?;
+        self.components.iter().find(|c| c.key == key)
     }
 
-    pub fn patch_connection_removed(&mut self, _key: ConnectionKey) {
-        self.generation = self.generation.saturating_add(1);
-    }
-
-    /// Look up a component by its display name within the active class.
-    pub fn find_component(&self, name: &str) -> Option<&ComponentEntry> {
-        let key = self.component_by_name.get(name)?;
-        self.components.iter().find(|c| c.key == *key)
+    /// Iterate components in `class` in declaration order.
+    pub fn components_in_class<'a>(
+        &'a self,
+        class: &str,
+    ) -> impl Iterator<Item = &'a ComponentEntry> + 'a {
+        self.components_by_class
+            .get(class)
+            .into_iter()
+            .flat_map(|keys| keys.iter())
+            .filter_map(move |key| self.components.iter().find(|c| c.key == *key))
     }
 }
 
@@ -243,17 +317,31 @@ fn insert_class_recursive(idx: &mut ModelicaIndex, qualified: String, class_def:
     };
     idx.classes.insert(qualified.clone(), entry);
 
-    // Components — populate the flat component list. Today's Index
-    // collapses all classes' components into one list (callers filter
-    // by class via NodeId or class scope). Panels that scope by class
-    // do so via the qualified-name prefix on NodeId.
+    // Components — keyed by (class, name) so multiple classes can hold
+    // colliding instance names without aliasing. Per-class iteration
+    // preserves declaration order via `components_by_class`.
+    //
+    // Description + modifications come from `ast_extract::extract_components_for_class`
+    // which runs the description + modification-expression flattening
+    // logic. Calling that public helper keeps Index in lockstep with
+    // the inspector's previous direct-AST path.
+    let infos = crate::ast_extract::extract_components_for_class(class_def);
+    let info_by_name: HashMap<String, crate::ast_extract::ComponentInfo> =
+        infos.into_iter().map(|i| (i.name.clone(), i)).collect();
     for (name, comp) in class_def.iter_components() {
         let key = ComponentKey(idx.components.len() as u32);
+        let info = info_by_name.get(name).cloned();
+        let (description, modifications) = info
+            .map(|i| (i.description, i.modifications))
+            .unwrap_or_default();
         let entry = ComponentEntry {
             key,
             node_id: NodeId::new(format!("{}|component|{}", qualified, name)),
+            class: qualified.clone(),
             name: name.to_string(),
             type_name: format!("{}", comp.type_name),
+            description,
+            modifications,
             source_range: Some(TextRange::new(
                 comp.name_token.location.start as usize,
                 comp.name_token.location.end as usize,
@@ -266,7 +354,12 @@ fn insert_class_recursive(idx: &mut ModelicaIndex, qualified: String, class_def:
             //   reprinting expressions to source text is the printer's
             //   job; until then we just record presence.
         };
-        idx.component_by_name.insert(name.to_string(), key);
+        idx.component_by_qualified
+            .insert((qualified.clone(), name.to_string()), key);
+        idx.components_by_class
+            .entry(qualified.clone())
+            .or_default()
+            .push(key);
         idx.components.push(entry);
     }
 
@@ -327,13 +420,51 @@ mod tests {
         // Three components: R (parameter), x, resistor.
         assert_eq!(idx.components.len(), 3, "components: {:?}", idx.components.iter().map(|c| &c.name).collect::<Vec<_>>());
 
-        let r = idx.find_component("R").expect("R present");
+        let r = idx.find_component("RC", "R").expect("R present");
         assert_eq!(r.variability, Variability::Parameter);
         assert_eq!(r.type_name, "Real");
 
-        let resistor = idx.find_component("resistor").expect("resistor present");
+        let resistor = idx.find_component("RC", "resistor").expect("resistor present");
         assert_eq!(resistor.type_name, "Modelica.Electrical.Analog.Basic.Resistor");
         assert_eq!(resistor.causality, Causality::None);
+
+        // Per-class iterator preserves declaration order.
+        let names: Vec<_> = idx
+            .components_in_class("RC")
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["R", "x", "resistor"]);
+    }
+
+    #[test]
+    fn patch_component_added_then_removed() {
+        let mut idx = ModelicaIndex::new();
+        let key = idx.patch_component_added("RC", "extra", "Real");
+        assert!(idx.find_component("RC", "extra").is_some());
+        assert_eq!(idx.find_component("RC", "extra").unwrap().key, key);
+
+        idx.patch_component_removed("RC", "extra");
+        assert!(idx.find_component("RC", "extra").is_none());
+        assert!(!idx.components_by_class.get("RC").map(|v| !v.is_empty()).unwrap_or(false));
+    }
+
+    #[test]
+    fn patch_placement_changed_updates_existing() {
+        let mut idx = ModelicaIndex::new();
+        idx.patch_component_added("RC", "r1", "Resistor");
+        let new_placement = Placement::at(10.0, 20.0);
+        idx.patch_placement_changed("RC", "r1", new_placement);
+        let entry = idx.find_component("RC", "r1").expect("r1 present");
+        let p = entry.placement.expect("placement set");
+        assert_eq!(p.x, 10.0);
+        assert_eq!(p.y, 20.0);
+    }
+
+    #[test]
+    fn patch_placement_on_missing_component_is_noop() {
+        let mut idx = ModelicaIndex::new();
+        // Should not panic; should silently ignore.
+        idx.patch_placement_changed("RC", "nope", Placement::at(0.0, 0.0));
     }
 
     #[test]
