@@ -143,6 +143,13 @@ pub struct ClassEntry {
     /// `(info, revisions)` from the class's `Documentation(...)`
     /// annotation. Both are `None` when no documentation was authored.
     pub documentation: (Option<String>, Option<String>),
+    /// Count of declared equations in this class, excluding `Empty`
+    /// placeholders and `connect(...)` (which is tracked separately
+    /// via [`Self::connections_in_class`]). Includes algebraic, For,
+    /// When, If, FunctionCall, and Assert equations — anything the
+    /// empty-diagram overlay should call out as "this class has
+    /// equation content beyond just connections".
+    pub equation_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -437,6 +444,7 @@ impl ModelicaIndex {
                 children: Vec::new(),
                 icon: None,
                 documentation: (None, None),
+                equation_count: 0,
             },
         );
     }
@@ -536,6 +544,26 @@ fn insert_class_recursive(idx: &mut ModelicaIndex, qualified: String, class_def:
     let documentation =
         crate::ui::panels::model_view::extract_documentation(&class_def.annotation);
 
+    // Count non-trivial equations: skip `Empty` placeholders and
+    // `Connect` (tracked separately via `connections`). Mirrors the
+    // empty-diagram overlay's intent — "does this class declare
+    // equation content beyond connectivity?". `initial_equations`
+    // contributes too; `algorithms` are counted as one block each
+    // (matching how Modelica authors think about them).
+    let equation_count = class_def
+        .equations
+        .iter()
+        .chain(class_def.initial_equations.iter())
+        .filter(|eq| {
+            !matches!(
+                eq,
+                rumoca_session::parsing::ast::Equation::Empty
+                    | rumoca_session::parsing::ast::Equation::Connect { .. }
+            )
+        })
+        .count()
+        + class_def.algorithms.len();
+
     let entry = ClassEntry {
         name: qualified.clone(),
         kind: map_class_type(&class_def.class_type),
@@ -552,6 +580,7 @@ fn insert_class_recursive(idx: &mut ModelicaIndex, qualified: String, class_def:
         children,
         icon,
         documentation,
+        equation_count,
     };
     idx.classes.insert(qualified.clone(), entry);
 

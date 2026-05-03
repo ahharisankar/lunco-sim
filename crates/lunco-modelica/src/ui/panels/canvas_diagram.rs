@@ -6250,11 +6250,8 @@ fn render_empty_diagram_overlay(
                         .find(|c| !matches!(c.kind, crate::index::ClassKind::Package))
                         .map(|c| c.name.clone())
                 })?;
-                Some(empty_overlay_counts_from_index(
-                    index,
-                    &qualified,
-                    document.source(),
-                ))
+                let _ = document;
+                Some(empty_overlay_counts_from_index(index, &qualified))
             })
             .unwrap_or_default()
     };
@@ -6820,7 +6817,6 @@ struct EmptyOverlayCounts {
 fn empty_overlay_counts_from_index(
     index: &crate::index::ModelicaIndex,
     qualified: &str,
-    source: &str,
 ) -> EmptyOverlayCounts {
     use crate::index::{Causality, Variability};
     let mut counts = EmptyOverlayCounts::default();
@@ -6835,33 +6831,12 @@ fn empty_overlay_counts_from_index(
         }
     }
     counts.connects = index.connections_in_class(qualified).count();
-    // TODO(index-migrate): track an equation count on `ClassEntry`
-    // during rebuild so this falls out of the Index too. Today the
-    // empty-diagram overlay's "X equations" tile is the only reader,
-    // so a class-scoped regex over the source slice is acceptable —
-    // it runs once per render and only on the source bytes belonging
-    // to the active class (when the class entry has a `source_range`).
-    let scan_target = index
+    counts.equations = index
         .classes
         .get(qualified)
-        .and_then(|e| e.source_range.as_ref())
-        .and_then(|r| {
-            let start = r.start as usize;
-            let end = r.end as usize;
-            source.get(start..end)
-        })
-        .unwrap_or(source);
-    counts.equations = equation_count_regex(scan_target);
+        .map(|e| e.equation_count)
+        .unwrap_or(0);
     counts
-}
-
-fn equation_count_regex(source: &str) -> usize {
-    use std::sync::OnceLock;
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        regex::Regex::new(r"(?m)^\s*(?:der\s*\(|[A-Za-z_]\w*\s*=\s*[^=])").unwrap()
-    });
-    re.find_iter(source).count()
 }
 
 // ─── Drill-in ───────────────────────────────────────────────────────
