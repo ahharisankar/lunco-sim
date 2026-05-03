@@ -409,6 +409,72 @@ impl ModelicaIndex {
         }
     }
 
+    /// Optimistic class-add. Inserts a placeholder `ClassEntry` keyed
+    /// by `qualified` with the given kind. Empty
+    /// description/extends/children — the next AST reconcile fills
+    /// them in. Also wires the qualified entry into its parent's
+    /// `children` list so browser tree reads stay current.
+    pub fn patch_class_added(&mut self, qualified: &str, kind: ClassKind) {
+        self.generation = self.generation.saturating_add(1);
+        // Add to parent's `children` if there is a parent, so tree
+        // assemblers see the new class without a reparse.
+        if let Some(dot) = qualified.rfind('.') {
+            let parent_path = &qualified[..dot];
+            if let Some(parent) = self.classes.get_mut(parent_path) {
+                if !parent.children.iter().any(|c| c == qualified) {
+                    parent.children.push(qualified.to_string());
+                }
+            }
+        }
+        self.classes.insert(
+            qualified.to_string(),
+            ClassEntry {
+                name: qualified.to_string(),
+                kind,
+                source_range: None,
+                extends: Vec::new(),
+                description: String::new(),
+                children: Vec::new(),
+                icon: None,
+                documentation: (None, None),
+            },
+        );
+    }
+
+    /// Optimistic class-remove. Drops the class entry and any
+    /// reference from its parent's `children` list. Components and
+    /// connections owned by the class are also dropped so panels
+    /// don't render orphaned entries.
+    pub fn patch_class_removed(&mut self, qualified: &str) {
+        self.generation = self.generation.saturating_add(1);
+        // Remove from parent's children list.
+        if let Some(dot) = qualified.rfind('.') {
+            let parent_path = &qualified[..dot];
+            if let Some(parent) = self.classes.get_mut(parent_path) {
+                parent.children.retain(|c| c != qualified);
+            }
+        }
+        self.classes.remove(qualified);
+        // Drop owned components.
+        if let Some(keys) = self.components_by_class.remove(qualified) {
+            for key in keys {
+                self.component_by_qualified
+                    .retain(|(_, _), v| *v != key);
+                if let Some(pos) = self.components.iter().position(|c| c.key == key) {
+                    self.components.remove(pos);
+                }
+            }
+        }
+        // Drop owned connections.
+        if let Some(keys) = self.connections_by_class.remove(qualified) {
+            for key in keys {
+                if let Some(pos) = self.connections.iter().position(|c| c.key == key) {
+                    self.connections.remove(pos);
+                }
+            }
+        }
+    }
+
     /// Look up a component by `(class, name)`. Returns `None` if the
     /// component doesn't exist.
     pub fn find_component(&self, class: &str, name: &str) -> Option<&ComponentEntry> {
@@ -778,5 +844,50 @@ mod tests {
         let mut idx = ModelicaIndex::new();
         idx.patch_parameter_changed("RC", "nope", "R", "100");
         // No panic, no changes.
+    }
+
+    #[test]
+    fn patch_class_added_top_level() {
+        let mut idx = ModelicaIndex::new();
+        idx.patch_class_added("Foo", ClassKind::Model);
+        assert!(idx.classes.contains_key("Foo"));
+        assert_eq!(idx.classes["Foo"].kind, ClassKind::Model);
+        // No parent → no children-list update.
+    }
+
+    #[test]
+    fn patch_class_added_nested_links_into_parent() {
+        let mut idx = ModelicaIndex::new();
+        idx.patch_class_added("Pkg", ClassKind::Package);
+        idx.patch_class_added("Pkg.Inner", ClassKind::Model);
+        // Parent now lists the child.
+        assert_eq!(idx.classes["Pkg"].children, vec!["Pkg.Inner".to_string()]);
+        assert!(idx.classes.contains_key("Pkg.Inner"));
+        assert_eq!(idx.classes["Pkg.Inner"].kind, ClassKind::Model);
+    }
+
+    #[test]
+    fn patch_class_removed_drops_components_and_parent_link() {
+        let mut idx = ModelicaIndex::new();
+        idx.patch_class_added("Pkg", ClassKind::Package);
+        idx.patch_class_added("Pkg.Inner", ClassKind::Model);
+        idx.patch_component_added("Pkg.Inner", "x", "Real");
+        idx.patch_component_added("Pkg.Inner", "y", "Real");
+        assert_eq!(idx.components_in_class("Pkg.Inner").count(), 2);
+        assert_eq!(idx.classes["Pkg"].children.len(), 1);
+
+        idx.patch_class_removed("Pkg.Inner");
+
+        assert!(!idx.classes.contains_key("Pkg.Inner"));
+        assert_eq!(idx.classes["Pkg"].children.len(), 0);
+        assert_eq!(idx.components_in_class("Pkg.Inner").count(), 0);
+        assert!(idx.find_component("Pkg.Inner", "x").is_none());
+    }
+
+    #[test]
+    fn patch_class_removed_unknown_is_noop() {
+        let mut idx = ModelicaIndex::new();
+        idx.patch_class_removed("DoesNotExist");
+        // No panic, no state change.
     }
 }

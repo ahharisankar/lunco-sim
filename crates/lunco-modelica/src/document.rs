@@ -140,6 +140,20 @@ pub enum ModelicaChange {
         /// Replacement value expression (emitted verbatim).
         value: String,
     },
+    /// A class was added (long form via [`ModelicaOp::AddClass`] or short
+    /// form via [`ModelicaOp::AddShortClass`]). `qualified` is the fully
+    /// qualified path (`parent.name` or just `name` for top-level).
+    ClassAdded {
+        /// Fully-qualified class name.
+        qualified: String,
+        /// Class kind keyword (`model`, `block`, `connector`, ...).
+        kind: pretty::ClassKindSpec,
+    },
+    /// A class was removed.
+    ClassRemoved {
+        /// Fully-qualified class name that no longer exists.
+        qualified: String,
+    },
 }
 
 /// Eagerly-refreshed AST cache attached to a [`ModelicaDocument`].
@@ -1046,6 +1060,13 @@ impl ModelicaDocument {
             } => {
                 self.index.patch_parameter_changed(class, component, param, value);
             }
+            ModelicaChange::ClassAdded { qualified, kind } => {
+                self.index
+                    .patch_class_added(qualified, class_kind_spec_to_index_kind(*kind));
+            }
+            ModelicaChange::ClassRemoved { qualified } => {
+                self.index.patch_class_removed(qualified);
+            }
             // TextReplaced — opaque text edit, Index reconciles on
             // the next reparse since we don't know what changed
             // structurally.
@@ -1057,6 +1078,23 @@ impl ModelicaDocument {
             range: inverse_range,
             replacement: removed,
         })
+    }
+}
+
+/// Map the op-layer's [`pretty::ClassKindSpec`] to the Index's
+/// [`crate::index::ClassKind`]. The op layer doesn't author the
+/// extended kinds (ExpandableConnector, Operator, OperatorRecord,
+/// Class) — those only appear via parse, never via API ops.
+fn class_kind_spec_to_index_kind(spec: pretty::ClassKindSpec) -> crate::index::ClassKind {
+    use crate::index::ClassKind;
+    match spec {
+        pretty::ClassKindSpec::Model => ClassKind::Model,
+        pretty::ClassKindSpec::Block => ClassKind::Block,
+        pretty::ClassKindSpec::Connector => ClassKind::Connector,
+        pretty::ClassKindSpec::Package => ClassKind::Package,
+        pretty::ClassKindSpec::Record => ClassKind::Record,
+        pretty::ClassKindSpec::Function => ClassKind::Function,
+        pretty::ClassKindSpec::Type => ClassKind::Type,
     }
 }
 
@@ -1166,26 +1204,47 @@ fn op_to_patch(
         }
         ModelicaOp::AddClass { parent, name, kind, description, partial } => {
             let (r, rp) = compute_add_class_patch(source, ast, &parent, &name, kind, &description, partial)?;
-            Ok((r, rp, ModelicaChange::TextReplaced))
+            let qualified = if parent.is_empty() {
+                name.clone()
+            } else {
+                format!("{}.{}", parent, name)
+            };
+            Ok((r, rp, ModelicaChange::ClassAdded { qualified, kind }))
         }
         ModelicaOp::RemoveClass { qualified } => {
             let (r, rp) = compute_remove_class_patch(source, ast, &qualified)?;
-            Ok((r, rp, ModelicaChange::TextReplaced))
+            Ok((r, rp, ModelicaChange::ClassRemoved { qualified }))
         }
         ModelicaOp::AddShortClass { parent, name, kind, base, prefixes, modifications } => {
             let (r, rp) = compute_add_short_class_patch(
                 source, ast, &parent, &name, kind, &base, &prefixes, &modifications,
             )?;
-            Ok((r, rp, ModelicaChange::TextReplaced))
+            let qualified = if parent.is_empty() {
+                name.clone()
+            } else {
+                format!("{}.{}", parent, name)
+            };
+            Ok((r, rp, ModelicaChange::ClassAdded { qualified, kind }))
         }
         ModelicaOp::AddVariable { class, decl } => {
             let (r, rp) = compute_add_variable_patch(source, ast, &class, &decl)?;
-            Ok((r, rp, ModelicaChange::TextReplaced))
+            // Variables and typed components share the AST `components`
+            // table — emit the same `ComponentAdded` event so panel-side
+            // observers and the per-doc Index don't have to special-case
+            // variables vs. typed components.
+            let change = ModelicaChange::ComponentAdded {
+                class,
+                name: decl.name.clone(),
+            };
+            Ok((r, rp, change))
         }
         ModelicaOp::RemoveVariable { class, name } => {
-            // Variables and components share the same AST table — reuse.
+            // Variables and components share the same AST table — reuse
+            // both the source patch helper and the `ComponentRemoved`
+            // event so consumers see one signal for both decl kinds.
             let (r, rp) = compute_remove_component_patch(source, ast, &class, &name)?;
-            Ok((r, rp, ModelicaChange::TextReplaced))
+            let change = ModelicaChange::ComponentRemoved { class, name };
+            Ok((r, rp, change))
         }
         ModelicaOp::AddEquation { class, eq } => {
             let (r, rp) = compute_add_equation_patch(source, ast, &class, &eq)?;
