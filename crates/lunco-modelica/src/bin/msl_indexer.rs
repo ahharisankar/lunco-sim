@@ -346,6 +346,24 @@ fn is_top_level_self_ref(name: &str, current_path: &str, is_package_file: bool) 
 }
 
 struct MSLIndexer {
+    /// Workspace + library engine. Receives every parsed `.mo`
+    /// the indexer scans, then `engine.icon_for(name)` resolves
+    /// inheritance the same way the runtime workbench does —
+    /// rumoca's `class_lookup_query` does proper MLS § 5
+    /// scope-walks, no indexer-side resolver heuristic.
+    ///
+    /// Populated bulk after `scan_dir` finishes via
+    /// `engine.session_mut().replace_parsed_source_set("msl", …)`
+    /// — same code path the web bootstrap uses to install the
+    /// prebuilt MSL bundle. Indexer and runtime then have the
+    /// SAME session shape; any `extends` chain that resolves at
+    /// runtime resolves here too.
+    engine: lunco_modelica::engine::ModelicaEngine,
+    /// Flat map of fully-qualified-name → own ClassDef. Used for
+    /// fields that don't need inheritance (description,
+    /// class_kind, own diagram_graphics, port/param walks until
+    /// they migrate too). Inheritance-merged data comes from
+    /// `engine.icon_for` and friends — single source of truth.
     classes: HashMap<String, ClassDef>,
     /// Per-class first-paragraph plain-text from
     /// `annotation(Documentation(info="…"))`. Keyed by the simple
@@ -368,6 +386,13 @@ struct MSLIndexer {
     /// via `Session::replace_parsed_source_set` — mirrors the wasm
     /// runtime's `parsed-*.bin.zst` strategy on native.
     parsed_bundle: Vec<(String, StoredDefinition)>,
+    /// `(path, source)` pairs captured during scan. Used by
+    /// `install_into_engine` to feed the session via the full
+    /// `add_document` pipeline so rumoca's `within`-aware lookup
+    /// indexes are populated correctly. `replace_parsed_source_set`
+    /// alone leaves `class_inherited_annotations_query`'s file-walk
+    /// blind to within-prefixed nested classes.
+    sources: Vec<(std::path::PathBuf, String)>,
 }
 
 /// Scan a Modelica source buffer and map each class's simple name to
@@ -526,6 +551,7 @@ fn clean_short_description(tokens: &[Token]) -> Option<String> {
 impl MSLIndexer {
     fn new() -> Self {
         Self {
+            engine: lunco_modelica::engine::ModelicaEngine::new(),
             classes: HashMap::new(),
             doc_infos: HashMap::new(),
             verbose: false,
@@ -534,6 +560,48 @@ impl MSLIndexer {
             scan_started: None,
             last_progress_print: None,
             parsed_bundle: Vec::with_capacity(2700),
+            sources: Vec::with_capacity(2700),
+        }
+    }
+
+    /// Install each file into the engine's session via the full
+    /// `add_document` pipeline. `replace_parsed_source_set` looked
+    /// like the right call (it's what web bootstrap uses) but
+    /// rumoca's `class_inherited_annotations_query` calls
+    /// `find_class_def_in_file` which expects `qualified_name` to
+    /// walk through `parsed.classes` directly — and MSL's flat
+    /// per-file `within X; model Y end Y;` shape doesn't have
+    /// that structure (the file's `parsed.classes` is just `{Y}`,
+    /// not nested under X). `add_document` goes through rumoca's
+    /// full pipeline which handles `within` correctly when
+    /// indexing scope. rumoca's content-hash artifact cache makes
+    /// the parse near-free on the second pass since the indexer
+    /// already populated it via `parse_files_parallel`.
+    fn install_into_engine(&mut self) {
+        let count = self.sources.len();
+        let started = Instant::now();
+        let sources = std::mem::take(&mut self.sources);
+        let session = self.engine.session_mut();
+        for (path, source) in &sources {
+            let uri = path.to_string_lossy().to_string();
+            let _ = session.add_document(&uri, source);
+        }
+        println!(
+            "[indexer] installed {count} docs into engine session in {:.1}s",
+            started.elapsed().as_secs_f64()
+        );
+        // Probe: confirm the session resolves a known-good class
+        // AND its inheritance walk has non-empty layers.
+        let probes = [
+            "Modelica.Mechanics.Rotational.Sensors.SpeedSensor",
+            "Modelica.Mechanics.Rotational.Components.Inertia",
+            "Modelica.Blocks.Continuous.Integrator",
+            "Modelica.Icons.RoundSensor",
+        ];
+        for p in probes {
+            let resolved = self.engine.session_mut().class_lookup_query(p);
+            let n_layers = self.engine.inherited_annotations(p).len();
+            println!("  probe {p}: resolved={resolved:?} layers={n_layers}");
         }
     }
 
@@ -634,6 +702,11 @@ impl MSLIndexer {
             }
             self.parsed_bundle
                 .push((path.to_string_lossy().to_string(), ast.clone()));
+            // Capture source for engine population. add_document
+            // needs raw text so rumoca's full pipeline runs (which
+            // populates the within-aware lookup tables that
+            // class_inherited_annotations_query reads).
+            self.sources.push((path.to_path_buf(), source.to_string()));
             self.add_stored_definition(ast, package_prefix, is_package_file);
         }
     }
@@ -933,11 +1006,25 @@ impl MSLIndexer {
     }
 
 
-    fn index_all(&self) -> Vec<MSLComponentDef> {
+    fn index_all(&mut self) -> Vec<MSLComponentDef> {
         use std::sync::Arc;
         let mut all_comps = Vec::new();
 
-        for (full_name, class) in &self.classes {
+        // Snapshot keys so we can iterate while mutably borrowing
+        // `self.engine` for icon queries. The classes themselves
+        // stay borrowed read-only via per-iteration `self.classes.get`.
+        let names: Vec<String> = self.classes.keys().cloned().collect();
+        for full_name in &names {
+            let full_name = full_name.as_str();
+            let class = match self.classes.get(full_name) {
+                Some(c) => c.clone(),
+                None => continue,
+            };
+            let class = &class;
+            // Original loop body resumes; `class` is &ClassDef, an
+            // owned clone here so we can freely &mut self for engine
+            // queries below. ClassDef cloning is cheap relative to
+            // an inheritance walk.
             if matches!(
                 class.class_type,
                 ClassType::Model | ClassType::Block | ClassType::Connector
@@ -951,25 +1038,29 @@ impl MSLIndexer {
                 let short_name = full_name.rsplit('.').next().unwrap_or(full_name).to_string();
                 let category = full_name.rsplitn(2, '.').nth(1).unwrap_or("").replace('.', "/");
 
-                // Walk the `extends` chain via the typed extractor so
-                // inherited icons (PartialValve → ValveCompressible)
-                // are merged into one `Icon` graphics list. Resolver
-                // searches the indexer's full-qualified-name map first,
-                // then falls back to a leaf-name suffix scan to handle
-                // bare `extends Foo` where `Foo` lives in the same
-                // package (MLS §5 scope-chain — `extract_icon_inherited`
-                // builds the candidate list, we just resolve names).
+                // Inheritance-merged icon. The merge logic lives in
+                // `extract_icon_inherited`; the resolver does
+                // class-name → ClassDef lookup. Use rumoca's
+                // `class_lookup_query` for the **lookup** (full MLS § 5
+                // scope-chain, no indexer-side heuristic), then fetch
+                // the ClassDef from `self.classes` (which is keyed by
+                // qualified name and populated during scan).
+                //
+                // Why two layers: rumoca's
+                // `class_inherited_annotations_query` would do this
+                // end-to-end, but its internal `find_class_def_in_file`
+                // expects `parsed.classes` to contain the full-path
+                // nesting — and MSL's `within X; model Y end Y;`
+                // shape only puts `Y` directly under `parsed.classes`.
+                // Our `self.classes` map sidesteps that — we pre-built
+                // the nested-name keying in `add_stored_definition`.
                 let resolver_classes = &self.classes;
+                let session = self.engine.session_mut();
                 let mut resolver = |name: &str| -> Option<Arc<ClassDef>> {
-                    if let Some(c) = resolver_classes.get(name) {
-                        return Some(Arc::new(c.clone()));
-                    }
-                    let leaf = name.rsplit('.').next().unwrap_or(name);
-                    let suffix = format!(".{leaf}");
-                    resolver_classes
-                        .iter()
-                        .find(|(k, _)| k.ends_with(&suffix) || k.as_str() == leaf)
-                        .map(|(_, v)| Arc::new(v.clone()))
+                    // rumoca's MLS § 5 lookup. Returns the full
+                    // qualified name we keyed on.
+                    let qualified = session.class_lookup_query(name)?;
+                    resolver_classes.get(&qualified).cloned().map(Arc::new)
                 };
                 let mut icon_visited = HashSet::new();
                 let icon_graphics = lunco_modelica::annotations::extract_icon_inherited(
@@ -1010,7 +1101,7 @@ impl MSLIndexer {
 
                 all_comps.push(MSLComponentDef {
                     name: short_name.clone(),
-                    msl_path: full_name.clone(),
+                    msl_path: full_name.to_string(),
                     category,
                     display_name: format!("📦 {}", short_name),
                     // Legacy Debug-formatted field. Kept for any caller
@@ -1141,6 +1232,11 @@ fn main() {
 
     println!("[indexer] indexing components (resolving inheritance)...");
     let t_index = Instant::now();
+    // Bulk-install all parsed defs into the engine session BEFORE
+    // index_all runs. After this, `engine.icon_for(name)` resolves
+    // any class via rumoca's MLS § 5 lookup — same path the
+    // workbench uses. No indexer-side resolver heuristic.
+    indexer.install_into_engine();
     let components = indexer.index_all();
     println!(
         "[indexer] index done: {} components in {:.1}s",
