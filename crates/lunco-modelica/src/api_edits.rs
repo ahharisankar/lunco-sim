@@ -138,9 +138,30 @@ fn on_set_document_source(
             bevy::log::warn!("[SetDocumentSource] no doc for id {}", doc_raw);
             return;
         };
-        let mut registry = world.resource_mut::<ModelicaDocumentRegistry>();
-        registry.checkpoint_source(doc, source);
-        bevy::log::info!("[SetDocumentSource] doc={} replaced", doc.raw());
+        // Skip if source is identical — preserves checkpoint_source's
+        // no-op behaviour and avoids dirtying the journal with empty
+        // ReplaceSource entries.
+        let unchanged = world
+            .get_resource::<ModelicaDocumentRegistry>()
+            .and_then(|r| r.host(doc))
+            .map(|h| h.document().source() == source)
+            .unwrap_or(false);
+        if unchanged {
+            return;
+        }
+        match crate::ui::panels::canvas_diagram::apply_one_op_as(
+            world,
+            doc,
+            ModelicaOp::ReplaceSource { new: source },
+            lunco_twin_journal::AuthorTag::for_tool("api"),
+        ) {
+            Ok(_) => bevy::log::info!("[SetDocumentSource] doc={} replaced", doc.raw()),
+            Err(e) => bevy::log::warn!(
+                "[SetDocumentSource] doc={} failed: {:?}",
+                doc.raw(),
+                e
+            ),
+        }
     });
 }
 
@@ -210,15 +231,32 @@ fn on_rename_modelica_class(
         // Drop the immutable borrow before taking the mut one.
         drop(registry);
 
-        let mut registry = world.resource_mut::<ModelicaDocumentRegistry>();
-        registry.checkpoint_source(doc, new_source);
-
-        if let Some(host) = registry.host_mut(doc) {
-            let doc_obj = host.document_mut();
-            if doc_obj.origin().is_untitled() {
-                doc_obj.set_origin(lunco_doc::DocumentOrigin::untitled(ev.new_name.clone()));
+        match crate::ui::panels::canvas_diagram::apply_one_op_as(
+            world,
+            doc,
+            ModelicaOp::ReplaceSource { new: new_source },
+            lunco_twin_journal::AuthorTag::for_tool("api"),
+        ) {
+            Ok(_) => {}
+            Err(e) => {
+                bevy::log::warn!(
+                    "[RenameModelicaClass] doc={} apply failed: {:?}",
+                    doc.raw(),
+                    e
+                );
+                return;
             }
-            doc_obj.waive_ast_debounce();
+        }
+
+        // Untitled docs adopt the new class name as their display name.
+        // (waive_ast_debounce is already done by the helper.)
+        if let Some(mut registry) = world.get_resource_mut::<ModelicaDocumentRegistry>() {
+            if let Some(host) = registry.host_mut(doc) {
+                let doc_obj = host.document_mut();
+                if doc_obj.origin().is_untitled() {
+                    doc_obj.set_origin(lunco_doc::DocumentOrigin::untitled(ev.new_name.clone()));
+                }
+            }
         }
         // The `derive_doc_title` system in `ui::mod` picks up the new
         // class name on the next frame and updates
@@ -360,16 +398,16 @@ fn on_add_modelica_component(
             modifications: Vec::new(),
             placement: Some(placement),
         };
-        let mut registry = world.resource_mut::<ModelicaDocumentRegistry>();
-        let Some(host) = registry.host_mut(doc) else {
-            return;
-        };
-        match host.apply(ModelicaOp::AddComponent {
-            class: ev.class.clone(),
-            decl,
-        }) {
+        match crate::ui::panels::canvas_diagram::apply_one_op_as(
+            world,
+            doc,
+            ModelicaOp::AddComponent {
+                class: ev.class.clone(),
+                decl,
+            },
+            lunco_twin_journal::AuthorTag::for_tool("api"),
+        ) {
             Ok(_) => {
-                host.document_mut().waive_ast_debounce();
                 bevy::log::info!(
                     "[AddModelicaComponent] doc={} class={} {}={}",
                     doc.raw(),
@@ -377,9 +415,6 @@ fn on_add_modelica_component(
                     ev.name,
                     ev.type_name
                 );
-                // Drop the registry borrow before touching another
-                // resource — Bevy's resource-mut is exclusive.
-                drop(registry);
                 // Queue a smooth camera focus on the new node. The
                 // canvas-side `drive_pending_api_focus` system applies
                 // it once projection lands the node in the scene.
@@ -444,16 +479,16 @@ fn on_remove_modelica_component(
         if ev.class.is_empty() || ev.name.is_empty() {
             return;
         }
-        let mut registry = world.resource_mut::<ModelicaDocumentRegistry>();
-        let Some(host) = registry.host_mut(doc) else {
-            return;
-        };
-        match host.apply(ModelicaOp::RemoveComponent {
-            class: ev.class.clone(),
-            name: ev.name.clone(),
-        }) {
+        match crate::ui::panels::canvas_diagram::apply_one_op_as(
+            world,
+            doc,
+            ModelicaOp::RemoveComponent {
+                class: ev.class.clone(),
+                name: ev.name.clone(),
+            },
+            lunco_twin_journal::AuthorTag::for_tool("api"),
+        ) {
             Ok(_) => {
-                host.document_mut().waive_ast_debounce();
                 bevy::log::info!(
                     "[RemoveModelicaComponent] doc={} {}.{}",
                     doc.raw(),
@@ -520,16 +555,16 @@ fn on_connect_components(
             to,
             line: None,
         };
-        let mut registry = world.resource_mut::<ModelicaDocumentRegistry>();
-        let Some(host) = registry.host_mut(doc) else {
-            return;
-        };
-        match host.apply(ModelicaOp::AddConnection {
-            class: ev.class.clone(),
-            eq: eq.clone(),
-        }) {
+        match crate::ui::panels::canvas_diagram::apply_one_op_as(
+            world,
+            doc,
+            ModelicaOp::AddConnection {
+                class: ev.class.clone(),
+                eq: eq.clone(),
+            },
+            lunco_twin_journal::AuthorTag::for_tool("api"),
+        ) {
             Ok(_) => {
-                host.document_mut().waive_ast_debounce();
                 bevy::log::info!(
                     "[ConnectComponents] doc={} {}: {} -> {}",
                     doc.raw(),
@@ -537,7 +572,6 @@ fn on_connect_components(
                     ev.from,
                     ev.to
                 );
-                drop(registry);
                 // Queue an edge-flash. The driver matches against the
                 // scene's edge list once projection lands the new
                 // edge (same async pattern as `PendingApiFocusQueue`).
@@ -595,17 +629,17 @@ fn on_disconnect_components(
         let Some(to) = parse_port_ref(&ev.to) else {
             return;
         };
-        let mut registry = world.resource_mut::<ModelicaDocumentRegistry>();
-        let Some(host) = registry.host_mut(doc) else {
-            return;
-        };
-        match host.apply(ModelicaOp::RemoveConnection {
-            class: ev.class.clone(),
-            from,
-            to,
-        }) {
+        match crate::ui::panels::canvas_diagram::apply_one_op_as(
+            world,
+            doc,
+            ModelicaOp::RemoveConnection {
+                class: ev.class.clone(),
+                from,
+                to,
+            },
+            lunco_twin_journal::AuthorTag::for_tool("api"),
+        ) {
             Ok(_) => {
-                host.document_mut().waive_ast_debounce();
                 bevy::log::info!(
                     "[DisconnectComponents] doc={} {}: {} -/- {}",
                     doc.raw(),

@@ -27,10 +27,6 @@
 //! (HTTP API observers, agent scripts) construct their own
 //! [`AuthorTag::for_tool`] before calling [`record_op_summary`].
 
-use bevy::prelude::*;
-use lunco_doc::DocumentId;
-use lunco_doc_bevy::JournalResource;
-use lunco_twin_journal::{AuthorTag, DomainKind};
 use serde_json::{json, Value};
 
 use crate::document::ModelicaOp;
@@ -182,22 +178,3 @@ pub fn summarize_op(op: &ModelicaOp) -> Value {
     }
 }
 
-/// Record a (forward, inverse) op pair into the canonical journal.
-///
-/// Called from `apply_ops` after a successful `host.apply`. The forward
-/// summary is built before apply (caller passes a snapshot of the op);
-/// the inverse summary is built from the op the host just pushed onto
-/// its undo stack ([`lunco_doc::DocumentHost::last_applied_inverse`]).
-pub fn record_op(
-    journal: &JournalResource,
-    author: AuthorTag,
-    doc: DocumentId,
-    op: &ModelicaOp,
-    inverse: &ModelicaOp,
-) {
-    let forward = summarize_op(op);
-    let backward = summarize_op(inverse);
-    journal.with_write(|j| {
-        j.record_op_value(author, doc, DomainKind::Modelica, forward, backward, None);
-    });
-}

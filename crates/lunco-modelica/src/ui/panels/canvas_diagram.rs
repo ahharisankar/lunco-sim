@@ -7895,6 +7895,91 @@ pub fn apply_ops_as(
     apply_ops(world, doc_id, ops, author);
 }
 
+/// Apply a single op through `host.apply` AND record the (forward,
+/// inverse) pair to the canonical Twin journal in one funnel.
+///
+/// Replaces the direct-`host.apply` pattern that several API command
+/// observers used to bypass the journal-recording path. Returns the
+/// `host.apply` result so callers can branch on success/failure
+/// exactly as before.
+///
+/// Side effects on success:
+/// - `waive_ast_debounce()` (so the next AST refresh tick reparses
+///   immediately, matching the canvas batch path).
+/// - `registry.mark_changed(doc)` (queues a `DocumentChanged` event;
+///   the previous direct-`host.apply` callers silently skipped this).
+/// - One canonical journal entry recorded with the supplied `author`.
+pub fn apply_one_op_as(
+    world: &mut World,
+    doc_id: lunco_doc::DocumentId,
+    op: ModelicaOp,
+    author: lunco_twin_journal::AuthorTag,
+) -> Result<lunco_doc::Ack, lunco_doc::Reject> {
+    use crate::ui::state::ModelicaDocumentRegistry;
+
+    let forward = crate::journal::summarize_op(&op);
+    // Layer 2 / structural ops can resolve a class that a previous
+    // op in the same UI batch just created. Mirror the canvas batch
+    // path's pre-apply AST refresh for those op kinds so direct
+    // single-op API calls don't see a stale snapshot either.
+    let needs_fresh_ast = matches!(
+        &op,
+        ModelicaOp::AddClass { .. }
+            | ModelicaOp::RemoveClass { .. }
+            | ModelicaOp::AddShortClass { .. }
+            | ModelicaOp::AddVariable { .. }
+            | ModelicaOp::RemoveVariable { .. }
+            | ModelicaOp::AddEquation { .. }
+            | ModelicaOp::AddIconGraphic { .. }
+            | ModelicaOp::AddDiagramGraphic { .. }
+            | ModelicaOp::SetExperimentAnnotation { .. }
+            | ModelicaOp::ReplaceSource { .. }
+    );
+
+    let (result, backward_summary) = {
+        let Some(mut registry) = world.get_resource_mut::<ModelicaDocumentRegistry>() else {
+            return Err(lunco_doc::Reject::InvalidOp(
+                "ModelicaDocumentRegistry resource missing".into(),
+            ));
+        };
+        let Some(host) = registry.host_mut(doc_id) else {
+            return Err(lunco_doc::Reject::InvalidOp(format!(
+                "doc {doc_id:?} not in registry"
+            )));
+        };
+        if needs_fresh_ast {
+            host.document_mut().refresh_ast_now();
+        }
+        let result = host.apply(op);
+        let backward = if result.is_ok() {
+            host.document_mut().waive_ast_debounce();
+            host.last_applied_inverse().map(crate::journal::summarize_op)
+        } else {
+            None
+        };
+        if result.is_ok() {
+            registry.mark_changed(doc_id);
+        }
+        (result, backward)
+    };
+
+    if let (Ok(_), Some(backward)) = (&result, backward_summary) {
+        if let Some(journal) = world.get_resource::<lunco_doc_bevy::JournalResource>() {
+            journal.with_write(|j| {
+                j.record_op_value(
+                    author,
+                    doc_id,
+                    lunco_twin_journal::DomainKind::Modelica,
+                    forward,
+                    backward,
+                    None,
+                );
+            });
+        }
+    }
+    result
+}
+
 fn apply_ops(
     world: &mut World,
     doc_id: lunco_doc::DocumentId,

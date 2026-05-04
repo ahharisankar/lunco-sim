@@ -494,9 +494,21 @@ impl Panel for CodeEditorPanel {
         if should_flush && !is_read_only {
             if let Some(doc) = doc_id {
                 let committed = world.resource::<EditorBufferState>().text.clone();
-                world
-                    .resource_mut::<ModelicaDocumentRegistry>()
-                    .checkpoint_source(doc, committed);
+                // Skip if source is identical (matches checkpoint_source's
+                // no-op behaviour and avoids journal noise).
+                let unchanged = world
+                    .get_resource::<ModelicaDocumentRegistry>()
+                    .and_then(|r| r.host(doc))
+                    .map(|h| h.document().source() == committed)
+                    .unwrap_or(false);
+                if !unchanged {
+                    let _ = crate::ui::panels::canvas_diagram::apply_one_op_as(
+                        world,
+                        doc,
+                        crate::document::ModelicaOp::ReplaceSource { new: committed },
+                        lunco_twin_journal::AuthorTag::for_tool("code-editor"),
+                    );
+                }
                 world.resource_mut::<EditorBufferState>().pending_commit_at = None;
             }
         }
