@@ -1257,7 +1257,7 @@ fn eval_visibility_falsy(
             .first()
             .map(|p| falsy_params.contains(p.ident.text.as_ref()))
             .unwrap_or(false),
-        Expression::Unary { op, rhs } => match op {
+        Expression::Unary { op, rhs: _ } => match op {
             OpUnary::Not(_) => {
                 // `not <expr>`: falsy iff inner is truthy. We can
                 // only confirm "truthy" when the bare ident appears

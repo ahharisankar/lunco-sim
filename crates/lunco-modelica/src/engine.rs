@@ -40,9 +40,7 @@
 //!   so cross-Twin MSL state is shared once multi-Twin lands.
 
 use lunco_doc::DocumentId;
-use rumoca_session::compile::{
-    ClassMemberCausality, ClassMemberInfo, ClassMemberVariability, SourceRootKind,
-};
+use rumoca_session::compile::SourceRootKind;
 use rumoca_session::Session;
 use std::collections::{HashMap, HashSet};
 

@@ -29,7 +29,7 @@
 //! Console panel — that's our "status somewhere" until a dedicated status
 //! bar lands.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use bevy::prelude::*;
 
@@ -49,9 +49,6 @@ pub fn global_parsed_msl() -> Option<&'static Arc<Vec<(String, rumoca_session::p
     GLOBAL_PARSED_MSL.get()
 }
 
-fn install_global_parsed_msl(docs: Vec<(String, rumoca_session::parsing::StoredDefinition)>) {
-    let _ = GLOBAL_PARSED_MSL.set(Arc::new(docs));
-}
 
 /// Plugin that owns MSL asset loading. Add once during app build.
 pub struct MslRemotePlugin;

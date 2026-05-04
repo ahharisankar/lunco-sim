@@ -238,12 +238,6 @@ pub(crate) fn render_workspace_doc(
     }
 }
 
-/// Derive the class tree + error flag from a [`SyntaxCache`]. Pure
-/// function — sub-millisecond on typical Modelica files. No parse,
-/// no allocation beyond the per-class string clones inside the tree.
-fn classes_from_syntax(syntax: &SyntaxCache) -> (Vec<ClassEntry>, bool) {
-    (collect_classes(&syntax.ast.classes, ""), syntax.has_errors)
-}
 
 /// Build the same class tree from the per-doc Index. Reads only the
 /// [`crate::index::ClassEntry`]s (no AST walk). Used by the live
@@ -323,42 +317,6 @@ fn parse_classes(source: &str) -> (Vec<ClassEntry>, bool) {
     classes_from_syntax(&syntax)
 }
 
-/// Walk an `IndexMap<String, ClassDef>` building [`ClassEntry`]
-/// records. `parent_path` is the dotted prefix to apply to each
-/// child's qualified path — empty for top-level classes.
-fn collect_classes(
-    classes: &indexmap::IndexMap<String, ClassDef>,
-    parent_path: &str,
-) -> Vec<ClassEntry> {
-    let mut out = Vec::new();
-    for (short, class_def) in classes {
-        let qualified = if parent_path.is_empty() {
-            short.clone()
-        } else {
-            format!("{}.{}", parent_path, short)
-        };
-        out.push(ClassEntry {
-            short_name: short.clone(),
-            qualified_path: qualified.clone(),
-            kind: class_def.class_type.clone(),
-            description: class_def
-                .description
-                .iter()
-                .next()
-                .map(|t| t.text.as_ref().trim_matches('"').to_string())
-                .filter(|s| !s.is_empty()),
-            children: collect_classes(&class_def.classes, &qualified),
-        });
-    }
-    // OMEdit ordering: UsersGuide first, Examples second, then
-    // sub-packages alphabetical, then leaf classes grouped by kind
-    // (model → block → connector → record → function → type →
-    // class → operator), alphabetical within each group. Mirrors
-    // `package_browser::omedit_sort_key`; duplicated here so this
-    // module doesn't reach into a sibling's private helper.
-    out.sort_by_key(|c| (browser_sort_group(c), c.short_name.to_lowercase()));
-    out
-}
 
 /// Sort bucket for [`ClassEntry`]. Variant order = display order via
 /// derived `Ord`, so adding a new bucket is a one-line edit.

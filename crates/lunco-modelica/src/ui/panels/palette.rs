@@ -136,9 +136,6 @@ fn category_of(msl_path: &str) -> &'static str {
     "Other"
 }
 
-fn category_info(name: &str) -> Option<&'static str> {
-    CATEGORIES.iter().copied().find(|c| *c == name)
-}
 
 /// The panel. Zero-sized; state lives in [`PaletteState`].
 pub struct ComponentPalettePanel;

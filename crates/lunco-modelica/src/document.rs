@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lunco_doc::{Document, DocumentError, DocumentId, DocumentOp, DocumentOrigin};
-use rumoca_phase_parse::{parse_to_ast, parse_to_syntax};
+use rumoca_phase_parse::parse_to_syntax;
 use rumoca_session::parsing::ast::StoredDefinition;
 
 use crate::pretty::{self, ComponentDecl, ConnectEquation, Placement, PortRef};
