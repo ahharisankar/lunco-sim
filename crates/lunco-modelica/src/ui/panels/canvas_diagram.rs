@@ -4155,9 +4155,15 @@ impl Panel for CanvasDiagramPanel {
                 // `SyntaxCache` only when strict parse failed — that
                 // way partial-parse states still draw something
                 // instead of going blank.
-                let ast = match doc.strict_ast() {
-                    Some(strict) => strict,
-                    None => std::sync::Arc::clone(&doc.syntax_arc().ast),
+                // Engine is the canonical AST source after Phase 4.
+                // If the engine hasn't parsed yet (first paint after
+                // doc install), strict_ast() returns None — paint
+                // the loading overlay and retry next tick. Mirrors
+                // the host-not-found branch above.
+                let Some(ast) = doc.strict_ast() else {
+                    drop(registry);
+                    self.render_canvas(ui, world);
+                    return;
                 };
                 (doc.source().to_string(), ast)
             };
