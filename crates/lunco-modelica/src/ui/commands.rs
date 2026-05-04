@@ -1797,19 +1797,34 @@ fn on_open_example_in_workspace(
             .map(|(s, e)| source_full[s..e].to_string())
             .unwrap_or(source_full);
         let extract_ms = t_extract.elapsed().as_secs_f64() * 1000.0;
-        // 4. Rewrite: rename + strip `within` so the copy is
-        //    standalone.
-        let t_rewrite = web_time::Instant::now();
-        let renamed = rewrite_duplicated_source(
+        // 4 + 4b. Single-pass rewrite: parse class_src once, then
+        //    rename + strip within + inject imports in one span splice.
+        //    Replaces the previous two-parse pair (rewrite_duplicated_source
+        //    + inject_class_imports) which each ran `parse_to_ast` on
+        //    the same bytes.
+        let t_collect = web_time::Instant::now();
+        let imports = collect_parent_imports(&path);
+        let collect_ms = t_collect.elapsed().as_secs_f64() * 1000.0;
+        let t_rewrite_only = web_time::Instant::now();
+        let renamed = rewrite_inject_in_one_pass(
             &class_src,
             &origin_short_for_task,
             &name_for_task,
-        );
-        // 4b. Inject parent-package imports (e.g. `import
-        //     Modelica.Units.SI;`) so scope-dependent references
-        //     resolve once the class is standalone.
-        let imports = collect_parent_imports(&path);
-        let renamed = inject_class_imports(&renamed, &imports);
+            &imports,
+        )
+        .unwrap_or_else(|| {
+            // Fallback: parse failed (unexpected — the cached extract
+            // already parsed). Run the legacy two-pass path so the
+            // user still gets a usable copy.
+            let r = rewrite_duplicated_source(
+                &class_src,
+                &origin_short_for_task,
+                &name_for_task,
+            );
+            inject_class_imports(&r, &imports)
+        });
+        let rewrite_only_ms = t_rewrite_only.elapsed().as_secs_f64() * 1000.0;
+        let inject_ms = 0.0_f64;
         // 4c. Re-attach a `within <origin package>;` clause so the
         //     copy's enclosing-package context is preserved for
         //     scope-chain resolution of bare `extends` refs. The
@@ -1826,7 +1841,7 @@ fn on_open_example_in_workspace(
         } else {
             format!("within {origin_pkg};\n{renamed}")
         };
-        let rewrite_ms = t_rewrite.elapsed().as_secs_f64() * 1000.0;
+        let rewrite_ms = rewrite_only_ms + collect_ms + inject_ms;
         // 5. Build doc (runs rumoca parse on the bg thread).
         let t_parse = web_time::Instant::now();
         let doc = crate::document::ModelicaDocument::with_origin(
@@ -1839,7 +1854,8 @@ fn on_open_example_in_workspace(
         bevy::log::info!(
             "[OpenExample bg] {qualified_for_task} src={source_len}B \
              total={total_ms:.1}ms resolve={resolve_ms:.1} read={read_ms:.1} \
-             extract={extract_ms:.1} rewrite={rewrite_ms:.1} parse={parse_ms:.1}"
+             extract={extract_ms:.1} rewrite_only={rewrite_only_ms:.1} \
+             collect_imports={collect_ms:.1} inject={inject_ms:.1} parse={parse_ms:.1}"
         );
         doc
     });
@@ -2255,6 +2271,137 @@ fn collect_parent_imports(class_file: &std::path::Path) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     chain.retain(|s| seen.insert(s.clone()));
     chain
+}
+
+/// One-parse rewrite: rename + within-strip + inject imports in a
+/// single span splice over the original source. Replaces the prior
+/// `rewrite_duplicated_source` + `inject_class_imports` pair, each of
+/// which re-parsed the same bytes — measured at ~370ms each in dev
+/// builds for a 7.9 KB extracted MSL class. This single pass parses
+/// once and emits final text.
+///
+/// Returns `None` if the parse fails so the caller can fall back to
+/// the source unchanged. (Unlikely — the caller's `extract_class_byte_range_via_path`
+/// already parsed this same source successfully via the cached path.)
+fn rewrite_inject_in_one_pass(
+    src: &str,
+    old_name: &str,
+    new_name: &str,
+    imports: &[String],
+) -> Option<String> {
+    let ast = rumoca_phase_parse::parse_to_ast(src, "duplicate.mo").ok()?;
+    let class_def = ast
+        .classes
+        .values()
+        .find(|c| c.name.text.as_ref() == old_name)?;
+    let end_token = class_def.end_name_token.as_ref()?;
+    let name_start = class_def.name.location.start as usize;
+    let name_end = class_def.name.location.end as usize;
+    let end_start = end_token.location.start as usize;
+    let end_end = end_token.location.end as usize;
+    if !(name_end <= end_start && end_end <= src.len()) {
+        return None;
+    }
+
+    // Within-clause removal range (in src). Empty range = no within.
+    let (wstart, wend) = match ast.within.as_ref() {
+        Some(w) => compute_within_strip_range(src, w).unwrap_or((0, 0)),
+        None => (0, 0),
+    };
+
+    // Inject anchor: position in `src` immediately after the class
+    // name's optional description string(s). Same scan
+    // `inject_class_imports` did.
+    let bytes = src.as_bytes();
+    let skip_ws = |mut i: usize| {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        i
+    };
+    let mut anchor = name_end;
+    let mut scan = skip_ws(anchor);
+    while scan < bytes.len() && bytes[scan] == b'"' {
+        let mut j = scan + 1;
+        while j < bytes.len() {
+            match bytes[j] {
+                b'\\' if j + 1 < bytes.len() => j += 2,
+                b'"' => {
+                    j += 1;
+                    break;
+                }
+                _ => j += 1,
+            }
+        }
+        anchor = j;
+        scan = skip_ws(j);
+    }
+    if anchor > end_start {
+        return None;
+    }
+    let want_inject = !imports.is_empty();
+    let inject_block: String = if want_inject {
+        imports.iter().map(|i| format!("  {i}\n")).collect()
+    } else {
+        String::new()
+    };
+
+    let mut out = String::with_capacity(src.len() + inject_block.len() + 4);
+    // Source up to within-strip start.
+    out.push_str(&src[..wstart]);
+    // Skip [wstart..wend) — within clause.
+    out.push_str(&src[wend..name_start]);
+    // Replace class name.
+    out.push_str(new_name);
+    // Description / whitespace between class name and inject anchor.
+    out.push_str(&src[name_end..anchor]);
+    if want_inject {
+        let needs_leading_newline = !out.ends_with('\n');
+        if needs_leading_newline {
+            out.push('\n');
+        }
+        out.push_str(&inject_block);
+    }
+    // Body from inject anchor up to end-token.
+    out.push_str(&src[anchor..end_start]);
+    // Replace end-token name.
+    out.push_str(new_name);
+    // Tail.
+    out.push_str(&src[end_end..]);
+    Some(out)
+}
+
+/// Compute the (start, end) byte range to remove for the within
+/// clause — same logic the prior `strip_within_clause` used, but
+/// returns the range instead of slicing.
+fn compute_within_strip_range(
+    src: &str,
+    name: &rumoca_session::parsing::ast::Name,
+) -> Option<(usize, usize)> {
+    let first = name.name.first()?;
+    let last = name.name.last()?;
+    let name_start = first.location.start as usize;
+    let name_end = last.location.end as usize;
+    if name_end > src.len() || name_start > name_end {
+        return None;
+    }
+    let kw_pos = src[..name_start].rfind("within")?;
+    let bytes = src.as_bytes();
+    let mut clause_start = kw_pos;
+    while clause_start > 0 {
+        let c = bytes[clause_start - 1];
+        if c == b' ' || c == b'\t' {
+            clause_start -= 1;
+        } else {
+            break;
+        }
+    }
+    let semi_offset = src[name_end..].find(';')?;
+    let mut clause_end = name_end + semi_offset + 1;
+    if clause_end < src.len() && bytes[clause_end] == b'\n' {
+        clause_end += 1;
+    }
+    Some((clause_start, clause_end))
 }
 
 /// Insert a block of `import` statements right after the class
