@@ -180,34 +180,6 @@ pub struct AstCache {
 }
 
 impl AstCache {
-    /// Parse `source` and record whether the strict parse succeeded.
-    /// Discards the parsed `StoredDefinition` — readers consult
-    /// [`SyntaxCache`] / engine for the actual AST.
-    ///
-    /// Prefer [`Self::from_syntax`] to avoid parsing twice when the
-    /// caller already has a [`SyntaxCache`] for this source — the
-    /// strict-parse-for-error-message vs lenient-parse-for-AST split
-    /// only matters when the *strict* error string is needed
-    /// independently. Most refresh paths can derive both from one
-    /// parse via [`Self::from_syntax`].
-    pub fn from_source(source: &str, generation: u64) -> Self {
-        // DIAGNOSTIC: when `LUNCO_NO_PARSE=1`, return an Err result
-        // instantly without invoking rumoca. Lets us prove whether
-        // the parse function itself is what blocks the renderer
-        // (independent of which thread it runs on).
-        if std::env::var_os("LUNCO_NO_PARSE").is_some() {
-            return Self {
-                generation,
-                result: Err("LUNCO_NO_PARSE diagnostic — parse skipped".into()),
-            };
-        }
-        let result = match parse_to_ast(source, "model.mo") {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e.to_string()),
-        };
-        Self { generation, result }
-    }
-
     /// Derive a parse-status cache from an existing [`SyntaxCache`] —
     /// no second parse. Loses the rumoca-strict-parser error string;
     /// uses a generic "parse errors" message when `has_errors`. Use
@@ -370,16 +342,6 @@ impl ModelicaDocument {
         doc
     }
 
-    /// Backwards-compatible alias for the duplicate-flow call site.
-    /// Identical to [`Self::with_origin`] — both are lazy. Will be
-    /// removed once the duplicate-flow caller is updated.
-    pub fn with_origin_lazy(
-        id: DocumentId,
-        source: impl Into<String>,
-        origin: DocumentOrigin,
-    ) -> Self {
-        Self::with_origin(id, source, origin)
-    }
 
     /// Load a `.mo` file from disk or the in-memory MSL bundle and
     /// build a fresh document. Uses rumoca's content-hash artifact
@@ -603,36 +565,6 @@ impl ModelicaDocument {
     /// source generation. Mirrors [`Self::ast_is_stale`].
     pub fn syntax_is_stale(&self) -> bool {
         self.syntax.generation != self.generation
-    }
-
-    /// Install a freshly-parsed AST cache produced off-thread.
-    ///
-    /// The async refresh path (`crate::ui::ast_refresh`) parses on
-    /// the task pool to keep multi-second rumoca parses off the main
-    /// thread. When the task completes, we hand the result here.
-    /// We only install if the new cache matches the **current** doc
-    /// generation — otherwise the source has moved on while parsing
-    /// was in flight and the result is stale (the next debounce will
-    /// kick a fresh parse).
-    pub fn install_ast(&mut self, ast: AstCache) {
-        if ast.generation != self.generation {
-            return;
-        }
-        self.ast = Arc::new(ast);
-        self.last_source_edit_at = None;
-    }
-
-    /// Install a freshly-parsed [`SyntaxCache`] produced off-thread.
-    /// Same generation gate as [`Self::install_ast`]. Prefer
-    /// [`Self::install_parse_results`] when both caches were produced
-    /// from the same source-snapshot — that variant guarantees they
-    /// land at the same generation atomically.
-    pub fn install_syntax(&mut self, syntax: SyntaxCache) {
-        if syntax.generation != self.generation {
-            return;
-        }
-        self.syntax = Arc::new(syntax);
-        self.rebuild_index();
     }
 
     /// Atomically install both the strict and the lenient parse

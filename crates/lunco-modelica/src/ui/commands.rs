@@ -1863,7 +1863,7 @@ fn on_open_example_in_workspace(
         //    on the next idle tick and backfills the doc's syntax
         //    cache. Tab-visible time = read + splice (no parse).
         let t_parse = web_time::Instant::now();
-        let doc = crate::document::ModelicaDocument::with_origin_lazy(
+        let doc = crate::document::ModelicaDocument::with_origin(
             doc_id,
             copy_src,
             lunco_doc::DocumentOrigin::untitled(name_for_task),
