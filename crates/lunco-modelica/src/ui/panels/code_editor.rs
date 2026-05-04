@@ -494,20 +494,33 @@ impl Panel for CodeEditorPanel {
         if should_flush && !is_read_only {
             if let Some(doc) = doc_id {
                 let committed = world.resource::<EditorBufferState>().text.clone();
-                // Skip if source is identical (matches checkpoint_source's
-                // no-op behaviour and avoids journal noise).
-                let unchanged = world
+                // Diff prior source against the committed buffer and
+                // emit a minimal `EditText` splice. This replaces the
+                // old whole-file `ReplaceSource` commit:
+                //   - undo granularity now follows the diff region,
+                //   - bytes outside the change are byte-identical
+                //     (comments + formatting stay verbatim),
+                //   - the op shape is CRDT-friendly when text edits
+                //     and structural ops eventually share the journal.
+                let prior = world
                     .get_resource::<ModelicaDocumentRegistry>()
                     .and_then(|r| r.host(doc))
-                    .map(|h| h.document().source() == committed)
-                    .unwrap_or(false);
-                if !unchanged {
-                    let _ = crate::ui::panels::canvas_diagram::apply_one_op_as(
-                        world,
-                        doc,
-                        crate::document::ModelicaOp::ReplaceSource { new: committed },
-                        lunco_twin_journal::AuthorTag::for_tool("code-editor"),
-                    );
+                    .map(|h| h.document().source().to_string());
+                if let Some(prior) = prior {
+                    if let Some((range, replacement)) =
+                        crate::text_diff::diff_to_edit(&prior, &committed)
+                    {
+                        let _ = crate::ui::panels::canvas_diagram::apply_one_op_as(
+                            world,
+                            doc,
+                            crate::document::ModelicaOp::EditText {
+                                range,
+                                replacement,
+                            },
+                            lunco_twin_journal::AuthorTag::for_tool("code-editor"),
+                        );
+                    }
+                    // None means buffer == prior source — silent no-op.
                 }
                 world.resource_mut::<EditorBufferState>().pending_commit_at = None;
             }

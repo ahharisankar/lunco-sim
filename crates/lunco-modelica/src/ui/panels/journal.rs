@@ -315,11 +315,29 @@ fn summarize_op(payload: &serde_json::Value) -> (String, String, egui::Color32) 
             "source replaced".into(),
             neutral,
         ),
-        "EditText" => (
-            "EDIT".into(),
-            format!("text edit"),
-            neutral,
-        ),
+        "EditText" => {
+            let range = payload.get("range").and_then(|v| v.as_array());
+            let len = payload
+                .get("replacement_len")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let span = match range {
+                Some(arr) if arr.len() == 2 => {
+                    let s = arr[0].as_u64().unwrap_or(0);
+                    let e = arr[1].as_u64().unwrap_or(0);
+                    let removed = e.saturating_sub(s);
+                    if removed == 0 {
+                        format!("@{} ← {}b", s, len)
+                    } else if len == 0 {
+                        format!("@{}..{} ✗{}b", s, e, removed)
+                    } else {
+                        format!("@{}..{} ↺ {}b", s, e, len)
+                    }
+                }
+                _ => format!("{}b", len),
+            };
+            ("EDIT".into(), span, neutral)
+        }
         "AddClass" => (
             "CLAS".into(),
             format!("{class}/{name}"),

@@ -115,6 +115,12 @@ pub mod engine_resource;
 /// "summary, not full Serialize" rationale.
 pub mod journal;
 
+/// Minimal byte-range diff helper. Used by the code-editor commit path
+/// to convert a debounced full-buffer snapshot into a single
+/// `ModelicaOp::EditText` splice — finer undo granularity and
+/// CRDT-friendly text edits.
+pub mod text_diff;
+
 /// Simple wrapper around rumoca-session for compiling Modelica models.
 ///
 /// MSL is preloaded into the session at construction time via
