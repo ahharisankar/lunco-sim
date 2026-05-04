@@ -7873,10 +7873,34 @@ pub fn apply_ops_public(
     doc_id: lunco_doc::DocumentId,
     ops: Vec<ModelicaOp>,
 ) {
-    apply_ops(world, doc_id, ops);
+    apply_ops(
+        world,
+        doc_id,
+        ops,
+        lunco_twin_journal::AuthorTag::local_user(),
+    );
 }
 
-fn apply_ops(world: &mut World, doc_id: lunco_doc::DocumentId, ops: Vec<ModelicaOp>) {
+/// Variant of [`apply_ops_public`] that lets the caller specify the
+/// author tag attached to journal entries. Used by API observers
+/// (`tool: "api"`), agent-script bridges (`tool: "agent:<name>"`), and
+/// future remote-replay paths. UI gestures should keep using
+/// [`apply_ops_public`] (defaults to `local_user`).
+pub fn apply_ops_as(
+    world: &mut World,
+    doc_id: lunco_doc::DocumentId,
+    ops: Vec<ModelicaOp>,
+    author: lunco_twin_journal::AuthorTag,
+) {
+    apply_ops(world, doc_id, ops, author);
+}
+
+fn apply_ops(
+    world: &mut World,
+    doc_id: lunco_doc::DocumentId,
+    ops: Vec<ModelicaOp>,
+    author: lunco_twin_journal::AuthorTag,
+) {
     // TEMP: timing instrumentation to find the source of the
     // multi-second lag observed when adding components from the
     // right-click menu. Each phase is timed independently so we
@@ -8001,10 +8025,11 @@ fn apply_ops(world: &mut World, doc_id: lunco_doc::DocumentId, ops: Vec<Modelica
     // Record the captured op pairs into the canonical Twin journal.
     // Single lock per batch keeps contention bounded; ordering matches
     // apply order so undo / replay walk the journal in the right
-    // direction.
+    // direction. Author flows in from the public entry point — UI
+    // gestures default to `local_user`; API observers and agent
+    // bridges pass their own tag.
     if !journal_pairs.is_empty() {
         if let Some(journal) = world.get_resource::<lunco_doc_bevy::JournalResource>() {
-            let author = lunco_twin_journal::AuthorTag::local_user();
             journal.with_write(|j| {
                 for (forward, backward) in journal_pairs.drain(..) {
                     j.record_op_value(

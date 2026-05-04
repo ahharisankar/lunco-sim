@@ -5,8 +5,10 @@
 //! `lunco-doc` is pure data (zero deps, headless-testable). This crate
 //! adds the ECS-facing half: generic document-lifecycle events that any
 //! domain's registry (Modelica, USD, scripting, SysML, …) fires through,
-//! plus the [`TwinJournal`] that subscribes to those events to give the
-//! whole project one canonical change log.
+//! plus the [`JournalResource`] — a Bevy wrapper around the canonical
+//! Twin journal in `lunco-twin-journal`. Lifecycle events become
+//! `EntryKind::Lifecycle` records; structural ops become `EntryKind::Op`
+//! records emitted by domain mutation paths. One log per Twin.
 //!
 //! ## The architectural rule
 //!
@@ -22,11 +24,12 @@
 //! This rule is the nucleus: it means
 //!
 //! - **Undo/redo works everywhere for free** — per-document
-//!   [`lunco_doc::DocumentHost`] stacks handle it.
+//!   [`lunco_doc::DocumentHost`] stacks handle it; per-twin Workspace
+//!   Undo is a journal scope filter.
 //! - **Scripting / API / keyboard shortcuts share one path** — they
 //!   all fire the same commands.
-//! - **The Twin journal is a complete record** — nothing mutates a
-//!   document without going through an event this crate already logs.
+//! - **The Twin journal is a complete record** — every `Op` and
+//!   lifecycle event lands in one canonical store.
 //! - **Views don't poll** — they `On<DocumentChanged>` (or similar)
 //!   and react.
 //!
@@ -39,21 +42,21 @@
 //! need to be reflected (for scripting dispatch) wrap their `DocumentId`
 //! with `#[reflect(ignore)]` or similar.
 //!
-//! ## TwinJournal
+//! ## JournalResource
 //!
-//! [`TwinJournal`] is a session-scoped, append-only log of document
-//! events. It is *not* undo history — per-document undo still lives on
+//! [`JournalResource`] wraps the canonical Twin journal
+//! ([`lunco_twin_journal::Journal`]) in `Arc<Mutex<_>>` for ECS access.
+//! It is *not* undo history — per-document undo still lives on
 //! `DocumentHost`. The journal answers different questions: "what
-//! happened this session, in what order, across all documents?" —
-//! useful for replay, audit, debugging, and future cross-doc
-//! transactions.
+//! happened this session, in what order, across all documents and
+//! domains?" — useful for replay, audit, debugging, the journal panel,
+//! and future cross-doc transactions / multi-user sync.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use web_time::Instant;
 
 use bevy::prelude::*;
 use lunco_core::Command;
@@ -643,149 +646,36 @@ impl JournalSink for BevyJournalSink {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TwinJournal
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// One entry in the [`TwinJournal`].
-///
-/// Journal entries intentionally do *not* carry op payloads — ops live
-/// on their `DocumentHost`'s undo stack. The journal is a *summary*
-/// timeline: "at time `t`, event `kind` happened on document `doc`,
-/// attributed to `origin`." Consumers that need the full op walk the
-/// host.
-#[derive(Clone, Debug)]
-pub struct TwinEvent {
-    /// Wall-clock time the event was appended (session-local).
-    pub at: Instant,
-    /// Who / what produced the event (`Local` user, `Remote` peer,
-    /// `Replay` harness). Audit and filter-by-source both use this.
-    pub origin: EventOrigin,
-    /// What happened.
-    pub kind: TwinEventKind,
-}
-
-/// Discriminant for [`TwinEvent`].
-///
-/// Kept flat (not a wrapped Bevy event) so consumers can serialize,
-/// diff, and persist the journal without pulling in Bevy's event types.
-/// When a future transactional / multi-document op lands, add a
-/// `Transaction { name, events: Vec<TwinEventKind> }` variant here.
-#[derive(Clone, Debug)]
-pub enum TwinEventKind {
-    /// A document was added to its registry.
-    Opened {
-        /// The id of the newly-opened document.
-        doc: DocumentId,
-    },
-    /// A document had an op applied (source advanced).
-    Changed {
-        /// The id of the changed document.
-        doc: DocumentId,
-    },
-    /// A document was saved to disk.
-    Saved {
-        /// The id of the saved document.
-        doc: DocumentId,
-    },
-    /// A document was removed from its registry.
-    Closed {
-        /// The id of the closed document.
-        doc: DocumentId,
-    },
-}
-
-/// Twin-level, append-only, session-scoped change log.
-///
-/// **Not user-facing undo.** Per-document undo stays on
-/// [`lunco_doc::DocumentHost`]. This resource records every document
-/// lifecycle event for replay, audit, diagnostics, and cross-document
-/// introspection.
-///
-/// The journal is unbounded today. When a session's journal outgrows
-/// comfortable memory, rotation (to disk, to a ring buffer) will land
-/// here; the public shape of reads won't change.
-#[derive(Resource, Default)]
-pub struct TwinJournal {
-    entries: Vec<TwinEvent>,
-}
-
-impl TwinJournal {
-    /// Append an event with the default [`EventOrigin::Local`].
-    /// Convenience for tests / ad-hoc seeding; observer-path uses
-    /// [`push_with_origin`](Self::push_with_origin) so remote-sourced
-    /// events retain their provenance.
-    pub fn push(&mut self, kind: TwinEventKind) {
-        self.push_with_origin(kind, EventOrigin::Local);
-    }
-
-    /// Append an event with an explicit origin.
-    pub fn push_with_origin(&mut self, kind: TwinEventKind, origin: EventOrigin) {
-        self.entries.push(TwinEvent {
-            at: Instant::now(),
-            origin,
-            kind,
-        });
-    }
-
-    /// Read all entries in chronological order.
-    pub fn entries(&self) -> &[TwinEvent] {
-        &self.entries
-    }
-
-    /// Total entry count.
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Whether the journal is empty.
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Last `n` entries, newest last. Convenience for UI / debug.
-    pub fn tail(&self, n: usize) -> &[TwinEvent] {
-        let start = self.entries.len().saturating_sub(n);
-        &self.entries[start..]
-    }
-
-    /// All entries for a given document, newest last.
-    pub fn filter_by_doc(&self, doc: DocumentId) -> impl Iterator<Item = &TwinEvent> {
-        self.entries.iter().filter(move |e| event_doc(&e.kind) == doc)
-    }
-}
-
-fn event_doc(kind: &TwinEventKind) -> DocumentId {
-    match kind {
-        TwinEventKind::Opened { doc }
-        | TwinEventKind::Changed { doc }
-        | TwinEventKind::Saved { doc }
-        | TwinEventKind::Closed { doc } => *doc,
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Plugin
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Registers the [`JournalResource`] (canonical op log), the legacy
-/// [`TwinJournal`] (lifecycle-summary timeline), and the four
-/// lifecycle-event subscribers that append into both.
+/// Registers the canonical [`JournalResource`] (op log), the [`Presence`]
+/// resource (collaboration seed), and the four lifecycle-event
+/// subscribers that record `Lifecycle` entries into the canonical
+/// journal.
 ///
 /// Domain crates (lunco-modelica, lunco-usd, …) add this plugin once
 /// per app. Events from any domain's registry flow into one canonical
-/// journal; the legacy summary store stays for now as a read-side
-/// adapter while consumers migrate.
+/// journal.
+///
+/// **Note:** the previous lifecycle-summary `TwinJournal` Resource was
+/// removed in the foundation consolidation — see `crates_index.md`.
+/// The `JournalResource` is now the single source of truth; consumers
+/// read lifecycle events via `journal.entries_for_doc(doc)` filtered on
+/// `EntryKind::Lifecycle`.
 pub struct TwinJournalPlugin;
 
 impl Plugin for TwinJournalPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<JournalResource>()
-            .init_resource::<TwinJournal>()
             .init_resource::<Presence>()
             .add_observer(on_document_opened)
-            .add_observer(on_document_changed)
             .add_observer(on_document_saved)
             .add_observer(on_document_closed);
+        // DocumentChanged is observed by the canonical journal indirectly:
+        // structural `Op` entries are recorded by the domain mutation
+        // path (e.g. lunco-modelica `apply_ops_public`) before this event
+        // fires for view fan-out. No observer needed here.
     }
 }
 
@@ -806,13 +696,8 @@ fn author_for_origin(origin: &EventOrigin) -> AuthorTag {
     }
 }
 
-fn on_document_opened(
-    trigger: On<DocumentOpened>,
-    mut legacy: ResMut<TwinJournal>,
-    canonical: Res<JournalResource>,
-) {
+fn on_document_opened(trigger: On<DocumentOpened>, canonical: Res<JournalResource>) {
     let ev = trigger.event();
-    legacy.push_with_origin(TwinEventKind::Opened { doc: ev.doc }, ev.origin.clone());
     let author = author_for_origin(&ev.origin);
     canonical.with_write(|j| {
         j.record_lifecycle(
@@ -825,39 +710,16 @@ fn on_document_opened(
     });
 }
 
-fn on_document_changed(
-    trigger: On<DocumentChanged>,
-    mut legacy: ResMut<TwinJournal>,
-    _canonical: Res<JournalResource>,
-) {
+fn on_document_saved(trigger: On<DocumentSaved>, canonical: Res<JournalResource>) {
     let ev = trigger.event();
-    legacy.push_with_origin(TwinEventKind::Changed { doc: ev.doc }, ev.origin.clone());
-    // Note: structural Op entries are recorded by the domain mutation path
-    // (lunco-modelica `apply_ops_public`), not by this lifecycle observer.
-    // DocumentChanged is fan-out for views; the canonical journal already
-    // has the underlying `Op` entry by the time this fires.
-}
-
-fn on_document_saved(
-    trigger: On<DocumentSaved>,
-    mut legacy: ResMut<TwinJournal>,
-    canonical: Res<JournalResource>,
-) {
-    let ev = trigger.event();
-    legacy.push_with_origin(TwinEventKind::Saved { doc: ev.doc }, ev.origin.clone());
     let author = author_for_origin(&ev.origin);
     canonical.with_write(|j| {
         j.record_lifecycle(author, ev.doc, LifecycleKind::Saved);
     });
 }
 
-fn on_document_closed(
-    trigger: On<DocumentClosed>,
-    mut legacy: ResMut<TwinJournal>,
-    canonical: Res<JournalResource>,
-) {
+fn on_document_closed(trigger: On<DocumentClosed>, canonical: Res<JournalResource>) {
     let ev = trigger.event();
-    legacy.push_with_origin(TwinEventKind::Closed { doc: ev.doc }, ev.origin.clone());
     let author = author_for_origin(&ev.origin);
     canonical.with_write(|j| {
         j.record_lifecycle(author, ev.doc, LifecycleKind::Closed);
@@ -867,18 +729,24 @@ fn on_document_closed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lunco_twin_journal::{AuthorId, EntryKind, TwinId};
 
     #[test]
-    fn journal_push_and_tail() {
-        let mut j = TwinJournal::default();
-        let d1 = DocumentId::new(1);
-        let d2 = DocumentId::new(2);
-        j.push(TwinEventKind::Opened { doc: d1 });
-        j.push(TwinEventKind::Changed { doc: d1 });
-        j.push(TwinEventKind::Opened { doc: d2 });
-        assert_eq!(j.len(), 3);
-        assert_eq!(j.tail(2).len(), 2);
-        assert_eq!(j.filter_by_doc(d1).count(), 2);
-        assert_eq!(j.filter_by_doc(d2).count(), 1);
+    fn journal_resource_records_lifecycle_entries() {
+        let res = JournalResource::new(TwinId::new("test"), AuthorId::local());
+        res.with_write(|j| {
+            j.record_lifecycle(
+                AuthorTag::local_user(),
+                DocumentId::new(1),
+                LifecycleKind::Saved,
+            );
+        });
+        let count = res.with_read(|j| j.entries().count());
+        assert_eq!(count, 1);
+        let saved = res.with_read(|j| {
+            j.entries_for_doc(DocumentId::new(1))
+                .any(|e| matches!(e.kind, EntryKind::Lifecycle(LifecycleKind::Saved)))
+        });
+        assert!(saved);
     }
 }

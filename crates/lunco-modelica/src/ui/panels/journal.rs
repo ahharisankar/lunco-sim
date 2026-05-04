@@ -27,19 +27,37 @@
 use bevy::prelude::*;
 use bevy_egui::egui;
 use lunco_doc_bevy::JournalResource;
+use lunco_settings::SettingsSection;
 use lunco_twin_journal::{EntryKind, JournalEntry, LifecycleKind};
 use lunco_workbench::{Panel, PanelId, PanelSlot};
+use serde::{Deserialize, Serialize};
 
 /// Panel id.
 pub const JOURNAL_PANEL_ID: PanelId = PanelId("modelica_journal");
 
-/// Cap on rows shown in the panel. Larger journals still scroll, but
-/// the rendered window stays bounded so render stays cheap on long
-/// sessions.
+/// Persisted preferences for the Journal panel.
 ///
-/// TODO(tunability): per AGENTS.md §3, this magic number should move
-/// to `lunco-settings` once a "Journal panel" settings section exists.
-const MAX_VISIBLE_ROWS: usize = 1_000;
+/// Per AGENTS.md §3 (Tunability), bounded display sizes and other
+/// user-visible knobs go through `lunco-settings`. The previous
+/// hard-coded `MAX_VISIBLE_ROWS = 1000` constant lived here as a
+/// magic number; it's now `JournalPanelSettings::max_visible_rows`,
+/// reachable from the in-app settings UI.
+#[derive(Resource, Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub struct JournalPanelSettings {
+    /// Max rows rendered at once. Larger journals still scroll;
+    /// cap exists to keep render allocation-bounded on long sessions.
+    pub max_visible_rows: usize,
+}
+
+impl Default for JournalPanelSettings {
+    fn default() -> Self {
+        Self { max_visible_rows: 1_000 }
+    }
+}
+
+impl SettingsSection for JournalPanelSettings {
+    const KEY: &'static str = "modelica_journal_panel";
+}
 
 pub struct JournalPanel;
 
@@ -67,6 +85,15 @@ impl Panel for JournalPanel {
             .get_resource::<lunco_workbench::WorkspaceResource>()
             .and_then(|ws| ws.active_document);
 
+        // Tunability: the row cap comes from `lunco-settings`. Falls
+        // back to the type's default if the section hasn't been
+        // registered (headless tests, unit-only setups).
+        let max_rows = world
+            .get_resource::<JournalPanelSettings>()
+            .copied()
+            .unwrap_or_default()
+            .max_visible_rows;
+
         // Snapshot the journal slice for the active doc. Brief lock,
         // bounded copy — render path holds nothing across egui calls.
         let entries: Vec<DisplayRow> = match (active_doc, world.get_resource::<JournalResource>()) {
@@ -78,8 +105,8 @@ impl Panel for JournalPanel {
             _ => Vec::new(),
         };
         let total = entries.len();
-        let display: &[DisplayRow] = if total > MAX_VISIBLE_ROWS {
-            &entries[total - MAX_VISIBLE_ROWS..]
+        let display: &[DisplayRow] = if total > max_rows {
+            &entries[total - max_rows..]
         } else {
             &entries
         };
@@ -87,8 +114,8 @@ impl Panel for JournalPanel {
         ui.horizontal(|ui| {
             let label = match active_doc {
                 Some(_) => {
-                    if total > MAX_VISIBLE_ROWS {
-                        format!("{total} entries (showing last {MAX_VISIBLE_ROWS})")
+                    if total > max_rows {
+                        format!("{total} entries (showing last {max_rows})")
                     } else {
                         format!("{total} entries")
                     }

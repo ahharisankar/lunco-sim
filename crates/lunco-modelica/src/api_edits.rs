@@ -1056,7 +1056,12 @@ fn on_apply_modelica_ops(
         if internal.is_empty() {
             return;
         }
-        crate::ui::panels::canvas_diagram::apply_ops_public(world, doc, internal);
+        crate::ui::panels::canvas_diagram::apply_ops_as(
+            world,
+            doc,
+            internal,
+            lunco_twin_journal::AuthorTag::for_tool("api"),
+        );
     });
 }
 

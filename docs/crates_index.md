@@ -18,7 +18,7 @@ Low-level primitives, document systems, and cross-cutting concerns (storage, ass
 | **`lunco-cache`** | Generic resource cache with in-flight deduplication for resolved URIs and parsed artifacts. |
 | **`lunco-theme`** | Centralized design tokens (Catppuccin-based) for consistent UI across all panels and domains. |
 | **`lunco-command-macro`** | Procedural macros for the typed command system (re-exported by `lunco-core`). |
-| **`lunco-doc-bevy`** | Bevy ECS integration for the Document System: lifecycle events, `JournalResource` (Bevy wrapper around the canonical Twin journal), legacy lifecycle-summary `TwinJournal`. |
+| **`lunco-doc-bevy`** | Bevy ECS integration for the Document System: lifecycle events, `JournalResource` (Bevy wrapper around the canonical Twin journal), `BevyJournalSink` for remote-replay, `EditorIntent` keybindings, `Presence` collab seed. |
 | **`lunco-twin-journal`** | Canonical Twin-scoped op log: Lamport-ordered entries, DAG parents (for future merges), Streams + Composition, ChangeSets, Markers (named milestones), Branches. CRDT-shapable schema; in-memory backend today, yrs-swap-ready. |
 
 ---
@@ -140,7 +140,7 @@ Centralized design tokens based on the Catppuccin palette. Provides semantic tok
 Procedural macros for the typed command system. Provides the `#[Command]`, `#[on_command]`, and `register_commands!` macros used to simplify the creation and registration of simulation actions.
 
 **`lunco-doc-bevy`**
-Bevy ECS integration for the Document System. Provides lifecycle events (Opened, Changed, Saved, Closed), the `JournalResource` Bevy wrapper around the canonical Twin journal in `lunco-twin-journal`, and a `BevyJournalSink` for replaying remote-author entries through the same store. The legacy `TwinJournal` lifecycle-summary log remains as a compatibility view while consumers migrate; new readers should use `JournalResource`.
+Bevy ECS integration for the Document System. Provides lifecycle events (Opened, Changed, Saved, Closed), the `JournalResource` Bevy wrapper around the canonical Twin journal in `lunco-twin-journal`, and a `BevyJournalSink` for replaying remote-author entries through the same store. Lifecycle observers translate `EventOrigin` into `AuthorTag` and record `EntryKind::Lifecycle` entries directly into the canonical journal; structural ops are recorded by domain mutation paths.
 
 **`lunco-twin-journal`**
 Canonical, append-only, Twin-scoped record of every change. Entries are immutable, identified by `(author, lamport)` pairs (yrs-compatible). Carries DAG parent links (multi-parent for merges), optional `change_set` grouping for atomic undo, and `EntryKind::{Op, TextEdit, Snapshot, Lifecycle}` payloads. Higher-level abstractions: `Stream` + `Composition` (Sequential / Layered / LastWriteWins; only Sequential implemented in foundation), `Branch` (mutable named ref), `Marker` (named milestone — Onshape Version / git tag / SysML v2 named Version). `JournalSink` trait for write-side abstraction; `UndoManager` with `UndoScope::{Document, Twin}` for per-doc and Workspace-Undo. SysML v2 API conformance is a downstream adapter; the in-memory schema is the substrate. Pure Rust, headless, no Bevy dep.

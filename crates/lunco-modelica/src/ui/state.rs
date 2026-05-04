@@ -147,8 +147,7 @@ pub struct WorkbenchState {
 // `drain_document_changes` (in `ui::mod`) drains them and fires the
 // typed triggers. This decouples registry mutations from the Bevy
 // trigger machinery and lets every domain funnel through the same
-// events — the canonical `JournalResource` (and legacy `TwinJournal`
-// summary) pick them all up.
+// events — the canonical `JournalResource` records them all.
 
 // ---------------------------------------------------------------------------
 // CompileState — per-document compile lifecycle

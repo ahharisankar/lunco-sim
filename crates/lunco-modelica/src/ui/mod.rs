@@ -510,6 +510,12 @@ impl Plugin for ModelicaUiPlugin {
         // adding the plugin multiple times is a no-op on `init_resource`.
         app.add_plugins(lunco_doc_bevy::TwinJournalPlugin);
 
+        // Per AGENTS.md §3 (Tunability): Journal panel display knobs
+        // go through `lunco-settings`. Registered here so `settings.json`
+        // round-trips them.
+        use lunco_settings::AppSettingsExt;
+        app.register_settings_section::<panels::journal::JournalPanelSettings>();
+
         // MSL class cache lives inside `class_cache::msl_engine` —
         // no Bevy plugin / resource needed. `peek_or_load_msl_class`
         // routes through the static engine; drill-in spawns its own
