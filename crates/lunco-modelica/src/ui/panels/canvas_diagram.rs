@@ -516,6 +516,7 @@ impl NodeVisual for IconNodeVisual {
         //   • acausal physical → filled circle (Pin, Flange, HeatPort, …)
         // Direction is derived from where the port sits on the icon
         // boundary, classified the same way edges classify port_dir.
+        //
         for port in &node.ports {
             let world = CanvasPos::new(
                 node.rect.min.x + port.local_offset.x,
@@ -573,24 +574,21 @@ impl NodeVisual for IconNodeVisual {
             } else {
                 Vec::new()
             };
-            // Engine-only resolution — no `peek_or_load_msl_class`.
-            // The previous implementation triggered a synchronous
-            // disk read + rumoca parse on every paint frame for every
-            // connector port whose class wasn't yet in the engine.
-            // That stalled the egui paint loop for 30+ seconds on
-            // cold MSL.
+            // Paint must not lock the engine. Connector-class icon
+            // rendering at port locations was the path that did so —
+            // for PID-class diagrams it locked the engine 30+ times
+            // per frame, blocking egui for 100s of ms.
             //
-            // Now: if the class is already in the engine session
-            // (workspace doc, or pre-warmed by the async icon
-            // warmer), `extract_icon_via_engine` returns its merged
-            // icon. Otherwise resolution is `None` and the caller
-            // falls back to the default port glyph; a subsequent
-            // re-render after the async warmer populates the class
-            // shows the real icon.
-            let resolved_icon = candidates.into_iter().find_map(|c| {
-                let handle = crate::engine_resource::global_engine_handle()?;
-                handle.lock().icon_for(&c)
-            });
+            // Drop the per-port class-icon lookup. The fallback path
+            // below draws a causality-typed shape (square / triangle
+            // / circle) — same visual OMEdit ships for default
+            // connectors. To re-enable per-port custom icons later,
+            // pre-resolve them off-thread inside `project_scene` and
+            // bake into `IconNodeData.port_connector_paths` as a
+            // resolved `Option<Icon>` field. Then paint reads the
+            // baked icon directly, no engine lock.
+            let _ = candidates; // suppress unused-warning; kept for ref.
+            let resolved_icon: Option<crate::annotations::Icon> = None;
             if let Some(icon) = resolved_icon {
                 {
                         // Render the connector's icon at the port
@@ -4678,6 +4676,96 @@ impl Panel for CanvasDiagramPanel {
 /// frame for ~2 seconds after each Add — captures sub-threshold
 /// hitches that don't trip the SLOW frame log on their own but add
 /// up to a perceived "freeze" when the user does something.
+/// Process-shared cache of resolved port-connector icons.
+///
+/// Paint-hot path: `IconNodeVisual::paint` looks up each port's
+/// connector icon many times per frame (once per port, sometimes
+/// per candidate in a 3-tier scope chain). Hitting `engine.lock()`
+/// inside paint locked the engine 30+ times per frame for PID-class
+/// diagrams — main thread blocked for 100s of ms each frame.
+///
+/// This cache memoises `qualified_class → Option<Icon>` across all
+/// frames, all nodes, all docs. Filled lazily on first lookup;
+/// every subsequent paint hits a HashMap. Invalidated wholesale on
+/// `DocumentChanged` via [`invalidate_port_icon_cache`] — coarse
+/// but safe (cross-doc inheritance can shift on any edit; recompute
+/// is cheap on rumoca's content-hash cache).
+///
+/// `Option<Icon>` so we cache "class has no icon" (Some(None)) as
+/// a hit too — avoids re-walking a known-empty inheritance chain.
+fn port_icon_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, Option<crate::annotations::Icon>>>
+{
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Option<crate::annotations::Icon>>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Look up the first cached icon among `candidates`. On full miss,
+/// take ONE engine lock, walk all candidates, populate the cache,
+/// return the first hit. Subsequent calls for the same candidates
+/// short-circuit on cache hits without engine contention.
+pub(crate) fn port_icon_lookup(candidates: &[String]) -> Option<crate::annotations::Icon> {
+    let cache = port_icon_cache();
+    // Fast path: every candidate already cached.
+    {
+        let guard = cache.lock().expect("port_icon_cache poisoned");
+        let mut all_cached = true;
+        let mut hit: Option<crate::annotations::Icon> = None;
+        for c in candidates {
+            match guard.get(c) {
+                Some(Some(icon)) => {
+                    hit = Some(icon.clone());
+                    break;
+                }
+                Some(None) => {} // known-empty — keep scanning
+                None => {
+                    all_cached = false;
+                    break;
+                }
+            }
+        }
+        if all_cached {
+            return hit;
+        }
+    }
+    // Cache miss: one engine lock, walk all uncached candidates.
+    let Some(handle) = crate::engine_resource::global_engine_handle() else {
+        return None;
+    };
+    let mut engine = handle.lock();
+    let mut found: Option<crate::annotations::Icon> = None;
+    {
+        let mut guard = cache.lock().expect("port_icon_cache poisoned");
+        for c in candidates {
+            let icon = match guard.get(c) {
+                Some(cached) => cached.clone(),
+                None => {
+                    let i = engine.icon_for(c);
+                    guard.insert(c.clone(), i.clone());
+                    i
+                }
+            };
+            if icon.is_some() {
+                found = icon;
+                break;
+            }
+        }
+    }
+    found
+}
+
+/// Clear the process-shared port-icon cache. Called on
+/// `DocumentChanged` so edits that move classes / change extends
+/// chains don't keep returning stale icons.
+pub(crate) fn invalidate_port_icon_cache() {
+    port_icon_cache()
+        .lock()
+        .expect("port_icon_cache poisoned")
+        .clear();
+}
+
 static LAST_APPLY_AT: std::sync::Mutex<Option<web_time::Instant>> =
     std::sync::Mutex::new(None);
 

@@ -1773,15 +1773,22 @@ fn on_open_example_in_workspace(
         //    failure: `PID`'s docstring text "block LimPID." matches
         //    the header pattern). Masking keeps byte offsets stable so
         //    the slice into `source_full` is exact.
-        let class_src = {
-            let masked = mask_strings_and_comments(&source_full);
-            extract_class_source(&masked, &origin_short_for_task)
-                .and_then(|_| extract_class_byte_range(&masked, &origin_short_for_task))
-                .filter(|(s, e)| *e <= source_full.len() && *s < *e)
-                .map(|(s, e)| source_full[s..e].to_string())
-                .or_else(|| extract_class_source(&source_full, &origin_short_for_task))
-                .unwrap_or(source_full)
-        };
+        // Path-aware extract: parses `path` via rumoca's
+        // content-hash artifact cache (instant on repeat opens).
+        // Replaces the previous double-parse via `parse_to_ast` on
+        // the masked + raw source — that was 30–60s per call in
+        // dev builds for 440 KB MSL package files. The masking
+        // step (which prevented regex misfires inside docstrings)
+        // is irrelevant once we use the typed AST: the AST already
+        // distinguishes class headers from string literals.
+        let class_src = extract_class_byte_range_via_path(
+            &path,
+            &source_full,
+            &origin_short_for_task,
+        )
+            .filter(|(s, e)| *e <= source_full.len() && *s < *e)
+            .map(|(s, e)| source_full[s..e].to_string())
+            .unwrap_or(source_full);
         // 4. Rewrite: rename + strip `within` so the copy is
         //    standalone.
         let renamed = rewrite_duplicated_source(
@@ -2005,6 +2012,25 @@ fn mask_strings_and_comments(src: &str) -> String {
 /// ORIGINAL (unmasked) source with the returned offsets.
 fn extract_class_byte_range(source: &str, class_name: &str) -> Option<(usize, usize)> {
     let ast = rumoca_phase_parse::parse_to_ast(source, "extract.mo").ok()?;
+    let class = find_top_or_nested_class_by_short_name(&ast, class_name)?;
+    class.full_span_with_leading_comments(source)
+}
+
+/// Path-aware variant: parses `path` via rumoca's
+/// `parse_files_parallel` (content-hash artifact cache → instant on
+/// repeat opens), then looks up `class_name`. Use this in the
+/// open-example bg task: it avoids the per-call multi-second
+/// `parse_to_ast` re-parse of large MSL package files
+/// (`Modelica/Blocks/Examples.mo` is ~440 KB; uncached parse is
+/// 30–60 s in dev).
+fn extract_class_byte_range_via_path(
+    path: &std::path::Path,
+    source: &str,
+    class_name: &str,
+) -> Option<(usize, usize)> {
+    let mut parsed =
+        rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()]).ok()?;
+    let (_uri, ast) = parsed.drain(..).next()?;
     let class = find_top_or_nested_class_by_short_name(&ast, class_name)?;
     class.full_span_with_leading_comments(source)
 }

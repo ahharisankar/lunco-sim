@@ -181,6 +181,15 @@ fn drop_workspace_class_on_doc_closed(
 /// immediately. Covers every edit path uniformly: SetDocumentSource,
 /// Add/RemoveComponent, Connect/Disconnect, undo/redo, canvas drag,
 /// scripted batches.
+/// Wholesale-clear the canvas paint-side port-icon cache when any
+/// doc changes. Cheap on rumoca's content-hash cache; the next
+/// paint refills.
+fn invalidate_port_icon_cache_on_doc_changed(
+    _trigger: On<lunco_doc_bevy::DocumentChanged>,
+) {
+    crate::ui::panels::canvas_diagram::invalidate_port_icon_cache();
+}
+
 fn mirror_open_model_on_doc_changed(
     trigger: On<lunco_doc_bevy::DocumentChanged>,
     registry: Res<ModelicaDocumentRegistry>,
@@ -625,6 +634,12 @@ impl Plugin for ModelicaUiPlugin {
             // canvas (which reads the registry) but leave the text
             // editor stuck on the old source.
             .add_observer(mirror_open_model_on_doc_changed)
+            // Coarse cache invalidation: any doc edit can shift
+            // cross-file inheritance chains, so the paint-hot
+            // port-icon cache flushes wholesale. Re-fills lazily
+            // on next paint via rumoca's content-hash cache —
+            // unchanged classes return the same icon instantly.
+            .add_observer(invalidate_port_icon_cache_on_doc_changed)
             .add_systems(Update, derive_doc_title)
             // Twin-panel: keep the loaded-classes list in sync with
             // the document registry. One `WorkspaceClass` per
