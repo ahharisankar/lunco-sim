@@ -121,6 +121,11 @@ pub mod journal;
 /// CRDT-friendly text edits.
 pub mod text_diff;
 
+/// Pre-warmer: walks each opened doc's AST collecting cross-package
+/// type references, then primes the engine's icon cache via a single
+/// off-thread task. Drill-in projection sees a populated cache.
+pub mod icon_warmer;
+
 /// Simple wrapper around rumoca-session for compiling Modelica models.
 ///
 /// MSL is preloaded into the session at construction time via

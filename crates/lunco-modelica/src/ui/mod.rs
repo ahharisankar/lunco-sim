@@ -527,6 +527,13 @@ impl Plugin for ModelicaUiPlugin {
         // instead of rebuilding one per call.
         app.add_plugins(crate::engine_resource::ModelicaEnginePlugin);
 
+        // Off-thread icon pre-warmer: on every DocumentOpened, walk
+        // the doc's AST for cross-package type references and prime
+        // rumoca's caches in the background. Drill-in projection
+        // sees a populated cache instead of paying the cold-walk
+        // seconds per first-time MSL chain.
+        app.add_plugins(crate::icon_warmer::IconWarmerPlugin);
+
         // Intent layer: key chords → EditorIntent. Domain resolvers
         // (installed by ModelicaCommandsPlugin below) translate intents
         // into concrete commands for the docs they own.
