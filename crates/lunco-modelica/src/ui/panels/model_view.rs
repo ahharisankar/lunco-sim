@@ -986,7 +986,7 @@ fn render_unified_toolbar(
 /// read fine inline for a workbench built for engineers. Upgrading
 /// to a Markdown-converted render is a follow-up.
 fn render_docs_view(ui: &mut egui::Ui, world: &mut World) {
-    use crate::ui::state::WorkbenchState;
+    
     let (heading_color, subtitle_color) = world
         .get_resource::<lunco_theme::Theme>()
         .map(|t| (t.tokens.text, t.tokens.text_subdued))
@@ -1237,52 +1237,6 @@ fn render_html_as_markdown(
     }
 }
 
-/// Walk a dotted qualified-name path into nested classes and return
-/// `(short_name, class)` for the final segment. Mirrors the canvas
-/// resolver but keeps the short name for the heading.
-fn walk_qualified_class<'a>(
-    ast: &'a rumoca_session::parsing::ast::StoredDefinition,
-    qualified: &str,
-) -> Option<(String, &'a rumoca_session::parsing::ast::ClassDef)> {
-    // An MSL file like `Modelica/Blocks/Continuous.mo` declares
-    // `within Modelica.Blocks;` and exposes `Continuous` as its
-    // top-level class. When the drill-in target is the fully
-    // qualified name `Modelica.Blocks.Continuous.PID`, walking from
-    // the first segment (`Modelica`) against `ast.classes` misses
-    // (the AST starts at `Continuous`). Strip any prefix that
-    // matches the file's `within` clause before walking — that's
-    // the "already consumed" part of the path, per MLS §13.2.1.
-    let within_prefix: Option<String> = ast.within.as_ref().map(|w| {
-        w.name
-            .iter()
-            .map(|t| t.text.to_string())
-            .collect::<Vec<_>>()
-            .join(".")
-    });
-    let effective = match within_prefix.as_deref() {
-        Some(p) if !p.is_empty() => qualified
-            .strip_prefix(p)
-            .and_then(|rest| rest.strip_prefix('.'))
-            .unwrap_or(qualified),
-        _ => qualified,
-    };
-
-    let mut segments = effective.split('.');
-    let first = segments.next()?;
-    let (first_name, first_class) = ast
-        .classes
-        .iter()
-        .find(|(n, _)| n.as_str() == first)
-        .map(|(n, c)| (n.clone(), c))?;
-    let mut current_name = first_name;
-    let mut current_class = first_class;
-    for seg in segments {
-        let next = current_class.classes.get_key_value(seg)?;
-        current_name = next.0.clone();
-        current_class = next.1;
-    }
-    Some((current_name, current_class))
-}
 
 /// Un-escape a Modelica string literal's body per MLS §2.4.6. The
 /// subset we handle covers what Documentation HTML actually uses:

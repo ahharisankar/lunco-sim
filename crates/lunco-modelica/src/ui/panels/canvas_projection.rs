@@ -275,7 +275,7 @@ pub const DEFAULT_MAX_DIAGRAM_NODES: usize = 1000;
 /// users editing deeply composed models can raise it in Settings.
 pub fn import_model_to_diagram_from_ast(
     ast: std::sync::Arc<rumoca_session::parsing::ast::StoredDefinition>,
-    source: &str,
+    _source: &str,
     max_nodes: usize,
     target_class: Option<&str>,
     layout: &DiagramAutoLayoutSettings,

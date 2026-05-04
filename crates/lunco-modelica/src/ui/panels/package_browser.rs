@@ -735,7 +735,7 @@ impl Panel for PackageBrowserPanel {
             .get_resource::<lunco_theme::Theme>()
             .map(|t| t.tokens.text_subdued)
             .unwrap_or(egui::Color32::DARK_GRAY);
-        let mut to_open: Option<PackageAction> = None;
+        let to_open: Option<PackageAction> = None;
         let mut reopen_in_memory: Option<String> = None;
         let mut create_new = false;
         let mut open_twin_picker = false;
@@ -1834,26 +1834,6 @@ fn first_quoted(s: &str) -> Option<String> {
     None
 }
 
-/// Single-letter class-kind badge matching the workspace section's
-/// vocabulary in `browser_section.rs::type_badge`. Mapped from the
-/// `class_kind` string carried by `MSLComponentDef` (case-insensitive
-/// — `msl_indexer` emits lower-case; defensive against external
-/// indexes that don't). Unknown kinds get `?` so the badge is always
-/// the same width and aligned with neighbouring rows.
-fn kind_letter_for(class_kind: &str) -> &'static str {
-    match class_kind.to_ascii_lowercase().as_str() {
-        "model" => "M",
-        "block" => "B",
-        "class" => "C",
-        "connector" => "X",
-        "record" => "R",
-        "type" => "T",
-        "package" => "P",
-        "function" => "F",
-        "operator" => "O",
-        _ => "?",
-    }
-}
 
 /// Add an instance of an MSL class as a sub-component of the
 /// currently-active canvas tab. Mirrors what the Component Palette

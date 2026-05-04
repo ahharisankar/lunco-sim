@@ -653,7 +653,7 @@ pub fn modelica_layouter(style: &egui::Style, src: &str) -> egui::text::LayoutJo
     let ident_color = palette.ident;
     let default_color = palette.default;
 
-    let mut push = |job: &mut egui::text::LayoutJob, text: &str, color: egui::Color32| {
+    let push = |job: &mut egui::text::LayoutJob, text: &str, color: egui::Color32| {
         job.append(text, 0.0, egui::TextFormat {
             font_id: font_id.clone(),
             color,

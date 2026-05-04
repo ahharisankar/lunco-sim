@@ -212,7 +212,7 @@ fn on_rename_modelica_class(
             return;
         }
 
-        let mut registry = world.resource_mut::<ModelicaDocumentRegistry>();
+        let registry = world.resource_mut::<ModelicaDocumentRegistry>();
         let Some(host) = registry.host(doc) else {
             return;
         };

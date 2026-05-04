@@ -210,36 +210,6 @@ fn is_top_level_example(c: &MSLComponentDef) -> bool {
     matches!(parts.next(), Some("Examples"))
 }
 
-/// Truncate `text` with a trailing `…` so the rendered galley fits
-/// within `max_w` pixels in `font`. Uses the painter's font-metric
-/// measurement so we clip *actually*, not by char count — long words
-/// and proportional glyph widths (narrow `l`, wide `W`) are handled
-/// correctly. Falls back to just `"…"` when nothing fits.
-///
-/// Called from every card/step render in Welcome so long MSL names
-/// like `AmplifierWithOpAmpDetailed` or path-style subtitles no
-/// longer spill past the card edge.
-fn truncate_to_width(
-    painter: &egui::Painter,
-    text: &str,
-    font: egui::FontId,
-    max_w: f32,
-    color: egui::Color32,
-) -> String {
-    let measure = |s: String| painter.layout_no_wrap(s, font.clone(), color).size().x;
-    if measure(text.to_string()) <= max_w {
-        return text.to_string();
-    }
-    let mut chars: Vec<char> = text.chars().collect();
-    while !chars.is_empty() {
-        chars.pop();
-        let candidate: String = chars.iter().collect::<String>() + "…";
-        if measure(candidate.clone()) <= max_w {
-            return candidate;
-        }
-    }
-    "…".to_string()
-}
 
 fn card_subtitle(c: &MSLComponentDef) -> String {
     if let Some(s) = c.short_description.as_ref() {
@@ -778,7 +748,7 @@ impl Panel for WelcomePanel {
                         .sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
                     ui.horizontal_wrapped(|ui| {
-                        let mut chip =
+                        let chip =
                             |ui: &mut egui::Ui,
                              label: String,
                              active: bool|

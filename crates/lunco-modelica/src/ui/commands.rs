@@ -1753,6 +1753,8 @@ fn on_open_example_in_workspace(
     let origin_short_for_task = origin_short.clone();
     let name_for_task = name.clone();
     let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
+        let t_total = web_time::Instant::now();
+        let t_resolve = web_time::Instant::now();
         // 1. Resolve MSL file path (static HashMap probe). If the
         //    class isn't indexed, build an empty doc so the user
         //    still gets a tab with a clear error marker.
@@ -1763,8 +1765,12 @@ fn on_open_example_in_workspace(
                 lunco_doc::DocumentOrigin::untitled(name_for_task),
             );
         };
+        let resolve_ms = t_resolve.elapsed().as_secs_f64() * 1000.0;
         // 2. Read file. I/O — fine off-thread.
+        let t_read = web_time::Instant::now();
         let source_full = std::fs::read_to_string(&path).unwrap_or_default();
+        let read_ms = t_read.elapsed().as_secs_f64() * 1000.0;
+        let source_len = source_full.len();
         // 3. Extract just the target class. We mask out string
         //    literals and comments first, then run the line-anchored
         //    class-header regex on the masked copy. Without masking,
@@ -1781,26 +1787,60 @@ fn on_open_example_in_workspace(
         // step (which prevented regex misfires inside docstrings)
         // is irrelevant once we use the typed AST: the AST already
         // distinguishes class headers from string literals.
-        let class_src = extract_class_byte_range_via_path(
+        let t_extract = web_time::Instant::now();
+        let spans_opt = extract_class_spans_via_path(
             &path,
             &source_full,
             &origin_short_for_task,
         )
-            .filter(|(s, e)| *e <= source_full.len() && *s < *e)
-            .map(|(s, e)| source_full[s..e].to_string())
-            .unwrap_or(source_full);
-        // 4. Rewrite: rename + strip `within` so the copy is
-        //    standalone.
-        let renamed = rewrite_duplicated_source(
-            &class_src,
-            &origin_short_for_task,
-            &name_for_task,
-        );
-        // 4b. Inject parent-package imports (e.g. `import
-        //     Modelica.Units.SI;`) so scope-dependent references
-        //     resolve once the class is standalone.
+        .filter(|s| s.full_start < s.full_end && s.full_end <= source_full.len());
+        let class_src = match spans_opt.as_ref() {
+            Some(s) => source_full[s.full_start..s.full_end].to_string(),
+            None => source_full.clone(),
+        };
+        let extract_ms = t_extract.elapsed().as_secs_f64() * 1000.0;
+        // 4 + 4b. Single-pass rewrite: parse class_src once, then
+        //    rename + strip within + inject imports in one span splice.
+        //    Replaces the previous two-parse pair (rewrite_duplicated_source
+        //    + inject_class_imports) which each ran `parse_to_ast` on
+        //    the same bytes.
+        let t_collect = web_time::Instant::now();
         let imports = collect_parent_imports(&path);
-        let renamed = inject_class_imports(&renamed, &imports);
+        let collect_ms = t_collect.elapsed().as_secs_f64() * 1000.0;
+        let t_rewrite_only = web_time::Instant::now();
+        let renamed = match spans_opt.as_ref() {
+            Some(spans) => rewrite_inject_in_one_pass(
+                &class_src,
+                &name_for_task,
+                &imports,
+                spans,
+            )
+            .unwrap_or_else(|| {
+                // Spans were valid against the file but didn't fit
+                // the slice — fall back to the legacy two-pass path
+                // so the user still gets a usable copy.
+                let r = rewrite_duplicated_source(
+                    &class_src,
+                    &origin_short_for_task,
+                    &name_for_task,
+                );
+                inject_class_imports(&r, &imports)
+            }),
+            None => {
+                // Extract failed (unindexed file or unusual MSL
+                // structure). Class_src is the whole file — keep
+                // the legacy parse-and-splice path to handle
+                // file-level `within` etc.
+                let r = rewrite_duplicated_source(
+                    &class_src,
+                    &origin_short_for_task,
+                    &name_for_task,
+                );
+                inject_class_imports(&r, &imports)
+            }
+        };
+        let rewrite_only_ms = t_rewrite_only.elapsed().as_secs_f64() * 1000.0;
+        let inject_ms = 0.0_f64;
         // 4c. Re-attach a `within <origin package>;` clause so the
         //     copy's enclosing-package context is preserved for
         //     scope-chain resolution of bare `extends` refs. The
@@ -1817,12 +1857,26 @@ fn on_open_example_in_workspace(
         } else {
             format!("within {origin_pkg};\n{renamed}")
         };
-        // 5. Build doc (runs rumoca parse on the bg thread).
-        crate::document::ModelicaDocument::with_origin(
+        let rewrite_ms = rewrite_only_ms + collect_ms + inject_ms;
+        // 5. Build doc lazily — no parse on the bg thread. The engine
+        //    async sync (drive_engine_sync drain step) parses this
+        //    on the next idle tick and backfills the doc's syntax
+        //    cache. Tab-visible time = read + splice (no parse).
+        let t_parse = web_time::Instant::now();
+        let doc = crate::document::ModelicaDocument::with_origin(
             doc_id,
             copy_src,
             lunco_doc::DocumentOrigin::untitled(name_for_task),
-        )
+        );
+        let parse_ms = t_parse.elapsed().as_secs_f64() * 1000.0;
+        let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+        bevy::log::info!(
+            "[OpenExample bg] {qualified_for_task} src={source_len}B \
+             total={total_ms:.1}ms resolve={resolve_ms:.1} read={read_ms:.1} \
+             extract={extract_ms:.1} rewrite_only={rewrite_only_ms:.1} \
+             collect_imports={collect_ms:.1} inject={inject_ms:.1} parse={parse_ms:.1}"
+        );
+        doc
     });
 
     duplicate_loads.insert(
@@ -1885,160 +1939,47 @@ fn find_class_byte_range(
     walk(&ast.classes, short_name)
 }
 
-/// Widen a `(start, end)` AST class span so the slice contains a
-/// stand-alone class definition: the start backs up to the beginning
-/// of the line containing the class header (so `package`/`model`/etc.
-/// plus any `partial`/`encapsulated` modifiers are included), and the
-/// end advances past the next `;` (rumoca's range stops at `end <Name>`,
-/// before the terminator). Without this, extracting a `package` from a
-/// multi-class file produces source that's missing the keyword and the
-/// trailing `;` — `rewrite_duplicated_source`'s header regex no-ops on
-/// it, and rumoca then picks the first nested class as the doc title.
-fn expand_class_byte_range(src: &str, start: usize, end: usize) -> (usize, usize) {
-    let bytes = src.as_bytes();
-    let mut s = start.min(bytes.len());
-    while s > 0 && bytes[s - 1] != b'\n' {
-        s -= 1;
-    }
-    let mut e = end.min(bytes.len());
-    while e < bytes.len() && (bytes[e] == b' ' || bytes[e] == b'\t') {
-        e += 1;
-    }
-    if e < bytes.len() && bytes[e] == b';' {
-        e += 1;
-    }
-    (s, e)
-}
 
-/// Replace bytes inside Modelica string literals and comments with
-/// spaces (preserving newlines and offsets). Returned text has the
-/// same byte length as the input — every match offset on the masked
-/// version is exact on the original. Used to keep the line-anchored
-/// class-header regex from picking up class names that appear inside
-/// docstrings (the canonical LimPID failure: `PID`'s docstring
-/// contains a literal `block LimPID.` line).
-///
-/// Recognised non-code spans:
-///   * `"…"` string literals — Modelica uses `\"` for escapes and
-///     does NOT support raw strings, so this is a simple state machine
-///   * `/* … */` block comments
-///   * `// …` line comments
-///
-/// Annotation HTML inside `info=\"<html>…\"` is just a string literal
-/// to the lexer, so it falls under the first rule.
-fn mask_strings_and_comments(src: &str) -> String {
-    let bytes = src.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    enum State { Code, Str, BlockC, LineC }
-    let mut state = State::Code;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        match state {
-            State::Code => {
-                if b == b'"' {
-                    out.push(b'"');
-                    state = State::Str;
-                    i += 1;
-                } else if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
-                    out.push(b' ');
-                    out.push(b' ');
-                    state = State::BlockC;
-                    i += 2;
-                } else if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-                    out.push(b' ');
-                    out.push(b' ');
-                    state = State::LineC;
-                    i += 2;
-                } else {
-                    out.push(b);
-                    i += 1;
-                }
-            }
-            State::Str => {
-                if b == b'\\' && i + 1 < bytes.len() {
-                    // Preserve newlines from the literal so the mask
-                    // matches the original line structure.
-                    let next = bytes[i + 1];
-                    out.push(if b == b'\n' { b'\n' } else { b' ' });
-                    out.push(if next == b'\n' { b'\n' } else { b' ' });
-                    i += 2;
-                } else if b == b'"' {
-                    out.push(b'"');
-                    state = State::Code;
-                    i += 1;
-                } else {
-                    out.push(if b == b'\n' { b'\n' } else { b' ' });
-                    i += 1;
-                }
-            }
-            State::BlockC => {
-                if b == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-                    out.push(b' ');
-                    out.push(b' ');
-                    state = State::Code;
-                    i += 2;
-                } else {
-                    out.push(if b == b'\n' { b'\n' } else { b' ' });
-                    i += 1;
-                }
-            }
-            State::LineC => {
-                if b == b'\n' {
-                    out.push(b'\n');
-                    state = State::Code;
-                    i += 1;
-                } else {
-                    out.push(b' ');
-                    i += 1;
-                }
-            }
-        }
-    }
-    // Safety: we only emit ASCII bytes (' ', '\n', '"') for non-code
-    // regions, and pass code bytes through unchanged. The result is
-    // valid UTF-8 because the input was valid UTF-8 and any
-    // multi-byte sequences inside string literals fall to the
-    // catch-all ' ' replacement (each byte becomes a space — still
-    // ASCII, still valid UTF-8).
-    String::from_utf8(out).expect("masking only emits ASCII for non-code spans")
-}
 
-/// Locate the byte range of a class declaration (header through
-/// `end Name;`) plus any leading `//` / `/* */` comment lines.
-///
-/// Routes through `rumoca`'s
-/// [`ClassDef::full_span_with_leading_comments`]. Caller slices the
-/// ORIGINAL (unmasked) source with the returned offsets.
-fn extract_class_byte_range(source: &str, class_name: &str) -> Option<(usize, usize)> {
-    let ast = rumoca_phase_parse::parse_to_ast(source, "extract.mo").ok()?;
-    let class = find_top_or_nested_class_by_short_name(&ast, class_name)?;
-    class.full_span_with_leading_comments(source)
-}
-
-/// Path-aware variant: parses `path` via rumoca's
-/// `parse_files_parallel` (content-hash artifact cache → instant on
-/// repeat opens), then looks up `class_name`. Use this in the
-/// open-example bg task: it avoids the per-call multi-second
-/// `parse_to_ast` re-parse of large MSL package files
-/// (`Modelica/Blocks/Examples.mo` is ~440 KB; uncached parse is
-/// 30–60 s in dev).
-fn extract_class_byte_range_via_path(
+/// Path-aware variant that also returns the class-name-token span and
+/// the end-token span (both **absolute** in `source`), so the bg
+/// duplicate flow can splice without re-parsing the same bytes a
+/// second time. Replaces the prior pattern of calling this *plus*
+/// `parse_to_ast(class_src)` inside `rewrite_inject_in_one_pass`.
+fn extract_class_spans_via_path(
     path: &std::path::Path,
     source: &str,
     class_name: &str,
-) -> Option<(usize, usize)> {
+) -> Option<DuplicateExtract> {
     let mut parsed =
         rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()]).ok()?;
     let (_uri, ast) = parsed.drain(..).next()?;
     let class = find_top_or_nested_class_by_short_name(&ast, class_name)?;
-    class.full_span_with_leading_comments(source)
+    let (full_start, full_end) = class.full_span_with_leading_comments(source)?;
+    let end_tok = class.end_name_token.as_ref()?;
+    Some(DuplicateExtract {
+        full_start,
+        full_end,
+        name_start: class.name.location.start as usize,
+        name_end: class.name.location.end as usize,
+        end_start: end_tok.location.start as usize,
+        end_end: end_tok.location.end as usize,
+    })
 }
 
-fn extract_class_source(source: &str, class_name: &str) -> Option<String> {
-    let (start, end) = extract_class_byte_range(source, class_name)?;
-    Some(source[start..end].to_string())
+#[derive(Debug, Clone, Copy)]
+struct DuplicateExtract {
+    /// Class slice within the source (full_span_with_leading_comments).
+    full_start: usize,
+    full_end: usize,
+    /// Class-name-token span (absolute in source).
+    name_start: usize,
+    name_end: usize,
+    /// `end Name` token span (absolute in source).
+    end_start: usize,
+    end_end: usize,
 }
+
 
 /// Find a class by simple name anywhere in the parsed AST — first at
 /// the top level, then walking nested-class trees. Mirrors the
@@ -2074,79 +2015,6 @@ fn find_nested_by_short_name<'a>(
     None
 }
 
-/// Given a byte offset at the start of a class `model …` header,
-/// walk backward past any immediately-preceding comment block and
-/// return the earliest offset that still belongs to the class.
-///
-/// Rewinds through:
-///   * blank lines (`\n`, `\n\t`, etc.)
-///   * `// …` line comments
-///   * `/* … */` block comments (must fully precede `header_start`)
-///
-/// Stops at any other content — including `within …;`, another
-/// class's `end …;`, or code — so we never accidentally pull
-/// unrelated context into the duplicate.
-fn rewind_through_leading_comments(source: &str, header_start: usize) -> usize {
-    // Find the start of the line that contains `header_start`. Any
-    // earlier line is a candidate for rewind.
-    let header_line_start = source[..header_start]
-        .rfind('\n')
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    // Work line-by-line from there back. `line_starts[i]` is the
-    // byte offset where line `i` begins. Keep only those strictly
-    // before the header line.
-    let mut line_starts: Vec<usize> = std::iter::once(0)
-        .chain(source.match_indices('\n').map(|(i, _)| i + 1))
-        .collect();
-    line_starts.retain(|&o| o < header_line_start);
-
-    // The header line is where the class declaration lives; we
-    // preserve at least that.
-    let mut keep = header_line_start;
-    let mut in_block_comment = false;
-    for &lstart in line_starts.iter().rev() {
-        let lend = source[lstart..]
-            .find('\n')
-            .map(|i| lstart + i)
-            .unwrap_or(source.len());
-        let line = &source[lstart..lend];
-        let trimmed = line.trim();
-        if in_block_comment {
-            // Still inside a `/* … */` that we haven't closed yet.
-            // Closing delimiter on this line ends the block (walking
-            // backward: the earlier `/*` starts it).
-            if trimmed.starts_with("/*") {
-                in_block_comment = false;
-                keep = lstart;
-                continue;
-            }
-            keep = lstart;
-            continue;
-        }
-        if trimmed.is_empty() || trimmed.starts_with("//") {
-            keep = lstart;
-            continue;
-        }
-        // Single-line `/* … */` or start of a multi-line block (we
-        // see it from below — so this is the *close* of a block we'd
-        // have to absorb).
-        if trimmed.ends_with("*/") {
-            // If the same line also opens `/*`, it's a single-line
-            // block comment — absorb and keep scanning.
-            if trimmed.starts_with("/*") {
-                keep = lstart;
-                continue;
-            }
-            // Multi-line block: mark and walk back past its opener.
-            in_block_comment = true;
-            keep = lstart;
-            continue;
-        }
-        break;
-    }
-    keep
-}
 
 /// Walk from a class file's directory up through the filesystem,
 /// collecting `import` statements from every `package.mo` on the
@@ -2237,6 +2105,101 @@ fn collect_parent_imports(class_file: &std::path::Path) -> Vec<String> {
     chain.retain(|s| seen.insert(s.clone()));
     chain
 }
+
+/// One-parse rewrite: rename + within-strip + inject imports in a
+/// single span splice over the original source. Replaces the prior
+/// `rewrite_duplicated_source` + `inject_class_imports` pair, each of
+/// which re-parsed the same bytes — measured at ~370ms each in dev
+/// builds for a 7.9 KB extracted MSL class. This single pass parses
+/// once and emits final text.
+///
+/// Returns `None` if the parse fails so the caller can fall back to
+/// the source unchanged. (Unlikely — the caller's `extract_class_byte_range_via_path`
+/// already parsed this same source successfully via the cached path.)
+fn rewrite_inject_in_one_pass(
+    src: &str,
+    new_name: &str,
+    imports: &[String],
+    spans: &DuplicateExtract,
+) -> Option<String> {
+    // Spans are absolute in the original file. Re-anchor against the
+    // class-only `src` slice (caller passes `source[full_start..full_end]`).
+    let base = spans.full_start;
+    let name_start = spans.name_start.checked_sub(base)?;
+    let name_end = spans.name_end.checked_sub(base)?;
+    let end_start = spans.end_start.checked_sub(base)?;
+    let end_end = spans.end_end.checked_sub(base)?;
+    if !(name_end <= end_start && end_end <= src.len()) {
+        return None;
+    }
+
+    // Class slice extracted by `full_span_with_leading_comments` does
+    // not include the file-level `within` clause (within precedes the
+    // first class header). Empty range.
+    let (wstart, wend) = (0usize, 0usize);
+
+    // Inject anchor: position in `src` immediately after the class
+    // name's optional description string(s). Same scan
+    // `inject_class_imports` did.
+    let bytes = src.as_bytes();
+    let skip_ws = |mut i: usize| {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        i
+    };
+    let mut anchor = name_end;
+    let mut scan = skip_ws(anchor);
+    while scan < bytes.len() && bytes[scan] == b'"' {
+        let mut j = scan + 1;
+        while j < bytes.len() {
+            match bytes[j] {
+                b'\\' if j + 1 < bytes.len() => j += 2,
+                b'"' => {
+                    j += 1;
+                    break;
+                }
+                _ => j += 1,
+            }
+        }
+        anchor = j;
+        scan = skip_ws(j);
+    }
+    if anchor > end_start {
+        return None;
+    }
+    let want_inject = !imports.is_empty();
+    let inject_block: String = if want_inject {
+        imports.iter().map(|i| format!("  {i}\n")).collect()
+    } else {
+        String::new()
+    };
+
+    let mut out = String::with_capacity(src.len() + inject_block.len() + 4);
+    // Source up to within-strip start.
+    out.push_str(&src[..wstart]);
+    // Skip [wstart..wend) — within clause.
+    out.push_str(&src[wend..name_start]);
+    // Replace class name.
+    out.push_str(new_name);
+    // Description / whitespace between class name and inject anchor.
+    out.push_str(&src[name_end..anchor]);
+    if want_inject {
+        let needs_leading_newline = !out.ends_with('\n');
+        if needs_leading_newline {
+            out.push('\n');
+        }
+        out.push_str(&inject_block);
+    }
+    // Body from inject anchor up to end-token.
+    out.push_str(&src[anchor..end_start]);
+    // Replace end-token name.
+    out.push_str(new_name);
+    // Tail.
+    out.push_str(&src[end_end..]);
+    Some(out)
+}
+
 
 /// Insert a block of `import` statements right after the class
 /// header line. Used after `rewrite_duplicated_source` so the

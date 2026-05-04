@@ -77,7 +77,6 @@ pub mod text_node;
 pub mod wasm_autosave;
 pub mod welcome_progress;
 /// Debounced AST reparse driver — see module docs.
-pub mod ast_refresh;
 pub mod input_activity;
 pub mod wire_router;
 /// Phase 1: bevy_vello-backed diagram canvas, one render target per
@@ -654,14 +653,11 @@ impl Plugin for ModelicaUiPlugin {
             // sidebar wouldn't reflect it.
             .add_observer(scan_twin_on_added)
             .add_systems(Update, panels::diagnostics::refresh_diagnostics)
-            // Debounced AST reparse — reparses any doc that has
-            // stopped receiving keystrokes for AST_DEBOUNCE_MS (250 ms).
-            // Keeps text-edit latency constant regardless of how busy
-            // the sim worker is.
-            .init_resource::<ast_refresh::PendingAstParses>()
+            // Input activity timestamp — read by `drive_engine_sync`
+            // to gate edit-debounced reparses (replaces the prior
+            // standalone `ast_refresh` system).
             .init_resource::<input_activity::InputActivity>()
             .add_systems(bevy::prelude::PreUpdate, input_activity::stamp_user_input)
-            .add_systems(Update, ast_refresh::refresh_stale_asts)
             .add_systems(Startup, register_settings_menu)
             // Image-loader install is a first-frame one-shot — runs
             // in the egui primary-context pass until the context is

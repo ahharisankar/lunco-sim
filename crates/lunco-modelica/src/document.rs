@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lunco_doc::{Document, DocumentError, DocumentId, DocumentOp, DocumentOrigin};
-use rumoca_phase_parse::{parse_to_ast, parse_to_syntax};
+use rumoca_phase_parse::parse_to_syntax;
 use rumoca_session::parsing::ast::StoredDefinition;
 
 use crate::pretty::{self, ComponentDecl, ConnectEquation, Placement, PortRef};
@@ -180,34 +180,6 @@ pub struct AstCache {
 }
 
 impl AstCache {
-    /// Parse `source` and record whether the strict parse succeeded.
-    /// Discards the parsed `StoredDefinition` — readers consult
-    /// [`SyntaxCache`] / engine for the actual AST.
-    ///
-    /// Prefer [`Self::from_syntax`] to avoid parsing twice when the
-    /// caller already has a [`SyntaxCache`] for this source — the
-    /// strict-parse-for-error-message vs lenient-parse-for-AST split
-    /// only matters when the *strict* error string is needed
-    /// independently. Most refresh paths can derive both from one
-    /// parse via [`Self::from_syntax`].
-    pub fn from_source(source: &str, generation: u64) -> Self {
-        // DIAGNOSTIC: when `LUNCO_NO_PARSE=1`, return an Err result
-        // instantly without invoking rumoca. Lets us prove whether
-        // the parse function itself is what blocks the renderer
-        // (independent of which thread it runs on).
-        if std::env::var_os("LUNCO_NO_PARSE").is_some() {
-            return Self {
-                generation,
-                result: Err("LUNCO_NO_PARSE diagnostic — parse skipped".into()),
-            };
-        }
-        let result = match parse_to_ast(source, "model.mo") {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e.to_string()),
-        };
-        Self { generation, result }
-    }
-
     /// Derive a parse-status cache from an existing [`SyntaxCache`] —
     /// no second parse. Loses the rumoca-strict-parser error string;
     /// uses a generic "parse errors" message when `has_errors`. Use
@@ -335,19 +307,41 @@ impl ModelicaDocument {
     /// For on-disk origins (read-only library entries, writable user
     /// files) the source is assumed to match disk at generation 0, so
     /// the document starts clean. Untitled origins start dirty.
+    /// Build a `ModelicaDocument` with an explicit origin.
+    ///
+    /// Lazy by design: no parse happens here. Empty `SyntaxCache`
+    /// + `AstCache` carrying "parse pending"; `last_source_edit_at`
+    /// stamped to now so the engine sync system parses the source
+    /// on the next idle Update tick. Tab opens instantly; engine
+    /// catches up off-thread.
+    ///
+    /// The doc-side caches are populated reactively by
+    /// [`crate::engine_resource::drive_engine_sync`]'s drain step —
+    /// they're a mirror of the engine session, not the source of
+    /// truth. Panels can keep reading `doc.strict_ast()` /
+    /// `doc.syntax_arc()`; they'll see the parsed state as soon as
+    /// the engine completes.
     pub fn with_origin(
         id: DocumentId,
         source: impl Into<String>,
         origin: DocumentOrigin,
     ) -> Self {
         let source = source.into();
-        // Single parse path: lenient parse populates SyntaxCache;
-        // AstCache derives from it. Halves the per-document parse
-        // cost vs the previous "parse twice" pattern.
-        let syntax = Arc::new(SyntaxCache::from_source(&source, 0));
-        let ast = Arc::new(AstCache::from_syntax(&syntax));
-        Self::from_parts(id, source, origin, ast, syntax)
+        let syntax = Arc::new(SyntaxCache {
+            generation: 0,
+            ast: Arc::new(StoredDefinition::default()),
+            has_errors: false,
+        });
+        let ast = Arc::new(AstCache {
+            generation: 0,
+            result: Err("parse pending".into()),
+        });
+        let mut doc = Self::from_parts(id, source, origin, ast, syntax);
+        doc.last_source_edit_at = Some(web_time::Instant::now());
+        doc.generation = 1;
+        doc
     }
+
 
     /// Load a `.mo` file from disk or the in-memory MSL bundle and
     /// build a fresh document. Uses rumoca's content-hash artifact
@@ -516,14 +510,15 @@ impl ModelicaDocument {
     }
 
     /// Backdate `last_source_edit_at` past the debounce window so the
-    /// next [`crate::ui::ast_refresh`] tick spawns an AST parse
-    /// immediately, without waiting for the typing-debounce. Use this
-    /// after a structured / API edit (one discrete commit) where the
-    /// debounce — which exists to coalesce keystroke bursts — only
-    /// adds latency. Has no effect when the AST is already fresh.
+    /// next [`crate::engine_resource::drive_engine_sync`] tick spawns
+    /// an AST parse immediately, without waiting for the typing-debounce.
+    /// Use this after a structured / API edit (one discrete commit)
+    /// where the debounce — which exists to coalesce keystroke bursts
+    /// — only adds latency. Has no effect when the AST is already fresh.
     pub fn waive_ast_debounce(&mut self) {
         if self.last_source_edit_at.is_some() {
-            let backdate_ms = (crate::ui::ast_refresh::AST_DEBOUNCE_MS as u64).saturating_add(1);
+            let backdate_ms =
+                (crate::engine_resource::AST_DEBOUNCE_MS as u64).saturating_add(1);
             self.last_source_edit_at = Some(
                 web_time::Instant::now() - std::time::Duration::from_millis(backdate_ms),
             );
@@ -570,36 +565,6 @@ impl ModelicaDocument {
     /// source generation. Mirrors [`Self::ast_is_stale`].
     pub fn syntax_is_stale(&self) -> bool {
         self.syntax.generation != self.generation
-    }
-
-    /// Install a freshly-parsed AST cache produced off-thread.
-    ///
-    /// The async refresh path (`crate::ui::ast_refresh`) parses on
-    /// the task pool to keep multi-second rumoca parses off the main
-    /// thread. When the task completes, we hand the result here.
-    /// We only install if the new cache matches the **current** doc
-    /// generation — otherwise the source has moved on while parsing
-    /// was in flight and the result is stale (the next debounce will
-    /// kick a fresh parse).
-    pub fn install_ast(&mut self, ast: AstCache) {
-        if ast.generation != self.generation {
-            return;
-        }
-        self.ast = Arc::new(ast);
-        self.last_source_edit_at = None;
-    }
-
-    /// Install a freshly-parsed [`SyntaxCache`] produced off-thread.
-    /// Same generation gate as [`Self::install_ast`]. Prefer
-    /// [`Self::install_parse_results`] when both caches were produced
-    /// from the same source-snapshot — that variant guarantees they
-    /// land at the same generation atomically.
-    pub fn install_syntax(&mut self, syntax: SyntaxCache) {
-        if syntax.generation != self.generation {
-            return;
-        }
-        self.syntax = Arc::new(syntax);
-        self.rebuild_index();
     }
 
     /// Atomically install both the strict and the lenient parse
@@ -694,23 +659,57 @@ impl ModelicaDocument {
         if !self.ast_is_stale() && !self.syntax_is_stale() {
             return;
         }
+        let Some(handle) = crate::engine_resource::global_engine_handle() else {
+            // Engine not installed (early boot, headless tests). Fall
+            // back to the local parser so the doc has *some* AST.
+            self.syntax = Arc::new(SyntaxCache::from_source(&self.source, self.generation));
+            self.ast = Arc::new(AstCache::from_syntax(&self.syntax));
+            self.rebuild_index();
+            self.last_source_edit_at = None;
+            return;
+        };
         let t = web_time::Instant::now();
         let bytes = self.source.len();
-        // Single parse path: lenient parse first, derive strict
-        // status from it. Saves the second `parse_to_ast` call that
-        // used to discard its `StoredDefinition`.
-        self.syntax = Arc::new(SyntaxCache::from_source(&self.source, self.generation));
-        self.ast = Arc::new(AstCache::from_syntax(&self.syntax));
+        // Route through engine: synchronous upsert (rumoca's
+        // content-hash cache makes unchanged sources free), then
+        // pull the strict AST back. Engine remains the canonical
+        // store; doc-side cache is its mirror.
+        let arc_ast: Option<Arc<StoredDefinition>> = {
+            let mut engine = handle.lock();
+            let _ = engine.upsert_document(self.id, &self.source);
+            engine.parsed_for_doc(self.id).cloned().map(Arc::new)
+        }; // engine lock released before rebuild_index re-acquires it
+        match arc_ast {
+            Some(ast) => {
+                self.syntax = Arc::new(SyntaxCache {
+                    generation: self.generation,
+                    ast,
+                    has_errors: false,
+                });
+                self.ast = Arc::new(AstCache {
+                    generation: self.generation,
+                    result: Ok(()),
+                });
+            }
+            None => {
+                // Strict parse failed inside engine — keep stale
+                // caches (callers like Compile read `ast.result` to
+                // bail) and just bump the generation marker on the
+                // existing tree so the staleness check doesn't loop.
+                self.ast = Arc::new(AstCache {
+                    generation: self.generation,
+                    result: Err("strict parse failed".into()),
+                });
+            }
+        }
         self.rebuild_index();
         let elapsed_ms = t.elapsed().as_secs_f64() * 1000.0;
         if elapsed_ms > 5.0 {
             bevy::log::info!(
-                "[Doc] refresh_ast_now: {bytes} bytes parsed in {elapsed_ms:.1}ms (gen={})",
+                "[Doc] refresh_ast_now: {bytes} bytes via engine in {elapsed_ms:.1}ms (gen={})",
                 self.generation
             );
         }
-        // Once both caches catch up, there's no outstanding edit to
-        // debounce for.
         self.last_source_edit_at = None;
     }
 

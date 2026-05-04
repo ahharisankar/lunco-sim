@@ -1392,11 +1392,6 @@ impl EdgeVisual for OrthogonalEdgeVisual {
     }
 }
 
-/// Translate `p` by `len` pixels in `dir`'s outward direction.
-fn step(p: CanvasPos, dir: PortDir, len: f32) -> CanvasPos {
-    let (ux, uy) = dir.outward();
-    CanvasPos::new(p.x + ux * len, p.y + uy * len)
-}
 
 /// Compute an orthogonal polyline routed between two ports, in
 /// **screen coords** (+Y down). The router emits a stub from each
@@ -2179,14 +2174,6 @@ pub mod coords {
 
 use coords::{canvas_to_modelica, ModelicaPos};
 
-/// Fallback port layout when the component has no annotated port
-/// positions. Alternates left / right edges at the vertical centre
-/// for the first two ports (the common two-terminal shape), then
-/// walks up both sides for any additional ports. Uses default icon
-/// dimensions; for sized icons see [`port_fallback_offset_for_size`].
-fn port_fallback_offset(index: usize, total: usize) -> (f32, f32) {
-    port_fallback_offset_for_size(index, total, ICON_W, ICON_H)
-}
 
 /// Same fallback layout as [`port_fallback_offset`] but parameterised
 /// by the icon's actual width/height — needed once Placement-driven
@@ -3566,36 +3553,6 @@ pub struct CinematicCamera {
 /// is to the fit-all view in one smooth sweep.
 const FIT_MOVE_MS: u32 = 700;
 
-/// Plan a cinematic for an API-driven add batch.
-///
-/// Per user feedback: simpler than a per-node tour. One smooth
-/// pan-and-zoom from the current viewport to a wide framing of *all*
-/// nodes (existing + new). The pulse glow on the new nodes is what
-/// signals "this just landed"; the wide view is what gives the user
-/// "where in the diagram it landed".
-///
-/// Returns a 2-keyframe move: current → fit-all over `FIT_MOVE_MS`.
-fn plan_camera_move(
-    current_center: lunco_canvas::Pos,
-    current_zoom: f32,
-    fit_all_center: lunco_canvas::Pos,
-    fit_all_zoom: f32,
-) -> Vec<Keyframe> {
-    vec![
-        Keyframe {
-            at_ms: 0,
-            center: current_center,
-            zoom: current_zoom,
-            ease_in: EaseKind::Linear,
-        },
-        Keyframe {
-            at_ms: FIT_MOVE_MS,
-            center: fit_all_center,
-            zoom: fit_all_zoom,
-            ease_in: EaseKind::EaseInOutCubic,
-        },
-    ]
-}
 
 /// Per-frame system: advance every active cinematic move, snap the
 /// owning canvas's viewport to the eased value. When a move's last
@@ -3888,38 +3845,7 @@ pub fn drive_pending_api_focus(
     }
 }
 
-/// World-space rect currently visible given the viewport's center,
-/// zoom, and the screen extent. Reverse of `world_rect_to_screen`.
-fn world_view_rect(
-    viewport: &lunco_canvas::Viewport,
-    screen: lunco_canvas::Rect,
-) -> lunco_canvas::Rect {
-    let half_w = (screen.max.x - screen.min.x) * 0.5
-        / viewport.zoom.max(f32::EPSILON);
-    let half_h = (screen.max.y - screen.min.y) * 0.5
-        / viewport.zoom.max(f32::EPSILON);
-    let c = viewport.center;
-    lunco_canvas::Rect::from_min_max(
-        lunco_canvas::Pos::new(c.x - half_w, c.y - half_h),
-        lunco_canvas::Pos::new(c.x + half_w, c.y + half_h),
-    )
-}
 
-/// Strict containment with a small slack — `inner` is considered
-/// inside `outer` only if every edge of `inner` is at least `MARGIN`
-/// world-units inset from `outer`'s edges. Avoids "technically visible
-/// but clipped at the corner" cases where the user would still want a
-/// small pan.
-fn rect_contains_rect(
-    outer: lunco_canvas::Rect,
-    inner: lunco_canvas::Rect,
-) -> bool {
-    const MARGIN: f32 = 20.0;
-    inner.min.x >= outer.min.x + MARGIN
-        && inner.min.y >= outer.min.y + MARGIN
-        && inner.max.x <= outer.max.x - MARGIN
-        && inner.max.y <= outer.max.y - MARGIN
-}
 
 /// Running projection task + the generation that spawned it, so the
 /// poll loop can tell whether we've moved on since and should drop a
@@ -4155,23 +4081,24 @@ impl Panel for CanvasDiagramPanel {
                 // `SyntaxCache` only when strict parse failed — that
                 // way partial-parse states still draw something
                 // instead of going blank.
-                let ast = match doc.strict_ast() {
-                    Some(strict) => strict,
-                    None => std::sync::Arc::clone(&doc.syntax_arc().ast),
+                // Engine is the canonical AST source after Phase 4.
+                // If the engine hasn't parsed yet (first paint after
+                // doc install), strict_ast() returns None — paint
+                // the loading overlay and retry next tick. Mirrors
+                // the host-not-found branch above.
+                let Some(ast) = doc.strict_ast() else {
+                    drop(registry);
+                    self.render_canvas(ui, world);
+                    return;
                 };
                 (doc.source().to_string(), ast)
             };
-            // Synchronously upsert this doc into the engine session
-            // so `engine.icon_for(qualified)` resolves locally-defined
-            // classes during the upcoming projection task. Without
-            // this, projection races `drive_engine_sync` and finishes
-            // before the engine has the doc — every icon lookup
-            // misses, every component renders as a default rect.
-            // rumoca's content-hash cache makes the upsert near-free
-            // when the source already matches the session.
-            if let Some(handle) = crate::engine_resource::global_engine_handle() {
-                let _ = handle.lock().upsert_document(doc_id, &source);
-            }
+            // `drive_engine_sync` (now AST-based, near-free per
+            // upsert via `add_parsed_batch`) populates the engine on
+            // the same Update tick the doc was installed. Projection
+            // either runs after engine sync this tick, or one tick
+            // later — either way the upsert is microseconds, not the
+            // ~370ms reparse the old sync path here cost.
             // Snapshot the configurable projection caps so the bg
             // task doesn't need to reach back into the world (it
             // can't — it runs off-thread with only owned data).
@@ -4702,59 +4629,6 @@ fn port_icon_cache(
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// Look up the first cached icon among `candidates`. On full miss,
-/// take ONE engine lock, walk all candidates, populate the cache,
-/// return the first hit. Subsequent calls for the same candidates
-/// short-circuit on cache hits without engine contention.
-pub(crate) fn port_icon_lookup(candidates: &[String]) -> Option<crate::annotations::Icon> {
-    let cache = port_icon_cache();
-    // Fast path: every candidate already cached.
-    {
-        let guard = cache.lock().expect("port_icon_cache poisoned");
-        let mut all_cached = true;
-        let mut hit: Option<crate::annotations::Icon> = None;
-        for c in candidates {
-            match guard.get(c) {
-                Some(Some(icon)) => {
-                    hit = Some(icon.clone());
-                    break;
-                }
-                Some(None) => {} // known-empty — keep scanning
-                None => {
-                    all_cached = false;
-                    break;
-                }
-            }
-        }
-        if all_cached {
-            return hit;
-        }
-    }
-    // Cache miss: one engine lock, walk all uncached candidates.
-    let Some(handle) = crate::engine_resource::global_engine_handle() else {
-        return None;
-    };
-    let mut engine = handle.lock();
-    let mut found: Option<crate::annotations::Icon> = None;
-    {
-        let mut guard = cache.lock().expect("port_icon_cache poisoned");
-        for c in candidates {
-            let icon = match guard.get(c) {
-                Some(cached) => cached.clone(),
-                None => {
-                    let i = engine.icon_for(c);
-                    guard.insert(c.clone(), i.clone());
-                    i
-                }
-            };
-            if icon.is_some() {
-                found = icon;
-                break;
-            }
-        }
-    }
-    found
-}
 
 /// Clear the process-shared port-icon cache. Called on
 /// `DocumentChanged` so edits that move classes / change extends
@@ -7505,10 +7379,6 @@ fn resolve_doc_context(world: &World) -> (Option<lunco_doc::DocumentId>, Option<
 
 // Thin wrapper so existing call sites keep their shape. The real
 // conversion lives in `coords::canvas_min_to_modelica_center`.
-fn canvas_min_to_modelica_center(min: lunco_canvas::Pos) -> (f32, f32) {
-    let m = coords::canvas_min_to_modelica_center(min, ICON_W, ICON_H);
-    (m.x, m.y)
-}
 
 /// Translate canvas scene events into ModelicaOps. Needs a brief
 /// read-only borrow of the scene (to look up edge endpoints); the

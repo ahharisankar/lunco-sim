@@ -40,11 +40,9 @@
 //!   so cross-Twin MSL state is shared once multi-Twin lands.
 
 use lunco_doc::DocumentId;
-use rumoca_session::compile::{
-    ClassMemberCausality, ClassMemberInfo, ClassMemberVariability, SourceRootKind,
-};
+use rumoca_session::compile::SourceRootKind;
 use rumoca_session::Session;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub use rumoca_session::compile::{
     ClassMemberCausality as InheritedCausality, ClassMemberInfo as InheritedMember,
@@ -67,6 +65,14 @@ pub struct ModelicaEngine {
     /// `DocumentId` → URI used inside the session. Stable for the
     /// document's lifetime; freed on [`Self::close_document`].
     uri_for_doc: HashMap<DocumentId, String>,
+    /// Documents whose async parse is currently in flight. Prevents
+    /// double-spawning the same parse while a worker is mid-flight.
+    /// Inserted by `mark_pending`; cleared by the worker on completion.
+    pending: HashSet<DocumentId>,
+    /// Async-parse completions ready for the Bevy adapter to drain.
+    /// Each entry carries the doc's generation **at parse spawn**, so
+    /// the adapter can ignore stale results when the doc moved on.
+    completed: Vec<(DocumentId, u64)>,
 }
 
 impl Default for ModelicaEngine {
@@ -80,7 +86,63 @@ impl ModelicaEngine {
         Self {
             session: Session::default(),
             uri_for_doc: HashMap::new(),
+            pending: HashSet::new(),
+            completed: Vec::new(),
         }
+    }
+
+    /// URI we'd use for `doc_id` — same value `uri()` would produce, but
+    /// callable from `&self` contexts where holding `self` mutably
+    /// across a parse would block other engine queries.
+    pub fn uri_for(&self, doc_id: DocumentId) -> String {
+        self.uri(doc_id)
+    }
+
+    /// Reserve an async-parse slot for `doc_id`. Returns `true` if the
+    /// caller now owns the spawn (no parse was in flight); `false` if
+    /// another parse is already running for this doc.
+    pub fn mark_pending(&mut self, doc_id: DocumentId) -> bool {
+        self.pending.insert(doc_id)
+    }
+
+    /// Worker reports its parse finished. Clears the in-flight slot
+    /// and queues the result for the adapter to drain.
+    pub fn finish_parse(&mut self, doc_id: DocumentId, gen: u64) {
+        self.pending.remove(&doc_id);
+        self.completed.push((doc_id, gen));
+    }
+
+    /// Whether `doc_id` has an async parse in flight right now.
+    pub fn is_doc_pending(&self, doc_id: DocumentId) -> bool {
+        self.pending.contains(&doc_id)
+    }
+
+    /// Take all completions accumulated since the last drain. Bevy
+    /// adapter calls this once per `Update` tick.
+    pub fn drain_completed(&mut self) -> Vec<(DocumentId, u64)> {
+        std::mem::take(&mut self.completed)
+    }
+
+    /// Install a strict AST under `doc_id`'s session URI without
+    /// touching pending/completed bookkeeping. Used by the async
+    /// worker after it parses off-lock.
+    pub fn install_parsed_ast(
+        &mut self,
+        doc_id: DocumentId,
+        ast: rumoca_session::parsing::ast::StoredDefinition,
+    ) {
+        let uri = self.uri(doc_id);
+        self.uri_for_doc.entry(doc_id).or_insert_with(|| uri.clone());
+        self.session.add_parsed_batch(vec![(uri, ast)]);
+    }
+
+    /// Lenient install — used when the strict parse fails. Falls back
+    /// to `Session::add_document` so the recovered tree (if any) lands
+    /// in the session for partial-data queries.
+    pub fn install_lenient(&mut self, doc_id: DocumentId, source: &str) {
+        let uri = self.uri(doc_id);
+        self.uri_for_doc.entry(doc_id).or_insert_with(|| uri.clone());
+        let _ = self.session.add_document(&uri, source);
     }
 
     /// URI we use for `doc_id` inside the session. Untitled / on-disk
@@ -101,6 +163,20 @@ impl ModelicaEngine {
         self.session
             .add_document(&uri, source)
             .map_err(|e| e.to_string())
+    }
+
+    /// Install a document whose AST has already been parsed elsewhere
+    /// (typically by `ModelicaDocument`). Bypasses the parser entirely
+    /// via `Session::add_parsed_batch`. Use this in steady-state sync
+    /// paths to avoid re-parsing the same bytes the doc just parsed.
+    pub fn upsert_document_with_ast(
+        &mut self,
+        doc_id: DocumentId,
+        ast: rumoca_session::parsing::ast::StoredDefinition,
+    ) {
+        let uri = self.uri(doc_id);
+        self.uri_for_doc.entry(doc_id).or_insert_with(|| uri.clone());
+        self.session.add_parsed_batch(vec![(uri, ast)]);
     }
 
     /// The engine's view of `doc_id`'s parsed AST, or `None` if the
