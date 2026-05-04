@@ -46,7 +46,7 @@ pub struct MouseSensitivity {
 
 impl Default for MouseSensitivity {
     fn default() -> Self {
-        Self { sensitivity: 0.45 }
+        Self { sensitivity: 0.1125 }
     }
 }
 
@@ -830,7 +830,7 @@ fn avatar_universal_locomotion_system(
         move_vec += *tf.right() * analog.side;
         move_vec += up_dir * analog.elevation;
 
-        let next_pos = current_pos + move_vec.as_dvec3() * 33.0 * (1.0 / 60.0);
+        let next_pos = current_pos + move_vec.as_dvec3() * 23.1 * (1.0 / 60.0);
         let (new_cell, new_tf) = grid.translation_to_grid(next_pos);
         *cell = new_cell;
         tf.translation = new_tf;
@@ -1021,6 +1021,7 @@ pub fn avatar_raycast_possession(
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform, Entity), With<Avatar>>,
     drag_mode_active: Res<lunco_core::DragModeActive>,
+    spawn_tool_active: Res<lunco_core::SpawnToolActive>,
     mut commands: Commands,
     q_bodies: Query<(Entity, &GlobalTransform, &CelestialBody)>,
     q_spacecraft: Query<(Entity, &GlobalTransform, &Spacecraft)>,
@@ -1035,6 +1036,8 @@ pub fn avatar_raycast_possession(
     if keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]) { return; }
     // Mid-drag on a transform gizmo: don't flip the camera under the user.
     if drag_mode_active.active { return; }
+    // Spawn placement tool armed: clicks place objects, don't possess.
+    if spawn_tool_active.0 { return; }
 
     let Some(pos) = windows.iter().next().and_then(|w| w.cursor_position()) else { return; };
     let Some((camera, cam_gtf, avatar_entity)) = camera_q.iter().next() else { return; };

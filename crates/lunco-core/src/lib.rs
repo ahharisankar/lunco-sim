@@ -189,6 +189,14 @@ impl Default for DragModeActive {
     }
 }
 
+/// Marker resource indicating a click-to-place spawn tool is armed.
+///
+/// Set by sandbox-edit's spawn placement system whenever `SpawnState`
+/// is `Selecting`. Read by avatar possession to suppress vessel
+/// possession on the placement click.
+#[derive(Resource, Default)]
+pub struct SpawnToolActive(pub bool);
+
 /// Represents the current "wall clock" time in the simulation universe.
 ///
 /// Uses Julian Date for astronomical precision and provides a mechanism

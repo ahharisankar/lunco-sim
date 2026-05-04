@@ -90,6 +90,7 @@ pub fn update_spawn_ghost(
 pub fn handle_spawn_placement(
     mut commands: Commands,
     mut spawn_state: ResMut<SpawnState>,
+    mut tool_active: ResMut<lunco_core::SpawnToolActive>,
     catalog: Res<SpawnCatalog>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     windows: Query<&Window>,
@@ -100,8 +101,14 @@ pub fn handle_spawn_placement(
     raycaster: avian3d::prelude::SpatialQuery,
 ) {
     let entry_id = match spawn_state.as_ref() {
-        SpawnState::Selecting { entry_id } => entry_id.clone(),
-        _ => return,
+        SpawnState::Selecting { entry_id } => {
+            tool_active.0 = true;
+            entry_id.clone()
+        }
+        _ => {
+            tool_active.0 = false;
+            return;
+        }
     };
 
     // Left click to place
@@ -158,10 +165,13 @@ pub fn handle_spawn_placement(
 
         info!("Spawn request: {} at {:?}", entry_id, point3);
 
-        for (ghost, _) in q_ghost.iter() {
-            commands.entity(ghost).despawn();
+        let sticky = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+        if !sticky {
+            for (ghost, _) in q_ghost.iter() {
+                commands.entity(ghost).despawn();
+            }
+            *spawn_state = SpawnState::Idle;
         }
-        *spawn_state = SpawnState::Idle;
     }
 
     // Escape cancels spawn mode

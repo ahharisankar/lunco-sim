@@ -56,7 +56,8 @@ impl Plugin for SandboxEditPlugin {
             .init_resource::<SelectedEntity>()
             .init_resource::<UndoStack>()
             .init_resource::<catalog::SpawnCatalog>()
-            .insert_resource(lunco_core::DragModeActive { active: false });
+            .insert_resource(lunco_core::DragModeActive { active: false })
+            .init_resource::<lunco_core::SpawnToolActive>();
 
         app.add_plugins(transform_gizmo_bevy::TransformGizmoPlugin);
         app.add_plugins(commands::SpawnCommandPlugin);

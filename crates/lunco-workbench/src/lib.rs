@@ -1300,6 +1300,23 @@ fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut 
             ui.menu_button("Help", |ui| {
                 ui.label("LunCoSim workbench v0.2 (egui_dock)");
             });
+
+            // Pause/Resume simulation. Toggles `Time<Virtual>` so both
+            // physics (avian -> Time<Physics> derived from Virtual) and
+            // the celestial clock (delta_secs gated) freeze together.
+            {
+                let mut vtime = world.resource_mut::<bevy::prelude::Time<bevy::prelude::Virtual>>();
+                let paused = vtime.is_paused();
+                let (glyph, hover) = if paused {
+                    ("▶", "Resume simulation")
+                } else {
+                    ("⏸", "Pause simulation")
+                };
+                if ui.button(glyph).on_hover_text(hover).clicked() {
+                    if paused { vtime.unpause(); } else { vtime.pause(); }
+                }
+            }
+
             // Perspective tabs live in the menu bar (right-aligned).
             // No separate transport bar — saves a row of vertical space.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
