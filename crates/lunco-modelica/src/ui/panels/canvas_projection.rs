@@ -89,16 +89,14 @@ struct ScannedComponent {
     placement: Option<crate::annotations::Placement>,
 }
 
-fn scan_component_declarations(source: &str) -> Vec<ScannedComponent> {
-    // `parse_to_syntax` never fails — it returns a strict parse when
-    // possible and a best-effort recovered tree otherwise. `best_effort`
-    // hands back whichever is available, so the duplicate-name /
-    // semantic-error case (where strict drops every component) still
-    // produces the salvaged components rumoca's recovery walks. Same
-    // primitive `Session::recovered_file_query` exposes for sessions
-    // that hold the file.
-    let syntax = rumoca_phase_parse::parse_to_syntax(source, "scan.mo");
-    let ast = syntax.best_effort();
+/// Walk the doc AST collecting every component declaration across all
+/// top-level classes. Replaces the previous `parse_to_syntax(source)`
+/// re-parse — the projection task already holds the parsed AST, so a
+/// second parse is pure waste. AST-as-source-of-truth: panels read
+/// the AST, never re-parse the source bytes.
+fn scan_component_declarations_from_ast(
+    ast: &rumoca_session::parsing::ast::StoredDefinition,
+) -> Vec<ScannedComponent> {
     let mut out = Vec::new();
     for (_class_name, class_def) in &ast.classes {
         for (name, comp) in class_def.iter_components() {
@@ -329,7 +327,7 @@ pub fn import_model_to_diagram_from_ast(
         if target_class.is_some() {
             return None;
         }
-        let scanned = scan_component_declarations(source);
+        let scanned = scan_component_declarations_from_ast(&ast);
         if !scanned.is_empty() {
             return Some(build_visual_diagram_from_scan(&scanned, layout));
         }
@@ -737,7 +735,13 @@ pub fn import_model_to_diagram_from_ast(
         // resolver-lambda plumbing.
         if let Some(def) = component_def.as_mut() {
             let qualified = def.msl_path.clone();
-            if let Some(handle) = crate::engine_resource::global_engine_handle() {
+            // Local-first: doc AST has the answer for self-contained
+            // models — zero locks, zero MSL parses. Engine fallback
+            // only when class is genuinely cross-package.
+            let local_icon = crate::annotations::extract_icon_from_local_ast(&qualified, &*ast);
+            if let Some(icon) = local_icon {
+                def.icon_graphics = Some(icon);
+            } else if let Some(handle) = crate::engine_resource::global_engine_handle() {
                 if let Some(icon) = crate::annotations::extract_icon_via_engine(
                     &qualified,
                     &mut handle.lock(),
@@ -997,7 +1001,14 @@ fn register_local_class(
     // catches up) picks it up.
     let icon = crate::engine_resource::global_engine_handle()
         .and_then(|handle| {
-            crate::annotations::extract_icon_via_engine(&class_context, &mut handle.lock())
+            // Local-first AST lookup; engine only for cross-package.
+            crate::annotations::extract_icon_from_local_ast(&class_context, ast)
+                .or_else(|| {
+                    crate::annotations::extract_icon_via_engine(
+                        &class_context,
+                        &mut handle.lock(),
+                    )
+                })
         });
     if icon.is_none() {
         let _ = class_def;
@@ -1063,7 +1074,13 @@ fn extract_local_class_ports(
                 &sub_type,
                 class_qualified_path,
                 ast,
-                crate::class_cache::MslLookupMode::Loading,
+                // Off-thread projection MUST be cache-only — see
+                // `collect_inherited_components_with` contract.
+                // Synchronous MSL parses inside the projection task
+                // stall the AsyncCompute pool for tens of seconds.
+                // Misses fall back to defaults; an async warmer
+                // upgrades visuals on the next projection.
+                crate::class_cache::MslLookupMode::Cached,
             );
         if !causality_is_port && !type_is_connector {
             continue;
@@ -1083,7 +1100,10 @@ fn extract_local_class_ports(
         // renderer needs directly from its AST: wire color
         // (Icon.graphics), causality (variable prefixes or class-
         // level causality), and flow-variable metadata.
-        let msl_mode = crate::class_cache::MslLookupMode::Loading;
+        // Off-thread projection: cache-only. Misses → default icon /
+        // default port glyph. Pre-warmer (separate background task)
+        // populates the cache; subsequent projection upgrades visuals.
+        let msl_mode = crate::class_cache::MslLookupMode::Cached;
         let class = crate::diagram::resolve_class_by_scope_pub(
             &sub_type,
             class_qualified_path,

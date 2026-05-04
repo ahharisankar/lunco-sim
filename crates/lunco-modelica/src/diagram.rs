@@ -146,7 +146,12 @@ impl ModelicaComponentBuilder {
                     comp,
                     &target,
                     &self.ast,
-                    crate::class_cache::MslLookupMode::Loading,
+                    // Diagram building runs on the projection task —
+                    // Cached mode prevents synchronous MSL parses
+                    // that stall the AsyncCompute pool. Misses fall
+                    // back to default port glyphs; the async warmer
+                    // upgrades on the next projection.
+                    crate::class_cache::MslLookupMode::Cached,
                 );
                 let qualified = format!("{}.{}", target, comp_name);
                 let node_id = graph.add_node_named(

@@ -573,14 +573,21 @@ impl NodeVisual for IconNodeVisual {
             } else {
                 Vec::new()
             };
-            // Force-load each candidate via `peek_or_load_msl_class`
-            // (engine-backed; no-op for already-loaded classes), then
-            // merge its inherited Icon through the unified engine via
-            // `extract_icon_via_engine`. Lock-load-and-extract is split
-            // so the load step doesn't hold the engine mutex while it
-            // does file I/O.
+            // Engine-only resolution — no `peek_or_load_msl_class`.
+            // The previous implementation triggered a synchronous
+            // disk read + rumoca parse on every paint frame for every
+            // connector port whose class wasn't yet in the engine.
+            // That stalled the egui paint loop for 30+ seconds on
+            // cold MSL.
+            //
+            // Now: if the class is already in the engine session
+            // (workspace doc, or pre-warmed by the async icon
+            // warmer), `extract_icon_via_engine` returns its merged
+            // icon. Otherwise resolution is `None` and the caller
+            // falls back to the default port glyph; a subsequent
+            // re-render after the async warmer populates the class
+            // shows the real icon.
             let resolved_icon = candidates.into_iter().find_map(|c| {
-                let _ = crate::class_cache::peek_or_load_msl_class(&c);
                 let handle = crate::engine_resource::global_engine_handle()?;
                 crate::annotations::extract_icon_via_engine(&c, &mut handle.lock())
             });
@@ -2208,16 +2215,20 @@ fn port_fallback_offset_for_size(
 /// Deliberately permissive: doesn't validate port existence, doesn't
 /// care about the line-continuation form, doesn't consult
 /// annotations. "Text says A.x ↔ B.y; show a line between A and B".
-fn recover_edges_from_source(source: &str, diagram: &mut VisualDiagram) {
-    // Walk every class's `Equation::Connect` via rumoca AST and add
-    // any edges the diagram-build path missed (typically connects on
-    // top-level connectors that the component-graph builder skips
-    // because they aren't sub-components). Iterating the AST gives
-    // us proper handling of dotted port paths (`flange.phi`) without
-    // a separate regex.
-    let Ok(ast) = rumoca_phase_parse::parse_to_ast(source, "recover.mo") else {
-        return;
-    };
+fn recover_edges_from_ast(
+    ast: &rumoca_session::parsing::ast::StoredDefinition,
+    diagram: &mut VisualDiagram,
+) {
+    // Walk every class's `Equation::Connect` and add any edges the
+    // primary diagram-build path missed (top-level connectors that
+    // the component-graph builder skips because they aren't
+    // sub-components). Iterating the AST that the projection task
+    // already holds — no second parse.
+    //
+    // AST-as-source-of-truth: the previous implementation called
+    // `parse_to_ast(source, "recover.mo")` here, re-parsing the same
+    // bytes the projection task already received. Removed — re-parse
+    // inside a projection task is a bug.
 
     // Build (instance_name → DiagramNodeId) index once per call.
     let index: HashMap<String, DiagramNodeId> = diagram
@@ -4284,6 +4295,11 @@ impl Panel for CanvasDiagramPanel {
                             return Scene::new();
                         }
                         let t0 = web_time::Instant::now();
+                        // Hold an Arc clone so `recover_edges_from_ast`
+                        // can read the same AST after the import call
+                        // takes ownership. Arc clone = pointer bump,
+                        // not a tree clone.
+                        let ast_for_recover = std::sync::Arc::clone(&ast_arc);
                         let mut diagram =
                             crate::ui::panels::canvas_projection::import_model_to_diagram_from_ast(
                                 ast_arc,
@@ -4303,7 +4319,7 @@ impl Panel for CanvasDiagramPanel {
                             return Scene::new();
                         }
                         let t1 = web_time::Instant::now();
-                        recover_edges_from_source(&source, &mut diagram);
+                        recover_edges_from_ast(&ast_for_recover, &mut diagram);
                         bevy::log::info!(
                             "[Projection] recover_edges done in {:.0}ms: {} edges",
                             t1.elapsed().as_secs_f64() * 1000.0,
@@ -6400,13 +6416,19 @@ fn empty_overlay_class_info(
         }
         None => class_name.to_string(),
     };
-    let icon = world
-        .get_resource::<crate::engine_resource::ModelicaEngineHandle>()
-        .and_then(|handle| {
-            crate::annotations::extract_icon_via_engine(
-                &class_context,
-                &mut handle.lock(),
-            )
+    // Local-first: the doc AST already has the answer for self-
+    // contained classes. Engine fallback only when the class extends
+    // something cross-package.
+    let icon = crate::annotations::extract_icon_from_local_ast(&class_context, &ast_arc)
+        .or_else(|| {
+            world
+                .get_resource::<crate::engine_resource::ModelicaEngineHandle>()
+                .and_then(|handle| {
+                    crate::annotations::extract_icon_via_engine(
+                        &class_context,
+                        &mut handle.lock(),
+                    )
+                })
         });
     let class_type = match class.class_type {
         ClassType::Model => Some("model"),
