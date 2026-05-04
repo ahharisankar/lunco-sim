@@ -52,11 +52,16 @@
 #![warn(missing_docs)]
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use web_time::Instant;
 
 use bevy::prelude::*;
 use lunco_core::Command;
 use lunco_doc::DocumentId;
+use lunco_twin_journal::{
+    AuthorId, AuthorTag, Journal as CanonicalJournal, JournalEntry, JournalSink, LifecycleKind,
+    TwinId,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // EventOrigin — which side of the wire produced this event
@@ -520,6 +525,124 @@ impl Presence {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// JournalResource — canonical op journal as a Bevy resource
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The pure-Rust [`CanonicalJournal`] (in `lunco-twin-journal`) is the
+// single source of truth for every recorded change in the active Twin —
+// ops, raw text edits, snapshots, lifecycle events. This Bevy resource
+// wraps it in `Arc<Mutex<_>>` so that:
+//
+// - **Domain mutation paths** (Modelica `apply_ops_public`, USD ops, …)
+//   record entries from observer bodies via [`BevyJournalSink`] without
+//   needing exclusive `World` access.
+// - **Read-side panels** (`JournalLog`, history view, audit) read the
+//   journal through `Res<JournalResource>` — locking is brief and only
+//   while computing the displayed slice.
+// - **Background tasks** (replay, sync, save) hold an `Arc` to the same
+//   journal across thread boundaries.
+//
+// One Twin → one JournalResource. Multi-Twin (when it lands) becomes a
+// `HashMap<TwinId, JournalResource>` resource; the per-Twin journal API
+// stays unchanged.
+
+/// The canonical op journal for the currently-active Twin, wrapped for
+/// Bevy ECS access.
+///
+/// Cloning is cheap (`Arc` clone). Lock the inner journal briefly to
+/// read or append; never hold the lock across a system boundary.
+#[derive(Resource, Clone)]
+pub struct JournalResource {
+    inner: Arc<Mutex<CanonicalJournal>>,
+}
+
+impl JournalResource {
+    /// Create a new resource around an empty journal scoped to one Twin.
+    pub fn new(twin: TwinId, local_author: AuthorId) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(CanonicalJournal::new(twin, local_author))),
+        }
+    }
+
+    /// Create a resource around an existing journal (used when the
+    /// journal is constructed elsewhere — e.g. loaded from disk later).
+    pub fn from_journal(journal: CanonicalJournal) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(journal)),
+        }
+    }
+
+    /// Default-initialise with a `local-twin` Twin id and the local
+    /// author. Sufficient for single-Twin sessions; multi-Twin replaces
+    /// this with explicit construction.
+    pub fn default_local() -> Self {
+        Self::new(TwinId::new("local-twin"), AuthorId::local())
+    }
+
+    /// Run a closure with shared read access to the journal. Returns
+    /// the closure's value. Panics if the lock is poisoned.
+    pub fn with_read<R>(&self, f: impl FnOnce(&CanonicalJournal) -> R) -> R {
+        let guard = self.inner.lock().expect("journal lock poisoned");
+        f(&*guard)
+    }
+
+    /// Run a closure with exclusive write access to the journal.
+    /// Panics if the lock is poisoned.
+    pub fn with_write<R>(&self, f: impl FnOnce(&mut CanonicalJournal) -> R) -> R {
+        let mut guard = self.inner.lock().expect("journal lock poisoned");
+        f(&mut *guard)
+    }
+
+    /// Build a [`JournalSink`] handle that records into this resource.
+    /// Cheap — just clones the inner `Arc`.
+    pub fn sink(&self) -> BevyJournalSink {
+        BevyJournalSink {
+            inner: self.inner.clone(),
+        }
+    }
+
+    /// Convenience: number of entries currently in the journal.
+    pub fn len(&self) -> usize {
+        self.with_read(|j| j.len())
+    }
+
+    /// Convenience: whether the journal has no entries yet.
+    pub fn is_empty(&self) -> bool {
+        self.with_read(|j| j.is_empty())
+    }
+}
+
+impl Default for JournalResource {
+    fn default() -> Self {
+        Self::default_local()
+    }
+}
+
+/// [`JournalSink`] implementation that pushes into a [`JournalResource`].
+///
+/// Created via [`JournalResource::sink`]. Domain mutation paths hold one
+/// of these and call `sink.record(entry)` after a successful op apply.
+#[derive(Clone)]
+pub struct BevyJournalSink {
+    inner: Arc<Mutex<CanonicalJournal>>,
+}
+
+impl JournalSink for BevyJournalSink {
+    fn record(&self, entry: JournalEntry) {
+        // Sink contract: this is the *remote-replay / forwarded entry*
+        // path. Local mutation paths allocate EntryIds via the journal
+        // itself (`record_op` / `record_text_edit` / etc. through
+        // `JournalResource::with_write`), bypassing this sink.
+        //
+        // The trait exists so future remote-replay paths (entries
+        // arriving from a peer with pre-allocated EntryIds) can push
+        // through the same generic sink interface.
+        let mut guard = self.inner.lock().expect("journal lock poisoned");
+        guard.append_remote(entry);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // TwinJournal
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -644,16 +767,20 @@ fn event_doc(kind: &TwinEventKind) -> DocumentId {
 // Plugin
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Registers the [`TwinJournal`] resource and the four lifecycle-event
-/// subscribers that append to it.
+/// Registers the [`JournalResource`] (canonical op log), the legacy
+/// [`TwinJournal`] (lifecycle-summary timeline), and the four
+/// lifecycle-event subscribers that append into both.
 ///
 /// Domain crates (lunco-modelica, lunco-usd, …) add this plugin once
-/// per app. Events from any domain's registry flow into one journal.
+/// per app. Events from any domain's registry flow into one canonical
+/// journal; the legacy summary store stays for now as a read-side
+/// adapter while consumers migrate.
 pub struct TwinJournalPlugin;
 
 impl Plugin for TwinJournalPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<TwinJournal>()
+        app.init_resource::<JournalResource>()
+            .init_resource::<TwinJournal>()
             .init_resource::<Presence>()
             .add_observer(on_document_opened)
             .add_observer(on_document_changed)
@@ -662,24 +789,79 @@ impl Plugin for TwinJournalPlugin {
     }
 }
 
-fn on_document_opened(trigger: On<DocumentOpened>, mut journal: ResMut<TwinJournal>) {
-    let ev = trigger.event();
-    journal.push_with_origin(TwinEventKind::Opened { doc: ev.doc }, ev.origin.clone());
+/// Translate the Bevy lifecycle [`EventOrigin`] into a journal
+/// [`AuthorTag`]. Today: local user with the originating tool labeled.
+/// Future: remote peers carry their `peer` id through `AuthorTag::user`.
+fn author_for_origin(origin: &EventOrigin) -> AuthorTag {
+    match origin {
+        EventOrigin::Local => AuthorTag::local_user(),
+        EventOrigin::Remote { peer } => AuthorTag {
+            user: peer.clone(),
+            tool: "remote".into(),
+        },
+        EventOrigin::Replay => AuthorTag {
+            user: "local".into(),
+            tool: "replay".into(),
+        },
+    }
 }
 
-fn on_document_changed(trigger: On<DocumentChanged>, mut journal: ResMut<TwinJournal>) {
+fn on_document_opened(
+    trigger: On<DocumentOpened>,
+    mut legacy: ResMut<TwinJournal>,
+    canonical: Res<JournalResource>,
+) {
     let ev = trigger.event();
-    journal.push_with_origin(TwinEventKind::Changed { doc: ev.doc }, ev.origin.clone());
+    legacy.push_with_origin(TwinEventKind::Opened { doc: ev.doc }, ev.origin.clone());
+    let author = author_for_origin(&ev.origin);
+    canonical.with_write(|j| {
+        j.record_lifecycle(
+            author,
+            ev.doc,
+            LifecycleKind::Opened {
+                source_hash: String::new(),
+            },
+        );
+    });
 }
 
-fn on_document_saved(trigger: On<DocumentSaved>, mut journal: ResMut<TwinJournal>) {
+fn on_document_changed(
+    trigger: On<DocumentChanged>,
+    mut legacy: ResMut<TwinJournal>,
+    _canonical: Res<JournalResource>,
+) {
     let ev = trigger.event();
-    journal.push_with_origin(TwinEventKind::Saved { doc: ev.doc }, ev.origin.clone());
+    legacy.push_with_origin(TwinEventKind::Changed { doc: ev.doc }, ev.origin.clone());
+    // Note: structural Op entries are recorded by the domain mutation path
+    // (lunco-modelica `apply_ops_public`), not by this lifecycle observer.
+    // DocumentChanged is fan-out for views; the canonical journal already
+    // has the underlying `Op` entry by the time this fires.
 }
 
-fn on_document_closed(trigger: On<DocumentClosed>, mut journal: ResMut<TwinJournal>) {
+fn on_document_saved(
+    trigger: On<DocumentSaved>,
+    mut legacy: ResMut<TwinJournal>,
+    canonical: Res<JournalResource>,
+) {
     let ev = trigger.event();
-    journal.push_with_origin(TwinEventKind::Closed { doc: ev.doc }, ev.origin.clone());
+    legacy.push_with_origin(TwinEventKind::Saved { doc: ev.doc }, ev.origin.clone());
+    let author = author_for_origin(&ev.origin);
+    canonical.with_write(|j| {
+        j.record_lifecycle(author, ev.doc, LifecycleKind::Saved);
+    });
+}
+
+fn on_document_closed(
+    trigger: On<DocumentClosed>,
+    mut legacy: ResMut<TwinJournal>,
+    canonical: Res<JournalResource>,
+) {
+    let ev = trigger.event();
+    legacy.push_with_origin(TwinEventKind::Closed { doc: ev.doc }, ev.origin.clone());
+    let author = author_for_origin(&ev.origin);
+    canonical.with_write(|j| {
+        j.record_lifecycle(author, ev.doc, LifecycleKind::Closed);
+    });
 }
 
 #[cfg(test)]

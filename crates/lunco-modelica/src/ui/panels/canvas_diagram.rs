@@ -7914,6 +7914,11 @@ fn apply_ops(world: &mut World, doc_id: lunco_doc::DocumentId, ops: Vec<Modelica
     let preload_ms = 0.0_f64;
 
     let t_apply_start = web_time::Instant::now();
+    // Captured (forward, inverse) op-summary pairs recorded into the
+    // canonical Twin journal once the registry borrow drops. Built
+    // inside the loop so each pair sees the inverse the host just
+    // pushed onto its undo stack.
+    let mut journal_pairs: Vec<(serde_json::Value, serde_json::Value)> = Vec::new();
     {
         let Some(mut registry) = world.get_resource_mut::<ModelicaDocumentRegistry>() else {
             bevy::log::warn!(
@@ -7932,6 +7937,10 @@ fn apply_ops(world: &mut World, doc_id: lunco_doc::DocumentId, ops: Vec<Modelica
         };
         for op in ops {
             bevy::log::info!("[CanvasDiagram] applying {:?}", op);
+            // Snapshot the forward summary BEFORE host.apply consumes the
+            // op, so the journal records what the user intended even if
+            // apply fails. (Failure paths drop the snapshot below.)
+            let forward = crate::journal::summarize_op(&op);
             // Layer 2 authoring ops can resolve a class that a previous
             // op in the same batch just created. The AST cache is
             // debounced (refresh deferred until idle), so the resolver
@@ -7957,7 +7966,18 @@ fn apply_ops(world: &mut World, doc_id: lunco_doc::DocumentId, ops: Vec<Modelica
                 host.document_mut().refresh_ast_now();
             }
             match host.apply(op) {
-                Ok(_) => any_applied = true,
+                Ok(_) => {
+                    any_applied = true;
+                    // Inverse was just pushed onto the undo stack by
+                    // DocumentHost::apply — read it and pair with the
+                    // forward summary for the journal. Skipped on
+                    // failure paths (forward summary is dropped).
+                    let backward = host
+                        .last_applied_inverse()
+                        .map(crate::journal::summarize_op)
+                        .unwrap_or(serde_json::Value::Null);
+                    journal_pairs.push((forward, backward));
+                }
                 Err(lunco_doc::Reject::ReadOnly) => {
                     // Document layer rejects mutations on read-only
                     // origins (MSL drill-in, bundled library). We
@@ -7977,6 +7997,28 @@ fn apply_ops(world: &mut World, doc_id: lunco_doc::DocumentId, ops: Vec<Modelica
         }
     }
     let apply_ms = t_apply_start.elapsed().as_secs_f64() * 1000.0;
+
+    // Record the captured op pairs into the canonical Twin journal.
+    // Single lock per batch keeps contention bounded; ordering matches
+    // apply order so undo / replay walk the journal in the right
+    // direction.
+    if !journal_pairs.is_empty() {
+        if let Some(journal) = world.get_resource::<lunco_doc_bevy::JournalResource>() {
+            let author = lunco_twin_journal::AuthorTag::local_user();
+            journal.with_write(|j| {
+                for (forward, backward) in journal_pairs.drain(..) {
+                    j.record_op_value(
+                        author.clone(),
+                        doc_id,
+                        lunco_twin_journal::DomainKind::Modelica,
+                        forward,
+                        backward,
+                        None,
+                    );
+                }
+            });
+        }
+    }
 
     if hit_read_only {
         if let Some(mut ws) = world.get_resource_mut::<WorkbenchState>() {

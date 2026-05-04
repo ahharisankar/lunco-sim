@@ -109,6 +109,12 @@ pub mod index;
 pub mod engine;
 pub mod engine_resource;
 
+/// Modelica adapter to the canonical Twin journal in
+/// `lunco-twin-journal`. Records each applied [`ModelicaOp`] as a
+/// summary entry alongside its inverse. See module docs for the
+/// "summary, not full Serialize" rationale.
+pub mod journal;
+
 /// Simple wrapper around rumoca-session for compiling Modelica models.
 ///
 /// MSL is preloaded into the session at construction time via

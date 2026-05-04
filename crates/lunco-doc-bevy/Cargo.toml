@@ -10,5 +10,7 @@ bevy_egui = { workspace = true }
 # `Command`, `on_command`, `register_commands` macro re-exports.
 lunco-core = { path = "../lunco-core" }
 lunco-doc = { path = "../lunco-doc" }
+# Canonical Twin-scoped op journal (Lamport-ordered, CRDT-shapable schema).
+lunco-twin-journal = { path = "../lunco-twin-journal" }
 # `std::time::Instant::now()` panics on wasm32-unknown-unknown.
 web-time = { workspace = true }

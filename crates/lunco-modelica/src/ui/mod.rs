@@ -557,8 +557,10 @@ impl Plugin for ModelicaUiPlugin {
             .init_resource::<panels::code_editor::EditorBufferState>()
             .init_resource::<panels::console::ConsoleLog>()
             .init_resource::<panels::diagnostics::DiagnosticsLog>()
-            .init_resource::<panels::journal::JournalLog>()
-            .add_systems(Update, panels::journal::poll_changes)
+            // Journal panel reads directly from the canonical
+            // `JournalResource` in `lunco-doc-bevy`; no local cache.
+            // Registration of `JournalResource` happens in
+            // `TwinJournalPlugin`, added as part of the workbench plugin.
             // Canvas animation: API-driven AddComponent calls queue a
             // pending camera focus; this system applies it via
             // `viewport.set_target` (which auto-eases) once the new

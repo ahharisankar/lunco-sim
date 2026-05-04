@@ -554,6 +554,15 @@ impl<D: Document> DocumentHost<D> {
     pub fn into_document(self) -> D {
         self.document
     }
+
+    /// Inverse of the most recently-applied op, if any.
+    ///
+    /// Equal to `undo_stack.last()` — exposed so journal sinks can record
+    /// the (forward, inverse) pair after a successful [`apply`](Self::apply)
+    /// without DocumentHost itself depending on the journal crate.
+    pub fn last_applied_inverse(&self) -> Option<&D::Op> {
+        self.undo_stack.last()
+    }
 }
 
 #[cfg(test)]

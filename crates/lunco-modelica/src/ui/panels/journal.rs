@@ -1,150 +1,45 @@
 //! Journal panel — chronological edit log for the active document.
 //!
-//! Bottom-dock tab next to Console / Diagnostics. A
-//! [`poll_changes`] system reads each open document's `changes_since`
-//! ring buffer once per Update and records new entries to a
-//! [`JournalLog`] resource keyed by `DocumentId`. The panel renders
-//! the active document's slice with wall-clock timestamps + a short
-//! human description per entry, so users can audit every API or canvas
-//! mutation without re-reading the source diff.
+//! Bottom-dock tab next to Console / Diagnostics. Reads directly from
+//! the canonical Twin journal ([`lunco_doc_bevy::JournalResource`]) — no
+//! per-doc denormalised cache. The journal is the single source of
+//! truth for "what happened in this Twin".
 //!
-//! Why a separate log resource (and not just iterating
-//! `Document::changes_since` at render time)?
-//!   * the document's ring buffer is capacity-bounded for state
-//!     consumers (canvas projection, derived caches) that must not
-//!     fall behind. The journal wants a longer history with wall
-//!     timestamps that the document doesn't store.
-//!   * polling once per frame and caching keeps render hot-path
-//!     cheap and lets the journal survive document reloads.
-
-use std::collections::{HashMap, VecDeque};
+//! Entries shown:
+//! - **Op entries** (`EntryKind::Op`) — domain ops (Modelica
+//!   AddComponent / SetParameter / …). Tag + colour derived from the
+//!   summary's `kind` field.
+//! - **Lifecycle entries** (`EntryKind::Lifecycle`) — Opened / Saved /
+//!   Closed. Useful as session boundaries in the timeline.
+//! - **TextEdit entries** (`EntryKind::TextEdit`) — raw byte-range edits
+//!   (code-pane commits, future text-CRDT path).
+//! - **Snapshot entries** (`EntryKind::Snapshot`) — full source
+//!   snapshots (file imports, save points).
+//!
+//! Why no per-frame cache layer (the previous design):
+//! - Single-source-of-truth: panel and audit see identical data.
+//! - Lock-and-clone keeps render allocation-free on the steady state
+//!   (lock briefly, copy the slice, release; egui paints from the
+//!   local Vec).
+//! - Generation-based polling is unnecessary because the journal is
+//!   append-only and entry counts are the natural change signal.
 
 use bevy::prelude::*;
 use bevy_egui::egui;
-use lunco_doc::DocumentId;
+use lunco_doc_bevy::JournalResource;
+use lunco_twin_journal::{EntryKind, JournalEntry, LifecycleKind};
 use lunco_workbench::{Panel, PanelId, PanelSlot};
-use web_time::Instant;
-
-use crate::document::ModelicaChange;
-use crate::ui::state::ModelicaDocumentRegistry;
 
 /// Panel id.
 pub const JOURNAL_PANEL_ID: PanelId = PanelId("modelica_journal");
 
-/// Per-document retention. Edits are cheap; 1 000 entries covers a
-/// long modelling session and still bounds memory.
-const MAX_ENTRIES_PER_DOC: usize = 1_000;
-
-#[derive(Debug, Clone)]
-pub struct JournalEntry {
-    pub at: Instant,
-    pub generation: u64,
-    pub change: ModelicaChange,
-}
-
-/// Wall-clock anchor for journal timestamps. Initialised on the first
-/// recorded entry; we display `(at - SESSION_START).as_secs_f32()`
-/// alongside an HH:MM:SS clock.
-static SESSION_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-
-#[derive(Resource, Default)]
-pub struct JournalLog {
-    by_doc: HashMap<DocumentId, VecDeque<JournalEntry>>,
-    last_seen_gen: HashMap<DocumentId, u64>,
-}
-
-impl JournalLog {
-    pub fn entries_for(&self, doc: DocumentId) -> Option<&VecDeque<JournalEntry>> {
-        self.by_doc.get(&doc)
-    }
-
-    fn record(&mut self, doc: DocumentId, entry: JournalEntry) {
-        let buf = self.by_doc.entry(doc).or_default();
-        if buf.len() >= MAX_ENTRIES_PER_DOC {
-            buf.pop_front();
-        }
-        buf.push_back(entry);
-    }
-}
-
-/// Drive system: poll each document's change ring once per Update and
-/// append any new entries to the journal. Cheap when nothing changes
-/// — `changes_since` returns an empty iterator and the loop exits.
-pub fn poll_changes(
-    registry: Res<ModelicaDocumentRegistry>,
-    mut journal: ResMut<JournalLog>,
-) {
-    let now = Instant::now();
-    for (doc_id, host) in registry.docs() {
-        let last = journal.last_seen_gen.get(&doc_id).copied().unwrap_or(0);
-        let doc = host.document();
-        let Some(iter) = doc.changes_since(last) else {
-            // History truncated past us — reset to the current
-            // generation so we don't keep retrying.
-            journal
-                .last_seen_gen
-                .insert(doc_id, doc.earliest_retained_generation());
-            continue;
-        };
-        let mut max_gen = last;
-        let mut new_entries: Vec<JournalEntry> = Vec::new();
-        for (gen, change) in iter {
-            new_entries.push(JournalEntry {
-                at: now,
-                generation: *gen,
-                change: change.clone(),
-            });
-            if *gen > max_gen {
-                max_gen = *gen;
-            }
-        }
-        if max_gen > last {
-            SESSION_START.get_or_init(|| now);
-            for entry in new_entries {
-                journal.record(doc_id, entry);
-            }
-            journal.last_seen_gen.insert(doc_id, max_gen);
-        }
-    }
-}
-
-fn change_summary(change: &ModelicaChange) -> (&'static str, String, egui::Color32) {
-    match change {
-        ModelicaChange::TextReplaced => (
-            "TEXT",
-            "source replaced".to_string(),
-            egui::Color32::from_rgb(180, 180, 180),
-        ),
-        ModelicaChange::ComponentAdded { class, name } => (
-            "ADD ",
-            format!("{class} ← {name}"),
-            egui::Color32::from_rgb(120, 200, 130),
-        ),
-        ModelicaChange::ComponentRemoved { class, name } => (
-            "DEL ",
-            format!("{class} ✗ {name}"),
-            egui::Color32::from_rgb(220, 120, 120),
-        ),
-        ModelicaChange::ConnectionAdded { class, from, to } => (
-            "WIRE",
-            format!("{class}: {}.{} → {}.{}", from.component, from.port, to.component, to.port),
-            egui::Color32::from_rgb(140, 180, 220),
-        ),
-        ModelicaChange::ConnectionRemoved { class, from, to } => (
-            "UNWR",
-            format!("{class}: {}.{} ⊘ {}.{}", from.component, from.port, to.component, to.port),
-            egui::Color32::from_rgb(220, 160, 100),
-        ),
-        // Catch-all for variants added after this match (e.g.
-        // PlacementChanged, ParameterChanged) — render generically
-        // rather than refuse to display.
-        other => (
-            "EDIT",
-            format!("{other:?}"),
-            egui::Color32::from_rgb(180, 180, 180),
-        ),
-    }
-}
+/// Cap on rows shown in the panel. Larger journals still scroll, but
+/// the rendered window stays bounded so render stays cheap on long
+/// sessions.
+///
+/// TODO(tunability): per AGENTS.md §3, this magic number should move
+/// to `lunco-settings` once a "Journal panel" settings section exists.
+const MAX_VISIBLE_ROWS: usize = 1_000;
 
 pub struct JournalPanel;
 
@@ -172,24 +67,39 @@ impl Panel for JournalPanel {
             .get_resource::<lunco_workbench::WorkspaceResource>()
             .and_then(|ws| ws.active_document);
 
-        let entries: Vec<JournalEntry> = match (active_doc, world.get_resource::<JournalLog>()) {
-            (Some(doc), Some(log)) => log
-                .entries_for(doc)
-                .map(|q| q.iter().cloned().collect())
-                .unwrap_or_default(),
+        // Snapshot the journal slice for the active doc. Brief lock,
+        // bounded copy — render path holds nothing across egui calls.
+        let entries: Vec<DisplayRow> = match (active_doc, world.get_resource::<JournalResource>()) {
+            (Some(doc), Some(journal)) => journal.with_read(|j| {
+                j.entries_for_doc(doc)
+                    .map(display_row)
+                    .collect::<Vec<_>>()
+            }),
             _ => Vec::new(),
+        };
+        let total = entries.len();
+        let display: &[DisplayRow] = if total > MAX_VISIBLE_ROWS {
+            &entries[total - MAX_VISIBLE_ROWS..]
+        } else {
+            &entries
         };
 
         ui.horizontal(|ui| {
             let label = match active_doc {
-                Some(_) => format!("{} entries", entries.len()),
+                Some(_) => {
+                    if total > MAX_VISIBLE_ROWS {
+                        format!("{total} entries (showing last {MAX_VISIBLE_ROWS})")
+                    } else {
+                        format!("{total} entries")
+                    }
+                }
                 None => "(no active document)".to_string(),
             };
             ui.label(egui::RichText::new(label).size(10.0).color(muted));
         });
         ui.separator();
 
-        if entries.is_empty() {
+        if display.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(20.0);
                 ui.label(
@@ -204,20 +114,14 @@ impl Panel for JournalPanel {
             return;
         }
 
+        let session_start_ms = display.first().map(|r| r.at_ms).unwrap_or(0);
+
         egui::ScrollArea::both()
             .stick_to_bottom(true)
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                let session_start = SESSION_START
-                    .get()
-                    .copied()
-                    .or_else(|| entries.first().map(|e| e.at));
-                for entry in &entries {
-                    let (tag, summary, color) = change_summary(&entry.change);
-                    let offset = session_start
-                        .and_then(|s| entry.at.checked_duration_since(s))
-                        .map(|d| d.as_secs_f32())
-                        .unwrap_or(0.0);
+                for row in display {
+                    let offset = (row.at_ms.saturating_sub(session_start_ms) as f32) / 1000.0;
                     let ts = format!("[+{offset:>6.2}s]");
                     ui.horizontal(|ui| {
                         ui.label(
@@ -227,26 +131,230 @@ impl Panel for JournalPanel {
                                 .color(muted),
                         );
                         ui.label(
-                            egui::RichText::new(format!("g{:>4}", entry.generation))
+                            egui::RichText::new(format!("L{:>4}", row.lamport))
                                 .monospace()
                                 .size(10.0)
                                 .color(muted),
                         );
                         ui.label(
-                            egui::RichText::new(tag)
+                            egui::RichText::new(&row.tag)
                                 .monospace()
                                 .size(10.0)
                                 .strong()
-                                .color(color),
+                                .color(row.color),
                         );
                         ui.label(
-                            egui::RichText::new(&summary)
+                            egui::RichText::new(&row.summary)
                                 .monospace()
                                 .size(11.0)
                                 .color(theme.tokens.text),
                         );
+                        if !row.author.is_empty() {
+                            ui.label(
+                                egui::RichText::new(format!("@{}", row.author))
+                                    .monospace()
+                                    .size(10.0)
+                                    .color(muted),
+                            );
+                        }
                     });
                 }
             });
     }
 }
+
+struct DisplayRow {
+    at_ms: u64,
+    lamport: u64,
+    tag: String,
+    summary: String,
+    color: egui::Color32,
+    author: String,
+}
+
+fn display_row(entry: &JournalEntry) -> DisplayRow {
+    let (tag, summary, color) = match &entry.kind {
+        EntryKind::Op { op, .. } => summarize_op(op),
+        EntryKind::TextEdit { range, replacement, .. } => (
+            "TEXT".to_string(),
+            format!("{}..{} ← {} bytes", range.start, range.end, replacement.len()),
+            egui::Color32::from_rgb(180, 180, 180),
+        ),
+        EntryKind::Snapshot { source, .. } => (
+            "SNAP".to_string(),
+            format!("source snapshot ({} bytes)", source.len()),
+            egui::Color32::from_rgb(140, 140, 200),
+        ),
+        EntryKind::Lifecycle(kind) => match kind {
+            LifecycleKind::Opened { .. } => (
+                "OPEN".to_string(),
+                "document opened".to_string(),
+                egui::Color32::from_rgb(140, 200, 200),
+            ),
+            LifecycleKind::Saved => (
+                "SAVE".to_string(),
+                "document saved".to_string(),
+                egui::Color32::from_rgb(120, 200, 130),
+            ),
+            LifecycleKind::Closed => (
+                "CLOS".to_string(),
+                "document closed".to_string(),
+                egui::Color32::from_rgb(180, 130, 180),
+            ),
+        },
+    };
+
+    // Show author only when it differs from the default local user, to
+    // keep single-user rows uncluttered.
+    let author_label = if entry.author.user == "local" && entry.author.tool == "workbench" {
+        String::new()
+    } else if entry.author.tool.is_empty() {
+        entry.author.user.clone()
+    } else {
+        format!("{}/{}", entry.author.user, entry.author.tool)
+    };
+
+    DisplayRow {
+        at_ms: entry.at_ms,
+        lamport: entry.id.lamport,
+        tag,
+        summary,
+        color,
+        author: author_label,
+    }
+}
+
+/// Map an op summary (built by `crate::journal::summarize_op`) to a
+/// row tag + label + color. Reads the `kind` discriminant string and
+/// known field shapes; unknown kinds fall through to a generic display.
+fn summarize_op(payload: &serde_json::Value) -> (String, String, egui::Color32) {
+    let kind = payload.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+    let class = payload
+        .get("class")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let component = payload
+        .get("component")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let from = payload.get("from").and_then(|v| v.as_str()).unwrap_or("");
+    let to = payload.get("to").and_then(|v| v.as_str()).unwrap_or("");
+
+    let green = egui::Color32::from_rgb(120, 200, 130);
+    let red = egui::Color32::from_rgb(220, 120, 120);
+    let blue = egui::Color32::from_rgb(140, 180, 220);
+    let orange = egui::Color32::from_rgb(220, 160, 100);
+    let yellow = egui::Color32::from_rgb(220, 200, 120);
+    let neutral = egui::Color32::from_rgb(180, 180, 180);
+
+    match kind {
+        "AddComponent" => (
+            "ADD ".into(),
+            format!("{class} ← {name}"),
+            green,
+        ),
+        "RemoveComponent" => (
+            "DEL ".into(),
+            format!("{class} ✗ {name}"),
+            red,
+        ),
+        "AddConnection" => (
+            "WIRE".into(),
+            format!("{class}: {from} → {to}"),
+            blue,
+        ),
+        "RemoveConnection" => (
+            "UNWR".into(),
+            format!("{class}: {from} ⊘ {to}"),
+            orange,
+        ),
+        "SetPlacement" => (
+            "MOVE".into(),
+            format!("{class}.{name}"),
+            neutral,
+        ),
+        "SetParameter" => {
+            let param = payload.get("param").and_then(|v| v.as_str()).unwrap_or("");
+            let value = payload.get("value").and_then(|v| v.as_str()).unwrap_or("");
+            (
+                "PARM".into(),
+                format!("{class}.{component}.{param} = {value}"),
+                yellow,
+            )
+        }
+        "ReplaceSource" => (
+            "TEXT".into(),
+            "source replaced".into(),
+            neutral,
+        ),
+        "EditText" => (
+            "EDIT".into(),
+            format!("text edit"),
+            neutral,
+        ),
+        "AddClass" => (
+            "CLAS".into(),
+            format!("{class}/{name}"),
+            green,
+        ),
+        "RemoveClass" => {
+            let qualified = payload
+                .get("qualified")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            (
+                "CLAS".into(),
+                format!("✗ {qualified}"),
+                red,
+            )
+        }
+        "AddShortClass" => (
+            "CLAS".into(),
+            format!("{class}/{name} (short)"),
+            green,
+        ),
+        "AddVariable" => (
+            "VAR ".into(),
+            format!("{class} ← {name}"),
+            green,
+        ),
+        "RemoveVariable" => (
+            "VAR ".into(),
+            format!("{class} ✗ {name}"),
+            red,
+        ),
+        "AddEquation" => (
+            "EQN ".into(),
+            format!("{class}"),
+            blue,
+        ),
+        "AddPlotNode" | "RemovePlotNode" | "SetPlotNodeExtent" | "SetPlotNodeTitle" => (
+            "PLOT".into(),
+            format!("{class}"),
+            neutral,
+        ),
+        "AddIconGraphic" | "AddDiagramGraphic" => (
+            "GFX ".into(),
+            format!("{class}"),
+            neutral,
+        ),
+        "SetDiagramTextExtent" | "SetDiagramTextString" | "RemoveDiagramText" => (
+            "TXT ".into(),
+            format!("{class}"),
+            neutral,
+        ),
+        "SetExperimentAnnotation" => (
+            "EXP ".into(),
+            format!("{class}"),
+            neutral,
+        ),
+        // Fallback for unknown / new variants.
+        _ => (
+            "EDIT".into(),
+            format!("{kind}"),
+            neutral,
+        ),
+    }
+}
+
