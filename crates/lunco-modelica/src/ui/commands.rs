@@ -1788,14 +1788,16 @@ fn on_open_example_in_workspace(
         // is irrelevant once we use the typed AST: the AST already
         // distinguishes class headers from string literals.
         let t_extract = web_time::Instant::now();
-        let class_src = extract_class_byte_range_via_path(
+        let spans_opt = extract_class_spans_via_path(
             &path,
             &source_full,
             &origin_short_for_task,
         )
-            .filter(|(s, e)| *e <= source_full.len() && *s < *e)
-            .map(|(s, e)| source_full[s..e].to_string())
-            .unwrap_or(source_full);
+        .filter(|s| s.full_start < s.full_end && s.full_end <= source_full.len());
+        let class_src = match spans_opt.as_ref() {
+            Some(s) => source_full[s.full_start..s.full_end].to_string(),
+            None => source_full.clone(),
+        };
         let extract_ms = t_extract.elapsed().as_secs_f64() * 1000.0;
         // 4 + 4b. Single-pass rewrite: parse class_src once, then
         //    rename + strip within + inject imports in one span splice.
@@ -1806,23 +1808,37 @@ fn on_open_example_in_workspace(
         let imports = collect_parent_imports(&path);
         let collect_ms = t_collect.elapsed().as_secs_f64() * 1000.0;
         let t_rewrite_only = web_time::Instant::now();
-        let renamed = rewrite_inject_in_one_pass(
-            &class_src,
-            &origin_short_for_task,
-            &name_for_task,
-            &imports,
-        )
-        .unwrap_or_else(|| {
-            // Fallback: parse failed (unexpected — the cached extract
-            // already parsed). Run the legacy two-pass path so the
-            // user still gets a usable copy.
-            let r = rewrite_duplicated_source(
+        let renamed = match spans_opt.as_ref() {
+            Some(spans) => rewrite_inject_in_one_pass(
                 &class_src,
-                &origin_short_for_task,
                 &name_for_task,
-            );
-            inject_class_imports(&r, &imports)
-        });
+                &imports,
+                spans,
+            )
+            .unwrap_or_else(|| {
+                // Spans were valid against the file but didn't fit
+                // the slice — fall back to the legacy two-pass path
+                // so the user still gets a usable copy.
+                let r = rewrite_duplicated_source(
+                    &class_src,
+                    &origin_short_for_task,
+                    &name_for_task,
+                );
+                inject_class_imports(&r, &imports)
+            }),
+            None => {
+                // Extract failed (unindexed file or unusual MSL
+                // structure). Class_src is the whole file — keep
+                // the legacy parse-and-splice path to handle
+                // file-level `within` etc.
+                let r = rewrite_duplicated_source(
+                    &class_src,
+                    &origin_short_for_task,
+                    &name_for_task,
+                );
+                inject_class_imports(&r, &imports)
+            }
+        };
         let rewrite_only_ms = t_rewrite_only.elapsed().as_secs_f64() * 1000.0;
         let inject_ms = 0.0_f64;
         // 4c. Re-attach a `within <origin package>;` clause so the
@@ -2070,6 +2086,45 @@ fn extract_class_byte_range_via_path(
     class.full_span_with_leading_comments(source)
 }
 
+/// Path-aware variant that also returns the class-name-token span and
+/// the end-token span (both **absolute** in `source`), so the bg
+/// duplicate flow can splice without re-parsing the same bytes a
+/// second time. Replaces the prior pattern of calling this *plus*
+/// `parse_to_ast(class_src)` inside `rewrite_inject_in_one_pass`.
+fn extract_class_spans_via_path(
+    path: &std::path::Path,
+    source: &str,
+    class_name: &str,
+) -> Option<DuplicateExtract> {
+    let mut parsed =
+        rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()]).ok()?;
+    let (_uri, ast) = parsed.drain(..).next()?;
+    let class = find_top_or_nested_class_by_short_name(&ast, class_name)?;
+    let (full_start, full_end) = class.full_span_with_leading_comments(source)?;
+    let end_tok = class.end_name_token.as_ref()?;
+    Some(DuplicateExtract {
+        full_start,
+        full_end,
+        name_start: class.name.location.start as usize,
+        name_end: class.name.location.end as usize,
+        end_start: end_tok.location.start as usize,
+        end_end: end_tok.location.end as usize,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DuplicateExtract {
+    /// Class slice within the source (full_span_with_leading_comments).
+    full_start: usize,
+    full_end: usize,
+    /// Class-name-token span (absolute in source).
+    name_start: usize,
+    name_end: usize,
+    /// `end Name` token span (absolute in source).
+    end_start: usize,
+    end_end: usize,
+}
+
 fn extract_class_source(source: &str, class_name: &str) -> Option<String> {
     let (start, end) = extract_class_byte_range(source, class_name)?;
     Some(source[start..end].to_string())
@@ -2285,29 +2340,25 @@ fn collect_parent_imports(class_file: &std::path::Path) -> Vec<String> {
 /// already parsed this same source successfully via the cached path.)
 fn rewrite_inject_in_one_pass(
     src: &str,
-    old_name: &str,
     new_name: &str,
     imports: &[String],
+    spans: &DuplicateExtract,
 ) -> Option<String> {
-    let ast = rumoca_phase_parse::parse_to_ast(src, "duplicate.mo").ok()?;
-    let class_def = ast
-        .classes
-        .values()
-        .find(|c| c.name.text.as_ref() == old_name)?;
-    let end_token = class_def.end_name_token.as_ref()?;
-    let name_start = class_def.name.location.start as usize;
-    let name_end = class_def.name.location.end as usize;
-    let end_start = end_token.location.start as usize;
-    let end_end = end_token.location.end as usize;
+    // Spans are absolute in the original file. Re-anchor against the
+    // class-only `src` slice (caller passes `source[full_start..full_end]`).
+    let base = spans.full_start;
+    let name_start = spans.name_start.checked_sub(base)?;
+    let name_end = spans.name_end.checked_sub(base)?;
+    let end_start = spans.end_start.checked_sub(base)?;
+    let end_end = spans.end_end.checked_sub(base)?;
     if !(name_end <= end_start && end_end <= src.len()) {
         return None;
     }
 
-    // Within-clause removal range (in src). Empty range = no within.
-    let (wstart, wend) = match ast.within.as_ref() {
-        Some(w) => compute_within_strip_range(src, w).unwrap_or((0, 0)),
-        None => (0, 0),
-    };
+    // Class slice extracted by `full_span_with_leading_comments` does
+    // not include the file-level `within` clause (within precedes the
+    // first class header). Empty range.
+    let (wstart, wend) = (0usize, 0usize);
 
     // Inject anchor: position in `src` immediately after the class
     // name's optional description string(s). Same scan
