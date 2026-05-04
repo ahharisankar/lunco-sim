@@ -36,7 +36,7 @@ pub enum Severity {
 /// **Why**: Ensures that the telemetry transport layer is agnostic of the 
 /// internal Rust type (f32, i32, bool), allowing external subscribers to 
 /// deserialize data into a unified variant type.
-#[derive(Debug, Clone, PartialEq, Reflect)]
+#[derive(Debug, Clone, PartialEq, Reflect, serde::Serialize, serde::Deserialize)]
 #[reflect(Debug, PartialEq, Default)]
 pub enum TelemetryValue {
     F64(f64),
