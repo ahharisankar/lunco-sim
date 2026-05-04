@@ -81,6 +81,55 @@ impl ModelicaEngineHandle {
     pub fn lock(&self) -> MutexGuard<'_, ModelicaEngine> {
         self.0.lock().expect("modelica engine mutex poisoned")
     }
+
+    /// Spawn an off-thread strict parse for `doc_id`'s `source` and
+    /// install the resulting AST into the session when it completes.
+    ///
+    /// Returns immediately; the lock is held only briefly to mark
+    /// `doc_id` as pending. The parse itself runs OUTSIDE the lock,
+    /// then a brief lock at the end installs the AST and queues a
+    /// completion via [`ModelicaEngine::finish_parse`].
+    ///
+    /// `gen` is the doc's generation at spawn time — readers that
+    /// drain completions can compare it against the doc's current
+    /// generation and discard stale results.
+    ///
+    /// `spawn_fn` is the platform task spawner: native callers pass
+    /// `|task| AsyncComputeTaskPool::get().spawn(async move { task() }).detach()`.
+    /// WASM can pass an equivalent. Decoupling the spawner keeps this
+    /// crate Bevy-agnostic at the engine layer.
+    ///
+    /// No-op if a parse for `doc_id` is already in flight (dedupe).
+    pub fn upsert_document_async<F>(
+        &self,
+        doc_id: DocumentId,
+        gen: u64,
+        source: String,
+        spawn_fn: F,
+    ) where
+        F: FnOnce(Box<dyn FnOnce() + Send + 'static>),
+    {
+        // Reserve the in-flight slot. Bail if another parse is running
+        // for this doc — the next sync tick will pick up newer source
+        // when the current parse finishes.
+        let uri = {
+            let mut engine = self.lock();
+            if !engine.mark_pending(doc_id) {
+                return;
+            }
+            engine.uri_for(doc_id)
+        };
+        let me = ModelicaEngineHandle(Arc::clone(&self.0));
+        spawn_fn(Box::new(move || {
+            let parsed = rumoca_phase_parse::parse_to_ast(&source, &uri).ok();
+            let mut engine = me.lock();
+            match parsed {
+                Some(ast) => engine.install_parsed_ast(doc_id, ast),
+                None => engine.install_lenient(doc_id, &source),
+            }
+            engine.finish_parse(doc_id, gen);
+        }));
+    }
 }
 
 /// Per-document generation cursor used by [`drive_engine_sync`] to
@@ -142,6 +191,29 @@ pub fn drive_engine_sync(
         return;
     }
 
+    // Drain any async parse completions from previous ticks. Each
+    // completion means the engine session is now up-to-date for that
+    // doc — bump the cursor so we don't re-spawn. Bevy adapters can
+    // observe the completion and trigger Index rebuilds in a follow-up
+    // (today the doc's `apply_patch` already calls `rebuild_index`).
+    {
+        let completed = handle.lock().drain_completed();
+        for (doc_id, gen) in completed {
+            bevy::log::info!(
+                "[EngineSync] async parse complete doc={} gen={}",
+                doc_id.raw(),
+                gen,
+            );
+            // Only advance cursor if we don't already have a newer
+            // sync. (User edits could have overshot the gen the parse
+            // started against — a fresh parse is queued already if so.)
+            let current = cursor.last_synced.get(&doc_id).copied().unwrap_or(0);
+            if gen > current {
+                cursor.last_synced.insert(doc_id, gen);
+            }
+        }
+    }
+
     let mut engine = handle.lock();
     for (doc_id, gen, ast, source) in to_upsert {
         let src_len = source.len();
@@ -164,31 +236,38 @@ pub fn drive_engine_sync(
             cursor.last_synced.insert(doc_id, gen);
             continue;
         }
-        match engine.upsert_document(doc_id, &source) {
-            Ok(()) => {
-                bevy::log::info!(
-                    "[EngineSync] upsert(reparse) doc={} gen={} src={}B in {:.1}ms",
-                    doc_id.raw(),
-                    gen,
-                    src_len,
-                    t.elapsed().as_secs_f64() * 1000.0,
-                );
-                cursor.last_synced.insert(doc_id, gen);
-            }
-            Err(e) => {
-                // A parse failure here doesn't poison anything — the
-                // document's strict AST simply isn't queryable from
-                // the engine until the user fixes the source. Bump
-                // the cursor anyway so we don't retry every tick.
-                bevy::log::warn!(
-                    "[EngineSync] upsert doc={} gen={} failed: {}",
-                    doc_id.raw(),
-                    gen,
-                    e
-                );
-                cursor.last_synced.insert(doc_id, gen);
-            }
+        // No pre-parsed AST → async path. Don't block the Update tick
+        // on a parse; spawn off-thread, drain the completion next
+        // tick. The engine itself dedupes: re-firing for the same
+        // doc while a parse is in flight is a no-op.
+        if engine.is_doc_pending(doc_id) {
+            // Already parsing; will resolve on a future tick. Don't
+            // bump the cursor — let the completion drain do that.
+            continue;
         }
+        // Drop the engine guard before spawning so the worker can
+        // re-acquire when it finishes.
+        drop(engine);
+        let pool = bevy::tasks::AsyncComputeTaskPool::get();
+        handle.upsert_document_async(doc_id, gen, source, |task| {
+            pool.spawn(async move { task() }).detach();
+        });
+        bevy::log::info!(
+            "[EngineSync] async parse spawned doc={} gen={} src={}B",
+            doc_id.raw(),
+            gen,
+            src_len,
+        );
+        // Re-acquire for the rest of the loop. (Hot path is the
+        // pre-parsed branch above — async path runs only when the
+        // doc lacks a strict AST, e.g. lazy-created docs after
+        // Phase 2 lands.)
+        engine = handle.lock();
+        // No cursor bump here — the drain step above advances it
+        // when this parse completes.
+        let _ = src_len;
+        let _ = t;
+        continue;
     }
     for doc_id in removed {
         engine.close_document(doc_id);
