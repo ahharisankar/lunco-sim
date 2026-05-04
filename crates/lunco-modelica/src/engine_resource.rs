@@ -166,10 +166,17 @@ pub struct EngineSyncCursor {
 ///
 /// Runs every `Update`. Reads `ModelicaDocumentRegistry`, mutates the
 /// engine and the cursor.
+/// Edit-debounce window before re-parsing a document that was
+/// previously parsed. New docs (never parsed) spawn immediately —
+/// only the edit path is debounced. Mirrors the prior `ast_refresh`
+/// gate now that `drive_engine_sync` is the single parse driver.
+pub const AST_DEBOUNCE_MS: u128 = 2500;
+
 pub fn drive_engine_sync(
     handle: Res<ModelicaEngineHandle>,
     mut registry: ResMut<crate::ui::state::ModelicaDocumentRegistry>,
     mut cursor: ResMut<EngineSyncCursor>,
+    activity: Res<crate::ui::input_activity::InputActivity>,
 ) {
     // ── 1. Drain async-parse completions ──────────────────────────────
     // Pull every completion the workers have queued since the last
@@ -326,20 +333,50 @@ pub fn drive_engine_sync(
     // Spawn async parses outside the engine lock — the spawn helper
     // re-locks briefly to mark pending; the worker re-locks at the
     // end to install the AST.
+    //
+    // Debounce gate (replaces the prior `ast_refresh` system):
+    //   - First parse for a doc (syntax.generation == 0) fires
+    //     immediately — open-flow, user is waiting.
+    //   - Edit reparse (syntax.generation > 0 but stale) waits for
+    //     `AST_DEBOUNCE_MS` of post-edit silence + no input activity.
+    //     Lets a typing burst settle before paying for a parse.
     let pool = bevy::tasks::AsyncComputeTaskPool::get();
+    let now = web_time::Instant::now();
     for (doc_id, gen, source) in async_only {
         if handle.lock().is_doc_pending(doc_id) {
             continue;
+        }
+        // Look up the doc to decide first-parse-vs-edit-reparse.
+        let (was_parsed, last_edit) = match registry.host(doc_id) {
+            Some(host) => {
+                let doc = host.document();
+                (
+                    doc.syntax_arc().generation > 0,
+                    doc.last_source_edit_at(),
+                )
+            }
+            None => (false, None),
+        };
+        if was_parsed {
+            // Edit case: defer until burst settles + UI idles.
+            let elapsed_ok = match last_edit {
+                Some(t) => now.duration_since(t).as_millis() >= AST_DEBOUNCE_MS,
+                None => true,
+            };
+            if !elapsed_ok || activity.is_active() {
+                continue;
+            }
         }
         let src_len = source.len();
         handle.upsert_document_async(doc_id, gen, source, |task| {
             pool.spawn(async move { task() }).detach();
         });
         bevy::log::info!(
-            "[EngineSync] async parse spawned doc={} gen={} src={}B",
+            "[EngineSync] async parse spawned doc={} gen={} src={}B (first_parse={})",
             doc_id.raw(),
             gen,
             src_len,
+            !was_parsed,
         );
     }
 }
