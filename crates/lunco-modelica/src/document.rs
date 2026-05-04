@@ -159,19 +159,37 @@ pub enum ModelicaChange {
 /// Eagerly-refreshed AST cache attached to a [`ModelicaDocument`].
 ///
 /// Every mutation replaces this with a freshly-parsed cache so readers
-/// never observe a stale AST. Cheap to clone via `Arc`.
+/// never observe a stale parse status. Cheap to clone via `Arc`.
+///
+/// **Note on canonical AST**: this cache no longer carries the parsed
+/// `StoredDefinition` — that storage is owned by the engine
+/// (`crate::engine::ModelicaEngine` session) and the lenient
+/// [`SyntaxCache`]. `AstCache` now records *whether* the strict parse
+/// succeeded plus the diagnostic message on failure. Callers that want
+/// the AST itself use [`ModelicaDocument::strict_ast`] (vends the
+/// lenient cache's `Arc<StoredDefinition>` when strict parse succeeded,
+/// `None` when it failed) or read the engine directly.
 #[derive(Debug, Clone)]
 pub struct AstCache {
     /// Document generation at which this cache was produced.
     pub generation: u64,
-    /// Parse outcome. `Ok` carries the parsed AST; `Err` carries a
-    /// human-readable parser diagnostic (preserved so panels can show
-    /// syntax errors without reparsing).
-    pub result: Result<Arc<StoredDefinition>, String>,
+    /// Parse outcome. `Ok(())` means the strict parse succeeded;
+    /// `Err(msg)` carries a human-readable parser diagnostic
+    /// (preserved so panels can show syntax errors without reparsing).
+    pub result: Result<(), String>,
 }
 
 impl AstCache {
-    /// Parse `source` into a fresh cache at the given generation.
+    /// Parse `source` and record whether the strict parse succeeded.
+    /// Discards the parsed `StoredDefinition` — readers consult
+    /// [`SyntaxCache`] / engine for the actual AST.
+    ///
+    /// Prefer [`Self::from_syntax`] to avoid parsing twice when the
+    /// caller already has a [`SyntaxCache`] for this source — the
+    /// strict-parse-for-error-message vs lenient-parse-for-AST split
+    /// only matters when the *strict* error string is needed
+    /// independently. Most refresh paths can derive both from one
+    /// parse via [`Self::from_syntax`].
     pub fn from_source(source: &str, generation: u64) -> Self {
         // DIAGNOSTIC: when `LUNCO_NO_PARSE=1`, return an Err result
         // instantly without invoking rumoca. Lets us prove whether
@@ -184,15 +202,27 @@ impl AstCache {
             };
         }
         let result = match parse_to_ast(source, "model.mo") {
-            Ok(ast) => Ok(Arc::new(ast)),
+            Ok(_) => Ok(()),
             Err(e) => Err(e.to_string()),
         };
         Self { generation, result }
     }
 
-    /// Shortcut: the parsed AST, if parsing succeeded.
-    pub fn ast(&self) -> Option<&StoredDefinition> {
-        self.result.as_ref().ok().map(|a| a.as_ref())
+    /// Derive a parse-status cache from an existing [`SyntaxCache`] —
+    /// no second parse. Loses the rumoca-strict-parser error string;
+    /// uses a generic "parse errors" message when `has_errors`. Use
+    /// this on the refresh hot path; use [`Self::from_source`] only
+    /// when the caller specifically wants the strict-parser
+    /// diagnostic.
+    pub fn from_syntax(syntax: &SyntaxCache) -> Self {
+        Self {
+            generation: syntax.generation,
+            result: if syntax.has_errors {
+                Err("source has parse errors — see syntax cache for details".into())
+            } else {
+                Ok(())
+            },
+        }
     }
 }
 
@@ -311,8 +341,11 @@ impl ModelicaDocument {
         origin: DocumentOrigin,
     ) -> Self {
         let source = source.into();
-        let ast = Arc::new(AstCache::from_source(&source, 0));
+        // Single parse path: lenient parse populates SyntaxCache;
+        // AstCache derives from it. Halves the per-document parse
+        // cost vs the previous "parse twice" pattern.
         let syntax = Arc::new(SyntaxCache::from_source(&source, 0));
+        let ast = Arc::new(AstCache::from_syntax(&syntax));
         Self::from_parts(id, source, origin, ast, syntax)
     }
 
@@ -352,43 +385,39 @@ impl ModelicaDocument {
 
         // 2. Strict parse via rumoca-session's content-hash artifact
         //    cache — re-opening a file the engine session has parsed
-        //    is essentially free.
-        let ast = if std::env::var_os("LUNCO_NO_PARSE").is_some() {
-            Arc::new(AstCache {
-                generation: 0,
-                result: Err("LUNCO_NO_PARSE diagnostic — parse skipped".into()),
-            })
-        } else {
-            match rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()]) {
-                Ok(mut pairs) if !pairs.is_empty() => {
-                    let (_, stored) = pairs.remove(0);
-                    Arc::new(AstCache {
-                        generation: 0,
-                        result: Ok(Arc::new(stored)),
-                    })
+        //    is essentially free. The strict `StoredDefinition` flows
+        //    into the lenient `SyntaxCache` (single canonical local
+        //    Arc); `AstCache` records only success/failure.
+        let parsed: Result<Arc<StoredDefinition>, String> =
+            if std::env::var_os("LUNCO_NO_PARSE").is_some() {
+                Err("LUNCO_NO_PARSE diagnostic — parse skipped".into())
+            } else {
+                match rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()]) {
+                    Ok(mut pairs) if !pairs.is_empty() => {
+                        let (_, stored) = pairs.remove(0);
+                        Ok(Arc::new(stored))
+                    }
+                    Ok(_) => Err("rumoca returned no parse result".into()),
+                    Err(e) => Err(e.to_string()),
                 }
-                Ok(_) => Arc::new(AstCache {
-                    generation: 0,
-                    result: Err("rumoca returned no parse result".into()),
-                }),
-                Err(e) => Arc::new(AstCache {
-                    generation: 0,
-                    result: Err(e.to_string()),
-                }),
-            }
-        };
+            };
 
-        // 3. Lenient `SyntaxCache` reuses the strict StoredDef when
+        let ast = Arc::new(AstCache {
+            generation: 0,
+            result: parsed.as_ref().map(|_| ()).map_err(|e| e.clone()),
+        });
+
+        // 3. Lenient `SyntaxCache` adopts the strict StoredDef when
         //    parsing succeeded — same reasoning as the previous
         //    `ModelicaFileLoader` path: re-running `parse_to_syntax`
         //    on a 184 KB MSL file (Continuous.mo) costs minutes in
         //    debug because it bypasses rumoca's cache. On strict
         //    failure we ship an empty SyntaxCache; the doc's
         //    edit-driven `ast_refresh` will rebuild it.
-        let syntax = Arc::new(match ast.result.as_ref() {
+        let syntax = Arc::new(match parsed {
             Ok(strict) => SyntaxCache {
                 generation: 0,
-                ast: Arc::clone(strict),
+                ast: strict,
                 has_errors: false,
             },
             Err(_) => SyntaxCache {
@@ -514,6 +543,27 @@ impl ModelicaDocument {
     /// borrow without keeping the document borrowed.
     pub fn syntax_arc(&self) -> &Arc<SyntaxCache> {
         &self.syntax
+    }
+
+    /// The current strict-parsed AST as an `Arc<StoredDefinition>`,
+    /// `None` when the strict parse failed.
+    ///
+    /// Vends the lenient [`SyntaxCache`]'s `Arc` — for valid sources
+    /// strict and lenient produce the same AST, so we share storage.
+    /// Returns `None` when `ast.result` is `Err`, signalling the source
+    /// has hard parse errors and callers (compile, codegen) should
+    /// not proceed.
+    ///
+    /// Replaces the previous `doc.ast().result.as_ref().ok().cloned()`
+    /// pattern. The strict `Arc<StoredDefinition>` no longer lives in
+    /// [`AstCache`] — engine + lenient cache are the canonical
+    /// storage.
+    pub fn strict_ast(&self) -> Option<Arc<StoredDefinition>> {
+        if self.ast.result.is_ok() {
+            Some(Arc::clone(&self.syntax.ast))
+        } else {
+            None
+        }
     }
 
     /// Returns `true` when the lenient parse is behind the current
@@ -646,8 +696,11 @@ impl ModelicaDocument {
         }
         let t = web_time::Instant::now();
         let bytes = self.source.len();
-        self.ast = Arc::new(AstCache::from_source(&self.source, self.generation));
+        // Single parse path: lenient parse first, derive strict
+        // status from it. Saves the second `parse_to_ast` call that
+        // used to discard its `StoredDefinition`.
         self.syntax = Arc::new(SyntaxCache::from_source(&self.source, self.generation));
+        self.ast = Arc::new(AstCache::from_syntax(&self.syntax));
         self.rebuild_index();
         let elapsed_ms = t.elapsed().as_secs_f64() * 1000.0;
         if elapsed_ms > 5.0 {
@@ -3281,7 +3334,8 @@ mod tests {
         let host = doc();
         let cache = host.document().ast();
         assert_eq!(cache.generation, 0);
-        let ast = cache.ast().expect("fresh doc should parse");
+        assert!(cache.result.is_ok(), "fresh doc should parse");
+        let ast = host.document().strict_ast().expect("strict_ast Some");
         assert!(ast.classes.contains_key("Empty"));
     }
 
@@ -3297,7 +3351,8 @@ mod tests {
         host.document_mut().refresh_ast_now();
         let cache = host.document().ast();
         assert_eq!(cache.generation, 1);
-        let ast = cache.ast().expect("should parse");
+        assert!(cache.result.is_ok(), "strict parse should succeed");
+        let ast = host.document().strict_ast().expect("strict_ast Some");
         assert!(ast.classes.contains_key("Foo"));
         assert!(!ast.classes.contains_key("Empty"));
     }
@@ -3424,7 +3479,7 @@ mod tests {
         );
         // AST cache is debounced — force a reparse before inspecting.
         host.document_mut().refresh_ast_now();
-        let ast = host.document().ast().ast().expect("parse ok");
+        let ast = host.document().strict_ast().expect("parse ok");
         assert!(ast.classes.get("M").unwrap().components.contains_key("b"));
     }
 

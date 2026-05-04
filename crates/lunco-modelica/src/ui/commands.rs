@@ -1135,7 +1135,7 @@ fn on_compile_model(
         match registry.host(doc) {
             Some(h) => {
                 let doc_ref = h.document();
-                let ast = doc_ref.ast().result.as_ref().ok().cloned();
+                let ast = doc_ref.strict_ast();
                 // Class candidates + first-non-package detection via
                 // the per-doc Index (sees optimistic patches; no extra
                 // AST walk per call).
@@ -1513,7 +1513,7 @@ fn on_duplicate_model_from_read_only(
             .as_ref()
             .and_then(|m| m.get(source_doc))
             .map(String::from);
-        let ast_opt = doc.ast().ast();
+        let ast_opt = doc.strict_ast();
         // Top-level class name = first key in `ast.classes` if we
         // have a parsed AST, otherwise fall back to the origin's
         // display name (e.g. `Untitled1`). This is the *outermost*

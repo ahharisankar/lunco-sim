@@ -211,24 +211,17 @@ pub fn refresh_stale_asts(
                 );
                 let has_errors = syntax_obj.has_errors();
                 let lenient_ast = std::sync::Arc::new(syntax_obj.best_effort().clone());
-                let ast = if has_errors {
-                    AstCache {
-                        generation: gen,
-                        result: Err(format!(
-                            "lenient parser reported errors (best-effort tree available via syntax())"
-                        )),
-                    }
-                } else {
-                    AstCache {
-                        generation: gen,
-                        result: Ok(std::sync::Arc::clone(&lenient_ast)),
-                    }
-                };
                 let syntax = SyntaxCache {
                     generation: gen,
                     ast: lenient_ast,
                     has_errors,
                 };
+                // AstCache no longer carries the parsed AST — it's a
+                // parse-status cache derived from the lenient pass.
+                // The lenient `Arc<StoredDefinition>` lives on
+                // `SyntaxCache.ast`; readers reach it via
+                // `ModelicaDocument::strict_ast()`.
+                let ast = AstCache::from_syntax(&syntax);
                 let elapsed_ms = t.elapsed().as_secs_f64() * 1000.0;
                 if elapsed_ms > 50.0 {
                     bevy::log::info!(

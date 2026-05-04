@@ -76,7 +76,7 @@ fn build_rc_circuit_from_empty_model() {
     );
 
     // Cached AST must reflect every component + connect.
-    let ast = host.document().ast().ast().expect("AST cache parse ok");
+    let ast = host.document().strict_ast().expect("AST cache parse ok");
     let circuit = ast.classes.get("Circuit").expect("class Circuit");
     assert_eq!(circuit.components.len(), 4, "4 components expected");
     for name in ["V1", "R1", "C1", "GND"] {
@@ -121,7 +121,7 @@ end Gamma;
     let final_source = host.document().source();
     assert!(reparse_ok(final_source), "must reparse");
 
-    let ast = host.document().ast().ast().unwrap();
+    let ast = host.document().strict_ast().unwrap();
     let alpha = ast.classes.get("Alpha").unwrap();
     let beta  = ast.classes.get("Beta").unwrap();
     let gamma = ast.classes.get("Gamma").unwrap();
@@ -178,7 +178,7 @@ end Circuit;
         "connect text present:\n{}", final_source
     );
 
-    let ast = host.document().ast().ast().unwrap();
+    let ast = host.document().strict_ast().unwrap();
     let circuit = ast.classes.get("Circuit").unwrap();
     assert_eq!(circuit.equations.len(), 1);
     // Other classes unchanged.
@@ -215,7 +215,7 @@ end Pkg;
 
     let final_source = host.document().source();
     assert!(reparse_ok(final_source), "must reparse");
-    let ast = host.document().ast().ast().unwrap();
+    let ast = host.document().strict_ast().unwrap();
     let inner = ast
         .classes
         .get("Pkg")
@@ -272,7 +272,7 @@ end A;
         },
     })
     .unwrap();
-    let ast = host.document().ast().ast().unwrap();
+    let ast = host.document().strict_ast().unwrap();
     let c = ast
         .classes
         .get("A")
@@ -334,7 +334,7 @@ end Pkg;
     })
     .unwrap();
 
-    let ast = host.document().ast().ast().unwrap();
+    let ast = host.document().strict_ast().unwrap();
     let circuit = ast.classes.get("Pkg").unwrap().classes.get("Circuit").unwrap();
     assert_eq!(circuit.equations.len(), 1);
 }
@@ -370,7 +370,7 @@ end Derived;
     let final_source = host.document().source();
     assert!(reparse_ok(final_source), "must reparse after adding to extending class");
 
-    let ast = host.document().ast().ast().unwrap();
+    let ast = host.document().strict_ast().unwrap();
     let derived = ast.classes.get("Derived").unwrap();
     assert_eq!(derived.extends.len(), 1, "extends preserved");
     assert!(derived.components.contains_key("local"));
@@ -829,7 +829,7 @@ fn mixed_op_sequence_undoes_back_to_start() {
     // Redo → identical to post-op state.
     for _ in 0..3 { host.redo().unwrap(); }
     assert!(reparse_ok(host.document().source()));
-    let ast = host.document().ast().ast().unwrap();
+    let ast = host.document().strict_ast().unwrap();
     let circuit = ast.classes.get("Circuit").unwrap();
     assert_eq!(circuit.components.len(), 2);
     assert_eq!(circuit.equations.len(), 1);

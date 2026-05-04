@@ -4146,8 +4146,8 @@ impl Panel for CanvasDiagramPanel {
                 // `SyntaxCache` only when strict parse failed — that
                 // way partial-parse states still draw something
                 // instead of going blank.
-                let ast = match doc.ast().result.as_ref().ok() {
-                    Some(strict) => std::sync::Arc::clone(strict),
+                let ast = match doc.strict_ast() {
+                    Some(strict) => strict,
                     None => std::sync::Arc::clone(&doc.syntax_arc().ast),
                 };
                 (doc.source().to_string(), ast)
@@ -5020,7 +5020,7 @@ impl CanvasDiagramPanel {
                                     let registry =
                                         world.resource::<crate::ui::state::ModelicaDocumentRegistry>();
                                     let host = registry.host(doc_id)?;
-                                    let ast = host.document().ast().result.as_ref().ok().cloned()?;
+                                    let ast = host.document().strict_ast()?;
                                     crate::ast_extract::extract_model_name_from_ast(&ast)
                                 })
                                 .unwrap_or_default()
@@ -6363,9 +6363,8 @@ fn empty_overlay_class_info(
         return (None, None, None, vec![], vec![], vec![]);
     };
     let document = host.document();
-    let ast_arc = match document.ast().result.as_ref() {
-        Ok(a) => a.clone(),
-        Err(_) => return (None, None, None, vec![], vec![], vec![]),
+    let Some(ast_arc) = document.strict_ast() else {
+        return (None, None, None, vec![], vec![], vec![]);
     };
 
     // Locate the class. Prefer an exact name match; fall back to the
@@ -7145,8 +7144,8 @@ pub fn drive_drill_in_loads(
             // OMEdit/Dymola: icon-only class or class with zero
             // instantiated components → Icon view; otherwise Canvas
             // (the user drilled FROM a canvas, expects a canvas).
-            let has_components = doc.ast().ast().and_then(|ast| {
-                crate::diagram::find_class_by_qualified_name(ast, &qualified)
+            let has_components = doc.strict_ast().and_then(|ast| {
+                crate::diagram::find_class_by_qualified_name(&ast, &qualified)
                     .map(|c| !c.components.is_empty())
             });
             (path, has_components)
@@ -7194,8 +7193,8 @@ pub fn drill_into_class(world: &mut World, qualified: &str) {
     let target_doc: Option<lunco_doc::DocumentId> = {
         let registry = world.resource::<ModelicaDocumentRegistry>();
         registry.iter().find_map(|(doc_id, host)| {
-            host.document().ast().ast().and_then(|ast| {
-                crate::diagram::find_class_by_qualified_name(ast, qualified)
+            host.document().strict_ast().and_then(|ast| {
+                crate::diagram::find_class_by_qualified_name(&ast, qualified)
                     .map(|_| doc_id)
             })
         })

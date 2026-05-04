@@ -604,7 +604,7 @@ impl ApiQueryProvider for DescribeModelProvider {
             return err_doc_not_found(doc_id);
         };
         let document = host.document();
-        let Some(ast) = document.ast().result.as_ref().ok().cloned() else {
+        let Some(ast) = document.strict_ast() else {
             return ApiResponse::error(
                 ApiErrorCode::InternalError,
                 format!(

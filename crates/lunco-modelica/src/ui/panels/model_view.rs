@@ -1454,7 +1454,7 @@ fn render_icon_view(ui: &mut egui::Ui, world: &mut World) {
                 if qualified.contains('.') {
                     return Some(qualified.clone());
                 }
-                let ast = document.ast().result.as_ref().ok().cloned()?;
+                let ast = document.strict_ast()?;
                 let short = qualified.as_str();
                 let pkg = ast
                     .within
