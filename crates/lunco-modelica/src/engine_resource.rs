@@ -106,10 +106,18 @@ pub fn drive_engine_sync(
     registry: Res<crate::ui::state::ModelicaDocumentRegistry>,
     mut cursor: ResMut<EngineSyncCursor>,
 ) {
-    // Collect (doc_id, gen, source) for any document whose generation
-    // has advanced. Borrow the registry immutably here; release before
-    // we lock the engine to keep the critical section tight.
-    let mut to_upsert: Vec<(DocumentId, u64, String)> = Vec::new();
+    // Collect (doc_id, gen, ast?, source) for any document whose
+    // generation has advanced. If the doc already parsed strictly we
+    // hand the engine the AST directly via `add_parsed_batch` — saves
+    // ~370ms per upsert vs the engine reparsing the same source. Fall
+    // back to source-only for docs whose strict parse failed (engine
+    // will run the lenient parser as before).
+    let mut to_upsert: Vec<(
+        DocumentId,
+        u64,
+        Option<std::sync::Arc<rumoca_session::parsing::ast::StoredDefinition>>,
+        String,
+    )> = Vec::new();
     let mut alive: HashSet<DocumentId> = HashSet::new();
     for (doc_id, host) in registry.iter() {
         alive.insert(doc_id);
@@ -119,7 +127,8 @@ pub fn drive_engine_sync(
             None => true,
         };
         if needs {
-            to_upsert.push((doc_id, gen, host.document().source().to_string()));
+            let ast = host.document().strict_ast();
+            to_upsert.push((doc_id, gen, ast, host.document().source().to_string()));
         }
     }
     let removed: Vec<DocumentId> = cursor
@@ -134,9 +143,36 @@ pub fn drive_engine_sync(
     }
 
     let mut engine = handle.lock();
-    for (doc_id, gen, source) in to_upsert {
+    for (doc_id, gen, ast, source) in to_upsert {
+        let src_len = source.len();
+        let t = std::time::Instant::now();
+        if let Some(ast) = ast {
+            // Pre-parsed fast path: the doc already has a strict AST.
+            // Hand it to rumoca's session via `add_parsed_batch` so
+            // the engine doesn't redo the same parse. Cloning the
+            // `StoredDefinition` is unavoidable today (the API takes
+            // by-value); the per-class `Arc`s inside it keep this
+            // shallow.
+            engine.upsert_document_with_ast(doc_id, (*ast).clone());
+            bevy::log::info!(
+                "[EngineSync] upsert(parsed) doc={} gen={} src={}B in {:.1}ms",
+                doc_id.raw(),
+                gen,
+                src_len,
+                t.elapsed().as_secs_f64() * 1000.0,
+            );
+            cursor.last_synced.insert(doc_id, gen);
+            continue;
+        }
         match engine.upsert_document(doc_id, &source) {
             Ok(()) => {
+                bevy::log::info!(
+                    "[EngineSync] upsert(reparse) doc={} gen={} src={}B in {:.1}ms",
+                    doc_id.raw(),
+                    gen,
+                    src_len,
+                    t.elapsed().as_secs_f64() * 1000.0,
+                );
                 cursor.last_synced.insert(doc_id, gen);
             }
             Err(e) => {

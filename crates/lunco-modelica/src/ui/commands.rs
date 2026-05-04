@@ -1753,6 +1753,8 @@ fn on_open_example_in_workspace(
     let origin_short_for_task = origin_short.clone();
     let name_for_task = name.clone();
     let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
+        let t_total = web_time::Instant::now();
+        let t_resolve = web_time::Instant::now();
         // 1. Resolve MSL file path (static HashMap probe). If the
         //    class isn't indexed, build an empty doc so the user
         //    still gets a tab with a clear error marker.
@@ -1763,8 +1765,12 @@ fn on_open_example_in_workspace(
                 lunco_doc::DocumentOrigin::untitled(name_for_task),
             );
         };
+        let resolve_ms = t_resolve.elapsed().as_secs_f64() * 1000.0;
         // 2. Read file. I/O — fine off-thread.
+        let t_read = web_time::Instant::now();
         let source_full = std::fs::read_to_string(&path).unwrap_or_default();
+        let read_ms = t_read.elapsed().as_secs_f64() * 1000.0;
+        let source_len = source_full.len();
         // 3. Extract just the target class. We mask out string
         //    literals and comments first, then run the line-anchored
         //    class-header regex on the masked copy. Without masking,
@@ -1781,6 +1787,7 @@ fn on_open_example_in_workspace(
         // step (which prevented regex misfires inside docstrings)
         // is irrelevant once we use the typed AST: the AST already
         // distinguishes class headers from string literals.
+        let t_extract = web_time::Instant::now();
         let class_src = extract_class_byte_range_via_path(
             &path,
             &source_full,
@@ -1789,8 +1796,10 @@ fn on_open_example_in_workspace(
             .filter(|(s, e)| *e <= source_full.len() && *s < *e)
             .map(|(s, e)| source_full[s..e].to_string())
             .unwrap_or(source_full);
+        let extract_ms = t_extract.elapsed().as_secs_f64() * 1000.0;
         // 4. Rewrite: rename + strip `within` so the copy is
         //    standalone.
+        let t_rewrite = web_time::Instant::now();
         let renamed = rewrite_duplicated_source(
             &class_src,
             &origin_short_for_task,
@@ -1817,12 +1826,22 @@ fn on_open_example_in_workspace(
         } else {
             format!("within {origin_pkg};\n{renamed}")
         };
+        let rewrite_ms = t_rewrite.elapsed().as_secs_f64() * 1000.0;
         // 5. Build doc (runs rumoca parse on the bg thread).
-        crate::document::ModelicaDocument::with_origin(
+        let t_parse = web_time::Instant::now();
+        let doc = crate::document::ModelicaDocument::with_origin(
             doc_id,
             copy_src,
             lunco_doc::DocumentOrigin::untitled(name_for_task),
-        )
+        );
+        let parse_ms = t_parse.elapsed().as_secs_f64() * 1000.0;
+        let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+        bevy::log::info!(
+            "[OpenExample bg] {qualified_for_task} src={source_len}B \
+             total={total_ms:.1}ms resolve={resolve_ms:.1} read={read_ms:.1} \
+             extract={extract_ms:.1} rewrite={rewrite_ms:.1} parse={parse_ms:.1}"
+        );
+        doc
     });
 
     duplicate_loads.insert(

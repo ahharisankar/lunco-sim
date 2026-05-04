@@ -103,6 +103,20 @@ impl ModelicaEngine {
             .map_err(|e| e.to_string())
     }
 
+    /// Install a document whose AST has already been parsed elsewhere
+    /// (typically by `ModelicaDocument`). Bypasses the parser entirely
+    /// via `Session::add_parsed_batch`. Use this in steady-state sync
+    /// paths to avoid re-parsing the same bytes the doc just parsed.
+    pub fn upsert_document_with_ast(
+        &mut self,
+        doc_id: DocumentId,
+        ast: rumoca_session::parsing::ast::StoredDefinition,
+    ) {
+        let uri = self.uri(doc_id);
+        self.uri_for_doc.entry(doc_id).or_insert_with(|| uri.clone());
+        self.session.add_parsed_batch(vec![(uri, ast)]);
+    }
+
     /// The engine's view of `doc_id`'s parsed AST, or `None` if the
     /// document hasn't been upserted yet (or its parse failed).
     ///

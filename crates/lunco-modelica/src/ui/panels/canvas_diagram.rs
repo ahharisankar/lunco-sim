@@ -4161,17 +4161,12 @@ impl Panel for CanvasDiagramPanel {
                 };
                 (doc.source().to_string(), ast)
             };
-            // Synchronously upsert this doc into the engine session
-            // so `engine.icon_for(qualified)` resolves locally-defined
-            // classes during the upcoming projection task. Without
-            // this, projection races `drive_engine_sync` and finishes
-            // before the engine has the doc — every icon lookup
-            // misses, every component renders as a default rect.
-            // rumoca's content-hash cache makes the upsert near-free
-            // when the source already matches the session.
-            if let Some(handle) = crate::engine_resource::global_engine_handle() {
-                let _ = handle.lock().upsert_document(doc_id, &source);
-            }
+            // `drive_engine_sync` (now AST-based, near-free per
+            // upsert via `add_parsed_batch`) populates the engine on
+            // the same Update tick the doc was installed. Projection
+            // either runs after engine sync this tick, or one tick
+            // later — either way the upsert is microseconds, not the
+            // ~370ms reparse the old sync path here cost.
             // Snapshot the configurable projection caps so the bg
             // task doesn't need to reach back into the world (it
             // can't — it runs off-thread with only owned data).
