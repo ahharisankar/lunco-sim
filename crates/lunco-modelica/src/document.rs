@@ -659,23 +659,57 @@ impl ModelicaDocument {
         if !self.ast_is_stale() && !self.syntax_is_stale() {
             return;
         }
+        let Some(handle) = crate::engine_resource::global_engine_handle() else {
+            // Engine not installed (early boot, headless tests). Fall
+            // back to the local parser so the doc has *some* AST.
+            self.syntax = Arc::new(SyntaxCache::from_source(&self.source, self.generation));
+            self.ast = Arc::new(AstCache::from_syntax(&self.syntax));
+            self.rebuild_index();
+            self.last_source_edit_at = None;
+            return;
+        };
         let t = web_time::Instant::now();
         let bytes = self.source.len();
-        // Single parse path: lenient parse first, derive strict
-        // status from it. Saves the second `parse_to_ast` call that
-        // used to discard its `StoredDefinition`.
-        self.syntax = Arc::new(SyntaxCache::from_source(&self.source, self.generation));
-        self.ast = Arc::new(AstCache::from_syntax(&self.syntax));
+        // Route through engine: synchronous upsert (rumoca's
+        // content-hash cache makes unchanged sources free), then
+        // pull the strict AST back. Engine remains the canonical
+        // store; doc-side cache is its mirror.
+        let arc_ast: Option<Arc<StoredDefinition>> = {
+            let mut engine = handle.lock();
+            let _ = engine.upsert_document(self.id, &self.source);
+            engine.parsed_for_doc(self.id).cloned().map(Arc::new)
+        }; // engine lock released before rebuild_index re-acquires it
+        match arc_ast {
+            Some(ast) => {
+                self.syntax = Arc::new(SyntaxCache {
+                    generation: self.generation,
+                    ast,
+                    has_errors: false,
+                });
+                self.ast = Arc::new(AstCache {
+                    generation: self.generation,
+                    result: Ok(()),
+                });
+            }
+            None => {
+                // Strict parse failed inside engine — keep stale
+                // caches (callers like Compile read `ast.result` to
+                // bail) and just bump the generation marker on the
+                // existing tree so the staleness check doesn't loop.
+                self.ast = Arc::new(AstCache {
+                    generation: self.generation,
+                    result: Err("strict parse failed".into()),
+                });
+            }
+        }
         self.rebuild_index();
         let elapsed_ms = t.elapsed().as_secs_f64() * 1000.0;
         if elapsed_ms > 5.0 {
             bevy::log::info!(
-                "[Doc] refresh_ast_now: {bytes} bytes parsed in {elapsed_ms:.1}ms (gen={})",
+                "[Doc] refresh_ast_now: {bytes} bytes via engine in {elapsed_ms:.1}ms (gen={})",
                 self.generation
             );
         }
-        // Once both caches catch up, there's no outstanding edit to
-        // debounce for.
         self.last_source_edit_at = None;
     }
 

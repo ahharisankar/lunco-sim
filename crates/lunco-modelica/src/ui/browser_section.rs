@@ -115,10 +115,12 @@ impl BrowserSection for ModelicaSection {
                 } else {
                     format!("🔒  {}", name)
                 };
-                egui::CollapsingHeader::new(label)
+                let resp = egui::CollapsingHeader::new(label)
                     .id_salt(("loaded_modelica_class", class.id()))
                     .default_open(class.default_open())
                     .show(ui, |ui| class.render_children(ui, ctx));
+                resp.header_response
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
             }
         }
 
@@ -427,6 +429,7 @@ fn render_class_row(
                 egui::RichText::new(&class.short_name)
             };
             ui.add(egui::Label::new(label).sense(egui::Sense::click()))
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
         }).inner;
         // Explicit highlight band — `selectable_label`'s default
         // selected chrome blends into the panel background under a
@@ -487,7 +490,9 @@ fn render_class_row(
         let qualified = class.qualified_path.clone();
         let short = class.short_name.clone();
         let muted = theme.text_muted();
-        resp.header_response.clone().on_hover_ui(move |ui| {
+        let header_resp = resp.header_response.clone()
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        header_resp.on_hover_ui(move |ui| {
             ui.strong(&short);
             ui.label(
                 egui::RichText::new(&qualified)
