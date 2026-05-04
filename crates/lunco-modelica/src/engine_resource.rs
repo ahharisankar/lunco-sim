@@ -120,14 +120,30 @@ impl ModelicaEngineHandle {
             engine.uri_for(doc_id)
         };
         let me = ModelicaEngineHandle(Arc::clone(&self.0));
+        let bytes = source.len();
         spawn_fn(Box::new(move || {
-            let parsed = rumoca_phase_parse::parse_to_ast(&source, &uri).ok();
+            let t_total = std::time::Instant::now();
+            // Lenient parser: always produces a usable tree.
+            let t_parse = std::time::Instant::now();
+            let recovery = rumoca_phase_parse::parse_to_syntax(&source, &uri);
+            let parse_ms = t_parse.elapsed().as_secs_f64() * 1000.0;
+            let has_errors = recovery.has_errors();
+            let ast = recovery.best_effort().clone();
+            let t_install = std::time::Instant::now();
             let mut engine = me.lock();
-            match parsed {
-                Some(ast) => engine.install_parsed_ast(doc_id, ast),
-                None => engine.install_lenient(doc_id, &source),
-            }
+            engine.install_parsed_ast(doc_id, ast);
             engine.finish_parse(doc_id, gen);
+            let install_ms = t_install.elapsed().as_secs_f64() * 1000.0;
+            bevy::log::info!(
+                "[engine] async parse doc={} gen={} bytes={} parse={:.1}ms install={:.1}ms total={:.1}ms has_errors={}",
+                doc_id.raw(),
+                gen,
+                bytes,
+                parse_ms,
+                install_ms,
+                t_total.elapsed().as_secs_f64() * 1000.0,
+                has_errors,
+            );
         }));
     }
 }
@@ -152,33 +168,122 @@ pub struct EngineSyncCursor {
 /// engine and the cursor.
 pub fn drive_engine_sync(
     handle: Res<ModelicaEngineHandle>,
-    registry: Res<crate::ui::state::ModelicaDocumentRegistry>,
+    mut registry: ResMut<crate::ui::state::ModelicaDocumentRegistry>,
     mut cursor: ResMut<EngineSyncCursor>,
 ) {
-    // Collect (doc_id, gen, ast?, source) for any document whose
-    // generation has advanced. If the doc already parsed strictly we
-    // hand the engine the AST directly via `add_parsed_batch` — saves
-    // ~370ms per upsert vs the engine reparsing the same source. Fall
-    // back to source-only for docs whose strict parse failed (engine
-    // will run the lenient parser as before).
-    let mut to_upsert: Vec<(
-        DocumentId,
-        u64,
-        Option<std::sync::Arc<rumoca_session::parsing::ast::StoredDefinition>>,
-        String,
-    )> = Vec::new();
+    // ── 1. Drain async-parse completions ──────────────────────────────
+    // Pull every completion the workers have queued since the last
+    // tick. For each, fetch the strict AST from the session and
+    // backfill the doc's local SyntaxCache + AstCache so panels see
+    // the parsed state without needing a separate `ast_refresh` pass.
+    let completed = handle.lock().drain_completed();
+    for (doc_id, parse_gen) in completed {
+        // Snapshot current doc gen + URI under a brief engine lock —
+        // we'll backfill if the doc still matches the gen this parse
+        // ran against.
+        let host_gen = registry
+            .host(doc_id)
+            .map(|h| h.document().generation())
+            .unwrap_or(u64::MAX);
+        if parse_gen != host_gen {
+            // Doc moved on while parse was in flight; the next
+            // sync tick will spawn a fresh parse for the new gen.
+            bevy::log::info!(
+                "[EngineSync] async parse stale (parse_gen={parse_gen} doc_gen={host_gen}) — discarded for doc={}",
+                doc_id.raw(),
+            );
+            continue;
+        }
+        let parsed_ast = handle.lock().parsed_for_doc(doc_id).cloned();
+        match (parsed_ast, registry.host_mut(doc_id)) {
+            (Some(ast), Some(host)) => {
+                let arc_ast = std::sync::Arc::new(ast);
+                let syntax = crate::document::SyntaxCache {
+                    generation: parse_gen,
+                    ast: arc_ast,
+                    has_errors: false,
+                };
+                let ast_cache = crate::document::AstCache {
+                    generation: parse_gen,
+                    result: Ok(()),
+                };
+                host.document_mut().install_parse_results(ast_cache, syntax);
+                bevy::log::info!(
+                    "[EngineSync] async parse complete doc={} gen={} → backfilled doc.syntax",
+                    doc_id.raw(),
+                    parse_gen,
+                );
+            }
+            (None, _) => {
+                // Strict parse failed (recovered into session via
+                // lenient fallback). Mark doc's AstCache Err so
+                // diagnostics panel knows.
+                if let Some(host) = registry.host_mut(doc_id) {
+                    let syntax = crate::document::SyntaxCache {
+                        generation: parse_gen,
+                        ast: std::sync::Arc::new(
+                            rumoca_session::parsing::ast::StoredDefinition::default(),
+                        ),
+                        has_errors: true,
+                    };
+                    let ast_cache = crate::document::AstCache {
+                        generation: parse_gen,
+                        result: Err("strict parse failed (lenient recovered)".into()),
+                    };
+                    host.document_mut().install_parse_results(ast_cache, syntax);
+                }
+                bevy::log::warn!(
+                    "[EngineSync] async parse strict-failed doc={} gen={}",
+                    doc_id.raw(),
+                    parse_gen,
+                );
+            }
+            (Some(_), None) => {
+                // Doc was closed mid-parse; engine still got the AST.
+            }
+        }
+        let current = cursor.last_synced.get(&doc_id).copied().unwrap_or(0);
+        if parse_gen > current {
+            cursor.last_synced.insert(doc_id, parse_gen);
+        }
+    }
+
+    // ── 2. Collect docs needing sync ──────────────────────────────────
+    // For each doc whose generation has advanced past the cursor,
+    // decide between sync fast-path (fresh strict AST already on doc)
+    // and async path (no AST or stale).
+    enum SyncPlan {
+        Sync(std::sync::Arc<rumoca_session::parsing::ast::StoredDefinition>),
+        Async(String),
+    }
+    let mut to_upsert: Vec<(DocumentId, u64, SyncPlan)> = Vec::new();
     let mut alive: HashSet<DocumentId> = HashSet::new();
     for (doc_id, host) in registry.iter() {
         alive.insert(doc_id);
-        let gen = host.document().generation();
+        let doc = host.document();
+        let gen = doc.generation();
         let needs = match cursor.last_synced.get(&doc_id) {
             Some(prev) => *prev < gen,
             None => true,
         };
-        if needs {
-            let ast = host.document().strict_ast();
-            to_upsert.push((doc_id, gen, ast, host.document().source().to_string()));
+        if !needs {
+            continue;
         }
+        // Fresh strict AST = doc.syntax.generation matches doc.generation
+        // and AstCache reports Ok. Otherwise the cached tree is stale
+        // (post-edit pre-reparse) and re-using it would push stale
+        // bytes into the engine session. Async path handles staleness
+        // by re-parsing.
+        let fresh_ast = if !doc.syntax_is_stale() && !doc.ast_is_stale() {
+            doc.strict_ast()
+        } else {
+            None
+        };
+        let plan = match fresh_ast {
+            Some(ast) => SyncPlan::Sync(ast),
+            None => SyncPlan::Async(doc.source().to_string()),
+        };
+        to_upsert.push((doc_id, gen, plan));
     }
     let removed: Vec<DocumentId> = cursor
         .last_synced
@@ -191,64 +296,42 @@ pub fn drive_engine_sync(
         return;
     }
 
-    // Drain any async parse completions from previous ticks. Each
-    // completion means the engine session is now up-to-date for that
-    // doc — bump the cursor so we don't re-spawn. Bevy adapters can
-    // observe the completion and trigger Index rebuilds in a follow-up
-    // (today the doc's `apply_patch` already calls `rebuild_index`).
-    {
-        let completed = handle.lock().drain_completed();
-        for (doc_id, gen) in completed {
-            bevy::log::info!(
-                "[EngineSync] async parse complete doc={} gen={}",
-                doc_id.raw(),
-                gen,
-            );
-            // Only advance cursor if we don't already have a newer
-            // sync. (User edits could have overshot the gen the parse
-            // started against — a fresh parse is queued already if so.)
-            let current = cursor.last_synced.get(&doc_id).copied().unwrap_or(0);
-            if gen > current {
-                cursor.last_synced.insert(doc_id, gen);
-            }
+    // ── 3. Apply sync upserts + spawn async parses ────────────────────
+    let mut sync_only: Vec<(DocumentId, u64, std::sync::Arc<rumoca_session::parsing::ast::StoredDefinition>)> = Vec::new();
+    let mut async_only: Vec<(DocumentId, u64, String)> = Vec::new();
+    for (doc_id, gen, plan) in to_upsert {
+        match plan {
+            SyncPlan::Sync(ast) => sync_only.push((doc_id, gen, ast)),
+            SyncPlan::Async(src) => async_only.push((doc_id, gen, src)),
         }
     }
-
-    let mut engine = handle.lock();
-    for (doc_id, gen, ast, source) in to_upsert {
-        let src_len = source.len();
-        let t = std::time::Instant::now();
-        if let Some(ast) = ast {
-            // Pre-parsed fast path: the doc already has a strict AST.
-            // Hand it to rumoca's session via `add_parsed_batch` so
-            // the engine doesn't redo the same parse. Cloning the
-            // `StoredDefinition` is unavoidable today (the API takes
-            // by-value); the per-class `Arc`s inside it keep this
-            // shallow.
+    {
+        let mut engine = handle.lock();
+        for (doc_id, gen, ast) in sync_only {
             engine.upsert_document_with_ast(doc_id, (*ast).clone());
             bevy::log::info!(
-                "[EngineSync] upsert(parsed) doc={} gen={} src={}B in {:.1}ms",
+                "[EngineSync] upsert(parsed) doc={} gen={}",
                 doc_id.raw(),
                 gen,
-                src_len,
-                t.elapsed().as_secs_f64() * 1000.0,
             );
             cursor.last_synced.insert(doc_id, gen);
+        }
+        for doc_id in &removed {
+            engine.close_document(*doc_id);
+        }
+    }
+    for doc_id in removed {
+        cursor.last_synced.remove(&doc_id);
+    }
+    // Spawn async parses outside the engine lock — the spawn helper
+    // re-locks briefly to mark pending; the worker re-locks at the
+    // end to install the AST.
+    let pool = bevy::tasks::AsyncComputeTaskPool::get();
+    for (doc_id, gen, source) in async_only {
+        if handle.lock().is_doc_pending(doc_id) {
             continue;
         }
-        // No pre-parsed AST → async path. Don't block the Update tick
-        // on a parse; spawn off-thread, drain the completion next
-        // tick. The engine itself dedupes: re-firing for the same
-        // doc while a parse is in flight is a no-op.
-        if engine.is_doc_pending(doc_id) {
-            // Already parsing; will resolve on a future tick. Don't
-            // bump the cursor — let the completion drain do that.
-            continue;
-        }
-        // Drop the engine guard before spawning so the worker can
-        // re-acquire when it finishes.
-        drop(engine);
-        let pool = bevy::tasks::AsyncComputeTaskPool::get();
+        let src_len = source.len();
         handle.upsert_document_async(doc_id, gen, source, |task| {
             pool.spawn(async move { task() }).detach();
         });
@@ -258,20 +341,6 @@ pub fn drive_engine_sync(
             gen,
             src_len,
         );
-        // Re-acquire for the rest of the loop. (Hot path is the
-        // pre-parsed branch above — async path runs only when the
-        // doc lacks a strict AST, e.g. lazy-created docs after
-        // Phase 2 lands.)
-        engine = handle.lock();
-        // No cursor bump here — the drain step above advances it
-        // when this parse completes.
-        let _ = src_len;
-        let _ = t;
-        continue;
-    }
-    for doc_id in removed {
-        engine.close_document(doc_id);
-        cursor.last_synced.remove(&doc_id);
     }
 }
 

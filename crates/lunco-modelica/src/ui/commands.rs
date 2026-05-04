@@ -1858,9 +1858,12 @@ fn on_open_example_in_workspace(
             format!("within {origin_pkg};\n{renamed}")
         };
         let rewrite_ms = rewrite_only_ms + collect_ms + inject_ms;
-        // 5. Build doc (runs rumoca parse on the bg thread).
+        // 5. Build doc lazily — no parse on the bg thread. The engine
+        //    async sync (drive_engine_sync drain step) parses this
+        //    on the next idle tick and backfills the doc's syntax
+        //    cache. Tab-visible time = read + splice (no parse).
         let t_parse = web_time::Instant::now();
-        let doc = crate::document::ModelicaDocument::with_origin(
+        let doc = crate::document::ModelicaDocument::with_origin_lazy(
             doc_id,
             copy_src,
             lunco_doc::DocumentOrigin::untitled(name_for_task),

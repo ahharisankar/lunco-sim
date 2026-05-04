@@ -349,6 +349,43 @@ impl ModelicaDocument {
         Self::from_parts(id, source, origin, ast, syntax)
     }
 
+    /// Lazy variant of [`Self::with_origin`]: builds the document with
+    /// **no** parse — empty `SyntaxCache` (`StoredDefinition::default`),
+    /// `AstCache` carrying a "needs parse" Err, and `last_source_edit_at`
+    /// set to now so the engine sync system reparses it on the next
+    /// idle Update tick.
+    ///
+    /// Use this for paths where the user is waiting on tab open (open
+    /// example, open file). The bg task constructs the doc instantly,
+    /// the tab paints with a "loading…" overlay, and the engine fills
+    /// in the AST asynchronously. Tab-visible time drops from
+    /// `read + splice + parse` to just `read + splice`.
+    pub fn with_origin_lazy(
+        id: DocumentId,
+        source: impl Into<String>,
+        origin: DocumentOrigin,
+    ) -> Self {
+        let source = source.into();
+        let syntax = Arc::new(SyntaxCache {
+            generation: 0,
+            ast: Arc::new(StoredDefinition::default()),
+            has_errors: false,
+        });
+        let ast = Arc::new(AstCache {
+            generation: 0,
+            result: Err("parse pending".into()),
+        });
+        let mut doc = Self::from_parts(id, source, origin, ast, syntax);
+        // Mark stale so the engine sync system picks the doc up on
+        // the next tick that passes the debounce gate.
+        doc.last_source_edit_at = Some(web_time::Instant::now());
+        // Generation 1 (vs syntax/ast at 0) ensures `ast_is_stale` /
+        // `syntax_is_stale` both report true — the standard signal
+        // for "needs parse".
+        doc.generation = 1;
+        doc
+    }
+
     /// Load a `.mo` file from disk or the in-memory MSL bundle and
     /// build a fresh document. Uses rumoca's content-hash artifact
     /// cache via `parse_files_parallel`, so subsequent loads of a
