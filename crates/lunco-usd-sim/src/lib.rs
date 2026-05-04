@@ -241,7 +241,7 @@ fn process_usd_sim_prims(
             };
             if type_name.as_deref() == Some("PhysicsRevoluteJoint") {
                 if let Some(body1) = read_rel_target(&reader, path, "physics:body1") {
-                    info!("USD joint dispatch: {} → wheel {}", path.as_str(), body1);
+                    debug!("USD joint dispatch: {} → wheel {}", path.as_str(), body1);
                     joint_targets.insert(
                         (prim_path.stage_handle.clone(), body1),
                         path.as_str().to_string(),
