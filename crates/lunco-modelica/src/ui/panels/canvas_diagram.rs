@@ -7384,9 +7384,8 @@ fn resolve_doc_context(world: &World) -> (Option<lunco_doc::DocumentId>, Option<
                 .host(doc_id)
                 .and_then(|h| {
                     h.document()
-                        .ast()
-                        .ast()
-                        .and_then(crate::ast_extract::extract_model_name_from_ast)
+                        .strict_ast()
+                        .and_then(|ast| crate::ast_extract::extract_model_name_from_ast(&ast))
                 })
         })
         .or_else(|| open.and_then(|o| o.detected_name.clone()));

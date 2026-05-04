@@ -6202,7 +6202,7 @@ dependencies = [
  "bevy_egui",
  "lunco-core",
  "lunco-doc",
- "web-time",
+ "lunco-twin-journal",
 ]
 
 [[package]]
@@ -6287,9 +6287,11 @@ dependencies = [
  "lunco-core",
  "lunco-doc",
  "lunco-doc-bevy",
+ "lunco-settings",
  "lunco-storage",
  "lunco-theme",
  "lunco-twin",
+ "lunco-twin-journal",
  "lunco-viz",
  "lunco-workbench",
  "lunco-workspace",

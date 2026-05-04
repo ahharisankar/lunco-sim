@@ -1131,7 +1131,8 @@ impl Document for ModelicaDocument {
         // `ReplaceSource` is expressed as replacing the full buffer —
         // no special-casing needed below. Every op follows the same
         // mutate / bump-generation / refresh-cache / emit-change path.
-        let (range, replacement, change) = op_to_patch(&self.source, &self.ast, op)?;
+        let (range, replacement, change) =
+            op_to_patch(&self.source, &self.ast, &self.syntax.ast, op)?;
         self.apply_patch(range, replacement, change)
     }
 }
@@ -1283,6 +1284,7 @@ fn class_kind_spec_to_index_kind(spec: pretty::ClassKindSpec) -> crate::index::C
 fn op_to_patch(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     op: ModelicaOp,
 ) -> Result<(Range<usize>, String, ModelicaChange), DocumentError> {
     match op {
@@ -1295,7 +1297,7 @@ fn op_to_patch(
             Ok((range, replacement, ModelicaChange::TextReplaced))
         }
         ModelicaOp::AddComponent { class, decl } => {
-            let (r, rp) = compute_add_component_patch(source, ast, &class, &decl)?;
+            let (r, rp) = compute_add_component_patch(source, ast, parsed, &class, &decl)?;
             let change = ModelicaChange::ComponentAdded {
                 class,
                 name: decl.name,
@@ -1303,7 +1305,7 @@ fn op_to_patch(
             Ok((r, rp, change))
         }
         ModelicaOp::AddConnection { class, eq } => {
-            let (r, rp) = compute_add_connection_patch(source, ast, &class, &eq)?;
+            let (r, rp) = compute_add_connection_patch(source, ast, parsed, &class, &eq)?;
             let change = ModelicaChange::ConnectionAdded {
                 class,
                 from: eq.from,
@@ -1312,17 +1314,17 @@ fn op_to_patch(
             Ok((r, rp, change))
         }
         ModelicaOp::RemoveComponent { class, name } => {
-            let (r, rp) = compute_remove_component_patch(source, ast, &class, &name)?;
+            let (r, rp) = compute_remove_component_patch(source, ast, parsed, &class, &name)?;
             let change = ModelicaChange::ComponentRemoved { class, name };
             Ok((r, rp, change))
         }
         ModelicaOp::RemoveConnection { class, from, to } => {
-            let (r, rp) = compute_remove_connection_patch(source, ast, &class, &from, &to)?;
+            let (r, rp) = compute_remove_connection_patch(source, ast, parsed, &class, &from, &to)?;
             let change = ModelicaChange::ConnectionRemoved { class, from, to };
             Ok((r, rp, change))
         }
         ModelicaOp::SetPlacement { class, name, placement } => {
-            let (r, rp) = compute_set_placement_patch(source, ast, &class, &name, &placement)?;
+            let (r, rp) = compute_set_placement_patch(source, ast, parsed, &class, &name, &placement)?;
             let change = ModelicaChange::PlacementChanged {
                 class,
                 component: name,
@@ -1331,7 +1333,7 @@ fn op_to_patch(
             Ok((r, rp, change))
         }
         ModelicaOp::SetParameter { class, component, param, value } => {
-            let (r, rp) = compute_set_parameter_patch(source, ast, &class, &component, &param, &value)?;
+            let (r, rp) = compute_set_parameter_patch(source, ast, parsed, &class, &component, &param, &value)?;
             let change = ModelicaChange::ParameterChanged {
                 class,
                 component,
@@ -1341,7 +1343,7 @@ fn op_to_patch(
             Ok((r, rp, change))
         }
         ModelicaOp::AddPlotNode { class, plot } => {
-            let (r, rp) = compute_add_plot_node_patch(source, ast, &class, &plot)?;
+            let (r, rp) = compute_add_plot_node_patch(source, ast, parsed, &class, &plot)?;
             // Plot edits don't move components or rewire connections;
             // they only affect the diagram-decoration layer. The
             // projection still re-reads the diagram annotation on
@@ -1350,39 +1352,39 @@ fn op_to_patch(
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::RemovePlotNode { class, signal_path } => {
-            let (r, rp) = compute_remove_plot_node_patch(source, ast, &class, &signal_path)?;
+            let (r, rp) = compute_remove_plot_node_patch(source, ast, parsed, &class, &signal_path)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::SetPlotNodeExtent { class, signal_path, x1, y1, x2, y2 } => {
             let (r, rp) = compute_set_plot_node_extent_patch(
-                source, ast, &class, &signal_path, x1, y1, x2, y2,
+                source, ast, parsed, &class, &signal_path, x1, y1, x2, y2,
             )?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::SetPlotNodeTitle { class, signal_path, title } => {
             let (r, rp) = compute_set_plot_node_title_patch(
-                source, ast, &class, &signal_path, &title,
+                source, ast, parsed, &class, &signal_path, &title,
             )?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::SetDiagramTextExtent { class, index, x1, y1, x2, y2 } => {
             let (r, rp) = compute_set_diagram_text_extent_patch(
-                source, ast, &class, index, x1, y1, x2, y2,
+                source, ast, parsed, &class, index, x1, y1, x2, y2,
             )?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::SetDiagramTextString { class, index, text } => {
             let (r, rp) = compute_set_diagram_text_string_patch(
-                source, ast, &class, index, &text,
+                source, ast, parsed, &class, index, &text,
             )?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::RemoveDiagramText { class, index } => {
-            let (r, rp) = compute_remove_diagram_text_patch(source, ast, &class, index)?;
+            let (r, rp) = compute_remove_diagram_text_patch(source, ast, parsed, &class, index)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::AddClass { parent, name, kind, description, partial } => {
-            let (r, rp) = compute_add_class_patch(source, ast, &parent, &name, kind, &description, partial)?;
+            let (r, rp) = compute_add_class_patch(source, ast, parsed, &parent, &name, kind, &description, partial)?;
             let qualified = if parent.is_empty() {
                 name.clone()
             } else {
@@ -1391,12 +1393,12 @@ fn op_to_patch(
             Ok((r, rp, ModelicaChange::ClassAdded { qualified, kind }))
         }
         ModelicaOp::RemoveClass { qualified } => {
-            let (r, rp) = compute_remove_class_patch(source, ast, &qualified)?;
+            let (r, rp) = compute_remove_class_patch(source, ast, parsed, &qualified)?;
             Ok((r, rp, ModelicaChange::ClassRemoved { qualified }))
         }
         ModelicaOp::AddShortClass { parent, name, kind, base, prefixes, modifications } => {
             let (r, rp) = compute_add_short_class_patch(
-                source, ast, &parent, &name, kind, &base, &prefixes, &modifications,
+                source, ast, parsed, &parent, &name, kind, &base, &prefixes, &modifications,
             )?;
             let qualified = if parent.is_empty() {
                 name.clone()
@@ -1406,7 +1408,7 @@ fn op_to_patch(
             Ok((r, rp, ModelicaChange::ClassAdded { qualified, kind }))
         }
         ModelicaOp::AddVariable { class, decl } => {
-            let (r, rp) = compute_add_variable_patch(source, ast, &class, &decl)?;
+            let (r, rp) = compute_add_variable_patch(source, ast, parsed, &class, &decl)?;
             // Variables and typed components share the AST `components`
             // table — emit the same `ComponentAdded` event so panel-side
             // observers and the per-doc Index don't have to special-case
@@ -1421,25 +1423,25 @@ fn op_to_patch(
             // Variables and components share the same AST table — reuse
             // both the source patch helper and the `ComponentRemoved`
             // event so consumers see one signal for both decl kinds.
-            let (r, rp) = compute_remove_component_patch(source, ast, &class, &name)?;
+            let (r, rp) = compute_remove_component_patch(source, ast, parsed, &class, &name)?;
             let change = ModelicaChange::ComponentRemoved { class, name };
             Ok((r, rp, change))
         }
         ModelicaOp::AddEquation { class, eq } => {
-            let (r, rp) = compute_add_equation_patch(source, ast, &class, &eq)?;
+            let (r, rp) = compute_add_equation_patch(source, ast, parsed, &class, &eq)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::AddIconGraphic { class, graphic } => {
-            let (r, rp) = compute_add_named_graphic_patch(source, ast, &class, "Icon", &graphic)?;
+            let (r, rp) = compute_add_named_graphic_patch(source, ast, parsed, &class, "Icon", &graphic)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::AddDiagramGraphic { class, graphic } => {
-            let (r, rp) = compute_add_named_graphic_patch(source, ast, &class, "Diagram", &graphic)?;
+            let (r, rp) = compute_add_named_graphic_patch(source, ast, parsed, &class, "Diagram", &graphic)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::SetExperimentAnnotation { class, start_time, stop_time, tolerance, interval } => {
             let (r, rp) = compute_set_experiment_patch(
-                source, ast, &class, start_time, stop_time, tolerance, interval,
+                source, ast, parsed, &class, start_time, stop_time, tolerance, interval,
             )?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
@@ -1472,18 +1474,17 @@ fn op_to_patch(
 /// named when resolution fails, and an error when the AST is currently
 /// a parse failure.
 fn resolve_class<'a>(
-    ast: &'a AstCache,
+    ast: &AstCache,
+    parsed: &'a StoredDefinition,
     class: &str,
 ) -> Result<&'a rumoca_session::parsing::ast::ClassDef, DocumentError> {
-    let stored = match &ast.result {
-        Ok(s) => s.as_ref(),
-        Err(msg) => {
-            return Err(DocumentError::ValidationFailed(format!(
-                "cannot apply AST op while source has a parse error: {}",
-                msg
-            )));
-        }
-    };
+    if let Err(msg) = &ast.result {
+        return Err(DocumentError::ValidationFailed(format!(
+            "cannot apply AST op while source has a parse error: {}",
+            msg
+        )));
+    }
+    let stored = parsed;
     if class.is_empty() {
         return Err(DocumentError::ValidationFailed(
             "class path is empty".into(),
@@ -1532,10 +1533,11 @@ fn line_start_byte(source: &str, byte_pos: usize) -> usize {
 fn compute_add_component_patch(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     class: &str,
     decl: &ComponentDecl,
 ) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, class)?;
+    let class_def = resolve_class(ast, parsed, class)?;
     // Defensive: refuse to inject a component declaration into a
     // `package` class. Modelica forbids package-level component
     // declarations (per spec: a package may only contain classes,
@@ -1574,10 +1576,11 @@ fn compute_add_component_patch(
 fn compute_add_connection_patch(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     class: &str,
     eq: &ConnectEquation,
 ) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, class)?;
+    let class_def = resolve_class(ast, parsed, class)?;
 
     let end_name_byte = class_def
         .end_name_token
@@ -1671,10 +1674,11 @@ fn find_statement_terminator(source: &str, from_byte: usize) -> Option<usize> {
 fn compute_remove_component_patch(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     class: &str,
     name: &str,
 ) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, class)?;
+    let class_def = resolve_class(ast, parsed, class)?;
     let component = class_def.components.get(name).ok_or_else(|| {
         DocumentError::ValidationFailed(format!(
             "component `{}` not found in class `{}`",
@@ -1716,12 +1720,13 @@ fn cref_matches_port(
 fn compute_remove_connection_patch(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     class: &str,
     from: &pretty::PortRef,
     to: &pretty::PortRef,
 ) -> Result<(Range<usize>, String), DocumentError> {
     use rumoca_session::parsing::ast::Equation;
-    let class_def = resolve_class(ast, class)?;
+    let class_def = resolve_class(ast, parsed, class)?;
     let eq = class_def
         .equations
         .iter()
@@ -1869,11 +1874,12 @@ fn find_placement_span(source: &str, span: Range<usize>) -> Option<Range<usize>>
 fn compute_set_placement_patch(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     class: &str,
     name: &str,
     placement: &pretty::Placement,
 ) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, class)?;
+    let class_def = resolve_class(ast, parsed, class)?;
     let component = class_def.components.get(name).ok_or_else(|| {
         DocumentError::ValidationFailed(format!(
             "component `{}` not found in class `{}`",
@@ -1924,12 +1930,13 @@ fn compute_set_placement_patch(
 fn compute_set_parameter_patch(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     class: &str,
     component: &str,
     param: &str,
     value: &str,
 ) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, class)?;
+    let class_def = resolve_class(ast, parsed, class)?;
     let comp = class_def.components.get(component).ok_or_else(|| {
         DocumentError::ValidationFailed(format!(
             "component `{}` not found in class `{}`",
@@ -2319,10 +2326,11 @@ fn parse_signal_arg(source: &str, inner: Range<usize>) -> Option<String> {
 fn compute_add_plot_node_patch(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     class: &str,
     plot: &pretty::LunCoPlotNodeSpec,
 ) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, class)?;
+    let class_def = resolve_class(ast, parsed, class)?;
     let body = (class_def.location.start as usize)..(class_def.location.end as usize);
     let new_entry = pretty::lunco_plot_node_inner(plot);
 
@@ -2398,10 +2406,11 @@ fn compute_add_plot_node_patch(
 fn compute_remove_plot_node_patch(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     class: &str,
     signal_path: &str,
 ) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, class)?;
+    let class_def = resolve_class(ast, parsed, class)?;
     let body = (class_def.location.start as usize)..(class_def.location.end as usize);
     let (_ann, _diagram_outer, diagram_inner) =
         find_class_diagram(source, body).ok_or_else(|| {
@@ -2464,6 +2473,7 @@ fn compute_remove_plot_node_patch(
 fn compute_set_plot_node_extent_patch(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     class: &str,
     signal_path: &str,
     x1: f32,
@@ -2471,7 +2481,7 @@ fn compute_set_plot_node_extent_patch(
     x2: f32,
     y2: f32,
 ) -> Result<(Range<usize>, String), DocumentError> {
-    let entry = locate_plot_entry(source, ast, class, signal_path)?;
+    let entry = locate_plot_entry(source, ast, parsed, class, signal_path)?;
     let inner_start = entry.start + "__LunCo_PlotNode(".len();
     let inner_end = entry.end - 1;
     // Locate the existing `extent` arg span (named-arg form). If
@@ -2493,11 +2503,12 @@ fn compute_set_plot_node_extent_patch(
 fn compute_set_plot_node_title_patch(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     class: &str,
     signal_path: &str,
     title: &str,
 ) -> Result<(Range<usize>, String), DocumentError> {
-    let entry = locate_plot_entry(source, ast, class, signal_path)?;
+    let entry = locate_plot_entry(source, ast, parsed, class, signal_path)?;
     let inner_start = entry.start + "__LunCo_PlotNode(".len();
     let inner_end = entry.end - 1;
     let escaped = title.replace('\\', "\\\\").replace('"', "\\\"");
@@ -2546,10 +2557,11 @@ fn compute_set_plot_node_title_patch(
 fn locate_plot_entry(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     class: &str,
     signal_path: &str,
 ) -> Result<Range<usize>, DocumentError> {
-    let class_def = resolve_class(ast, class)?;
+    let class_def = resolve_class(ast, parsed, class)?;
     let body = (class_def.location.start as usize)..(class_def.location.end as usize);
     let (_a, _d, diagram_inner) =
         find_class_diagram(source, body).ok_or_else(|| {
@@ -2697,10 +2709,11 @@ fn trim_trailing_ws_back(source: &str, span: Range<usize>) -> usize {
 fn locate_diagram_text_entry(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     class: &str,
     target_index: usize,
 ) -> Result<Range<usize>, DocumentError> {
-    let class_def = resolve_class(ast, class)?;
+    let class_def = resolve_class(ast, parsed, class)?;
     let body = (class_def.location.start as usize)..(class_def.location.end as usize);
     let (_a, _d, diagram_inner) =
         find_class_diagram(source, body).ok_or_else(|| {
@@ -2733,6 +2746,7 @@ fn locate_diagram_text_entry(
 fn compute_set_diagram_text_extent_patch(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     class: &str,
     index: usize,
     x1: f32,
@@ -2740,7 +2754,7 @@ fn compute_set_diagram_text_extent_patch(
     x2: f32,
     y2: f32,
 ) -> Result<(Range<usize>, String), DocumentError> {
-    let entry = locate_diagram_text_entry(source, ast, class, index)?;
+    let entry = locate_diagram_text_entry(source, ast, parsed, class, index)?;
     let inner_start = entry.start + "Text(".len();
     let inner_end = entry.end - 1;
     let extent_value = find_named_arg_value_span(source, inner_start..inner_end, "extent")
@@ -2760,11 +2774,12 @@ fn compute_set_diagram_text_extent_patch(
 fn compute_set_diagram_text_string_patch(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     class: &str,
     index: usize,
     text: &str,
 ) -> Result<(Range<usize>, String), DocumentError> {
-    let entry = locate_diagram_text_entry(source, ast, class, index)?;
+    let entry = locate_diagram_text_entry(source, ast, parsed, class, index)?;
     let inner_start = entry.start + "Text(".len();
     let inner_end = entry.end - 1;
     let value = find_named_arg_value_span(source, inner_start..inner_end, "textString")
@@ -2778,11 +2793,12 @@ fn compute_set_diagram_text_string_patch(
 fn compute_remove_diagram_text_patch(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     class: &str,
     index: usize,
 ) -> Result<(Range<usize>, String), DocumentError> {
-    let entry = locate_diagram_text_entry(source, ast, class, index)?;
-    let class_def = resolve_class(ast, class)?;
+    let entry = locate_diagram_text_entry(source, ast, parsed, class, index)?;
+    let class_def = resolve_class(ast, parsed, class)?;
     let body = (class_def.location.start as usize)..(class_def.location.end as usize);
     let (_a, _d, diagram_inner) =
         find_class_diagram(source, body).ok_or_else(|| {
@@ -2941,6 +2957,7 @@ fn match_entry(
 fn compute_add_class_patch(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     parent: &str,
     name: &str,
     kind: pretty::ClassKindSpec,
@@ -2963,7 +2980,7 @@ fn compute_add_class_patch(
         let pos = source.len();
         return Ok((pos..pos, format!("{prefix}{block}")));
     }
-    let parent_def = resolve_class(ast, parent)?;
+    let parent_def = resolve_class(ast, parsed, parent)?;
     let end_byte = parent_def
         .end_name_token
         .as_ref()
@@ -2997,9 +3014,10 @@ fn compute_add_class_patch(
 fn compute_remove_class_patch(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     qualified: &str,
 ) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, qualified)?;
+    let class_def = resolve_class(ast, parsed, qualified)?;
     let raw_start = class_def.location.start as usize;
     // class_def.location.end stops before `end`; advance to past the
     // terminating `;` of `end <Name>;`.
@@ -3022,6 +3040,7 @@ fn compute_remove_class_patch(
 fn compute_add_short_class_patch(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     parent: &str,
     name: &str,
     kind: pretty::ClassKindSpec,
@@ -3048,7 +3067,7 @@ fn compute_add_short_class_patch(
         let unindented = line.strip_prefix(&body_indent).unwrap_or(&line).to_string();
         return Ok((pos..pos, format!("{prefix}{unindented}")));
     }
-    let parent_def = resolve_class(ast, parent)?;
+    let parent_def = resolve_class(ast, parsed, parent)?;
     let end_byte = parent_def
         .end_name_token
         .as_ref()
@@ -3068,10 +3087,11 @@ fn compute_add_short_class_patch(
 fn compute_add_variable_patch(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     class: &str,
     decl: &pretty::VariableDecl,
 ) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, class)?;
+    let class_def = resolve_class(ast, parsed, class)?;
     let insertion_byte = class_section_insertion_point(class_def).ok_or_else(|| {
         DocumentError::ValidationFailed(format!(
             "could not locate insertion point in class `{class}`"
@@ -3085,10 +3105,11 @@ fn compute_add_variable_patch(
 fn compute_add_equation_patch(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     class: &str,
     eq: &pretty::EquationDecl,
 ) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, class)?;
+    let class_def = resolve_class(ast, parsed, class)?;
     let end_name_byte = class_def
         .end_name_token
         .as_ref()
@@ -3114,11 +3135,12 @@ fn compute_add_equation_patch(
 fn compute_add_named_graphic_patch(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     class: &str,
     layer: &str,
     graphic: &pretty::GraphicSpec,
 ) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, class)?;
+    let class_def = resolve_class(ast, parsed, class)?;
     let body = (class_def.location.start as usize)..(class_def.location.end as usize);
     let new_entry = pretty::graphic_inner(graphic);
 
@@ -3193,13 +3215,14 @@ fn find_class_named_graphics_layer(
 fn compute_set_experiment_patch(
     source: &str,
     ast: &AstCache,
+    parsed: &rumoca_session::parsing::ast::StoredDefinition,
     class: &str,
     start_time: f64,
     stop_time: f64,
     tolerance: f64,
     interval: f64,
 ) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, class)?;
+    let class_def = resolve_class(ast, parsed, class)?;
     let body = (class_def.location.start as usize)..(class_def.location.end as usize);
     let new_inner = pretty::experiment_inner(start_time, stop_time, tolerance, interval);
 

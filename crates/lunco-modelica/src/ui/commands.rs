@@ -3370,8 +3370,8 @@ fn on_inspect_active_doc(_trigger: On<InspectActiveDoc>, mut commands: Commands)
             document.source().len(),
             cache.generation,
         );
-        match cache.result.as_ref() {
-            Ok(ast) => {
+        match (cache.result.as_ref(), document.strict_ast()) {
+            (Ok(()), Some(ast)) => {
                 bevy::log::info!(
                     "[InspectActiveDoc]   parse OK; within={:?}",
                     ast.within.as_ref().map(|w| w.to_string()),
@@ -3403,7 +3403,12 @@ fn on_inspect_active_doc(_trigger: On<InspectActiveDoc>, mut commands: Commands)
                     dump(n, c, 0);
                 }
             }
-            Err(e) => {
+            (Ok(()), None) => {
+                bevy::log::warn!(
+                    "[InspectActiveDoc]   strict result OK but no AST available — caches out of sync"
+                );
+            }
+            (Err(e), _) => {
                 bevy::log::warn!("[InspectActiveDoc]   parse ERR: {}", e);
             }
         }

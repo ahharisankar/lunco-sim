@@ -86,7 +86,7 @@ pub fn summarize_op(op: &ModelicaOp) -> Value {
         ModelicaOp::AddPlotNode { class, plot } => json!({
             "kind": "AddPlotNode",
             "class": class,
-            "signal": plot.signal_path,
+            "signal": plot.signal,
         }),
         ModelicaOp::RemovePlotNode { class, signal_path } => json!({
             "kind": "RemovePlotNode",
