@@ -735,17 +735,14 @@ pub fn import_model_to_diagram_from_ast(
         // resolver-lambda plumbing.
         if let Some(def) = component_def.as_mut() {
             let qualified = def.msl_path.clone();
-            // Local-first: doc AST has the answer for self-contained
-            // models — zero locks, zero MSL parses. Engine fallback
-            // only when class is genuinely cross-package.
-            let local_icon = crate::annotations::extract_icon_from_local_ast(&qualified, &*ast);
-            if let Some(icon) = local_icon {
-                def.icon_graphics = Some(icon);
-            } else if let Some(handle) = crate::engine_resource::global_engine_handle() {
-                if let Some(icon) = crate::annotations::extract_icon_via_engine(
-                    &qualified,
-                    &mut handle.lock(),
-                ) {
+            // Engine owns icon resolution + caching. One API,
+            // memoised, never blocks on disk. Returns None when the
+            // class isn't in the session yet (cold MSL); caller
+            // renders a default icon and a later projection picks
+            // up the resolved icon once the async warmer lands the
+            // class.
+            if let Some(handle) = crate::engine_resource::global_engine_handle() {
+                if let Some(icon) = handle.lock().icon_for(&qualified) {
                     def.icon_graphics = Some(icon);
                 }
             }
@@ -1000,16 +997,7 @@ fn register_local_class(
     // skips registration; the next projection (after the sync system
     // catches up) picks it up.
     let icon = crate::engine_resource::global_engine_handle()
-        .and_then(|handle| {
-            // Local-first AST lookup; engine only for cross-package.
-            crate::annotations::extract_icon_from_local_ast(&class_context, ast)
-                .or_else(|| {
-                    crate::annotations::extract_icon_via_engine(
-                        &class_context,
-                        &mut handle.lock(),
-                    )
-                })
-        });
+        .and_then(|handle| handle.lock().icon_for(&class_context));
     if icon.is_none() {
         let _ = class_def;
         return;

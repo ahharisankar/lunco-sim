@@ -589,7 +589,7 @@ impl NodeVisual for IconNodeVisual {
             // shows the real icon.
             let resolved_icon = candidates.into_iter().find_map(|c| {
                 let handle = crate::engine_resource::global_engine_handle()?;
-                crate::annotations::extract_icon_via_engine(&c, &mut handle.lock())
+                handle.lock().icon_for(&c)
             });
             if let Some(icon) = resolved_icon {
                 {
@@ -6416,20 +6416,10 @@ fn empty_overlay_class_info(
         }
         None => class_name.to_string(),
     };
-    // Local-first: the doc AST already has the answer for self-
-    // contained classes. Engine fallback only when the class extends
-    // something cross-package.
-    let icon = crate::annotations::extract_icon_from_local_ast(&class_context, &ast_arc)
-        .or_else(|| {
-            world
-                .get_resource::<crate::engine_resource::ModelicaEngineHandle>()
-                .and_then(|handle| {
-                    crate::annotations::extract_icon_via_engine(
-                        &class_context,
-                        &mut handle.lock(),
-                    )
-                })
-        });
+    // Engine owns icon resolution (cached, AST-aware).
+    let icon = world
+        .get_resource::<crate::engine_resource::ModelicaEngineHandle>()
+        .and_then(|handle| handle.lock().icon_for(&class_context));
     let class_type = match class.class_type {
         ClassType::Model => Some("model"),
         ClassType::Block => Some("block"),

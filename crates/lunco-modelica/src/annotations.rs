@@ -676,109 +676,11 @@ pub fn extract_icon(annotations: &[Expression]) -> Option<Icon> {
     extract_icon_with_visibility(annotations, &std::collections::HashSet::new())
 }
 
-/// Resolve `qualified` against the doc's own AST and extract its
-/// `Icon(...)`. Tries the class's own annotation first; if absent,
-/// walks `extends` clauses *locally* (only resolves within the same
-/// `StoredDefinition`) and recurses. Returns `None` when the class
-/// isn't in this AST or its extends chain reaches outside it.
-///
-/// Use this *before* [`extract_icon_via_engine`]: for self-contained
-/// docs (every Modelica file with no `extends MSL.X`) the local walk
-/// hits in microseconds, with zero engine locks and zero MSL parses.
-/// Engine fallback only fires for genuine cross-package inheritance.
-///
-/// AST-as-source-of-truth: the local AST has the answer when the
-/// answer is local. Don't pay the engine round-trip for it.
-pub fn extract_icon_from_local_ast(
-    qualified: &str,
-    ast: &rumoca_session::parsing::ast::StoredDefinition,
-) -> Option<Icon> {
-    let class = lookup_class_in_local_ast(qualified, ast)?;
-    if let Some(icon) = extract_icon(&class.annotation) {
-        return Some(icon);
-    }
-    // Own class has no Icon — try local `extends` bases.
-    for ext in &class.extends {
-        let base = ext.base_name.to_string();
-        if base.is_empty() {
-            continue;
-        }
-        // Resolution candidates, in MLS § 5 lookup order:
-        //   1. Absolute path (when the source wrote one).
-        //   2. Sibling under each ancestor scope of `qualified`.
-        //   3. Top-level fallback.
-        let candidates: Vec<String> = if base.contains('.') {
-            vec![base.clone()]
-        } else {
-            let mut cands = Vec::new();
-            let mut scope = qualified;
-            while let Some(dot) = scope.rfind('.') {
-                scope = &scope[..dot];
-                cands.push(format!("{}.{}", scope, base));
-            }
-            cands.push(base.clone());
-            cands
-        };
-        for cand in candidates {
-            if let Some(icon) = extract_icon_from_local_ast(&cand, ast) {
-                return Some(icon);
-            }
-        }
-    }
-    None
-}
-
-fn lookup_class_in_local_ast<'a>(
-    qualified: &str,
-    ast: &'a rumoca_session::parsing::ast::StoredDefinition,
-) -> Option<&'a rumoca_session::parsing::ast::ClassDef> {
-    let segments: Vec<&str> = qualified.split('.').collect();
-    if segments.is_empty() {
-        return None;
-    }
-
-    // Direct path: ast.classes[seg0].classes[seg1]...
-    if let Some(found) = walk_dotted(&segments, ast) {
-        return Some(found);
-    }
-
-    // Bare-name fallback: a component declared as `Tank tank(...)`
-    // inside `package AnnotatedRocketStage` resolves "Tank" against
-    // the package, not the doc top level. Walk every top-level
-    // package in the doc trying the segments as a relative path.
-    // First match wins. AST-as-source-of-truth: the answer IS in
-    // this AST, just one nesting level down.
-    for class in ast.classes.values() {
-        if let Some(found) = walk_dotted_in_class(&segments, class) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-fn walk_dotted<'a>(
-    segments: &[&str],
-    ast: &'a rumoca_session::parsing::ast::StoredDefinition,
-) -> Option<&'a rumoca_session::parsing::ast::ClassDef> {
-    let first = *segments.first()?;
-    let mut current = ast.classes.get(first)?;
-    for seg in &segments[1..] {
-        current = current.classes.get(*seg)?;
-    }
-    Some(current)
-}
-
-fn walk_dotted_in_class<'a>(
-    segments: &[&str],
-    class: &'a rumoca_session::parsing::ast::ClassDef,
-) -> Option<&'a rumoca_session::parsing::ast::ClassDef> {
-    let first = *segments.first()?;
-    let mut current = class.classes.get(first)?;
-    for seg in &segments[1..] {
-        current = current.classes.get(*seg)?;
-    }
-    Some(current)
-}
+// Panel-side icon resolution lives on the engine
+// (`crate::engine::ModelicaEngine::icon_for`). Removed:
+// `extract_icon_from_local_ast` + scope-walk helpers — duplicated
+// the engine's session lookup. Single source of truth: panels call
+// `engine.icon_for(qualified)`.
 
 /// Same as [`extract_icon`] but skips graphic primitives whose
 /// `visible=` flag resolves to `false`. The `falsy_params` set lists

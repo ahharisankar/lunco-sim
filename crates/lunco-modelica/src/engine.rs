@@ -67,6 +67,15 @@ pub struct ModelicaEngine {
     /// `DocumentId` → URI used inside the session. Stable for the
     /// document's lifetime; freed on [`Self::close_document`].
     uri_for_doc: HashMap<DocumentId, String>,
+    /// Memoised result of `icon_for(qualified)`. Engine owns icon
+    /// resolution; panels just ask. Keyed by qualified class name.
+    /// Inner `Option` distinguishes "computed and class has no icon"
+    /// (Some(None)) from "not in cache yet" (entry absent). The
+    /// outer `HashMap` is cleared in bulk on every `upsert_document`
+    /// — coarse but correct: edits invalidate every icon since cross-
+    /// file inheritance chains can shift on any change. Future:
+    /// per-doc invalidation via fingerprint when profiling demands.
+    icon_cache: HashMap<String, Option<crate::annotations::Icon>>,
 }
 
 impl Default for ModelicaEngine {
@@ -80,6 +89,7 @@ impl ModelicaEngine {
         Self {
             session: Session::default(),
             uri_for_doc: HashMap::new(),
+            icon_cache: HashMap::new(),
         }
     }
 
@@ -98,6 +108,12 @@ impl ModelicaEngine {
     pub fn upsert_document(&mut self, doc_id: DocumentId, source: &str) -> Result<(), String> {
         let uri = self.uri(doc_id);
         self.uri_for_doc.entry(doc_id).or_insert_with(|| uri.clone());
+        // Bulk-flush the icon cache. Any class in any open doc may
+        // resolve through this updated source (cross-file inheritance);
+        // safest to recompute on demand. rumoca's content-hash cache
+        // makes the underlying inheritance walk near-free for unchanged
+        // sources, so the flush only costs first-paint per class.
+        self.icon_cache.clear();
         self.session
             .add_document(&uri, source)
             .map_err(|e| e.to_string())
@@ -127,6 +143,59 @@ impl ModelicaEngine {
         if let Some(uri) = self.uri_for_doc.remove(&doc_id) {
             self.session.remove_document(&uri);
         }
+        self.icon_cache.clear();
+    }
+
+    /// Resolved + merged Icon for `qualified`, memoised.
+    ///
+    /// **Single AST-aware entry point for icon resolution.** Panels
+    /// must use this — never call [`crate::annotations::extract_icon`]
+    /// or [`crate::annotations::extract_icon_via_engine`] directly.
+    /// Centralising here gives:
+    ///
+    /// - One cache, valid until the next edit (cleared by
+    ///   [`Self::upsert_document`] / [`Self::close_document`]).
+    /// - One inheritance-walk implementation (rumoca's
+    ///   `class_inherited_annotations_query` + its content-hash
+    ///   cache).
+    /// - Off-thread-safe: never reads from disk, never spawns a
+    ///   parse. If `qualified` isn't in the session yet, returns
+    ///   `None` and the caller renders a default icon. A subsequent
+    ///   render after the class lands picks up the resolved icon.
+    ///
+    /// AST-as-source-of-truth: the engine's session IS the AST
+    /// store; consulting it is consulting the AST.
+    pub fn icon_for(&mut self, qualified: &str) -> Option<crate::annotations::Icon> {
+        if let Some(hit) = self.icon_cache.get(qualified) {
+            return hit.clone();
+        }
+        // Direct lookup first.
+        let mut icon = crate::annotations::extract_icon_via_engine(qualified, self);
+        // If miss and the name looks bare (no dot), try every
+        // top-level package in every parsed doc as a scope prefix.
+        // Modelica § 5 lookup: a `Tank` reference inside
+        // `package AnnotatedRocketStage` resolves to
+        // `AnnotatedRocketStage.Tank`. The session already has all
+        // open docs; iterate their roots.
+        if icon.is_none() && !qualified.contains('.') {
+            // Collect URIs first to drop the borrow on `self`.
+            let uris: Vec<String> = self.uri_for_doc.values().cloned().collect();
+            let mut prefixes: Vec<String> = Vec::new();
+            for uri in &uris {
+                if let Some(parsed) = self.session.parsed_file_query(uri) {
+                    prefixes.extend(parsed.classes.keys().cloned());
+                }
+            }
+            for prefix in prefixes {
+                let cand = format!("{prefix}.{qualified}");
+                if let Some(found) = crate::annotations::extract_icon_via_engine(&cand, self) {
+                    icon = Some(found);
+                    break;
+                }
+            }
+        }
+        self.icon_cache.insert(qualified.to_string(), icon.clone());
+        icon
     }
 
     /// Load a library (MSL or third-party) into the session as a
