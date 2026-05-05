@@ -525,7 +525,7 @@ impl Plugin for ModelicaUiPlugin {
         app.register_settings_section::<panels::journal::JournalPanelSettings>();
 
         // MSL class cache lives inside `class_cache::msl_engine` —
-        // no Bevy plugin / resource needed. `peek_or_load_msl_class`
+        // no Bevy plugin / resource needed. `peek_or_load_msl_class_blocking`
         // routes through the static engine; drill-in spawns its own
         // task that ultimately consults the same session.
 

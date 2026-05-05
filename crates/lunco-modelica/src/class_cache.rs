@@ -2,7 +2,7 @@
 //!
 //! Routes all MSL class lookups through the workbench's single
 //! [`crate::engine_resource::ModelicaEngineHandle`] (workspace +
-//! libraries unified). Misses on `peek_or_load_msl_class` resolve a
+//! libraries unified). Misses on `peek_or_load_msl_class_blocking` resolve a
 //! qualified name to a file via [`crate::library_fs`], read source
 //! bytes from `lunco_assets::msl::global_msl_source`, and feed the
 //! result into the workspace engine's session via `add_document`.
@@ -64,7 +64,7 @@ impl MslLookupMode {
     ) -> Option<Arc<rumoca_session::parsing::ast::ClassDef>> {
         match self {
             Self::Cached => peek_msl_class_cached(qualified),
-            Self::Loading => peek_or_load_msl_class(qualified),
+            Self::Loading => peek_or_load_msl_class_blocking(qualified),
         }
     }
 }
@@ -89,7 +89,7 @@ fn read_msl_source_bytes(path: &std::path::Path) -> Option<String> {
 /// matches the previous static-MSL-engine implementation: a None
 /// during boot lets icon/connector resolvers fall back to defaults
 /// until MSL lands.
-pub fn peek_or_load_msl_class(
+pub fn peek_or_load_msl_class_blocking(
     qualified: &str,
 ) -> Option<Arc<rumoca_session::parsing::ast::ClassDef>> {
     let handle = crate::engine_resource::global_engine_handle()?;
@@ -104,7 +104,7 @@ pub fn peek_or_load_msl_class(
     engine.class_def(qualified).map(Arc::new)
 }
 
-/// Non-blocking variant of [`peek_or_load_msl_class`] — returns the
+/// Non-blocking variant of [`peek_or_load_msl_class_blocking`] — returns the
 /// `Arc<ClassDef>` if the engine session already holds it, and
 /// `None` *without triggering a load* on a miss.
 ///

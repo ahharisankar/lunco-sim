@@ -32,19 +32,6 @@ fn parse(source: &str) -> Option<StoredDefinition> {
     parse_to_ast(source, "model.mo").ok()
 }
 
-/// Public best-effort parse: returns the strict-parsed AST if it
-/// succeeds, the recovered/lenient AST otherwise. Use this when you
-/// have raw source bytes and want to walk *some* AST regardless of
-/// whether strict parsing fails on a semantic error.
-///
-/// The cosim dispatch path (`lunco-usd-sim::cosim::dispatch_modelica`)
-/// uses this before calling the `_from_ast` extract helpers — one
-/// parse instead of three string-call re-parses. Same engine that
-/// `extract_icon_via_engine` and `Session::recovered_file_query` use.
-pub fn parse_source_best_effort(source: &str, file_label: &str) -> StoredDefinition {
-    let syntax = rumoca_phase_parse::parse_to_syntax(source, file_label);
-    syntax.best_effort().clone()
-}
 
 // ---------------------------------------------------------------------------
 // Public extraction functions (drop-in replacements for regex versions)
@@ -344,26 +331,6 @@ pub fn extract_variable_names_from_ast(ast: &StoredDefinition) -> Vec<String> {
     names
 }
 
-/// Extract input variable names **without** default values.
-///
-/// These are true runtime-settable slots that can be changed via `set_input()`
-/// without recompilation.
-///
-/// Only returns inputs **without** binding expressions. Inputs with defaults
-/// like `input Real g = 9.81` are treated as parameters by the Modelica
-/// compiler (they become constants in the DAE, not runtime-settable slots).
-///
-/// This is a drop-in replacement for the regex-based `extract_input_names`.
-pub fn extract_input_names(source: &str) -> Vec<String> {
-    let ast = match parse(source) {
-        Some(a) => a,
-        None => return Vec::new(),
-    };
-
-    let mut inputs = Vec::new();
-    collect_input_names_from_classes(&ast.classes, &mut inputs);
-    inputs
-}
 
 /// AST-based variant — see `extract_parameters_from_ast`.
 pub fn extract_input_names_from_ast(ast: &StoredDefinition) -> Vec<String> {

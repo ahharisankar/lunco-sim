@@ -31,10 +31,7 @@ use std::collections::HashMap;
 
 use lunco_core::{Command, on_command, register_commands};
 
-use crate::ast_extract::{
-    extract_input_names, extract_inputs_with_defaults, extract_model_name,
-    extract_parameters, hash_content,
-};
+use crate::ast_extract::hash_content;
 use crate::ui::panels::code_editor::EditorBufferState;
 use crate::ui::{CompileState, CompileStates, ModelicaDocumentRegistry, WorkbenchState};
 use crate::{ModelicaChannels, ModelicaCommand, ModelicaModel};
@@ -893,7 +890,7 @@ fn sync_editor_buffer_to_source(
     }
     editor.text = source.to_string();
     editor.line_starts = new_starts.into();
-    editor.detected_name = extract_model_name(source);
+    editor.detected_name = crate::ast_extract::extract_model_name(source);
     editor.source_hash = hash_content(source);
     workbench.editor_buffer = source.to_string();
 }
