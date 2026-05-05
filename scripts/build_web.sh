@@ -262,6 +262,15 @@ generate_bindings() {
         rm -rf "$worker_dist_dir"
         mkdir -p "$worker_dist_dir"
         cp "$worker_bindgen_dir"/* "$worker_dist_dir/"
+        # Web Worker entry shim. wasm-bindgen --target web exports `init`
+        # but doesn't run it; this tiny module imports + calls it so the
+        # `#[wasm_bindgen(start)]` worker entry actually fires.
+        local worker_bootstrap="$PROJECT_DIR/crates/$crate/web/worker_bootstrap.js"
+        if [ -f "$worker_bootstrap" ]; then
+            cp "$worker_bootstrap" "$worker_dist_dir/worker_bootstrap.js"
+        else
+            warn "No worker_bootstrap.js at $worker_bootstrap — worker won't init"
+        fi
         local worker_size
         worker_size=$(du -h "$worker_dist_dir/${worker_bin}_bg.wasm" | cut -f1)
         info "Worker bundle: $worker_size at $worker_dist_dir"

@@ -184,6 +184,17 @@ pub fn run() -> Result<(), JsValue> {
                     ),
                 );
             }
+            WireMessage::Ping(tag) => {
+                post_log(
+                    &scope_for_cb,
+                    format!(
+                        "pong: {tag} (msl={})",
+                        lunco_modelica::msl_remote::global_parsed_msl()
+                            .map(|m| m.len())
+                            .unwrap_or(0)
+                    ),
+                );
+            }
         }
     }) as Box<dyn FnMut(MessageEvent)>);
 
@@ -192,6 +203,11 @@ pub fn run() -> Result<(), JsValue> {
         *slot.borrow_mut() = Some(onmessage);
     });
 
+    // Echo a hello back to main so the page knows the worker
+    // wasm finished init and onmessage is wired. Without this the only
+    // way to know the worker came up was to send a ping; if anything
+    // panicked during init the page just silently never got results.
+    post_log(&scope, "ready (worker wasm init complete)");
     web_sys::console::log_1(&"[lunica_worker] ready".into());
     Ok(())
 }

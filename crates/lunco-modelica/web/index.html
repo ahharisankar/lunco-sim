@@ -81,7 +81,13 @@
     </div>
     <canvas id="bevy"></canvas>
     <script type="module">
-        import init from './lunica_web.js';
+        import init, { __lc_test_worker_ping, __lc_test_dispatch_compile } from './lunica_web.js';
+        // Expose dev-side bridges to test the off-thread worker round-trip
+        // from the Console without going through canvas clicks:
+        //   __lc_test_worker_ping('hi')                — pings worker
+        //   __lc_test_dispatch_compile(model, source)  — fires Compile cmd
+        window.__lc_test_worker_ping = __lc_test_worker_ping;
+        window.__lc_test_dispatch_compile = __lc_test_dispatch_compile;
 
         const root   = document.getElementById('loading');
         const phaseE = root.querySelector('.phase');

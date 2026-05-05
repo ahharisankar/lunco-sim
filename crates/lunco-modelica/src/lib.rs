@@ -705,6 +705,9 @@ fn build_modelica_core(app: &mut App) {
         // channel the existing `handle_modelica_responses` system drains.
         // Cheap to clone; the original still goes into ModelicaChannels.
         let _ = worker_transport::register_result_sender(tx_res.clone());
+        // Same trick on the command side so the JS test bridge can post
+        // commands without going through the UI.
+        let _ = worker_transport::register_command_sender(tx_cmd.clone());
         app.insert_resource(ModelicaChannels { tx: tx_cmd, rx: rx_res, rx_cmd, tx_res });
     }
 

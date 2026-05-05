@@ -75,6 +75,11 @@ pub enum WireMessage {
     /// own MSL install lands. Worker uses this to seed
     /// `ModelicaCompiler::new`'s session before the first Compile.
     InstallParsedMsl(Vec<(String, rumoca_session::parsing::StoredDefinition)>),
+    /// Diagnostic round-trip — worker echoes back as a `WireResult::Log`.
+    /// Used by the test bridge (`window.__lc_test_worker_ping`) to confirm
+    /// the worker is alive and responding without sending an actual
+    /// Modelica command.
+    Ping(String),
 }
 
 /// Wire-format envelope from worker → main. Same multiplexing principle as
@@ -115,6 +120,11 @@ static WORKER: OnceLock<WorkerHandle> = OnceLock::new();
 /// Set once at startup; drained by the existing
 /// `worker::handle_modelica_responses` system through `ModelicaChannels.rx`.
 static RESULT_TX: OnceLock<Sender<ModelicaResult>> = OnceLock::new();
+/// Process-wide sender for `ModelicaCommand`s — same handle the Bevy
+/// systems write to via `ModelicaChannels.tx`. Used by the
+/// `__lc_test_dispatch_compile` JS bridge to fire commands without going
+/// through the UI (for autonomous test loops).
+static COMMAND_TX: OnceLock<crossbeam_channel::Sender<ModelicaCommand>> = OnceLock::new();
 
 thread_local! {
     /// Holds the `onmessage` closure for the lifetime of the page so the
@@ -130,6 +140,15 @@ thread_local! {
 /// `ModelicaPlugin` setup; idempotent (later calls are silently dropped).
 pub fn register_result_sender(tx_res: Sender<ModelicaResult>) -> bool {
     RESULT_TX.set(tx_res).is_ok()
+}
+
+/// Stash the command-side sender so the dev-test JS bridge can post
+/// commands directly without going through the UI. Same handle as
+/// `ModelicaChannels.tx`. Idempotent.
+pub fn register_command_sender(
+    tx_cmd: crossbeam_channel::Sender<ModelicaCommand>,
+) -> bool {
+    COMMAND_TX.set(tx_cmd).is_ok()
 }
 
 /// `true` once a JS Worker has been attached via [`install_worker`]. The
@@ -224,18 +243,82 @@ pub fn pump_commands_to_worker(channels: Res<ModelicaChannels>) {
     }
 }
 
+fn post_to_worker(msg: &WireMessage, label: &str) {
+    let Some(WorkerHandle(worker)) = WORKER.get() else {
+        bevy::log::warn!("[worker_transport] {label}: worker not installed");
+        return;
+    };
+    let bytes = match bincode::serialize(msg) {
+        Ok(b) => b,
+        Err(e) => {
+            bevy::log::error!("[worker_transport] {label}: serialize failed: {e}");
+            return;
+        }
+    };
+    let array = Uint8Array::new_with_length(bytes.len() as u32);
+    array.copy_from(&bytes);
+    if let Err(e) = worker.post_message(&array) {
+        bevy::log::error!("[worker_transport] {label}: post_message failed: {e:?}");
+    }
+}
+
+/// JS-callable bridge for the dev test loop. Sends a `WireMessage::Ping`
+/// to the worker and expects a `[worker] pong` line on the main page
+/// console. Use from DevTools: `await window.__lc_test_worker_ping('hi')`.
+#[wasm_bindgen]
+pub fn __lc_test_worker_ping(tag: &str) {
+    bevy::log::info!("[worker_transport] sending ping: {tag}");
+    post_to_worker(&WireMessage::Ping(tag.to_string()), "ping");
+}
+
+/// JS-callable bridge that synthesizes a `ModelicaCommand::Compile` and
+/// pushes it through the same channel the UI uses. Bypasses the canvas
+/// click pathway — synthetic mouse events don't reach egui reliably from
+/// the page, so this is the autonomous test path.
+///
+/// Uses `Entity::PLACEHOLDER` so the result stream lands on no model entity
+/// — the result still surfaces in console via `[worker] done:` so we know
+/// compile finished + how long it took.
+#[wasm_bindgen]
+pub fn __lc_test_dispatch_compile(model_name: &str, source: &str) {
+    let Some(tx) = COMMAND_TX.get() else {
+        bevy::log::error!("[worker_transport] dispatch_compile: command sender not registered");
+        return;
+    };
+    bevy::log::info!(
+        "[worker_transport] dispatching test Compile: model={model_name} src={}B",
+        source.len()
+    );
+    let cmd = ModelicaCommand::Compile {
+        entity: bevy::prelude::Entity::PLACEHOLDER,
+        session_id: 1,
+        model_name: model_name.to_string(),
+        source: source.to_string(),
+        extra_sources: Vec::new(),
+        stream: None,
+    };
+    if let Err(e) = tx.send(cmd) {
+        bevy::log::error!("[worker_transport] dispatch_compile: send failed: {e}");
+    }
+}
+
 /// Ship the pre-parsed MSL bundle to the off-thread worker so its own
 /// `GLOBAL_PARSED_MSL` slot is populated before any Compile arrives.
 ///
 /// Called from `msl_remote::drain_msl_load_slot` after the main app's
 /// install lands. No-op if the worker isn't installed (we'd be the only
 /// side that needed MSL anyway).
+///
+/// Uses `postMessage(message, [transfer])` so the `ArrayBuffer` ownership
+/// is *moved* into the worker instead of structured-cloned. Without this
+/// the main thread spends ~1–2 s memcpying the 165 MB encoded bundle
+/// when MSL install fires — visible as a UI stutter on first page load.
+/// The transfer call detaches the source `ArrayBuffer` immediately;
+/// the worker receives it with no extra allocation.
 pub fn install_msl_in_worker(
     parsed: &[(String, rumoca_session::parsing::StoredDefinition)],
 ) {
     let Some(WorkerHandle(worker)) = WORKER.get() else { return };
-    // Serialize against a borrowed `Vec` to avoid cloning the 16 MB+ bundle
-    // — bincode's `Serialize` uses references throughout.
     let envelope = WireMessage::InstallParsedMsl(parsed.to_vec());
     let bytes = match bincode::serialize(&envelope) {
         Ok(b) => b,
@@ -244,15 +327,18 @@ pub fn install_msl_in_worker(
             return;
         }
     };
-    let array = Uint8Array::new_with_length(bytes.len() as u32);
+    let len = bytes.len();
+    let array = Uint8Array::new_with_length(len as u32);
     array.copy_from(&bytes);
-    if let Err(e) = worker.post_message(&array) {
-        bevy::log::error!("[worker_transport] post_message MSL install failed: {e:?}");
+    let transfer = js_sys::Array::new();
+    transfer.push(&array.buffer());
+    if let Err(e) = worker.post_message_with_transfer(&array, &transfer) {
+        bevy::log::error!("[worker_transport] post_message_with_transfer MSL install failed: {e:?}");
     } else {
         bevy::log::info!(
-            "[worker_transport] installed MSL into worker: {} docs ({} bytes wire)",
+            "[worker_transport] installed MSL into worker: {} docs ({} bytes wire, transferred)",
             parsed.len(),
-            bytes.len()
+            len
         );
     }
 }
