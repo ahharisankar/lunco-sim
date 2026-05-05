@@ -50,19 +50,19 @@ fn on_document_opened_warm(
     let Some(host) = registry.host(doc_id) else {
         return;
     };
-    // Read AST from the engine session — single source of truth.
-    // Fall back to the doc's lenient cache when the engine handle
-    // hasn't been installed yet (early boot / headless tests).
-    let types = if let Some(handle) = crate::engine_resource::global_engine_handle() {
-        let mut engine = handle.lock();
-        let _ = engine.upsert_document(doc_id, host.document().source());
-        match engine.parsed_for_doc(doc_id) {
-            Some(ast) => collect_referenced_types(ast),
-            None => return,
-        }
-    } else {
-        collect_referenced_types(&host.document().syntax_arc().ast)
-    };
+    // Read from the doc's lenient cache — it's a reactive mirror of
+    // the engine's strict parse, populated by either
+    // `drive_engine_sync`'s drain step (workspace docs) or
+    // `load_msl_file`'s strict-adopt (drill-in / library docs).
+    //
+    // We must NOT call `engine.upsert_document(...)` here: for a
+    // drill-in into Modelica.Blocks.* the source is the whole
+    // 152 kB Blocks/package.mo, and synchronously parsing that on
+    // the main thread freezes the workbench for 100+ seconds in
+    // dev. The engine catches up async via `drive_engine_sync`
+    // anyway; an icon paint that misses the warm cache falls
+    // through to `engine.icon_for` which has its own MSL fallback.
+    let types = collect_referenced_types(&host.document().syntax_arc().ast);
 
     if types.is_empty() {
         return;

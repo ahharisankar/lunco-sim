@@ -7276,14 +7276,21 @@ fn open_drill_in_tab(
     };
 
     if needs_load {
-        // Spawn the off-thread load. `ModelicaDocument::load_msl_file`
-        // routes through rumoca's content-hash artifact cache, so
-        // every class drilled into the same file (Continuous.mo holds
-        // Der/Integrator/PID/...) shares one parse the second time
-        // around. Driver: `drive_drill_in_loads`.
+        // Spawn the off-thread load. `load_msl_class` extracts only
+        // the target class from the wrapper file: a 152 KB
+        // `Modelica/Blocks/package.mo` becomes a ~7 KB doc holding
+        // just `PID_Controller` + a `within Modelica.Blocks.Examples;`
+        // prefix for scope-chain resolution. Lazy doc — no main-
+        // thread parse on install; `drive_engine_sync` parses the
+        // small slice off-thread. Driver: `drive_drill_in_loads`.
         let path_for_task = file_path.to_path_buf();
+        let qualified_for_task = qualified.to_string();
         let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
-            crate::document::ModelicaDocument::load_msl_file(doc_id, &path_for_task)
+            crate::document::ModelicaDocument::load_msl_class(
+                doc_id,
+                &path_for_task,
+                &qualified_for_task,
+            )
         });
         let mut loads = world.resource_mut::<DrillInLoads>();
         loads.pending.insert(
