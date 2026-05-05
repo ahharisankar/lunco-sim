@@ -1,8 +1,9 @@
 //! AST-based extraction functions for Modelica source code.
 //!
-//! Replaces regex-based extraction by walking the full Modelica AST produced by
-//! `rumoca_phase_parse::parse_to_ast`. All functions accept raw source text so
-//! they can be used as drop-in replacements for the legacy regex functions.
+//! Walks the full Modelica AST produced by `rumoca_phase_parse::parse_to_ast`.
+//! All functions accept raw source text and parse internally — callers that
+//! already hold an `Arc<StoredDefinition>` can use the lower-level helpers
+//! instead.
 //!
 //! ## Design Notes
 //!

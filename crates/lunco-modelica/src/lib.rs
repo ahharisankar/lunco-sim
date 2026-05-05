@@ -46,7 +46,7 @@ use self::ast_extract::strip_input_defaults;
 /// AST-based extraction functions for Modelica source code.
 ///
 /// Walks the full Modelica AST (via `rumoca_phase_parse`) to extract model names,
-/// parameters, inputs, and other symbols. Replaces the legacy regex-based extraction.
+/// parameters, inputs, and other symbols.
 pub mod ast_extract;
 
 /// `ModelicaDocument` — the Document System representation of a `.mo` file.

@@ -72,17 +72,12 @@ impl Default for DiagramAutoLayoutSettings {
 /// every top-level class. Used as the *fallback* when the AST-based
 /// component-graph builder produced an empty graph (rumoca's error
 /// recovery sometimes drops every component of a class on a parse error
-/// elsewhere in the file). This walk is over the same rumoca AST so it
-/// agrees with the projection when the AST is healthy.
+/// elsewhere in the file).
 ///
-/// Replaces the legacy regex scanner (`(?m)^\s*…(\w+)\s+(\w+)\b` with a
-/// keyword reject-list). Kept behavior-compatible — see
-/// `tests/rumoca_api_coverage.rs::rumoca_components_match_regex_scan`
-/// for the equivalence check.
 /// Scanned component with its typed `Placement` annotation
-/// (already extracted at AST-walk time, no per-instance regex on
-/// raw source). `placement` is `None` when the source either
-/// authored none or the rumoca-recovery parse couldn't salvage it.
+/// (already extracted at AST-walk time). `placement` is `None`
+/// when the source either authored none or the rumoca-recovery
+/// parse couldn't salvage it.
 struct ScannedComponent {
     type_name: String,
     instance_name: String,
@@ -115,8 +110,7 @@ fn scan_component_declarations_from_ast(
 /// `((a_inst, a_port), (b_inst, b_port))` — unordered so
 /// `connect(a.p, b.q)` and `connect(b.q, a.p)` hash to the same key.
 ///
-/// Walks every class's `equations` Vec across the whole AST (matches
-/// the previous regex's whole-source semantics) and pulls
+/// Walks every class's `equations` Vec across the whole AST and pulls
 /// `Equation::Connect.annotation` via
 /// [`crate::annotations::extract_line_points`]. The bare-connector
 /// case (`connect(u, P.u)` where `u` is a top-level connector with

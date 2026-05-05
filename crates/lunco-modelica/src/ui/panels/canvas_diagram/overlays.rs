@@ -503,14 +503,10 @@ pub(super) fn paint_class_type_badge(
     );
 }
 
-/// One-time-compiled regexes used by the empty-diagram summary.
-///
-/// Counts for the empty-diagram overlay. Read from the per-doc
-/// [`crate::index::ModelicaIndex`] — components by variability /
-/// causality, connections by class. `equations` falls back to a
-/// regex scan against the class's source slice because Index
-/// doesn't track algebraic equations yet (would require growing
-/// `ClassEntry` with an equation count during rebuild).
+/// Counts for the empty-diagram overlay. All four numbers come from
+/// the per-doc [`crate::index::ModelicaIndex`]: components by
+/// variability / causality, connections by class, and the class's
+/// `equation_count` populated during rebuild.
 ///
 /// O(components_in_class) per call. The Index is rebuilt on every
 /// successful parse install, so callers see fresh counts as soon

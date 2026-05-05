@@ -1982,9 +1982,7 @@ struct DuplicateExtract {
 
 
 /// Find a class by simple name anywhere in the parsed AST — first at
-/// the top level, then walking nested-class trees. Mirrors the
-/// short-name semantics the previous regex matched (it scanned the
-/// whole source, not just top-level openers).
+/// the top level, then walking nested-class trees.
 fn find_top_or_nested_class_by_short_name<'a>(
     ast: &'a rumoca_session::parsing::ast::StoredDefinition,
     short: &str,
