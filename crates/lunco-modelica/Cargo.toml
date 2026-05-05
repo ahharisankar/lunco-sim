@@ -20,6 +20,14 @@ path = "src/bin/lunica.rs"
 name = "lunica_web"
 path = "src/bin/lunica_web.rs"
 
+# Off-thread Modelica worker — wasm32 only. Built as a second wasm bundle
+# the main page launches via `new Worker()`. See
+# `src/worker_transport.rs` for the JS bridge and
+# `scripts/build_web.sh` for the second `wasm-bindgen --target web` pass.
+[[bin]]
+name = "lunica_worker"
+path = "src/bin/lunica_worker.rs"
+
 [[bin]]
 name = "msl_indexer"
 path = "src/bin/msl_indexer.rs"
@@ -177,6 +185,13 @@ web-sys = { version = "0.3", features = [
     "Response",
     "Headers",
     "Storage",
+    # Web Worker bindings — used by `worker_transport` to offload the
+    # blocking compile/step pipeline off the main thread.
+    "Worker",
+    "WorkerType",
+    "WorkerOptions",
+    "DedicatedWorkerGlobalScope",
+    "MessageEvent",
 ] }
 js-sys = "0.3"
 console_error_panic_hook = "0.1"
