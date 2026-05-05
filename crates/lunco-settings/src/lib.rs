@@ -128,19 +128,31 @@ impl Settings {
         if !self.dirty {
             return;
         }
-        let path = settings_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        // Wasm has no real filesystem — `std::fs::write` would fail every
+        // tick and flood the console with identical warnings. Silently
+        // mark as flushed; persistence on web is the autosave plugin's
+        // job (localStorage-backed), not this resource.
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.dirty = false;
+            return;
         }
-        match serde_json::to_string_pretty(&self.raw) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&path, json) {
-                    warn!("[Settings] write to {} failed: {e}", path.display());
-                    return;
-                }
-                self.dirty = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let path = settings_path();
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
             }
-            Err(e) => warn!("[Settings] serialise failed: {e}"),
+            match serde_json::to_string_pretty(&self.raw) {
+                Ok(json) => {
+                    if let Err(e) = std::fs::write(&path, json) {
+                        warn!("[Settings] write to {} failed: {e}", path.display());
+                        return;
+                    }
+                    self.dirty = false;
+                }
+                Err(e) => warn!("[Settings] serialise failed: {e}"),
+            }
         }
     }
 }

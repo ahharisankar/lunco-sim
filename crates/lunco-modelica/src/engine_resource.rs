@@ -122,14 +122,14 @@ impl ModelicaEngineHandle {
         let me = ModelicaEngineHandle(Arc::clone(&self.0));
         let bytes = source.len();
         spawn_fn(Box::new(move || {
-            let t_total = std::time::Instant::now();
+            let t_total = web_time::Instant::now();
             // Lenient parser: always produces a usable tree.
-            let t_parse = std::time::Instant::now();
+            let t_parse = web_time::Instant::now();
             let recovery = rumoca_phase_parse::parse_to_syntax(&source, &uri);
             let parse_ms = t_parse.elapsed().as_secs_f64() * 1000.0;
             let has_errors = recovery.has_errors();
             let ast = recovery.best_effort().clone();
-            let t_install = std::time::Instant::now();
+            let t_install = web_time::Instant::now();
             let mut engine = me.lock();
             engine.install_parsed_ast(doc_id, ast);
             engine.finish_parse(doc_id, gen);

@@ -1529,7 +1529,7 @@ impl CanvasDiagramPanel {
                 #[cfg(feature = "lunco-api")]
                 crate::api_edits::trigger_apply_ops(world, doc_id, all_ops);
                 #[cfg(not(feature = "lunco-api"))]
-                apply_ops(world, doc_id, all_ops);
+                apply_ops_public(world, doc_id, all_ops);
             }
         } else if !menu_ops.is_empty() {
             bevy::log::warn!(

@@ -93,11 +93,14 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "bevy_camera",
     "bevy_core_pipeline",
     "bevy_image",                  # egui_extras image loaders + asset pipeline
-    "webgl2",                      # wasm fallback when WebGPU unavailable
+    "webgl2",                      # wasm renderer (WebGL2 backend — broadest browser support, egui works fine)
     "x11",                         # Linux X11 backend
     "wayland",                     # Linux Wayland backend (avoids XWayland stalls on Wayland sessions)
     "bevy_picking",                # picking core (sub-backends are opt-in)
-    "trace_tracy",                 # Tracy profiler client — connect with tracy-profiler
+    # NOTE: `trace_tracy` is intentionally NOT in the workspace default features
+    # because tracy-client-sys requires a C++ compile that doesn't work targeting
+    # wasm32-unknown-unknown. It is re-enabled for native builds via a
+    # target-specific dependency on bevy in lunco-modelica/Cargo.toml.
     "serialize",                   # serde Serialize/Deserialize for Entity, Vec3, Quat, Handle, etc.
                                    # Enables `#[Command]` to always derive serde without per-field worry.
 ] }

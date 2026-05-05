@@ -211,12 +211,23 @@ fn persist_recents_when_changed(
     if current == snapshot.json {
         return;
     }
-    let path = recents_path();
-    if let Err(e) = workspace.recents.save(&path) {
-        warn!("[Recents] save to {} failed: {e}", path.display());
+    // Wasm has no real filesystem — `Recents::save` fails every tick and
+    // floods the console. Track the snapshot so we don't keep retrying,
+    // but skip the actual write.
+    #[cfg(target_arch = "wasm32")]
+    {
+        snapshot.json = current;
         return;
     }
-    snapshot.json = current;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let path = recents_path();
+        if let Err(e) = workspace.recents.save(&path) {
+            warn!("[Recents] save to {} failed: {e}", path.display());
+            return;
+        }
+        snapshot.json = current;
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

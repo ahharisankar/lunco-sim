@@ -17,7 +17,6 @@
 //! See `../lib.rs` for the inline worker implementation.
 
 use bevy::prelude::*;
-use bevy::render::{RenderPlugin, settings::{WgpuSettings, Backends, RenderCreation}};
 use std::path::PathBuf;
 use bevy_egui::EguiPlugin;
 use lunco_modelica::{
@@ -73,12 +72,6 @@ pub fn run() {
                 fit_canvas_to_parent: true,
                 // Prevent Bevy from swallowing keyboard events (egui needs them too).
                 prevent_default_event_handling: true,
-                ..default()
-            }),
-            ..default()
-        }).set(RenderPlugin {
-            render_creation: RenderCreation::Automatic(WgpuSettings {
-                backends: Some(Backends::all()),
                 ..default()
             }),
             ..default()

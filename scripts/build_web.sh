@@ -119,7 +119,15 @@ build_wasm() {
     # We use --no-default-features to avoid pulling in the full tokio/axum stack
     # from lunco-api, which depends on mio and other networking primitives
     # that are unsupported on wasm32-unknown-unknown.
-    cargo build --profile web-release --target wasm32-unknown-unknown --bin "$binary" -p "$crate" --no-default-features
+    #
+    # `--cfg=web_sys_unstable_apis` is REQUIRED for wgpu's WebGPU backend on
+    # wasm (web-sys's `Gpu*` bindings are gated behind that flag). Without it
+    # `navigator.gpu.requestAdapter()` silently returns null and bevy_render
+    # panics with "Unable to find a GPU!" — even when the browser fully
+    # supports WebGPU. egui's pipeline requires WebGPU here, so this flag is
+    # mandatory, not optional.
+    RUSTFLAGS="${RUSTFLAGS:-} --cfg=web_sys_unstable_apis" \
+        cargo build --profile web-release --target wasm32-unknown-unknown --bin "$binary" -p "$crate" --no-default-features
     
     if [ $? -eq 0 ]; then
         success "WASM binary built successfully"

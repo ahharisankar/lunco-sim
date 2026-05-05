@@ -766,7 +766,7 @@ unsafe impl Sync for InlineWorker {}
 /// Runs each frame in the Update schedule. Drains one command from the
 /// channel and processes it synchronously, sending results back immediately.
 #[cfg(target_arch = "wasm32")]
-fn inline_worker_process(
+pub(crate) fn inline_worker_process(
     mut worker: ResMut<InlineWorker>,
     channels: Res<ModelicaChannels>,
 ) {

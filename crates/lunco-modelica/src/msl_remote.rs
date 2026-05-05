@@ -30,6 +30,8 @@
 //! bar lands.
 
 use std::sync::{Arc, OnceLock};
+#[cfg(target_arch = "wasm32")]
+use std::sync::Mutex;
 
 use bevy::prelude::*;
 
@@ -47,6 +49,15 @@ static GLOBAL_PARSED_MSL: OnceLock<Arc<Vec<(String, rumoca_session::parsing::Sto
 /// Read the pre-parsed MSL bundle if any has been installed.
 pub fn global_parsed_msl() -> Option<&'static Arc<Vec<(String, rumoca_session::parsing::StoredDefinition)>>> {
     GLOBAL_PARSED_MSL.get()
+}
+
+/// Publish a freshly parsed MSL bundle to the process-wide slot. Only
+/// the first install wins; subsequent calls are silently ignored
+/// (the `OnceLock` guarantees a stable handle for the lifetime of
+/// the page session).
+#[cfg(target_arch = "wasm32")]
+fn install_global_parsed_msl(parsed: Vec<(String, rumoca_session::parsing::StoredDefinition)>) {
+    let _ = GLOBAL_PARSED_MSL.set(Arc::new(parsed));
 }
 
 
@@ -187,7 +198,7 @@ struct MslLoadSlot(SharedSlot);
 fn drain_msl_load_slot(
     slot: Res<MslLoadSlot>,
     mut state: ResMut<MslLoadState>,
-    mut worker: ResMut<crate::InlineWorker>,
+    mut worker: ResMut<crate::worker::InlineWorker>,
     mut commands: Commands,
 ) {
     let mut inner = match slot.0.lock() {
@@ -254,7 +265,7 @@ fn drain_msl_load_slot(
 fn drive_msl_parse(
     state: Option<ResMut<MslParseInProgress>>,
     mut load_state: ResMut<MslLoadState>,
-    mut worker: ResMut<crate::InlineWorker>,
+    mut worker: ResMut<crate::worker::InlineWorker>,
     mut commands: Commands,
 ) {
     let Some(mut state) = state else { return };

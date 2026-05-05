@@ -673,7 +673,7 @@ fn build_modelica_core(app: &mut App) {
 
     #[cfg(target_arch = "wasm32")]
     {
-        app.insert_resource(InlineWorker::default());
+        app.insert_resource(worker::InlineWorker::default());
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -712,7 +712,7 @@ fn build_modelica_core(app: &mut App) {
 
     #[cfg(target_arch = "wasm32")]
     {
-        app.add_systems(Update, inline_worker_process);
+        app.add_systems(Update, worker::inline_worker_process);
         app.add_systems(Update, ui::update_file_load_result);
     }
 }

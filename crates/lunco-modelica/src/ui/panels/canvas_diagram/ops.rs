@@ -1013,7 +1013,7 @@ pub(super) fn auto_arrange_now(world: &mut World, doc_id: lunco_doc::DocumentId)
     #[cfg(feature = "lunco-api")]
     crate::api_edits::trigger_apply_ops(world, doc_id, ops);
     #[cfg(not(feature = "lunco-api"))]
-    apply_ops(world, doc_id, ops);
+    apply_ops_public(world, doc_id, ops);
 }
 
 /// Resolve the active class name for an Auto-Arrange target. Prefers
