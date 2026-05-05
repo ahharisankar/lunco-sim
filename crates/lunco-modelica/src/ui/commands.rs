@@ -74,25 +74,6 @@ pub struct DuplicateModelFromReadOnly {
     pub source_doc: DocumentId,
 }
 
-/// Open an MSL example as a fresh editable copy in the workspace
-/// without the user needing to first drill into it.
-///
-/// The Welcome page's examples strip dispatches this on click.
-/// Same effect as `DuplicateModelFromReadOnly` but sourced from a
-/// qualified MSL class name rather than an already-open read-only
-/// doc — the observer resolves the file path via the MSL class
-/// index and runs the whole extract + rewrite + parse pipeline on
-/// a background task so the UI stays responsive even for
-/// multi-hundred-KB package files.
-///
-/// The duplicated copy lands in Canvas view by default (examples
-/// are composed models — users want to see the diagram, not the
-/// source).
-#[Command(default)]
-pub struct OpenExampleInWorkspace {
-    pub qualified: String,
-}
-
 /// Request to compile a Modelica document and run the resulting
 /// simulation.
 ///
@@ -427,7 +408,6 @@ register_commands!(
     on_open,
     on_open_class,
     on_open_example,
-    on_open_example_in_workspace,
     on_open_file,
     on_pan_canvas,
     on_pause_active_model,
@@ -1690,33 +1670,30 @@ fn on_duplicate_model_from_read_only(
     }
 }
 
-#[on_command(OpenExampleInWorkspace)]
-fn on_open_example_in_workspace(
-    trigger: On<OpenExampleInWorkspace>,
-    mut cache: ResMut<crate::ui::panels::package_browser::PackageTreeCache>,
-    mut model_tabs: ResMut<crate::ui::panels::model_view::ModelTabs>,
-    mut registry: ResMut<ModelicaDocumentRegistry>,
-    mut duplicate_loads: ResMut<
-        crate::ui::panels::canvas_diagram::DuplicateLoads,
-    >,
-    mut console: ResMut<crate::ui::panels::console::ConsoleLog>,
-    mut commands: Commands,
-) {
-    let qualified = trigger.event().qualified.clone();
+/// World-mut helper invoked from the `OpenClass { action: Duplicate }`
+/// branch. Reserves an Untitled doc id, opens its tab in Canvas
+/// view, and spawns the bg task that produces the renamed copy.
+fn spawn_duplicate_class_task(world: &mut World, qualified: String, name_hint: String) {
     let origin_short = qualified
         .rsplit('.')
         .next()
         .map(str::to_string)
         .unwrap_or_else(|| qualified.clone());
 
-    // Pick a new Untitled name, same collision strategy as the
-    // sibling `on_duplicate_model_from_read_only`.
-    let taken: std::collections::HashSet<String> = cache
+    // Resolve the requested name against existing Untitled tabs:
+    // empty → derive `<short>Copy`; non-empty → use as-is, then
+    // bump with a numeric suffix on collision.
+    let taken: std::collections::HashSet<String> = world
+        .resource::<crate::ui::panels::package_browser::PackageTreeCache>()
         .in_memory_models
         .iter()
         .map(|e| e.display_name.clone())
         .collect();
-    let base_name = format!("{origin_short}Copy");
+    let base_name = if name_hint.is_empty() {
+        format!("{origin_short}Copy")
+    } else {
+        name_hint
+    };
     let mut name = base_name.clone();
     let mut n: u32 = 2;
     while taken.contains(&name) {
@@ -1727,23 +1704,33 @@ fn on_open_example_in_workspace(
     // Reserve id + open the tab now so the user sees immediate
     // feedback; the canvas will show "Loading resource…" until
     // the bg build lands via `drive_duplicate_loads`.
-    let doc_id = registry.reserve_id();
+    let doc_id = world
+        .resource_mut::<ModelicaDocumentRegistry>()
+        .reserve_id();
     let mem_id = format!("mem://{name}");
-    cache.in_memory_models.retain(|e| e.id != mem_id);
-    cache
-        .in_memory_models
-        .push(crate::ui::panels::package_browser::InMemoryEntry {
-            display_name: name.clone(),
-            id: mem_id,
-            doc: doc_id,
-        });
+    {
+        let mut cache = world
+            .resource_mut::<crate::ui::panels::package_browser::PackageTreeCache>();
+        cache.in_memory_models.retain(|e| e.id != mem_id);
+        cache
+            .in_memory_models
+            .push(crate::ui::panels::package_browser::InMemoryEntry {
+                display_name: name.clone(),
+                id: mem_id,
+                doc: doc_id,
+            });
+    }
     // Examples are composed models — land in Canvas view so users
     // see the diagram on open, not the raw source.
-    model_tabs.ensure(doc_id);
-    if let Some(tab) = model_tabs.get_mut(doc_id) {
-        tab.view_mode = crate::ui::panels::model_view::ModelViewMode::Canvas;
+    {
+        let mut model_tabs = world
+            .resource_mut::<crate::ui::panels::model_view::ModelTabs>();
+        model_tabs.ensure(doc_id);
+        if let Some(tab) = model_tabs.get_mut(doc_id) {
+            tab.view_mode = crate::ui::panels::model_view::ModelViewMode::Canvas;
+        }
     }
-    commands.trigger(lunco_workbench::OpenTab {
+    world.commands().trigger(lunco_workbench::OpenTab {
         kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
         instance: doc_id.raw(),
     });
@@ -1873,22 +1860,26 @@ fn on_open_example_in_workspace(
         doc
     });
 
-    duplicate_loads.insert(
-        doc_id,
-        crate::ui::panels::canvas_diagram::DuplicateBinding {
-            display_name: name.clone(),
-            origin_short: origin_short.clone(),
-            // OpenExampleInWorkspace duplicates a single named class
-            // (`qualified` is already the leaf the user clicked) —
-            // there's no inner-drill to preserve.
-            inner_drill: None,
-            started: web_time::Instant::now(),
-            task,
-        },
-    );
-    console.info(format!(
-        "📄 Opening example `{qualified}` → editable `{name}` (building…)"
-    ));
+    world
+        .resource_mut::<crate::ui::panels::canvas_diagram::DuplicateLoads>()
+        .insert(
+            doc_id,
+            crate::ui::panels::canvas_diagram::DuplicateBinding {
+                display_name: name.clone(),
+                origin_short: origin_short.clone(),
+                // Duplicate flow operates on a single named class
+                // (`qualified` is already the leaf the user clicked) —
+                // there's no inner-drill to preserve.
+                inner_drill: None,
+                started: web_time::Instant::now(),
+                task,
+            },
+        );
+    world
+        .resource_mut::<crate::ui::panels::console::ConsoleLog>()
+        .info(format!(
+            "📄 Opening class `{qualified}` → editable `{name}` (building…)"
+        ));
 }
 
 /// Pull the source text for a named class out of a (possibly
@@ -2411,11 +2402,14 @@ fn on_open_example(
     trigger: On<OpenExample>,
     mut commands: Commands,
 ) {
-    // Shim over `OpenExampleInWorkspace` with a simpler name for the
-    // public API surface. Internal callers can keep using the old
-    // event directly; this observer just re-fires.
+    // Public-API alias for `OpenClass { action: Duplicate { name: "" } }`.
+    // The duplicate handler derives a default name (`<short>Copy`)
+    // when the requested name is empty.
     let qualified = trigger.event().qualified.clone();
-    commands.trigger(OpenExampleInWorkspace { qualified });
+    commands.trigger(OpenClass {
+        qualified,
+        action: ClassAction::Duplicate { name: String::new() },
+    });
 }
 
 /// Open a class in a **read-only** tab — the same path the canvas's
@@ -2423,9 +2417,31 @@ fn on_open_example(
 /// duplicates into an editable Untitled doc), this opens the class
 /// directly as an `msl://` tab for exploration. Reuses an existing
 /// tab if the same class is already open.
+///
+/// `action` selects the open mode:
+///   - `View` (default): read-only drill-in with `File { writable: false }` origin.
+///   - `Duplicate { name }`: writable Untitled workspace copy with the
+///     class renamed and parent-package imports inlined for scope-chain
+///     resolution.
+///
+/// Both modes share the same prep (resolve path → parse cached →
+/// extract target class via spans). Duplicate adds the rename +
+/// import inject + within prefix.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Default, bevy::reflect::Reflect)]
+#[serde(tag = "kind")]
+pub enum ClassAction {
+    #[default]
+    View,
+    Duplicate {
+        name: String,
+    },
+}
+
 #[Command(default)]
 pub struct OpenClass {
     pub qualified: String,
+    #[serde(default)]
+    pub action: ClassAction,
 }
 
 /// Startup system: register the Modelica URI handler with the
@@ -2467,9 +2483,16 @@ fn prewarm_msl_library() {
 
 #[on_command(OpenClass)]
 fn on_open_class(trigger: On<OpenClass>, mut commands: Commands) {
-    let qualified = trigger.event().qualified.clone();
-    commands.queue(move |world: &mut World| {
-        crate::ui::panels::canvas_diagram::drill_into_class(world, &qualified);
+    let ev = trigger.event();
+    let qualified = ev.qualified.clone();
+    let action = ev.action.clone();
+    commands.queue(move |world: &mut World| match action {
+        ClassAction::View => {
+            crate::ui::panels::canvas_diagram::drill_into_class(world, &qualified);
+        }
+        ClassAction::Duplicate { name } => {
+            spawn_duplicate_class_task(world, qualified, name);
+        }
     });
 }
 

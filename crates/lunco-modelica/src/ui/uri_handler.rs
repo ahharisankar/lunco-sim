@@ -130,6 +130,7 @@ pub fn on_modelica_uri_clicked(
         } => {
             commands.trigger(crate::ui::commands::OpenClass {
                 qualified: identifier.clone(),
+                action: crate::ui::commands::ClassAction::View,
             });
         }
         UriResolution::NavigateAnchor { identifier, anchor } => {
@@ -142,6 +143,7 @@ pub fn on_modelica_uri_clicked(
             );
             commands.trigger(crate::ui::commands::OpenClass {
                 qualified: identifier.clone(),
+                action: crate::ui::commands::ClassAction::View,
             });
         }
         UriResolution::OpenResource { path } => {
