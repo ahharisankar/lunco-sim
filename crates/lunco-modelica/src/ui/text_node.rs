@@ -71,32 +71,44 @@ impl NodeVisual for TextNodeVisual {
         // sets `fontSize=`, else auto-fit to the rect's pixel
         // height. The MLS auto-fit factor is "draw at the extent
         // height," which is what we approximate.
-        let font_px = if self.data.font_size > 0.0 {
-            // Modelica `fontSize` is in pt; the canvas viewport
-            // already converts modelica units to screen px via
-            // `world_rect_to_screen`, but `fontSize` overrides the
-            // extent height as the text size. Apply the canvas
-            // zoom (rect_height ratio) so the text scales with
-            // pan/zoom like every other graphic.
-            let zoom = (egui_rect.height() / node.rect.height().max(1e-3)).max(0.05);
-            (self.data.font_size as f32 * zoom).max(1.0)
-        } else {
-            (egui_rect.height() * 0.9).max(1.0)
-        };
         let color = self
             .data
             .color
             .map(|[r, g, b]| egui::Color32::from_rgb(r, g, b))
             .unwrap_or_else(|| ctx.ui.visuals().text_color());
-        // Single-line for now — the icon path's two-line splitter
-        // for `\n` lives in `icon_paint::paint_text` and isn't
-        // replicated here. Most diagram callouts are single line;
-        // multi-line support lands when a real case asks for it.
-        let layout = ctx.ui.painter().layout(
+        // MLS §18: `fontSize=0` means "auto-fit to extent". OMEdit /
+        // Dymola interpret this as fit BOTH dimensions: start at the
+        // extent height (the natural cap height for one-line text),
+        // then shrink uniformly if the rendered text width exceeds
+        // the extent width. Without the width shrink, wide labels
+        // like "reference speed generation" in a 67×8 extent would
+        // be sized to the 8-unit height (a font far too large for
+        // the 67-unit width) and wrap onto two lines past the
+        // authored frame.
+        let mut font_px = if self.data.font_size > 0.0 {
+            let zoom = (egui_rect.height() / node.rect.height().max(1e-3)).max(0.05);
+            (self.data.font_size as f32 * zoom).max(1.0)
+        } else {
+            (egui_rect.height() * 0.9).max(1.0)
+        };
+        if egui_rect.width() > 0.5 && font_px > 1.0 {
+            let measure = ctx.ui.painter().layout_no_wrap(
+                self.data.text.clone(),
+                egui::FontId::proportional(font_px),
+                color,
+            );
+            let measured_w = measure.size().x;
+            if measured_w > egui_rect.width() {
+                font_px = (font_px * egui_rect.width() / measured_w).max(1.0);
+            }
+        }
+        // No-wrap layout: render the text on a single line (already
+        // shrunk to fit the extent width above). Wrapping would
+        // betray the authored extent box.
+        let layout = ctx.ui.painter().layout_no_wrap(
             self.data.text.clone(),
             egui::FontId::proportional(font_px),
             color,
-            egui_rect.width(),
         );
         // Centre the layout inside the rect.
         let pos = egui::pos2(

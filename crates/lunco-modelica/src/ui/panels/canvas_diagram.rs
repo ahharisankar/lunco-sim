@@ -232,6 +232,13 @@ pub struct IconNodeData {
     /// `Placement(transformation(extent=..., rotation=...))`. Empty
     /// path falls back to the generic per-shape marker.
     pub port_connector_paths: Vec<(String, String, f32, f32, f32)>,
+    /// Pre-resolved `Icon` for each port's connector class, indexed
+    /// parallel to `port_connector_paths`. Resolved off-thread in
+    /// `project_scene` so the painter never holds the engine lock —
+    /// inline resolution previously locked 30+ times per frame on
+    /// PID-class diagrams. `None` when the connector class has no
+    /// Icon in its inheritance chain or hasn't been indexed yet.
+    pub port_connector_icons: Vec<Option<crate::annotations::Icon>>,
     /// Conditional component (`Component X if <cond>`). Renderer
     /// halves opacity so users can see it's design-time visible but
     /// runtime-conditional — matches OMEdit/Dymola convention.
@@ -318,6 +325,10 @@ struct IconNodeVisual {
     /// `(port_name, connector_class_qualified_path, size_x, size_y,
     /// rotation_deg)` from the projected scene.
     port_connector_paths: Vec<(String, String, f32, f32, f32)>,
+    /// Pre-resolved connector-class `Icon` for each port, indexed
+    /// parallel to `port_connector_paths`. See [`IconNodeData`] for
+    /// the rationale (off-thread resolution to keep paint lock-free).
+    port_connector_icons: Vec<Option<crate::annotations::Icon>>,
     /// Parent component's fully-qualified type — used as the scope
     /// root when the indexer wrote a short connector path like
     /// `"RealInput"` and we need to resolve it via package walk.
@@ -423,23 +434,11 @@ impl NodeVisual for IconNodeVisual {
                 &icon.graphics,
             );
             drew_icon = true;
-            // Overlay Diagram-annotation graphics — for MSL signal
-            // connectors this carries the `%name` Text label and a
-            // smaller decorative inner polygon. Painted on top of the
-            // Icon so the name appears next to the connector triangle
-            // without replacing the full-size Icon polygon.
-            if let Some(diag) = &self.diagram_graphics {
-                crate::icon_paint::paint_graphics_themed(
-                    painter,
-                    rect,
-                    diag.coordinate_system,
-                    orientation,
-                    Some(&sub),
-                    Some(resolver_ref),
-                    palette.as_ref(),
-                    &diag.graphics,
-                );
-            }
+            // MLS §18: when a class is rendered as a component
+            // instance, only its Icon annotation is used. The Diagram
+            // annotation (sub-components, internal wiring, pedagogical
+            // labels like Torque's "Angle" box) belongs to the
+            // class's editing view, never to instance rendering.
         }
 
         if !drew_icon {
@@ -574,21 +573,20 @@ impl NodeVisual for IconNodeVisual {
             } else {
                 Vec::new()
             };
-            // Paint must not lock the engine. Connector-class icon
-            // rendering at port locations was the path that did so —
-            // for PID-class diagrams it locked the engine 30+ times
-            // per frame, blocking egui for 100s of ms.
-            //
-            // Drop the per-port class-icon lookup. The fallback path
-            // below draws a causality-typed shape (square / triangle
-            // / circle) — same visual OMEdit ships for default
-            // connectors. To re-enable per-port custom icons later,
-            // pre-resolve them off-thread inside `project_scene` and
-            // bake into `IconNodeData.port_connector_paths` as a
-            // resolved `Option<Icon>` field. Then paint reads the
-            // baked icon directly, no engine lock.
-            let _ = candidates; // suppress unused-warning; kept for ref.
-            let resolved_icon: Option<crate::annotations::Icon> = None;
+            // Paint stays lock-free: the connector class's `Icon`
+            // was pre-resolved off-thread in `project_scene` and
+            // baked into `port_connector_icons` (parallel to
+            // `port_connector_paths`). Read it by index. MLS §18:
+            // the connector's authored Icon is what carries the
+            // input/output triangle / acausal flange dot — drawing
+            // it at the port location is what gives the diagram
+            // its OMEdit-parity arrowheads, not a wire-end marker.
+            let _ = candidates; // legacy fallback kept compiling; no longer used.
+            let resolved_icon: Option<crate::annotations::Icon> = self
+                .port_connector_paths
+                .iter()
+                .position(|(name, _, _, _, _)| name == port.id.as_str())
+                .and_then(|i| self.port_connector_icons.get(i).cloned().flatten());
             if let Some(icon) = resolved_icon {
                 {
                         // Render the connector's icon at the port
@@ -2049,6 +2047,7 @@ fn build_registry() -> VisualRegistry {
             mirror_y: d.mirror_y,
             instance_name: d.instance_name.clone(),
             port_connector_paths: d.port_connector_paths.clone(),
+            port_connector_icons: d.port_connector_icons.clone(),
             is_conditional: d.is_conditional,
             parent_qualified_type: d.qualified_type.clone(),
         }
@@ -2303,6 +2302,78 @@ fn recover_edges_from_ast(
     }
 }
 
+/// Resolve each port's connector-class `Icon` using the engine's
+/// indexed view, mirroring the candidate-path walk that the painter
+/// previously did inline. Runs off-thread inside the projection task,
+/// so the engine lock is taken once per port (typically 2–8 per
+/// component) at projection time — never during paint.
+///
+/// Empty `msl_path` (port type not classified yet) → `None`.
+/// Qualified path that fails to resolve → walk parent's package
+/// chain trying `<pkg>.Interfaces.<name>` and `<pkg>.<name>` so
+/// older indexes that wrote unqualified types still find their
+/// connector class.
+fn resolve_port_icons(
+    parent_qualified: &str,
+    ports: &[crate::visual_diagram::PortDef],
+) -> Vec<Option<crate::annotations::Icon>> {
+    // MSL pre-baked palette: connector classes (RealInput / RealOutput
+    // / Flange_*) have their `Icon(graphics={...})` already extracted
+    // by `msl_indexer` into `MSLComponentDef.icon_graphics`. Look up
+    // by qualified path. This is the authoritative source — the live
+    // engine session may not have the connector class loaded yet
+    // (rumoca's lazy MSL warmup hasn't reached interface packages),
+    // and short-class connectors (`connector RealInput = input Real`)
+    // also slip through `class_inherited_annotations_query`.
+    let palette = crate::visual_diagram::msl_component_library();
+    let palette_lookup: std::collections::HashMap<&str, &crate::visual_diagram::MSLComponentDef> =
+        palette.iter().map(|d| (d.msl_path.as_str(), d)).collect();
+    let handle = crate::engine_resource::global_engine_handle();
+    ports
+        .iter()
+        .map(|p| {
+            let path = &p.msl_path;
+            let candidates: Vec<String> = if path.contains('.') {
+                vec![path.clone()]
+            } else if !path.is_empty() {
+                let mut out = Vec::new();
+                let mut scope = parent_qualified.to_string();
+                while scope.contains('.') {
+                    let pkg = scope.rsplitn(2, '.').nth(1).unwrap_or("").to_string();
+                    if !pkg.is_empty() {
+                        out.push(format!("{pkg}.Interfaces.{path}"));
+                        out.push(format!("{pkg}.{path}"));
+                    }
+                    scope = pkg;
+                }
+                out.push(path.clone());
+                out
+            } else {
+                return None;
+            };
+            for c in &candidates {
+                if let Some(def) = palette_lookup.get(c.as_str()) {
+                    if let Some(icon) = def.icon_graphics.as_ref() {
+                        return Some(icon.clone());
+                    }
+                }
+                if let Some(handle) = handle.as_ref() {
+                    let mut engine = handle.lock();
+                    if let Some(icon) = engine.icon_for(c) {
+                        return Some(icon);
+                    }
+                    if let Some(cd) = engine.class_def(c) {
+                        if let Some(icon) = crate::annotations::extract_icon(&cd.annotation) {
+                            return Some(icon);
+                        }
+                    }
+                }
+            }
+            None
+        })
+        .collect()
+}
+
 fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramNodeId, CanvasNodeId>) {
     let mut scene = Scene::new();
     let mut id_map: HashMap<DiagramNodeId, CanvasNodeId> = HashMap::new();
@@ -2425,6 +2496,10 @@ fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramNodeId, Canv
                     .iter()
                     .map(|p| (p.name.clone(), p.msl_path.clone(), p.size_x, p.size_y, p.rotation_deg))
                     .collect(),
+                port_connector_icons: resolve_port_icons(
+                    &node.component_def.msl_path,
+                    &node.component_def.ports,
+                ),
                 is_conditional: node.is_conditional,
             }),
             ports,
@@ -7750,6 +7825,7 @@ fn synthesize_msl_node(
                 .iter()
                 .map(|p| (p.name.clone(), p.msl_path.clone(), p.size_x, p.size_y, p.rotation_deg))
                 .collect(),
+            port_connector_icons: resolve_port_icons(&comp.msl_path, &comp.ports),
             is_conditional: false,
         }),
         ports,

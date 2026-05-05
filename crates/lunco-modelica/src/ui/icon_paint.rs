@@ -756,25 +756,48 @@ fn paint_text(
     // with the icon, which scales with viewport zoom). A label that
     // fits its node at zoom X also fits at zoom 2X. Clamping caused
     // labels to overflow the icon at high zoom or freeze at low.
+    let color = color_or_default(t.text_color, egui::Color32::from_gray(20));
     let font_size_px = if t.font_size > 0.0 {
         t.font_size as f32 * xf.scale
     } else {
-        // 0.95× of the shorter extent dim — close to MLS Annex D's
-        // implicit "fit the extent box" intent and matches what
-        // OMEdit/Dymola render at the same zoom. MSL connectors
-        // (RealInput/RealOutput) declare degenerate Text extents
-        // like `extent={{-10,85},{-10,60}}` (zero width) for the
-        // `%name` label — fall back to the non-zero dimension so
-        // those labels render at all instead of being culled.
+        // MLS §18: `fontSize=0` means "size the font to fit the
+        // extent". OMEdit / Dymola interpret this as fit BOTH
+        // dimensions: start at extent height (the natural cap height
+        // for one-line text), then shrink uniformly if the rendered
+        // text width exceeds the extent width. Without the width
+        // shrink, wide MSL diagram labels like
+        // `extent={{-98,59},{-31,51}}` "reference speed generation"
+        // (67 wide × 8 tall) render at a 8-icon-unit font that's far
+        // too wide for the 67-unit extent, so the label visibly
+        // overflows or wraps past its authored frame.
         let w = rect.width().abs();
         let h = rect.height().abs();
-        let dim = if w < 0.5 { h } else if h < 0.5 { w } else { w.min(h) };
-        dim * 0.95
+        let mut size = if w < 0.5 {
+            h * 0.95
+        } else if h < 0.5 {
+            w * 0.95
+        } else {
+            h * 0.95
+        };
+        if w >= 0.5 && size > 1.0 {
+            // Egui galley measure: cheap no-wrap layout to get the
+            // rendered width at this font size. If it overruns the
+            // extent, scale down by the ratio.
+            let galley = painter.layout_no_wrap(
+                rendered.clone(),
+                egui::FontId::proportional(size),
+                color,
+            );
+            let measured_w = galley.size().x;
+            if measured_w > w {
+                size *= w / measured_w;
+            }
+        }
+        size
     };
     if font_size_px < 1.0 {
         return;
     }
-    let color = color_or_default(t.text_color, egui::Color32::from_gray(20));
     // Total rotation = primitive's own `rotation` + the parent
     // instance's orientation (carried on `xf.rotation_deg`). Modelica
     // and screen Y are flipped, so the screen-space angle is the

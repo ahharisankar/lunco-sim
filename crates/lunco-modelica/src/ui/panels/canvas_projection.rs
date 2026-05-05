@@ -691,16 +691,33 @@ pub fn import_model_to_diagram_from_ast(
         // placeholder is far better — they can see the wiring and
         // edit the source to fix the type.
         //
-        // EXCEPT: builtin scalar primitives (`Real`, `Integer`,
-        // `Boolean`, `String`, `enumeration`) are *parameters*, not
-        // component instances — they don't belong on the diagram. The
-        // graph builder still emits them as nodes, so we have to
-        // filter here.
+        // EXCEPT: scalar variables (per MLS §4.5.4) don't belong on
+        // the diagram — OMEdit / Dymola hide them. The graph builder
+        // still emits a node for every component declaration, so we
+        // filter here:
+        //   1. Builtin scalars (`Real`, `Integer`, …): primitive
+        //      parameters / vars.
+        //   2. `type` declarations (`type Angle = Real(unit="rad")`
+        //      and every member of `SIunits` / `Units.SI`): scalar
+        //      variables aliased to a unit-decorated Real. Detected
+        //      via `class_kind == "type"` on the resolved component
+        //      def, with a path-pattern fallback for cold MSL paths
+        //      that the indexer hasn't reached yet.
         let is_builtin_scalar = matches!(
             type_name,
             "Real" | "Integer" | "Boolean" | "String" | "enumeration"
         );
-        if component_def.is_none() && !type_name.is_empty() && !is_builtin_scalar {
+        let is_type_alias = component_def
+            .as_ref()
+            .map(|d| d.class_kind == "type")
+            .unwrap_or(false)
+            || type_name.contains(".SIunits.")
+            || type_name.contains(".Units.SI.")
+            || type_name.starts_with("SI.");
+        if is_builtin_scalar || is_type_alias {
+            continue;
+        }
+        if component_def.is_none() && !type_name.is_empty() {
             let leaf = type_name.rsplit('.').next().unwrap_or(type_name);
             component_def = Some(MSLComponentDef {
                 name: leaf.to_string(),
