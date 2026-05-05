@@ -484,22 +484,36 @@ impl ModelicaDocumentRegistry {
 
     /// Drain queued change notifications. The `drain_document_changes`
     /// system calls this each frame and fans the ids out as
-    /// [`lunco_doc_bevy::DocumentChanged`] triggers.
+    /// [`lunco_doc_bevy::DocumentChanged`] triggers. Deduped per drain
+    /// so an N-edit batch fires observers N times across N drains, not
+    /// N×N times within one drain.
     pub fn drain_pending_changes(&mut self) -> Vec<DocumentId> {
-        std::mem::take(&mut self.pending_changes)
+        let raw = std::mem::take(&mut self.pending_changes);
+        let mut seen: std::collections::HashSet<DocumentId> = std::collections::HashSet::new();
+        raw.into_iter().filter(|id| seen.insert(*id)).collect()
     }
 
     /// Drain queued Opened notifications. The same drain-and-fire
     /// system in `ui::mod` turns these into
     /// [`lunco_doc_bevy::DocumentOpened`] triggers.
+    /// Drain queued `Opened` ids. Deduplicates so each doc fires its
+    /// observers at most once per drain even if the open pipeline
+    /// races pushed the same id multiple times (e.g.
+    /// `reserve_id` + `install_prebuilt` + an explicit late
+    /// `register` from a second observer).
     pub fn drain_pending_opened(&mut self) -> Vec<DocumentId> {
-        std::mem::take(&mut self.pending_opened)
+        let raw = std::mem::take(&mut self.pending_opened);
+        let mut seen: std::collections::HashSet<DocumentId> = std::collections::HashSet::new();
+        raw.into_iter().filter(|id| seen.insert(*id)).collect()
     }
 
     /// Drain queued Closed notifications. Fanned out as
-    /// [`lunco_doc_bevy::DocumentClosed`] triggers.
+    /// [`lunco_doc_bevy::DocumentClosed`] triggers. Deduped — Closed
+    /// is once-per-lifecycle so duplicates are spurious.
     pub fn drain_pending_closed(&mut self) -> Vec<DocumentId> {
-        std::mem::take(&mut self.pending_closed)
+        let raw = std::mem::take(&mut self.pending_closed);
+        let mut seen: std::collections::HashSet<DocumentId> = std::collections::HashSet::new();
+        raw.into_iter().filter(|id| seen.insert(*id)).collect()
     }
 
     /// Immutable access to a document host by id.

@@ -3509,147 +3509,15 @@ pub fn drive_pending_api_connections(
 // also drift the values, so each frame we snap-set both current AND
 // target to the eased keyframe value (`viewport.snap_to`).
 
-#[derive(Clone, Copy, Debug)]
-enum EaseKind {
-    /// Constant value — produces a "hold" segment between two
-    /// identical keyframes.
-    Hold,
-    /// Linear blend.
-    Linear,
-    /// Soft-start, hard-end. Good for arrivals.
-    EaseOutCubic,
-    /// Symmetric soft-start and soft-end. Default for smooth dollies.
-    EaseInOutCubic,
-}
-
-impl EaseKind {
-    fn apply(self, t: f32) -> f32 {
-        let t = t.clamp(0.0, 1.0);
-        match self {
-            EaseKind::Hold => 0.0,
-            EaseKind::Linear => t,
-            EaseKind::EaseOutCubic => 1.0 - (1.0 - t).powi(3),
-            EaseKind::EaseInOutCubic => {
-                if t < 0.5 {
-                    4.0 * t * t * t
-                } else {
-                    1.0 - ((-2.0 * t + 2.0).powi(3)) / 2.0
-                }
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Keyframe {
-    /// Offset from move start, milliseconds.
-    at_ms: u32,
-    center: lunco_canvas::Pos,
-    zoom: f32,
-    /// How to ease *into* this keyframe from the previous one.
-    ease_in: EaseKind,
-}
-
-struct CameraMove {
-    started_at: web_time::Instant,
-    keyframes: Vec<Keyframe>,
-    /// What we last `snap_to`'d the viewport with. On the next tick,
-    /// if `viewport.center / .zoom` no longer matches, the user (or
-    /// the on-canvas zoom widget at the bottom-right) moved the
-    /// camera — the cinematic yields and stops fighting them.
-    last_applied: Option<(lunco_canvas::Pos, f32)>,
-}
-
-impl CameraMove {
-    fn total_ms(&self) -> u32 {
-        self.keyframes.last().map(|k| k.at_ms).unwrap_or(0)
-    }
-    /// Eased (center, zoom) at the given elapsed time. `None` once
-    /// past the last keyframe — caller drops the move then.
-    fn sample(&self, elapsed_ms: u32) -> Option<(lunco_canvas::Pos, f32)> {
-        if self.keyframes.is_empty() {
-            return None;
-        }
-        if elapsed_ms >= self.total_ms() {
-            return None;
-        }
-        // Find the segment [prev, next] containing elapsed_ms.
-        let mut prev = &self.keyframes[0];
-        for kf in self.keyframes.iter().skip(1) {
-            if elapsed_ms < kf.at_ms {
-                let span_ms = (kf.at_ms - prev.at_ms).max(1) as f32;
-                let local_t = (elapsed_ms - prev.at_ms) as f32 / span_ms;
-                let eased = kf.ease_in.apply(local_t);
-                return Some((
-                    lerp_pos(prev.center, kf.center, eased),
-                    lerp_f32(prev.zoom, kf.zoom, eased),
-                ));
-            }
-            prev = kf;
-        }
-        Some((prev.center, prev.zoom))
-    }
-}
-
-fn lerp_pos(a: lunco_canvas::Pos, b: lunco_canvas::Pos, t: f32) -> lunco_canvas::Pos {
-    lunco_canvas::Pos::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
-}
-fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
-}
-
-/// Per-doc active cinematic move. None = no move (viewport is free).
-#[derive(Resource, Default)]
-pub struct CinematicCamera {
-    moves: std::collections::HashMap<lunco_doc::DocumentId, CameraMove>,
-}
-
-/// Single-move cinematic duration: pull the camera from wherever it
-/// is to the fit-all view in one smooth sweep.
-const FIT_MOVE_MS: u32 = 700;
 
 
-/// Per-frame system: advance every active cinematic move, snap the
-/// owning canvas's viewport to the eased value. When a move's last
-/// keyframe is reached, drop it and let the user have free camera.
-pub fn tick_cinematic_camera(
-    mut cinematic: ResMut<CinematicCamera>,
-    mut state: ResMut<CanvasDiagramState>,
-) {
-    if cinematic.moves.is_empty() {
-        return;
-    }
-    let now = web_time::Instant::now();
-    let mut finished: Vec<lunco_doc::DocumentId> = Vec::new();
-    for (doc, mv) in cinematic.moves.iter_mut() {
-        let docstate = state.get_mut(Some(*doc));
-        // User-input yield: if the live viewport doesn't match what
-        // we last applied, something else moved it (zoom widget,
-        // mouse pan, F-to-fit, scroll). Cancel the cinematic and let
-        // the user have the camera.
-        if let Some((last_c, last_z)) = mv.last_applied {
-            let live_c = docstate.canvas.viewport.center;
-            let live_z = docstate.canvas.viewport.zoom;
-            let dc = (live_c.x - last_c.x).abs() + (live_c.y - last_c.y).abs();
-            let dz = (live_z - last_z).abs();
-            if dc > 0.5 || dz > 0.005 {
-                finished.push(*doc);
-                continue;
-            }
-        }
-        let elapsed = now.duration_since(mv.started_at).as_millis() as u32;
-        match mv.sample(elapsed) {
-            Some((center, zoom)) => {
-                docstate.canvas.viewport.snap_to(center, zoom);
-                mv.last_applied = Some((center, zoom));
-            }
-            None => finished.push(*doc),
-        }
-    }
-    for d in finished {
-        cinematic.moves.remove(&d);
-    }
-}
+
+
+
+
+
+
+
 
 /// One pulse-glow entry: target id, when it started, and how long it
 /// should last (per-call duration; the API caller can pass
@@ -3796,7 +3664,6 @@ impl lunco_canvas::Layer for PulseGlowLayer {
 pub fn drive_pending_api_focus(
     mut queue: ResMut<PendingApiFocusQueue>,
     mut state: ResMut<CanvasDiagramState>,
-    mut cinematic: ResMut<CinematicCamera>,
 ) {
     if queue.0.is_empty() {
         return;
@@ -3850,10 +3717,6 @@ pub fn drive_pending_api_focus(
     }
 
     let now_pulse = web_time::Instant::now();
-    let _ = cinematic; // kept for shape; not used now that the camera
-                       // move delegates to `pending_fit` (next frame's
-                       // canvas render does the math against the real
-                       // widget rect — see commentary below).
     for (doc, entries) in matched {
         let docstate = state.get_mut(Some(doc));
 
