@@ -128,6 +128,14 @@ build_wasm() {
     # mandatory, not optional.
     RUSTFLAGS="${RUSTFLAGS:-} --cfg=web_sys_unstable_apis" \
         cargo build --profile web-release --target wasm32-unknown-unknown --bin "$binary" -p "$crate" --no-default-features
+
+    # For lunica_web, also build the off-thread worker bundle. It runs in a
+    # Web Worker so rumoca's compile (~20s) doesn't block the UI.
+    if [ "$binary" = "lunica_web" ]; then
+        info "Building companion worker bundle: lunica_worker"
+        RUSTFLAGS="${RUSTFLAGS:-} --cfg=web_sys_unstable_apis" \
+            cargo build --profile web-release --target wasm32-unknown-unknown --bin lunica_worker -p "$crate" --no-default-features
+    fi
     
     if [ $? -eq 0 ]; then
         success "WASM binary built successfully"
@@ -221,6 +229,43 @@ generate_bindings() {
     JS_SIZE=$(du -h "$dist_dir/${binary}.js" | cut -f1)
     info "Bundle sizes: WASM=${WASM_SIZE}, JS=${JS_SIZE}"
     info "Bundle ready: $dist_dir"
+
+    # ── Worker bundle (lunica_web only) ─────────────────────────────────
+    # Generate bindings for the off-thread Modelica worker and place its
+    # output under `dist/lunica_web/worker/` so the main page can
+    # `new Worker('./worker/lunica_worker.js', { type: 'module' })`. The
+    # worker bundle is a SECOND wasm instance — it has its own memory and
+    # state — and there is no way to share Rust globals or `Arc`s with it.
+    if [ "$binary" = "lunica_web" ]; then
+        local worker_bin="lunica_worker"
+        local worker_bindgen_dir="$base_target_dir/web/$worker_bin"
+        local worker_dist_dir="$dist_dir/worker"
+        info "Generating bindings for worker bundle: $worker_bin"
+        mkdir -p "$worker_bindgen_dir" "$worker_dist_dir"
+        $wasm_bindgen_cmd "$cargo_out_dir/${worker_bin}.wasm" \
+            --out-dir "$worker_bindgen_dir" \
+            --target web
+        if [ $? -ne 0 ]; then
+            error "Worker binding generation failed"
+            exit 1
+        fi
+        # wasm-opt the worker too, same flags as the main bundle.
+        local worker_wasm_in="$worker_bindgen_dir/${worker_bin}_bg.wasm"
+        if [ -f "$worker_wasm_in" ] && command -v wasm-opt &> /dev/null; then
+            local tmp="$worker_wasm_in.opt.tmp"
+            if wasm-opt -O2 --strip-debug -o "$tmp" "$worker_wasm_in"; then
+                mv "$tmp" "$worker_wasm_in"
+            else
+                rm -f "$tmp"
+            fi
+        fi
+        rm -rf "$worker_dist_dir"
+        mkdir -p "$worker_dist_dir"
+        cp "$worker_bindgen_dir"/* "$worker_dist_dir/"
+        local worker_size
+        worker_size=$(du -h "$worker_dist_dir/${worker_bin}_bg.wasm" | cut -f1)
+        info "Worker bundle: $worker_size at $worker_dist_dir"
+    fi
 }
 
 # Pack MSL into a versioned, compressed bundle and place it next to the

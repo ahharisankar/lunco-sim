@@ -13,6 +13,7 @@ use std::time::Duration;
 use bevy::prelude::*;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use rumoca_sim::{SimStepper, StepperOptions};
+use serde::{Serialize, Deserialize};
 
 use lunco_assets::modelica_dir;
 
@@ -43,6 +44,14 @@ pub struct ModelicaChannels {
 ///
 /// Each command targets a specific Bevy `Entity` and carries a `session_id` for
 /// fencing stale results. The worker owns all `SimStepper` instances, keyed by entity.
+///
+/// Derives `Serialize`/`Deserialize` so the wasm Web Worker transport can ship
+/// commands over `postMessage`. The `Compile.stream` field carries an
+/// `Arc<ArcSwap<…>>` that can't cross a worker boundary; it's `#[serde(skip)]`
+/// — wasm builds always use the `outputs`-via-result path instead of the
+/// shared snapshot fast-path. Native still uses the shared snapshot
+/// in-process and never touches serde here.
+#[derive(Serialize, Deserialize)]
 pub enum ModelicaCommand {
     /// Advance simulation by one timestep. Sent every frame from `spawn_modelica_requests`.
     Step {
@@ -75,6 +84,12 @@ pub enum ModelicaCommand {
         /// `SignalRegistry`. When `Some`, the worker updates the
         /// stream directly and the main-thread handler can skip the
         /// per-sample push loop.
+        ///
+        /// Skipped by serde: the `Arc<ArcSwap<_>>` only makes sense
+        /// inside one address space. On wasm (Web Worker transport)
+        /// this is always serialized as `None`, forcing the legacy
+        /// outputs-via-result path. Native is unaffected.
+        #[serde(skip)]
         stream: Option<SimStream>,
     },
     /// Update parameter values by recompiling with modified source code.
@@ -105,6 +120,10 @@ use std::sync::Arc;
 ///
 /// Contains simulation outputs, detected symbols, and error information.
 /// The `session_id` field is used by `handle_modelica_responses` to fence stale results.
+///
+/// Derives serde for the wasm Web Worker transport. All fields are plain
+/// data; no special handling required.
+#[derive(Serialize, Deserialize)]
 pub struct ModelicaResult {
     pub entity: Entity,
     pub session_id: u64,
@@ -721,9 +740,13 @@ fn is_squashable(last: &ModelicaCommand, next: &ModelicaCommand) -> bool {
 
 /// Inner simulation state for wasm32 inline worker.
 /// Mirrors the local variables in `modelica_worker` on desktop.
+///
+/// `pub` so the off-thread worker bin (`bin/lunica_worker.rs`) can own
+/// one of these directly. The fields stay private — only the type itself
+/// crosses crate boundaries.
 #[cfg(target_arch = "wasm32")]
 #[derive(Default)]
-struct InlineWorkerInner {
+pub struct InlineWorkerInner {
     steppers: HashMap<Entity, (u64, String, SimStepper)>,
     current_sessions: HashMap<Entity, u64>,
     cached_models: HashMap<Entity, CachedModel>,
@@ -770,13 +793,45 @@ pub(crate) fn inline_worker_process(
     mut worker: ResMut<InlineWorker>,
     channels: Res<ModelicaChannels>,
 ) {
-    let w = &mut worker.inner;
-    // Process one command per frame to avoid blocking the main thread
+    // If the off-thread Web Worker is wired up
+    // (`worker_transport::install_worker` succeeded), it owns the
+    // `rx_cmd` queue: its pump system drains commands and forwards them
+    // to the worker bundle. We must not also consume from the same
+    // queue here or commands would race. Bail out — the worker
+    // pipeline is the active one.
+    if crate::worker_transport::is_worker_active() {
+        return;
+    }
+    // Process one command per frame to avoid blocking the main thread.
     let Ok(cmd) = channels.rx_cmd.try_recv() else { return };
+    let tx = channels.tx_res.clone();
+    process_inline_command(&mut worker.inner, cmd, |r| {
+        let _ = tx.send(r);
+    });
+}
 
+/// Apply a single `ModelicaCommand` against the inline worker state, sending
+/// any resulting `ModelicaResult` values through `send`.
+///
+/// Same dispatch the desktop `modelica_worker` loop runs, parameterised over
+/// the result sink so both the in-process inline path
+/// (`inline_worker_process`) and the off-thread Web Worker entry
+/// (`bin/lunica_worker.rs`) can share it. Passing a closure rather than a
+/// concrete `Sender` keeps this fn agnostic to whether results go to a
+/// crossbeam channel, a `Vec`, or a `postMessage` queue.
+///
+/// `state` carries the per-entity `SimStepper` map, DAE cache, and the lazy
+/// `ModelicaCompiler`. The wasm worker bin owns one of these for the lifetime
+/// of the page and reuses it across postMessage dispatches.
+#[cfg(target_arch = "wasm32")]
+pub fn process_inline_command<F: FnMut(ModelicaResult)>(
+    state: &mut InlineWorkerInner,
+    cmd: ModelicaCommand,
+    mut send: F,
+) {
+    let w = state;
     match cmd {
         ModelicaCommand::Step { entity, session_id, model_name, inputs, dt, model_path: _ } => {
-            let tx = &channels.tx_res;
 
             // Auto-init: compile if stepper doesn't exist
             if !w.steppers.contains_key(&entity) {
@@ -809,7 +864,7 @@ pub(crate) fn inline_worker_process(
                     for _ in 0..3 { if let Err(e) = stepper.step(sub_dt) { step_err = Some(e); break; } }
 
                     if let Some(e) = step_err {
-                        let _ = tx.send(ModelicaResult {
+                        send(ModelicaResult {
                             entity, session_id, new_time: stepper.time(),
                             outputs: Vec::new(),
                             detected_symbols: Vec::new(), error: Some(format!("Solver Error: {:?}", e)),
@@ -819,7 +874,7 @@ pub(crate) fn inline_worker_process(
                         w.steppers.remove(&entity);
                     } else {
                         let outputs = collect_stepper_observables(stepper);
-                        let _ = tx.send(ModelicaResult {
+                        send(ModelicaResult {
                             entity, session_id, new_time: stepper.time(),
                             outputs, error: None,
                             log_message: None, is_new_model: false, detected_symbols: Vec::new(),
@@ -827,7 +882,7 @@ pub(crate) fn inline_worker_process(
                         });
                     }
                 } else {
-                    let _ = tx.send(result_ok(entity, session_id));
+                    send(result_ok(entity, session_id));
                 }
             } else {
                 // No stepper for this entity. The Bevy-side
@@ -838,7 +893,7 @@ pub(crate) fn inline_worker_process(
                 // missing). Surface a message that tells the user
                 // what to do next instead of "Sim engine failed to
                 // start." which doesn't.
-                let _ = tx.send(ModelicaResult {
+                send(ModelicaResult {
                     entity, session_id, new_time: 0.0,
                     outputs: Vec::new(),
                     detected_symbols: Vec::new(),
@@ -861,7 +916,6 @@ pub(crate) fn inline_worker_process(
 
             let mut opts = StepperOptions::default();
             opts.atol = 1e-1; opts.rtol = 1e-1;
-            let tx = &channels.tx_res;
 
             let compiler = w.compiler.get_or_insert_with(ModelicaCompiler::new);
             let compile_outcome = if extra_sources.is_empty() {
@@ -883,7 +937,7 @@ pub(crate) fn inline_worker_process(
                             });
 
                             w.steppers.insert(entity, (session_id, model_name.clone(), stepper));
-                            let _ = tx.send(ModelicaResult {
+                            send(ModelicaResult {
                                 entity, session_id, new_time: 0.0,
                                 outputs: Vec::new(),
                                 detected_symbols: symbols, error: None,
@@ -894,7 +948,7 @@ pub(crate) fn inline_worker_process(
                             });
                         }
                         Err(e) => {
-                            let _ = tx.send(ModelicaResult {
+                            send(ModelicaResult {
                                 entity, session_id, new_time: 0.0,
                                 outputs: Vec::new(),
                                 detected_symbols: Vec::new(), error: Some(format!("Stepper Init Error: {:?}", e)),
@@ -905,7 +959,7 @@ pub(crate) fn inline_worker_process(
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(ModelicaResult {
+                    send(ModelicaResult {
                         entity, session_id, new_time: 0.0,
                         outputs: Vec::new(),
                         detected_symbols: Vec::new(), error: Some(format!("Compile Error: {:?}", e)),
@@ -917,7 +971,6 @@ pub(crate) fn inline_worker_process(
         }
         ModelicaCommand::Reset { entity, session_id } => {
             w.current_sessions.insert(entity, session_id);
-            let tx = &channels.tx_res;
 
             if let Some(cached) = w.cached_models.get(&entity) {
                 let (stripped_source, input_defaults) = strip_input_defaults(&cached.source);
@@ -932,7 +985,7 @@ pub(crate) fn inline_worker_process(
                             let symbols = collect_stepper_observables(&stepper);
                             let descriptions = collect_variable_descriptions(&stripped_source);
                             w.steppers.insert(entity, (session_id, cached.model_name.clone(), stepper));
-                            let _ = tx.send(ModelicaResult {
+                            send(ModelicaResult {
                                 entity, session_id, new_time: 0.0,
                                 outputs: Vec::new(),
                                 detected_symbols: symbols, error: None,
@@ -943,7 +996,7 @@ pub(crate) fn inline_worker_process(
                             });
 
                                 } else {
-                                let _ = tx.send(ModelicaResult {
+                                send(ModelicaResult {
                                 entity, session_id, new_time: 0.0,
                                 outputs: Vec::new(),
                                 detected_symbols: Vec::new(), error: Some("Stepper init failed".to_string()),
@@ -953,7 +1006,7 @@ pub(crate) fn inline_worker_process(
                                 }
                                 }
                                 Err(e) => {
-                                let _ = tx.send(ModelicaResult {
+                                send(ModelicaResult {
                                 entity, session_id, new_time: 0.0,
                                 outputs: Vec::new(),
                                 detected_symbols: Vec::new(), error: Some(format!("Reset compile error: {:?}", e)),
@@ -964,7 +1017,7 @@ pub(crate) fn inline_worker_process(
                                 }
                                 } else {
                                 w.steppers.remove(&entity);
-                                let _ = tx.send(ModelicaResult {
+                                send(ModelicaResult {
                                 entity, session_id, new_time: 0.0,
                                 outputs: Vec::new(),
                                 detected_symbols: Vec::new(), error: None,
@@ -977,7 +1030,7 @@ pub(crate) fn inline_worker_process(
         }
         ModelicaCommand::UpdateParameters { entity, session_id, model_name, source } => {
             if session_id < *w.current_sessions.get(&entity).unwrap_or(&0) {
-                let _ = channels.tx_res.send(result_ok(entity, session_id));
+                send(result_ok(entity, session_id));
                 return;
             }
             w.current_sessions.insert(entity, session_id);
@@ -985,7 +1038,6 @@ pub(crate) fn inline_worker_process(
 
             let mut opts = StepperOptions::default();
             opts.atol = 1e-1; opts.rtol = 1e-1;
-            let tx = &channels.tx_res;
 
             let compiler = w.compiler.get_or_insert_with(ModelicaCompiler::new);
             match compiler.compile_str(&model_name, &stripped_source, "model.mo") {
@@ -1002,7 +1054,7 @@ pub(crate) fn inline_worker_process(
                             });
 
                             w.steppers.insert(entity, (session_id, model_name.clone(), stepper));
-                            let _ = tx.send(ModelicaResult {
+                            send(ModelicaResult {
                                 entity, session_id, new_time: 0.0,
                                 outputs: Vec::new(),
                                 detected_symbols: symbols, error: None,
@@ -1013,7 +1065,7 @@ pub(crate) fn inline_worker_process(
                             });
                         }
                         Err(e) => {
-                            let _ = tx.send(ModelicaResult {
+                            send(ModelicaResult {
                                 entity, session_id, new_time: 0.0,
                                 outputs: Vec::new(),
                                 detected_symbols: Vec::new(), error: Some(format!("Stepper Init Error: {:?}", e)),
@@ -1024,7 +1076,7 @@ pub(crate) fn inline_worker_process(
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(ModelicaResult {
+                    send(ModelicaResult {
                         entity, session_id, new_time: 0.0,
                         outputs: Vec::new(),
                         detected_symbols: Vec::new(), error: Some(format!("Re-compile Error: {:?}", e)),

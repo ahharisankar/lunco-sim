@@ -60,6 +60,14 @@ fn install_global_parsed_msl(parsed: Vec<(String, rumoca_session::parsing::Store
     let _ = GLOBAL_PARSED_MSL.set(Arc::new(parsed));
 }
 
+/// `pub` re-export of `install_global_parsed_msl` so the off-thread
+/// worker bin (`bin/lunica_worker.rs`) can install the MSL bundle it
+/// receives over postMessage.
+#[cfg(target_arch = "wasm32")]
+pub fn install_global_parsed_msl_pub(parsed: Vec<(String, rumoca_session::parsing::StoredDefinition)>) {
+    install_global_parsed_msl(parsed);
+}
+
 
 /// Plugin that owns MSL asset loading. Add once during app build.
 pub struct MslRemotePlugin;
@@ -230,6 +238,13 @@ fn drain_msl_load_slot(
             bevy::log::info!(
                 "[MSL] using pre-parsed bundle — {count} docs ready (no on-page parse)"
             );
+            // Forward to the off-thread worker (if installed) BEFORE
+            // moving `parsed_docs` into the main address space's
+            // `GLOBAL_PARSED_MSL`. The worker has its own wasm linear
+            // memory and OnceLock; without this hand-off, every compile
+            // dispatched to the worker would fail to resolve any
+            // `Modelica.*` reference.
+            crate::worker_transport::install_msl_in_worker(&parsed_docs);
             install_global_parsed_msl(parsed_docs);
             commands.insert_resource(source);
             // Drop any previously-cached empty compiler so the next
@@ -320,6 +335,7 @@ fn drive_msl_parse(
             "[MSL] parse complete — {total} docs in {:.1}s",
             elapsed.as_secs_f64()
         );
+        crate::worker_transport::install_msl_in_worker(&parsed);
         install_global_parsed_msl(parsed);
         // Drop the compiler that was lazily built before MSL was ready
         // (or before parse finished); next compile reinstates with the

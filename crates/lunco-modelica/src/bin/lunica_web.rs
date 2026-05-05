@@ -91,8 +91,26 @@ pub fn run() {
             default_source: default_source.to_string(),
         })
         .add_systems(Startup, setup_web_workbench)
-        .add_systems(Update, hide_html_loader_once_painted)
-        .run();
+        .add_systems(Update, hide_html_loader_once_painted);
+
+    // Off-thread Modelica worker. The result-side sender was registered by
+    // `ModelicaPlugin::build` above; this call attaches a `web_sys::Worker`
+    // instance pointing at the second wasm bundle. Bevy's
+    // `worker_transport::pump_commands_to_worker` system then ships every
+    // ModelicaCommand to the worker, and the worker's postMessage replies
+    // are decoded and pushed back into the channel that
+    // `handle_modelica_responses` already drains.
+    //
+    // If this fails (worker bundle missing, COOP/COEP misconfigured, etc.)
+    // we log + continue: the inline worker remains as a fallback so the
+    // page still loads, just with the old UI-blocking compile path.
+    if let Err(e) = lunco_modelica::worker_transport::install_worker("./worker/lunica_worker.js") {
+        bevy::log::error!(
+            "[lunica_web] failed to start off-thread worker; falling back to inline: {e:?}"
+        );
+    }
+
+    app.run();
 }
 
 /// Resource holding the default model info passed to the startup system.

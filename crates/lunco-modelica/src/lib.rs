@@ -517,6 +517,11 @@ pub mod models;
 pub mod msl_remote;
 pub mod sim_stream;
 pub mod worker;
+/// Wasm-only Web Worker transport — relays `ModelicaCommand` /
+/// `ModelicaResult` between the main wasm instance and the off-thread
+/// worker bundle so the UI never blocks on rumoca compile / step.
+#[cfg(target_arch = "wasm32")]
+pub mod worker_transport;
 pub use worker::{
     ModelicaChannels, ModelicaCommand, ModelicaModel, ModelicaResult, handle_modelica_responses,
     spawn_modelica_requests,
@@ -679,6 +684,13 @@ fn build_modelica_core(app: &mut App) {
         });
     }
 
+    // On wasm we still hold the inline worker resource as a fallback for
+    // pages that haven't loaded the off-thread worker bundle (e.g. local
+    // dev where the worker JS file is missing). The Web Worker transport,
+    // when wired up by the binary's startup code via
+    // `worker_transport::install_worker`, takes precedence — it intercepts
+    // commands via its own pump system and ships them to the worker
+    // bundle, bypassing the inline path entirely.
     #[cfg(target_arch = "wasm32")]
     {
         app.insert_resource(worker::InlineWorker::default());
@@ -688,6 +700,11 @@ fn build_modelica_core(app: &mut App) {
     app.insert_resource(ModelicaChannels { tx: tx_cmd, rx: rx_res });
     #[cfg(target_arch = "wasm32")]
     {
+        // Hand the result-side sender to the worker_transport so the JS
+        // `onmessage` callback can deliver decoded results into the same
+        // channel the existing `handle_modelica_responses` system drains.
+        // Cheap to clone; the original still goes into ModelicaChannels.
+        let _ = worker_transport::register_result_sender(tx_res.clone());
         app.insert_resource(ModelicaChannels { tx: tx_cmd, rx: rx_res, rx_cmd, tx_res });
     }
 
@@ -720,6 +737,14 @@ fn build_modelica_core(app: &mut App) {
 
     #[cfg(target_arch = "wasm32")]
     {
+        // Both systems run every Update; only one actually does work per
+        // frame. `pump_commands_to_worker` early-returns if the JS worker
+        // hasn't been installed yet — which keeps `inline_worker_process`
+        // as the fallback dispatch until then. Once `install_worker` is
+        // called by the binary, pump_commands wins because it drains
+        // `rx_cmd` first; inline_worker_process then sees an empty queue
+        // and no-ops.
+        app.add_systems(Update, worker_transport::pump_commands_to_worker);
         app.add_systems(Update, worker::inline_worker_process);
         app.add_systems(Update, ui::update_file_load_result);
     }
