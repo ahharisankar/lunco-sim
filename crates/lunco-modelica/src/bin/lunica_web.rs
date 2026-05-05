@@ -42,15 +42,61 @@ pub fn run() {
     #[cfg(target_arch = "wasm32")]
     console_error_panic_hook::set_once();
 
-    // Load the first bundled model (Battery.mo) as the default.
-    // Models are embedded at compile time via include_str! — no filesystem access.
-    // Bevy requires some default; RocketEngine is first in the list.
+    // Pick the bundled model that loads on startup. Default is the
+    // first entry (`bundled_models()` is sorted by filename), but the
+    // page URL can override via `?example=<filename>` so we can deep-
+    // link straight to a specific model — handy for tutorials, bug
+    // reports, and the autonomous test loop.
+    //
+    //   /                                 → first bundled model
+    //   /?example=AnnotatedRocketStage.mo → AnnotatedRocketStage
+    //   /?example=Battery                 → Battery (.mo extension is
+    //                                       auto-appended if missing)
+    //
+    // Unknown names log a warn and fall back to the default so a stale
+    // bookmark doesn't break the page.
     let models = bundled_models();
-    let default_model = models
+    let fallback = models
         .first()
         .expect("at least one bundled model");
-    let default_filename = default_model.filename;
-    let default_source = default_model.source;
+    #[cfg(target_arch = "wasm32")]
+    let url_example: Option<String> = web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .and_then(|s| {
+            // `s` is the literal query string including the leading
+            // `?`. URLSearchParams handles decoding for us.
+            web_sys::UrlSearchParams::new_with_str(s.trim_start_matches('?'))
+                .ok()
+                .and_then(|p| p.get("example"))
+        });
+    #[cfg(not(target_arch = "wasm32"))]
+    let url_example: Option<String> = None;
+
+    let chosen = url_example
+        .as_deref()
+        .and_then(|name| {
+            let matches = |candidate: &str| {
+                let n_with_ext = if name.ends_with(".mo") {
+                    name.to_string()
+                } else {
+                    format!("{name}.mo")
+                };
+                candidate == name || candidate == n_with_ext
+            };
+            models.iter().find(|m| matches(m.filename))
+        })
+        .unwrap_or_else(|| {
+            if let Some(name) = url_example.as_deref() {
+                bevy::log::warn!(
+                    "[lunica_web] ?example={name:?} not found in bundled models — \
+                     falling back to {}",
+                    fallback.filename
+                );
+            }
+            fallback
+        });
+    let default_filename = chosen.filename;
+    let default_source = chosen.source;
 
     let mut app = App::new();
     app.insert_resource(Time::<Fixed>::from_hz(60.0));

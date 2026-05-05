@@ -40,10 +40,13 @@ use bevy_egui::egui;
 #[derive(bevy::prelude::Resource, Default)]
 pub struct FontsInstalled(pub bool);
 
-/// Idempotent installer. Called once per egui context at startup.
-/// Silently no-ops if the font file is missing — the app still
-/// runs, just without the expanded glyph coverage. A warning is
-/// logged so the missing-font condition is visible.
+/// Idempotent installer. Native reads the font from the cache dir;
+/// wasm callers must hand in pre-fetched bytes via
+/// [`install_fallback_fonts_with_bytes`] (see [`spawn_wasm_font_fetch`]).
+/// Silently no-ops if the font file is missing — the app still runs,
+/// just without the expanded glyph coverage. A warning is logged so the
+/// missing-font condition is visible.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn install_fallback_fonts(ctx: &egui::Context) {
     let dejavu = match std::fs::read(lunco_assets::dejavu_sans_path()) {
         Ok(bytes) => bytes,
@@ -57,7 +60,20 @@ pub fn install_fallback_fonts(ctx: &egui::Context) {
             return;
         }
     };
+    install_fallback_fonts_with_bytes(ctx, dejavu);
+}
 
+/// Wasm stub: there's no filesystem at runtime, so the sync entry
+/// point can't read the font. Callers go through
+/// [`spawn_wasm_font_fetch`] instead, which fetches over HTTP and then
+/// calls [`install_fallback_fonts_with_bytes`] once the bytes land.
+#[cfg(target_arch = "wasm32")]
+pub fn install_fallback_fonts(_ctx: &egui::Context) {}
+
+/// Same as [`install_fallback_fonts`] but takes the DejaVu bytes
+/// directly — used on wasm where the font must be fetched over HTTP at
+/// runtime instead of read from disk.
+pub fn install_fallback_fonts_with_bytes(ctx: &egui::Context, dejavu: Vec<u8>) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "dejavu".into(),
@@ -82,4 +98,67 @@ pub fn install_fallback_fonts(ctx: &egui::Context) {
         "[lunco-theme] installed DejaVu Sans fallback (covers U+2190-2311: \
          arrows, math operators, misc technical)"
     );
+}
+
+/// Wasm-only: fetch `url` over HTTP, then install the result as a
+/// fallback font on `ctx`. The page bundle ships DejaVu under
+/// `/fonts/DejaVuSans.ttf`; `build_web.sh` copies it from
+/// `<workspace>/.cache/fonts/DejaVuSans.ttf` into `dist/lunica_web/fonts/`
+/// during pack. Fire-and-forget — failure logs a warning and leaves
+/// egui with default fonts (math/arrow glyphs will tofu).
+#[cfg(target_arch = "wasm32")]
+pub fn spawn_wasm_font_fetch(ctx: egui::Context, url: String) {
+    use wasm_bindgen_futures::JsFuture;
+    use wasm_bindgen::JsCast;
+    wasm_bindgen_futures::spawn_local(async move {
+        let win = match web_sys::window() {
+            Some(w) => w,
+            None => {
+                bevy::log::warn!("[lunco-theme] no `window` — skipping font fetch");
+                return;
+            }
+        };
+        let resp_jsv = match JsFuture::from(win.fetch_with_str(&url)).await {
+            Ok(v) => v,
+            Err(e) => {
+                bevy::log::warn!("[lunco-theme] font fetch {url}: {e:?}");
+                return;
+            }
+        };
+        let resp: web_sys::Response = match resp_jsv.dyn_into() {
+            Ok(r) => r,
+            Err(e) => {
+                bevy::log::warn!("[lunco-theme] font fetch {url}: not a Response: {e:?}");
+                return;
+            }
+        };
+        if !resp.ok() {
+            bevy::log::warn!(
+                "[lunco-theme] font fetch {url}: HTTP {} {}",
+                resp.status(),
+                resp.status_text()
+            );
+            return;
+        }
+        let buf_jsv = match resp.array_buffer() {
+            Ok(p) => match JsFuture::from(p).await {
+                Ok(v) => v,
+                Err(e) => {
+                    bevy::log::warn!("[lunco-theme] font fetch {url}: array_buffer: {e:?}");
+                    return;
+                }
+            },
+            Err(e) => {
+                bevy::log::warn!("[lunco-theme] font fetch {url}: array_buffer init: {e:?}");
+                return;
+            }
+        };
+        let array = js_sys::Uint8Array::new(&buf_jsv);
+        let bytes = array.to_vec();
+        bevy::log::info!(
+            "[lunco-theme] font fetched {url}: {} bytes — installing",
+            bytes.len()
+        );
+        install_fallback_fonts_with_bytes(&ctx, bytes);
+    });
 }

@@ -224,6 +224,26 @@ generate_bindings() {
         warn "No index.html found at $index_html — bundle will lack an entry point"
     fi
 
+    # DejaVu Sans — wasm has no filesystem, lunco-theme fetches this
+    # over HTTP at startup (see crates/lunco-theme/src/fonts.rs::
+    # spawn_wasm_font_fetch). Source lives in the workspace cache
+    # (populated by `cargo run -p lunco-assets -- download`); we just
+    # copy it next to the wasm so it's served same-origin.
+    local dejavu_src=""
+    for candidate in \
+        "$PROJECT_DIR/../.cache/fonts/DejaVuSans.ttf" \
+        "$PROJECT_DIR/.cache/fonts/DejaVuSans.ttf"; do
+        if [ -f "$candidate" ]; then dejavu_src="$candidate"; break; fi
+    done
+    if [ -n "$dejavu_src" ]; then
+        mkdir -p "$dist_dir/fonts"
+        cp "$dejavu_src" "$dist_dir/fonts/DejaVuSans.ttf"
+        info "Copied DejaVu Sans → $dist_dir/fonts/"
+    else
+        warn "DejaVu Sans not found — math/arrow glyphs will tofu in browser. \
+Run: cargo run -p lunco-assets -- download"
+    fi
+
     # Show output size
     WASM_SIZE=$(du -h "$dist_dir/${binary}_bg.wasm" | cut -f1)
     JS_SIZE=$(du -h "$dist_dir/${binary}.js" | cut -f1)

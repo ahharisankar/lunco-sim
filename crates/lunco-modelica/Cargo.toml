@@ -185,6 +185,9 @@ web-sys = { version = "0.3", features = [
     "Response",
     "Headers",
     "Storage",
+    # `?example=…` URL parameter parsing in lunica_web.rs.
+    "Location",
+    "UrlSearchParams",
     # Web Worker bindings — used by `worker_transport` to offload the
     # blocking compile/step pipeline off the main thread.
     "Worker",

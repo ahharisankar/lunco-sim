@@ -6442,8 +6442,12 @@ dependencies = [
  "bevy_egui",
  "catppuccin-egui",
  "egui_colors",
+ "js-sys",
  "lunco-assets",
  "serde",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

@@ -124,29 +124,40 @@ pub fn user_config_subdir(name: &str) -> PathBuf {
 /// let textures = cache_dir().join("textures");
 /// ```
 pub fn cache_dir() -> PathBuf {
-    // 1. Runtime env var overrides everything
-    if let Some(val) = std::env::var_os("LUNCOSIM_CACHE") {
-        return PathBuf::from(val);
+    // wasm32-unknown-unknown has no filesystem — `Path::exists` /
+    // `read_dir` panic with "no filesystem on this platform". Return
+    // a stable nominal path; callers that try to read/write it will
+    // get a clean Err instead of crashing the page.
+    #[cfg(target_arch = "wasm32")]
+    {
+        return PathBuf::from(".cache");
     }
-    // 2. Walk up from this crate's manifest to find .cache/msl
-    //    CARGO_MANIFEST_DIR = .../modelica/crates/lunco-assets
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let mut current = Some(manifest.clone());
-    for _ in 0..10 {
-        if let Some(dir) = &current {
-            let candidate = dir.join(".cache");
-            let msl_modelica = candidate.join("msl").join("Modelica");
-            // Check it has actual content
-            if msl_modelica.exists() {
-                if msl_modelica.read_dir().map(|mut d| d.next().is_some()).unwrap_or(false) {
-                    return candidate;
-                }
-            }
-            current = dir.parent().map(PathBuf::from);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // 1. Runtime env var overrides everything
+        if let Some(val) = std::env::var_os("LUNCOSIM_CACHE") {
+            return PathBuf::from(val);
         }
+        // 2. Walk up from this crate's manifest to find .cache/msl
+        //    CARGO_MANIFEST_DIR = .../modelica/crates/lunco-assets
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut current = Some(manifest.clone());
+        for _ in 0..10 {
+            if let Some(dir) = &current {
+                let candidate = dir.join(".cache");
+                let msl_modelica = candidate.join("msl").join("Modelica");
+                // Check it has actual content
+                if msl_modelica.exists() {
+                    if msl_modelica.read_dir().map(|mut d| d.next().is_some()).unwrap_or(false) {
+                        return candidate;
+                    }
+                }
+                current = dir.parent().map(PathBuf::from);
+            }
+        }
+        // 3. Last resort: CWD-relative
+        PathBuf::from(".cache")
     }
-    // 3. Last resort: CWD-relative
-    PathBuf::from(".cache")
 }
 
 /// Returns the subdirectory within the cache for a specific asset category.

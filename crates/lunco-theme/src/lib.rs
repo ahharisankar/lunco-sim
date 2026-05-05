@@ -673,8 +673,19 @@ fn install_fallback_fonts_once(
         return;
     };
     bevy::log::info!(
-        "[lunco-theme] installing Noto fallback fonts (Greek/math/arrow coverage)…"
+        "[lunco-theme] installing fallback fonts (Greek/math/arrow coverage)…"
     );
-    fonts::install_fallback_fonts(ctx);
+    #[cfg(target_arch = "wasm32")]
+    {
+        // Wasm has no filesystem — fetch the font over HTTP from the
+        // page bundle. Fire-and-forget; the install happens on the
+        // next frame after the bytes land. Until then egui uses the
+        // default font and math/arrow glyphs tofu briefly.
+        fonts::spawn_wasm_font_fetch(ctx.clone(), "./fonts/DejaVuSans.ttf".to_string());
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        fonts::install_fallback_fonts(ctx);
+    }
     done.0 = true;
 }
