@@ -359,6 +359,81 @@ impl ModelicaDocument {
     /// an `AsyncComputeTaskPool::spawn` and install the result via
     /// `ModelicaDocumentRegistry::install_prebuilt` on the main
     /// thread. The drill-in flow uses exactly this pattern.
+    /// Load just the target class out of an MSL package file,
+    /// instead of the whole wrapper. Drill-in path uses this so
+    /// opening `Modelica.Blocks.Examples.PID_Controller` yields a
+    /// ~7 KB doc (the PID class with leading comments) instead of
+    /// the 152 KB `Modelica/Blocks/package.mo` wrapper.
+    ///
+    /// Source layout: `within Modelica.Blocks.Examples;\n<class_slice>`.
+    /// The within prefix preserves scope-chain resolution for
+    /// in-class references that rely on the parent package
+    /// (`SI.Angle`, `Blocks.Math.Gain`, etc.).
+    ///
+    /// The doc is **lazy**: AST/SyntaxCache start empty, marked stale
+    /// so `drive_engine_sync` parses the small slice off-thread. Tab
+    /// opens immediately; content fills on the next idle Update.
+    ///
+    /// `qualified` is the MSL fully-qualified class name (e.g.
+    /// `Modelica.Blocks.Examples.PID_Controller`); `path` is the
+    /// `.mo` file containing that class (typically a `package.mo`).
+    pub fn load_msl_class(
+        id: DocumentId,
+        path: &std::path::Path,
+        qualified: &str,
+    ) -> Result<Self, String> {
+        // Read whole-file bytes (in-memory bundle on web, fs on native).
+        let full_source = if let Some(bytes) = lunco_assets::msl::global_msl_source()
+            .and_then(|s| s.read(path))
+        {
+            String::from_utf8(bytes)
+                .map_err(|e| format!("non-utf8 source `{}`: {e}", path.display()))?
+        } else {
+            std::fs::read_to_string(path).map_err(|e| {
+                format!("read failed `{}`: {e}", path.display())
+            })?
+        };
+
+        // Resolve the target class span via rumoca's cached parse.
+        let short_name = qualified.rsplit('.').next().unwrap_or(qualified);
+        let parent_pkg: String = {
+            let mut parts: Vec<&str> = qualified.split('.').collect();
+            parts.pop();
+            parts.join(".")
+        };
+
+        let mut parsed = rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()])
+            .map_err(|e| format!("parse failed `{}`: {e}", path.display()))?;
+        let (_uri, ast) = parsed
+            .drain(..)
+            .next()
+            .ok_or_else(|| format!("rumoca returned no parse result for `{}`", path.display()))?;
+
+        let class_def = find_class_by_short_name_recursive(&ast, short_name)
+            .ok_or_else(|| format!("class `{qualified}` not found in `{}`", path.display()))?;
+        let (full_start, full_end) = class_def
+            .full_span_with_leading_comments(&full_source)
+            .ok_or_else(|| format!("could not slice class `{qualified}` from `{}`", path.display()))?;
+        let class_slice = &full_source[full_start..full_end];
+
+        // Compose final source: within prefix + class slice. Empty
+        // parent (top-level class) drops the within line.
+        let source = if parent_pkg.is_empty() {
+            class_slice.to_string()
+        } else {
+            format!("within {parent_pkg};\n{class_slice}")
+        };
+
+        let origin = lunco_doc::DocumentOrigin::File {
+            path: path.to_path_buf(),
+            writable: false,
+        };
+        // Lazy: SyntaxCache empty, stale. drive_engine_sync's async
+        // parse fills it on next Update tick. Tab paints immediately
+        // with a "Loading…" overlay until the parse lands.
+        Ok(Self::with_origin(id, source, origin))
+    }
+
     pub fn load_msl_file(
         id: DocumentId,
         path: &std::path::Path,
@@ -615,23 +690,20 @@ impl ModelicaDocument {
     /// equivalent for in-doc fields because the engine-canonical AST
     /// for a single doc is the same parse result as the local one.
     fn rebuild_index(&mut self) {
-        if let Some(handle) = crate::engine_resource::global_engine_handle() {
-            let mut engine = handle.lock();
-            // Upsert keeps the engine in lockstep with the doc's
-            // current source. Errors here mean the parse failed
-            // server-side (same condition as `self.ast.result.is_err()`)
-            // — we still want to rebuild from whatever AST shape the
-            // engine recovered, so we ignore the result and fall
-            // through to the query.
-            let _ = engine.upsert_document(self.id, &self.source);
-            if let Some(ast) = engine.parsed_for_doc(self.id) {
-                self.index
-                    .rebuild_with_errors(ast, &self.source, self.syntax.has_errors);
-                return;
-            }
-        }
-        // Fallback path — no engine handle or no parsed AST in
-        // session. Walk the local lenient cache directly.
+        // Engine-free: read the local SyntaxCache directly. The
+        // SyntaxCache IS the engine-mirror (populated only by
+        // `drive_engine_sync`'s drain step or by `load_msl_file`'s
+        // strict-adopt) — and it's `Arc<StoredDefinition>`, so the
+        // walk is a pointer dereference, not a re-parse.
+        //
+        // Previously this site locked the engine and called
+        // `upsert_document(self.id, &self.source)` — a synchronous
+        // parse on the main thread. For drill-in into a 152 KB
+        // MSL package that froze the workbench for 100+ seconds.
+        // Removed: engine catches up async; if doc.syntax lags
+        // engine by one tick, the next drain re-calls
+        // `install_parse_results` which re-runs `rebuild_index`
+        // with the fresh AST.
         self.index.rebuild_with_errors(
             &self.syntax.ast,
             &self.source,
@@ -659,13 +731,17 @@ impl ModelicaDocument {
         if !self.ast_is_stale() && !self.syntax_is_stale() {
             return;
         }
+        // Engine is the only AST source after Phase 4. If it isn't
+        // installed (early boot, headless test that didn't add the
+        // plugin) the doc stays at its current cache and the caller
+        // sees stale data — `ModelicaEnginePlugin::build` runs
+        // before any UI tick, so this branch is unreachable in
+        // production.
         let Some(handle) = crate::engine_resource::global_engine_handle() else {
-            // Engine not installed (early boot, headless tests). Fall
-            // back to the local parser so the doc has *some* AST.
-            self.syntax = Arc::new(SyntaxCache::from_source(&self.source, self.generation));
-            self.ast = Arc::new(AstCache::from_syntax(&self.syntax));
-            self.rebuild_index();
-            self.last_source_edit_at = None;
+            bevy::log::warn!(
+                "[Doc] refresh_ast_now: engine not installed; skipping reparse for doc={}",
+                self.id.raw(),
+            );
             return;
         };
         let t = web_time::Instant::now();
@@ -830,6 +906,30 @@ impl ModelicaDocument {
     pub fn mark_saved(&mut self) {
         self.last_saved_generation = Some(self.generation);
     }
+}
+
+/// Recursive class lookup by short name — checks top-level classes
+/// first, then walks nested-class trees. Used by `load_msl_class` to
+/// locate the target class inside a wrapper package file.
+fn find_class_by_short_name_recursive<'a>(
+    ast: &'a rumoca_session::parsing::ast::StoredDefinition,
+    short: &str,
+) -> Option<&'a rumoca_session::parsing::ast::ClassDef> {
+    fn walk<'a>(
+        classes: &'a indexmap::IndexMap<String, rumoca_session::parsing::ast::ClassDef>,
+        short: &str,
+    ) -> Option<&'a rumoca_session::parsing::ast::ClassDef> {
+        if let Some(c) = classes.get(short) {
+            return Some(c);
+        }
+        for c in classes.values() {
+            if let Some(found) = walk(&c.classes, short) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    walk(&ast.classes, short)
 }
 
 /// The op type for [`ModelicaDocument`].

@@ -388,7 +388,7 @@ impl Panel for TwinBrowserPanel {
                         let header = egui::CollapsingHeader::new(section.title())
                             .id_salt(("twin_panel_section", section.id()))
                             .default_open(section.default_open());
-                        header.show(ui, |ui| {
+                        let resp = header.show(ui, |ui| {
                             let twin_ref = workspace
                                 .as_ref()
                                 .and_then(|ws| ws.active_twin.and_then(|id| ws.twin(id)));
@@ -399,6 +399,8 @@ impl Panel for TwinBrowserPanel {
                             };
                             section.render(ui, &mut ctx);
                         });
+                        resp.header_response
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
                     }
                 });
         }

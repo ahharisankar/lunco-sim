@@ -979,9 +979,18 @@ impl Panel for WelcomePanel {
             );
         }
         if let Some(qualified) = open_msl {
+            // Welcome examples are "open as my copy to play with" —
+            // dispatch as `Duplicate { name: "" }`, which lets the
+            // handler derive the default `<short>Copy` name. Replaces
+            // the old `OpenExampleInWorkspace` event.
             world
                 .commands()
-                .trigger(crate::ui::commands::OpenClass { qualified });
+                .trigger(crate::ui::commands::OpenClass {
+                    qualified,
+                    action: crate::ui::commands::ClassAction::Duplicate {
+                        name: String::new(),
+                    },
+                });
         }
     }
 }

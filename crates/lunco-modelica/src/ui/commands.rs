@@ -74,25 +74,6 @@ pub struct DuplicateModelFromReadOnly {
     pub source_doc: DocumentId,
 }
 
-/// Open an MSL example as a fresh editable copy in the workspace
-/// without the user needing to first drill into it.
-///
-/// The Welcome page's examples strip dispatches this on click.
-/// Same effect as `DuplicateModelFromReadOnly` but sourced from a
-/// qualified MSL class name rather than an already-open read-only
-/// doc — the observer resolves the file path via the MSL class
-/// index and runs the whole extract + rewrite + parse pipeline on
-/// a background task so the UI stays responsive even for
-/// multi-hundred-KB package files.
-///
-/// The duplicated copy lands in Canvas view by default (examples
-/// are composed models — users want to see the diagram, not the
-/// source).
-#[Command(default)]
-pub struct OpenExampleInWorkspace {
-    pub qualified: String,
-}
-
 /// Request to compile a Modelica document and run the resulting
 /// simulation.
 ///
@@ -427,7 +408,6 @@ register_commands!(
     on_open,
     on_open_class,
     on_open_example,
-    on_open_example_in_workspace,
     on_open_file,
     on_pan_canvas,
     on_pause_active_model,
@@ -1616,22 +1596,23 @@ fn on_duplicate_model_from_read_only(
         // extracted source mid-package and produced a malformed
         // copy. Passing the whole source avoids that class entirely.
         let class_src = source_full;
-        // 2. Rewrite: rename the class + strip `within` so the
-        //    copy is standalone.
-        let renamed = rewrite_duplicated_source(
-            &class_src,
-            &origin_short_for_task,
-            &name_for_task,
-        );
-        // 2b. Inject parent-package imports so scope-dependent refs
-        //     like `SI.Angle` still resolve after extraction. No-op
-        //     for non-MSL sources (FQN unknown → no path → empty).
+        // 2 + 2b. Single-pass rewrite via cached spans: parse once
+        //    inline, splice rename + within strip + import inject in
+        //    one operation. Replaces the legacy
+        //    `rewrite_duplicated_source` + `inject_class_imports`
+        //    pair (each ran its own parse).
         let imports = origin_fqn_for_task
             .as_deref()
             .and_then(crate::library_fs::resolve_class_path_indexed)
             .map(|p| collect_parent_imports(&p))
             .unwrap_or_default();
-        let renamed = inject_class_imports(&renamed, &imports);
+        let renamed = match extract_class_spans_inline(&class_src, &origin_short_for_task) {
+            Some(spans) => {
+                rewrite_inject_in_one_pass(&class_src, &name_for_task, &imports, &spans)
+                    .unwrap_or_else(|| class_src.clone())
+            }
+            None => class_src.clone(),
+        };
         // 2c. Re-attach a `within <origin package>;` so within-
         //     relative type references in the copy (e.g. PID's
         //     `Blocks.Math.Gain` which is short for
@@ -1689,33 +1670,30 @@ fn on_duplicate_model_from_read_only(
     }
 }
 
-#[on_command(OpenExampleInWorkspace)]
-fn on_open_example_in_workspace(
-    trigger: On<OpenExampleInWorkspace>,
-    mut cache: ResMut<crate::ui::panels::package_browser::PackageTreeCache>,
-    mut model_tabs: ResMut<crate::ui::panels::model_view::ModelTabs>,
-    mut registry: ResMut<ModelicaDocumentRegistry>,
-    mut duplicate_loads: ResMut<
-        crate::ui::panels::canvas_diagram::DuplicateLoads,
-    >,
-    mut console: ResMut<crate::ui::panels::console::ConsoleLog>,
-    mut commands: Commands,
-) {
-    let qualified = trigger.event().qualified.clone();
+/// World-mut helper invoked from the `OpenClass { action: Duplicate }`
+/// branch. Reserves an Untitled doc id, opens its tab in Canvas
+/// view, and spawns the bg task that produces the renamed copy.
+fn spawn_duplicate_class_task(world: &mut World, qualified: String, name_hint: String) {
     let origin_short = qualified
         .rsplit('.')
         .next()
         .map(str::to_string)
         .unwrap_or_else(|| qualified.clone());
 
-    // Pick a new Untitled name, same collision strategy as the
-    // sibling `on_duplicate_model_from_read_only`.
-    let taken: std::collections::HashSet<String> = cache
+    // Resolve the requested name against existing Untitled tabs:
+    // empty → derive `<short>Copy`; non-empty → use as-is, then
+    // bump with a numeric suffix on collision.
+    let taken: std::collections::HashSet<String> = world
+        .resource::<crate::ui::panels::package_browser::PackageTreeCache>()
         .in_memory_models
         .iter()
         .map(|e| e.display_name.clone())
         .collect();
-    let base_name = format!("{origin_short}Copy");
+    let base_name = if name_hint.is_empty() {
+        format!("{origin_short}Copy")
+    } else {
+        name_hint
+    };
     let mut name = base_name.clone();
     let mut n: u32 = 2;
     while taken.contains(&name) {
@@ -1726,23 +1704,33 @@ fn on_open_example_in_workspace(
     // Reserve id + open the tab now so the user sees immediate
     // feedback; the canvas will show "Loading resource…" until
     // the bg build lands via `drive_duplicate_loads`.
-    let doc_id = registry.reserve_id();
+    let doc_id = world
+        .resource_mut::<ModelicaDocumentRegistry>()
+        .reserve_id();
     let mem_id = format!("mem://{name}");
-    cache.in_memory_models.retain(|e| e.id != mem_id);
-    cache
-        .in_memory_models
-        .push(crate::ui::panels::package_browser::InMemoryEntry {
-            display_name: name.clone(),
-            id: mem_id,
-            doc: doc_id,
-        });
+    {
+        let mut cache = world
+            .resource_mut::<crate::ui::panels::package_browser::PackageTreeCache>();
+        cache.in_memory_models.retain(|e| e.id != mem_id);
+        cache
+            .in_memory_models
+            .push(crate::ui::panels::package_browser::InMemoryEntry {
+                display_name: name.clone(),
+                id: mem_id,
+                doc: doc_id,
+            });
+    }
     // Examples are composed models — land in Canvas view so users
     // see the diagram on open, not the raw source.
-    model_tabs.ensure(doc_id);
-    if let Some(tab) = model_tabs.get_mut(doc_id) {
-        tab.view_mode = crate::ui::panels::model_view::ModelViewMode::Canvas;
+    {
+        let mut model_tabs = world
+            .resource_mut::<crate::ui::panels::model_view::ModelTabs>();
+        model_tabs.ensure(doc_id);
+        if let Some(tab) = model_tabs.get_mut(doc_id) {
+            tab.view_mode = crate::ui::panels::model_view::ModelViewMode::Canvas;
+        }
     }
-    commands.trigger(lunco_workbench::OpenTab {
+    world.commands().trigger(lunco_workbench::OpenTab {
         kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
         instance: doc_id.raw(),
     });
@@ -1815,28 +1803,21 @@ fn on_open_example_in_workspace(
                 &imports,
                 spans,
             )
-            .unwrap_or_else(|| {
-                // Spans were valid against the file but didn't fit
-                // the slice — fall back to the legacy two-pass path
-                // so the user still gets a usable copy.
-                let r = rewrite_duplicated_source(
-                    &class_src,
-                    &origin_short_for_task,
-                    &name_for_task,
-                );
-                inject_class_imports(&r, &imports)
-            }),
+            .unwrap_or_else(|| class_src.clone()),
             None => {
-                // Extract failed (unindexed file or unusual MSL
-                // structure). Class_src is the whole file — keep
-                // the legacy parse-and-splice path to handle
-                // file-level `within` etc.
-                let r = rewrite_duplicated_source(
-                    &class_src,
-                    &origin_short_for_task,
-                    &name_for_task,
-                );
-                inject_class_imports(&r, &imports)
+                // Path-based extract failed; try in-memory parse on
+                // the (possibly whole-file) class_src as a final
+                // fallback before giving up.
+                extract_class_spans_inline(&class_src, &origin_short_for_task)
+                    .and_then(|spans| {
+                        rewrite_inject_in_one_pass(
+                            &class_src,
+                            &name_for_task,
+                            &imports,
+                            &spans,
+                        )
+                    })
+                    .unwrap_or_else(|| class_src.clone())
             }
         };
         let rewrite_only_ms = t_rewrite_only.elapsed().as_secs_f64() * 1000.0;
@@ -1879,22 +1860,26 @@ fn on_open_example_in_workspace(
         doc
     });
 
-    duplicate_loads.insert(
-        doc_id,
-        crate::ui::panels::canvas_diagram::DuplicateBinding {
-            display_name: name.clone(),
-            origin_short: origin_short.clone(),
-            // OpenExampleInWorkspace duplicates a single named class
-            // (`qualified` is already the leaf the user clicked) —
-            // there's no inner-drill to preserve.
-            inner_drill: None,
-            started: web_time::Instant::now(),
-            task,
-        },
-    );
-    console.info(format!(
-        "📄 Opening example `{qualified}` → editable `{name}` (building…)"
-    ));
+    world
+        .resource_mut::<crate::ui::panels::canvas_diagram::DuplicateLoads>()
+        .insert(
+            doc_id,
+            crate::ui::panels::canvas_diagram::DuplicateBinding {
+                display_name: name.clone(),
+                origin_short: origin_short.clone(),
+                // Duplicate flow operates on a single named class
+                // (`qualified` is already the leaf the user clicked) —
+                // there's no inner-drill to preserve.
+                inner_drill: None,
+                started: web_time::Instant::now(),
+                task,
+            },
+        );
+    world
+        .resource_mut::<crate::ui::panels::console::ConsoleLog>()
+        .info(format!(
+            "📄 Opening class `{qualified}` → editable `{name}` (building…)"
+        ));
 }
 
 /// Pull the source text for a named class out of a (possibly
@@ -1954,7 +1939,25 @@ fn extract_class_spans_via_path(
     let mut parsed =
         rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()]).ok()?;
     let (_uri, ast) = parsed.drain(..).next()?;
-    let class = find_top_or_nested_class_by_short_name(&ast, class_name)?;
+    spans_from_ast(&ast, source, class_name)
+}
+
+/// In-memory variant: parses `source` directly (no path / cache) and
+/// returns the splice spans needed by `rewrite_inject_in_one_pass`.
+/// Use when the caller has source text but no on-disk URI — e.g.,
+/// duplicating a workspace doc whose source lives in
+/// `ModelicaDocumentRegistry`.
+fn extract_class_spans_inline(source: &str, class_name: &str) -> Option<DuplicateExtract> {
+    let ast = rumoca_phase_parse::parse_to_ast(source, "duplicate-inline.mo").ok()?;
+    spans_from_ast(&ast, source, class_name)
+}
+
+fn spans_from_ast(
+    ast: &rumoca_session::parsing::ast::StoredDefinition,
+    source: &str,
+    class_name: &str,
+) -> Option<DuplicateExtract> {
+    let class = find_top_or_nested_class_by_short_name(ast, class_name)?;
     let (full_start, full_end) = class.full_span_with_leading_comments(source)?;
     let end_tok = class.end_name_token.as_ref()?;
     Some(DuplicateExtract {
@@ -2201,179 +2204,8 @@ fn rewrite_inject_in_one_pass(
 }
 
 
-/// Insert a block of `import` statements right after the class
-/// header line. Used after `rewrite_duplicated_source` so the
-/// header has already been renamed. Returns the input unmodified
-/// when the list is empty or the header can't be located — a copy
-/// that still needs an import fix is strictly better than a copy
-/// with a broken header.
-fn inject_class_imports(src: &str, imports: &[String]) -> String {
-    if imports.is_empty() {
-        return src.to_string();
-    }
-    // Find the first class via rumoca AST and start the
-    // insertion-point search right after its name token. The
-    // existing scanner below then walks past whitespace + any
-    // quoted description strings to land just before the class
-    // body — same behaviour the regex had, AST-anchored.
-    let Ok(ast) = rumoca_phase_parse::parse_to_ast(src, "inject.mo") else {
-        return src.to_string();
-    };
-    let Some(class) = ast.classes.values().next() else {
-        return src.to_string();
-    };
-    let mut insert_at = class.name.location.end as usize;
-    // Per MLS the class name may be followed by a description string
-    // (optionally split across lines, or even broken over multiple
-    // adjacent quoted strings). Imports must land *after* it — the
-    // grammar forbids anything between the class name and its
-    // description. Advance past whitespace and any leading quoted
-    // string(s) before injecting.
-    let bytes = src.as_bytes();
-    let skip_ws = |mut i: usize| {
-        while i < bytes.len() && (bytes[i].is_ascii_whitespace()) {
-            i += 1;
-        }
-        i
-    };
-    let mut scan = skip_ws(insert_at);
-    while scan < bytes.len() && bytes[scan] == b'"' {
-        let mut j = scan + 1;
-        while j < bytes.len() {
-            match bytes[j] {
-                b'\\' if j + 1 < bytes.len() => j += 2,
-                b'"' => { j += 1; break; }
-                _ => j += 1,
-            }
-        }
-        insert_at = j;
-        scan = skip_ws(j);
-    }
-    // Inject on its own new line so the imports don't glue to the
-    // description's trailing `"`.
-    let needs_leading_newline = insert_at > 0 && bytes[insert_at - 1] != b'\n';
-    let block: String = imports
-        .iter()
-        .map(|i| format!("  {i}\n"))
-        .collect();
-    let mut out = String::with_capacity(src.len() + block.len() + 1);
-    out.push_str(&src[..insert_at]);
-    if needs_leading_newline {
-        out.push('\n');
-    }
-    out.push_str(&block);
-    out.push_str(&src[insert_at..]);
-    out
-}
 
-/// Rename the class and strip any `within` clause so the copy is a
-/// standalone Untitled model. Conservative: if anything doesn't
-/// match exactly, returns the input unmodified — a user-visible but
-/// working "not quite renamed" copy beats a mangled source.
-///
-/// Uses rumoca's typed AST (`ClassDef::name` + `ClassDef::end_name_token`)
-/// to locate the header and end-token spans precisely, no regex. Falls
-/// back to the input string when the parse fails.
-///
-/// `within`-clause strip stays as a one-liner regex
-/// (`TODO(rumoca: within-clause editor)` — rumoca doesn't expose a
-/// typed within-rewrite helper today).
-fn rewrite_duplicated_source(
-    src: &str,
-    old_name: &str,
-    new_name: &str,
-) -> String {
-    let Ok(ast) = rumoca_phase_parse::parse_to_ast(src, "duplicate.mo") else {
-        return src.to_string();
-    };
-    let Some(class_def) = ast.classes.values().find(|c| c.name.text.as_ref() == old_name) else {
-        return src.to_string();
-    };
 
-    // Header name span — guaranteed present.
-    let header_loc = &class_def.name.location;
-    // End-token span — present whenever the source has `end Name;`. If
-    // not, the source is malformed; bail.
-    let Some(end_token) = class_def.end_name_token.as_ref() else {
-        return src.to_string();
-    };
-    let end_loc = &end_token.location;
-
-    // Splice end-token first so header-token byte offsets stay valid.
-    let mut buf = String::with_capacity(src.len() + new_name.len());
-    let h_start = header_loc.start as usize;
-    let h_end = header_loc.end as usize;
-    let e_start = end_loc.start as usize;
-    let e_end = end_loc.end as usize;
-    if !(h_start <= h_end && h_end <= e_start && e_start <= e_end && e_end <= src.len()) {
-        return src.to_string();
-    }
-    buf.push_str(&src[..h_start]);
-    buf.push_str(new_name);
-    buf.push_str(&src[h_end..e_start]);
-    buf.push_str(new_name);
-    buf.push_str(&src[e_end..]);
-
-    // Within-clause strip via the parsed AST: rumoca's
-    // `StoredDefinition::within` carries the clause's `Name` with
-    // per-token byte locations. We bracket the clause by walking
-    // backward from the first name-token to the `within` keyword
-    // and forward from the last name-token to the closing `;`
-    // (plus an optional trailing newline). Within byte offsets are
-    // valid against `buf` because the only earlier splice — header
-    // rename — occurs strictly *after* the within clause, so the
-    // clause's offsets in `src` carry through unchanged.
-    strip_within_clause(&buf, &ast.within)
-}
-
-fn strip_within_clause(
-    buf: &str,
-    within: &Option<rumoca_session::parsing::ast::Name>,
-) -> String {
-    let Some(name) = within else {
-        return buf.to_string();
-    };
-    let Some(first) = name.name.first() else {
-        return buf.to_string();
-    };
-    let Some(last) = name.name.last() else {
-        return buf.to_string();
-    };
-    let name_start = first.location.start as usize;
-    let name_end = last.location.end as usize;
-    if name_end > buf.len() || name_start > name_end {
-        return buf.to_string();
-    }
-    // Scan backward for the `within` keyword sitting before the name.
-    let Some(kw_pos) = buf[..name_start].rfind("within") else {
-        return buf.to_string();
-    };
-    // Consume leading whitespace on the same line so the clause's
-    // indent disappears with it. Don't cross a newline — preserve
-    // any blank line authored above the within.
-    let mut clause_start = kw_pos;
-    let bytes = buf.as_bytes();
-    while clause_start > 0 {
-        let c = bytes[clause_start - 1];
-        if c == b' ' || c == b'\t' {
-            clause_start -= 1;
-        } else {
-            break;
-        }
-    }
-    // Forward to the `;` terminator after the name.
-    let Some(semi_offset) = buf[name_end..].find(';') else {
-        return buf.to_string();
-    };
-    let mut clause_end = name_end + semi_offset + 1;
-    if clause_end < buf.len() && bytes[clause_end] == b'\n' {
-        clause_end += 1;
-    }
-    let mut out = String::with_capacity(buf.len() - (clause_end - clause_start));
-    out.push_str(&buf[..clause_start]);
-    out.push_str(&buf[clause_end..]);
-    out
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // API navigation observers
@@ -2570,11 +2402,14 @@ fn on_open_example(
     trigger: On<OpenExample>,
     mut commands: Commands,
 ) {
-    // Shim over `OpenExampleInWorkspace` with a simpler name for the
-    // public API surface. Internal callers can keep using the old
-    // event directly; this observer just re-fires.
+    // Public-API alias for `OpenClass { action: Duplicate { name: "" } }`.
+    // The duplicate handler derives a default name (`<short>Copy`)
+    // when the requested name is empty.
     let qualified = trigger.event().qualified.clone();
-    commands.trigger(OpenExampleInWorkspace { qualified });
+    commands.trigger(OpenClass {
+        qualified,
+        action: ClassAction::Duplicate { name: String::new() },
+    });
 }
 
 /// Open a class in a **read-only** tab — the same path the canvas's
@@ -2582,9 +2417,31 @@ fn on_open_example(
 /// duplicates into an editable Untitled doc), this opens the class
 /// directly as an `msl://` tab for exploration. Reuses an existing
 /// tab if the same class is already open.
+///
+/// `action` selects the open mode:
+///   - `View` (default): read-only drill-in with `File { writable: false }` origin.
+///   - `Duplicate { name }`: writable Untitled workspace copy with the
+///     class renamed and parent-package imports inlined for scope-chain
+///     resolution.
+///
+/// Both modes share the same prep (resolve path → parse cached →
+/// extract target class via spans). Duplicate adds the rename +
+/// import inject + within prefix.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Default, bevy::reflect::Reflect)]
+#[serde(tag = "kind")]
+pub enum ClassAction {
+    #[default]
+    View,
+    Duplicate {
+        name: String,
+    },
+}
+
 #[Command(default)]
 pub struct OpenClass {
     pub qualified: String,
+    #[serde(default)]
+    pub action: ClassAction,
 }
 
 /// Startup system: register the Modelica URI handler with the
@@ -2626,9 +2483,16 @@ fn prewarm_msl_library() {
 
 #[on_command(OpenClass)]
 fn on_open_class(trigger: On<OpenClass>, mut commands: Commands) {
-    let qualified = trigger.event().qualified.clone();
-    commands.queue(move |world: &mut World| {
-        crate::ui::panels::canvas_diagram::drill_into_class(world, &qualified);
+    let ev = trigger.event();
+    let qualified = ev.qualified.clone();
+    let action = ev.action.clone();
+    commands.queue(move |world: &mut World| match action {
+        ClassAction::View => {
+            crate::ui::panels::canvas_diagram::drill_into_class(world, &qualified);
+        }
+        ClassAction::Duplicate { name } => {
+            spawn_duplicate_class_task(world, qualified, name);
+        }
     });
 }
 

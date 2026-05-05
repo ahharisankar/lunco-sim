@@ -813,7 +813,7 @@ impl Panel for PackageBrowserPanel {
                 // at least one scratch model. Always top of the tree
                 // so recently-created items stay visible.
                 if !cache.in_memory_models.is_empty() {
-                    egui::CollapsingHeader::new(
+                    let resp = egui::CollapsingHeader::new(
                         egui::RichText::new("(Untitled)")
                             .size(11.0)
                             .italics()
@@ -830,6 +830,8 @@ impl Panel for PackageBrowserPanel {
                             reopen_in_memory = Some(id);
                         }
                     });
+                    resp.header_response
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
                 }
 
                 // Twin folder (if any).
@@ -1083,10 +1085,11 @@ fn render_node(
                 ui.add_space(indent);
                 ui.add_sized([12.0, 12.0], egui::Label::new(
                     egui::RichText::new(arrow).size(8.0).color(egui::Color32::GRAY)
-                ));
+                ).selectable(false));
                 ui.add(egui::Label::new(
                     egui::RichText::new(name.as_str()).size(11.0)
-                ).sense(egui::Sense::click()))
+                ).selectable(false).sense(egui::Sense::click()))
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
             }).inner;
             if is_active {
                 ui.painter().rect_filled(resp.rect, 2.0, bg_active);
@@ -1499,7 +1502,8 @@ pub fn render_twin_node(
                     action.merge(render_twin_node(ui, child, rename));
                 }
             })
-            .header_response;
+            .header_response
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
         node_context_menu(&header_response, node, &mut action);
     } else {
         let (icon, color) = if node.is_modelica {
@@ -1566,7 +1570,8 @@ fn render_in_memory_models(
         };
         let resp = ui.horizontal(|ui| {
             ui.add_space(16.0);
-            ui.add(egui::Label::new(label).sense(egui::Sense::click()))
+            ui.add(egui::Label::new(label).selectable(false).sense(egui::Sense::click()))
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
         }).inner;
         if resp.clicked() && !is_active {
             clicked = Some(entry.id.clone());

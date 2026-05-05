@@ -386,7 +386,7 @@ fn render_class_row(
             } else {
                 egui::RichText::new(&class.short_name)
             };
-            ui.add(egui::Label::new(label).sense(egui::Sense::click()))
+            ui.add(egui::Label::new(label).selectable(false).sense(egui::Sense::click()))
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
         }).inner;
         // Explicit highlight band — `selectable_label`'s default
