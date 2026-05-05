@@ -659,13 +659,17 @@ impl ModelicaDocument {
         if !self.ast_is_stale() && !self.syntax_is_stale() {
             return;
         }
+        // Engine is the only AST source after Phase 4. If it isn't
+        // installed (early boot, headless test that didn't add the
+        // plugin) the doc stays at its current cache and the caller
+        // sees stale data — `ModelicaEnginePlugin::build` runs
+        // before any UI tick, so this branch is unreachable in
+        // production.
         let Some(handle) = crate::engine_resource::global_engine_handle() else {
-            // Engine not installed (early boot, headless tests). Fall
-            // back to the local parser so the doc has *some* AST.
-            self.syntax = Arc::new(SyntaxCache::from_source(&self.source, self.generation));
-            self.ast = Arc::new(AstCache::from_syntax(&self.syntax));
-            self.rebuild_index();
-            self.last_source_edit_at = None;
+            bevy::log::warn!(
+                "[Doc] refresh_ast_now: engine not installed; skipping reparse for doc={}",
+                self.id.raw(),
+            );
             return;
         };
         let t = web_time::Instant::now();

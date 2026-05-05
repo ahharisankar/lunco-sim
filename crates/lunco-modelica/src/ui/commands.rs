@@ -1616,22 +1616,23 @@ fn on_duplicate_model_from_read_only(
         // extracted source mid-package and produced a malformed
         // copy. Passing the whole source avoids that class entirely.
         let class_src = source_full;
-        // 2. Rewrite: rename the class + strip `within` so the
-        //    copy is standalone.
-        let renamed = rewrite_duplicated_source(
-            &class_src,
-            &origin_short_for_task,
-            &name_for_task,
-        );
-        // 2b. Inject parent-package imports so scope-dependent refs
-        //     like `SI.Angle` still resolve after extraction. No-op
-        //     for non-MSL sources (FQN unknown → no path → empty).
+        // 2 + 2b. Single-pass rewrite via cached spans: parse once
+        //    inline, splice rename + within strip + import inject in
+        //    one operation. Replaces the legacy
+        //    `rewrite_duplicated_source` + `inject_class_imports`
+        //    pair (each ran its own parse).
         let imports = origin_fqn_for_task
             .as_deref()
             .and_then(crate::library_fs::resolve_class_path_indexed)
             .map(|p| collect_parent_imports(&p))
             .unwrap_or_default();
-        let renamed = inject_class_imports(&renamed, &imports);
+        let renamed = match extract_class_spans_inline(&class_src, &origin_short_for_task) {
+            Some(spans) => {
+                rewrite_inject_in_one_pass(&class_src, &name_for_task, &imports, &spans)
+                    .unwrap_or_else(|| class_src.clone())
+            }
+            None => class_src.clone(),
+        };
         // 2c. Re-attach a `within <origin package>;` so within-
         //     relative type references in the copy (e.g. PID's
         //     `Blocks.Math.Gain` which is short for
@@ -1815,28 +1816,21 @@ fn on_open_example_in_workspace(
                 &imports,
                 spans,
             )
-            .unwrap_or_else(|| {
-                // Spans were valid against the file but didn't fit
-                // the slice — fall back to the legacy two-pass path
-                // so the user still gets a usable copy.
-                let r = rewrite_duplicated_source(
-                    &class_src,
-                    &origin_short_for_task,
-                    &name_for_task,
-                );
-                inject_class_imports(&r, &imports)
-            }),
+            .unwrap_or_else(|| class_src.clone()),
             None => {
-                // Extract failed (unindexed file or unusual MSL
-                // structure). Class_src is the whole file — keep
-                // the legacy parse-and-splice path to handle
-                // file-level `within` etc.
-                let r = rewrite_duplicated_source(
-                    &class_src,
-                    &origin_short_for_task,
-                    &name_for_task,
-                );
-                inject_class_imports(&r, &imports)
+                // Path-based extract failed; try in-memory parse on
+                // the (possibly whole-file) class_src as a final
+                // fallback before giving up.
+                extract_class_spans_inline(&class_src, &origin_short_for_task)
+                    .and_then(|spans| {
+                        rewrite_inject_in_one_pass(
+                            &class_src,
+                            &name_for_task,
+                            &imports,
+                            &spans,
+                        )
+                    })
+                    .unwrap_or_else(|| class_src.clone())
             }
         };
         let rewrite_only_ms = t_rewrite_only.elapsed().as_secs_f64() * 1000.0;
@@ -1954,7 +1948,25 @@ fn extract_class_spans_via_path(
     let mut parsed =
         rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()]).ok()?;
     let (_uri, ast) = parsed.drain(..).next()?;
-    let class = find_top_or_nested_class_by_short_name(&ast, class_name)?;
+    spans_from_ast(&ast, source, class_name)
+}
+
+/// In-memory variant: parses `source` directly (no path / cache) and
+/// returns the splice spans needed by `rewrite_inject_in_one_pass`.
+/// Use when the caller has source text but no on-disk URI — e.g.,
+/// duplicating a workspace doc whose source lives in
+/// `ModelicaDocumentRegistry`.
+fn extract_class_spans_inline(source: &str, class_name: &str) -> Option<DuplicateExtract> {
+    let ast = rumoca_phase_parse::parse_to_ast(source, "duplicate-inline.mo").ok()?;
+    spans_from_ast(&ast, source, class_name)
+}
+
+fn spans_from_ast(
+    ast: &rumoca_session::parsing::ast::StoredDefinition,
+    source: &str,
+    class_name: &str,
+) -> Option<DuplicateExtract> {
+    let class = find_top_or_nested_class_by_short_name(ast, class_name)?;
     let (full_start, full_end) = class.full_span_with_leading_comments(source)?;
     let end_tok = class.end_name_token.as_ref()?;
     Some(DuplicateExtract {
@@ -2201,179 +2213,8 @@ fn rewrite_inject_in_one_pass(
 }
 
 
-/// Insert a block of `import` statements right after the class
-/// header line. Used after `rewrite_duplicated_source` so the
-/// header has already been renamed. Returns the input unmodified
-/// when the list is empty or the header can't be located — a copy
-/// that still needs an import fix is strictly better than a copy
-/// with a broken header.
-fn inject_class_imports(src: &str, imports: &[String]) -> String {
-    if imports.is_empty() {
-        return src.to_string();
-    }
-    // Find the first class via rumoca AST and start the
-    // insertion-point search right after its name token. The
-    // existing scanner below then walks past whitespace + any
-    // quoted description strings to land just before the class
-    // body — same behaviour the regex had, AST-anchored.
-    let Ok(ast) = rumoca_phase_parse::parse_to_ast(src, "inject.mo") else {
-        return src.to_string();
-    };
-    let Some(class) = ast.classes.values().next() else {
-        return src.to_string();
-    };
-    let mut insert_at = class.name.location.end as usize;
-    // Per MLS the class name may be followed by a description string
-    // (optionally split across lines, or even broken over multiple
-    // adjacent quoted strings). Imports must land *after* it — the
-    // grammar forbids anything between the class name and its
-    // description. Advance past whitespace and any leading quoted
-    // string(s) before injecting.
-    let bytes = src.as_bytes();
-    let skip_ws = |mut i: usize| {
-        while i < bytes.len() && (bytes[i].is_ascii_whitespace()) {
-            i += 1;
-        }
-        i
-    };
-    let mut scan = skip_ws(insert_at);
-    while scan < bytes.len() && bytes[scan] == b'"' {
-        let mut j = scan + 1;
-        while j < bytes.len() {
-            match bytes[j] {
-                b'\\' if j + 1 < bytes.len() => j += 2,
-                b'"' => { j += 1; break; }
-                _ => j += 1,
-            }
-        }
-        insert_at = j;
-        scan = skip_ws(j);
-    }
-    // Inject on its own new line so the imports don't glue to the
-    // description's trailing `"`.
-    let needs_leading_newline = insert_at > 0 && bytes[insert_at - 1] != b'\n';
-    let block: String = imports
-        .iter()
-        .map(|i| format!("  {i}\n"))
-        .collect();
-    let mut out = String::with_capacity(src.len() + block.len() + 1);
-    out.push_str(&src[..insert_at]);
-    if needs_leading_newline {
-        out.push('\n');
-    }
-    out.push_str(&block);
-    out.push_str(&src[insert_at..]);
-    out
-}
 
-/// Rename the class and strip any `within` clause so the copy is a
-/// standalone Untitled model. Conservative: if anything doesn't
-/// match exactly, returns the input unmodified — a user-visible but
-/// working "not quite renamed" copy beats a mangled source.
-///
-/// Uses rumoca's typed AST (`ClassDef::name` + `ClassDef::end_name_token`)
-/// to locate the header and end-token spans precisely, no regex. Falls
-/// back to the input string when the parse fails.
-///
-/// `within`-clause strip stays as a one-liner regex
-/// (`TODO(rumoca: within-clause editor)` — rumoca doesn't expose a
-/// typed within-rewrite helper today).
-fn rewrite_duplicated_source(
-    src: &str,
-    old_name: &str,
-    new_name: &str,
-) -> String {
-    let Ok(ast) = rumoca_phase_parse::parse_to_ast(src, "duplicate.mo") else {
-        return src.to_string();
-    };
-    let Some(class_def) = ast.classes.values().find(|c| c.name.text.as_ref() == old_name) else {
-        return src.to_string();
-    };
 
-    // Header name span — guaranteed present.
-    let header_loc = &class_def.name.location;
-    // End-token span — present whenever the source has `end Name;`. If
-    // not, the source is malformed; bail.
-    let Some(end_token) = class_def.end_name_token.as_ref() else {
-        return src.to_string();
-    };
-    let end_loc = &end_token.location;
-
-    // Splice end-token first so header-token byte offsets stay valid.
-    let mut buf = String::with_capacity(src.len() + new_name.len());
-    let h_start = header_loc.start as usize;
-    let h_end = header_loc.end as usize;
-    let e_start = end_loc.start as usize;
-    let e_end = end_loc.end as usize;
-    if !(h_start <= h_end && h_end <= e_start && e_start <= e_end && e_end <= src.len()) {
-        return src.to_string();
-    }
-    buf.push_str(&src[..h_start]);
-    buf.push_str(new_name);
-    buf.push_str(&src[h_end..e_start]);
-    buf.push_str(new_name);
-    buf.push_str(&src[e_end..]);
-
-    // Within-clause strip via the parsed AST: rumoca's
-    // `StoredDefinition::within` carries the clause's `Name` with
-    // per-token byte locations. We bracket the clause by walking
-    // backward from the first name-token to the `within` keyword
-    // and forward from the last name-token to the closing `;`
-    // (plus an optional trailing newline). Within byte offsets are
-    // valid against `buf` because the only earlier splice — header
-    // rename — occurs strictly *after* the within clause, so the
-    // clause's offsets in `src` carry through unchanged.
-    strip_within_clause(&buf, &ast.within)
-}
-
-fn strip_within_clause(
-    buf: &str,
-    within: &Option<rumoca_session::parsing::ast::Name>,
-) -> String {
-    let Some(name) = within else {
-        return buf.to_string();
-    };
-    let Some(first) = name.name.first() else {
-        return buf.to_string();
-    };
-    let Some(last) = name.name.last() else {
-        return buf.to_string();
-    };
-    let name_start = first.location.start as usize;
-    let name_end = last.location.end as usize;
-    if name_end > buf.len() || name_start > name_end {
-        return buf.to_string();
-    }
-    // Scan backward for the `within` keyword sitting before the name.
-    let Some(kw_pos) = buf[..name_start].rfind("within") else {
-        return buf.to_string();
-    };
-    // Consume leading whitespace on the same line so the clause's
-    // indent disappears with it. Don't cross a newline — preserve
-    // any blank line authored above the within.
-    let mut clause_start = kw_pos;
-    let bytes = buf.as_bytes();
-    while clause_start > 0 {
-        let c = bytes[clause_start - 1];
-        if c == b' ' || c == b'\t' {
-            clause_start -= 1;
-        } else {
-            break;
-        }
-    }
-    // Forward to the `;` terminator after the name.
-    let Some(semi_offset) = buf[name_end..].find(';') else {
-        return buf.to_string();
-    };
-    let mut clause_end = name_end + semi_offset + 1;
-    if clause_end < buf.len() && bytes[clause_end] == b'\n' {
-        clause_end += 1;
-    }
-    let mut out = String::with_capacity(buf.len() - (clause_end - clause_start));
-    out.push_str(&buf[..clause_start]);
-    out.push_str(&buf[clause_end..]);
-    out
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // API navigation observers
