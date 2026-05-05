@@ -423,7 +423,7 @@ enum MslBootstrapState {
 ///
 /// **Native path**: when the bundle is filesystem-resident
 /// (`MslAssetSource::Filesystem`), we leave the source root unbootstrapped
-/// here. The lazy fallback in `class_cache::peek_or_load_msl_class`
+/// here. The lazy fallback in `class_cache::peek_or_load_msl_class_blocking`
 /// reads individual files into the session via `add_document` on
 /// first miss. Tradeoff: native pays per-class parse cost amortised
 /// over the session, vs eager full-MSL parse at boot.
@@ -462,7 +462,7 @@ fn drive_msl_bootstrap(
         return;
     }
     // Native filesystem path: leave eager bulk load deferred — the
-    // lazy fallback in `class_cache::peek_or_load_msl_class` covers
+    // lazy fallback in `class_cache::peek_or_load_msl_class_blocking` covers
     // it. Mark as `Done` so we don't re-check every tick; if a
     // `MslAssetSource::Filesystem` user later wants eager preload,
     // an explicit command can call `engine.load_library_files`

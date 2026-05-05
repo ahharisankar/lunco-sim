@@ -26,12 +26,6 @@
 //! typically, so a session with a dozen scratch models still fits.
 
 use bevy::prelude::*;
-
-/// Prefix every autosaved entry shares. Keeps the workbench's
-/// records out of the way of any other code (extensions, future
-/// `lunco-storage` backends) that touches the same `localStorage`.
-const KEY_PREFIX: &str = "lunco_modelica/untitled/";
-
 /// Bevy plugin that wires the three lifecycle observers + the
 /// startup restore system. Add this **after** `ModelicaPlugin` so
 /// the document registry it observes is already initialised.

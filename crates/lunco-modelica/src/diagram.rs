@@ -544,7 +544,7 @@ pub fn find_class_by_qualified_name<'a>(
 ///
 /// Resolution order for each `extends` target:
 ///   1. Local lookup inside the same `StoredDefinition`.
-///   2. MSL filesystem index via [`crate::class_cache::peek_or_load_msl_class`].
+///   2. MSL filesystem index via [`crate::class_cache::peek_or_load_msl_class_blocking`].
 ///   3. Both retried with each enclosing-scope prefix of
 ///      `class_qualified_path`.
 ///
@@ -1223,7 +1223,7 @@ end Gain;
     /// being materialised so CI without MSL doesn't fail.
     #[test]
     fn test_real_msl_pid_has_inherited_u_y() {
-        let Some(pid) = crate::class_cache::peek_or_load_msl_class(
+        let Some(pid) = crate::class_cache::peek_or_load_msl_class_blocking(
             "Modelica.Blocks.Continuous.PID",
         ) else {
             eprintln!("MSL cache not materialised — skipping");

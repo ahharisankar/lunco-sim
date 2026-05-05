@@ -4,7 +4,7 @@
 //! doc's AST collecting every cross-package type referenced (component
 //! types, extends bases, connector port types). A single
 //! [`AsyncComputeTaskPool`] task fans out
-//! [`crate::class_cache::peek_or_load_msl_class`] for each unique
+//! [`crate::class_cache::peek_or_load_msl_class_blocking`] for each unique
 //! qualified name, then primes the engine's icon resolution by calling
 //! [`crate::engine::ModelicaEngine::icon_for`] for each one.
 //!
@@ -130,7 +130,7 @@ fn spawn_warm_task(doc_id: DocumentId, types: Vec<String>) {
     AsyncComputeTaskPool::get()
         .spawn(async move {
             // **Cache-only warm.** We deliberately do NOT call
-            // `peek_or_load_msl_class` here — it would parse large
+            // `peek_or_load_msl_class_blocking` here — it would parse large
             // MSL files (200KB+) under the engine mutex, blocking
             // both the projection task and any main-thread query
             // for tens of seconds in dev builds. That regresses the

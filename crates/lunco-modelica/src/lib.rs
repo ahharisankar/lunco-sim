@@ -2243,8 +2243,6 @@ pub use ast_extract::{
     extract_parameters_from_ast,
     extract_inputs_with_defaults,
     extract_inputs_with_defaults_from_ast,
-    extract_input_names,
-    parse_source_best_effort,
     substitute_params_in_source,
     hash_content,
     extract_from_source,

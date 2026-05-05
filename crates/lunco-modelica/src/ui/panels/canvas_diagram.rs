@@ -929,24 +929,6 @@ enum PortDir {
 }
 
 impl PortDir {
-    fn as_str(self) -> &'static str {
-        match self {
-            PortDir::Left => "left",
-            PortDir::Right => "right",
-            PortDir::Up => "up",
-            PortDir::Down => "down",
-            PortDir::None => "",
-        }
-    }
-    fn from_str(s: &str) -> PortDir {
-        match s {
-            "left" => PortDir::Left,
-            "right" => PortDir::Right,
-            "up" => PortDir::Up,
-            "down" => PortDir::Down,
-            _ => PortDir::None,
-        }
-    }
     /// Unit vector pointing *outward* from the icon at this edge,
     /// in screen coordinates (+Y down). Used to extend the wire
     /// stub away from the icon body.
@@ -2100,8 +2082,6 @@ fn build_registry() -> VisualRegistry {
 /// render components at this size by default. Reading the actual
 /// per-component `Icon` annotation extent is a follow-up.
 const ICON_W: f32 = 20.0;
-const ICON_H: f32 = 20.0;
-
 /// Coordinate-system types + the two conversion functions between
 /// them. Named wrappers around plain `(f32, f32)` so every place
 /// the sign flip happens is explicit and typed — previously we had
@@ -4439,7 +4419,7 @@ impl Panel for CanvasDiagramPanel {
             // while it was running. Projection tasks can take tens
             // of seconds when MSL `extends`-chain resolution misses
             // the cache (each miss does a sync rumoca parse inside
-            // the task — see `peek_or_load_msl_class`). During that
+            // the task — see `peek_or_load_msl_class_blocking`). During that
             // window the user may have added several components via
             // the optimistic-synth path; swapping in the stale
             // projected scene wipes those nodes. We KEEP the
@@ -8076,7 +8056,7 @@ fn apply_ops(
                 let qualified = decl.type_name.clone();
                 bevy::tasks::AsyncComputeTaskPool::get()
                     .spawn(async move {
-                        let _ = crate::class_cache::peek_or_load_msl_class(&qualified);
+                        let _ = crate::class_cache::peek_or_load_msl_class_blocking(&qualified);
                     })
                     .detach();
             }
