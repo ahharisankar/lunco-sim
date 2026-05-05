@@ -182,6 +182,21 @@ lto = "fat"
 codegen-units = 1
 strip = true
 
+# Wasm web build, fast-iteration variant. Used by `scripts/build_web.sh
+# build <bin> --dev` for inner-loop development — produces a larger
+# wasm but compiles+links in a fraction of the time of `web-release`
+# (no fat LTO, no shrink-first codegen, parallel codegen units). The
+# build script also skips the `wasm-opt` post-pass when this profile
+# is selected. Use `web-release` for what users actually load.
+[profile.web-dev]
+inherits = "release"
+opt-level = 1
+lto = false
+codegen-units = 16
+strip = false
+debug = "line-tables-only"
+incremental = true
+
 # Profile for samply / perf — release codegen with line-table debug info so
 # stacks symbolicate to function names. Strip is off; otherwise identical to
 # release. Build with `cargo run --profile profiling --bin ...`.

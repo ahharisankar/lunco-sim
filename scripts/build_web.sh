@@ -110,11 +110,17 @@ check_prerequisites() {
 build_wasm() {
     local binary="$1"
     local crate="$2"
-    
+
+    # `BUILD_PROFILE` is exported by `main` once the CLI args are
+    # parsed. Defaults to web-release; `--dev` flips it to web-dev for
+    # a fast inner-loop build (no fat LTO, no shrink-first codegen,
+    # parallel codegen units, incremental). The `wasm-opt` post-pass
+    # is skipped in dev mode too — see `generate_bindings`.
+    local profile="${BUILD_PROFILE:-web-release}"
     info "Building $binary for WebAssembly..."
     info "Crate: $crate"
     info "Target: wasm32-unknown-unknown"
-    info "Profile: web-release"
+    info "Profile: $profile"
 
     # We use --no-default-features to avoid pulling in the full tokio/axum stack
     # from lunco-api, which depends on mio and other networking primitives
@@ -127,14 +133,14 @@ build_wasm() {
     # supports WebGPU. egui's pipeline requires WebGPU here, so this flag is
     # mandatory, not optional.
     RUSTFLAGS="${RUSTFLAGS:-} --cfg=web_sys_unstable_apis" \
-        cargo build --profile web-release --target wasm32-unknown-unknown --bin "$binary" -p "$crate" --no-default-features
+        cargo build --profile "$profile" --target wasm32-unknown-unknown --bin "$binary" -p "$crate" --no-default-features
 
     # For lunica_web, also build the off-thread worker bundle. It runs in a
     # Web Worker so rumoca's compile (~20s) doesn't block the UI.
     if [ "$binary" = "lunica_web" ]; then
         info "Building companion worker bundle: lunica_worker"
         RUSTFLAGS="${RUSTFLAGS:-} --cfg=web_sys_unstable_apis" \
-            cargo build --profile web-release --target wasm32-unknown-unknown --bin lunica_worker -p "$crate" --no-default-features
+            cargo build --profile "$profile" --target wasm32-unknown-unknown --bin lunica_worker -p "$crate" --no-default-features
     fi
     
     if [ $? -eq 0 ]; then
@@ -159,7 +165,8 @@ generate_bindings() {
 
     # Dynamically find the target directory in case it's overridden in .cargo/config.toml
     local base_target_dir=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
-    local cargo_out_dir="$base_target_dir/wasm32-unknown-unknown/web-release"
+    local profile="${BUILD_PROFILE:-web-release}"
+    local cargo_out_dir="$base_target_dir/wasm32-unknown-unknown/$profile"
     local bindgen_out_dir="$base_target_dir/web/$binary"
     local dist_dir="$PROJECT_DIR/dist/$binary"
 
@@ -192,7 +199,12 @@ generate_bindings() {
     # build still succeeds on machines that haven't installed
     # `binaryen`.
     local wasm_in="$bindgen_out_dir/${binary}_bg.wasm"
-    if [ -f "$wasm_in" ] && command -v wasm-opt &> /dev/null; then
+    # Skip the size pass entirely in dev mode — wasm-opt on a 28 MB
+    # debug-ish wasm is ~20–30 s, which dominates inner-loop cycle
+    # time. Bigger payload is fine for `localhost`.
+    if [ "${BUILD_PROFILE:-web-release}" = "web-dev" ]; then
+        info "wasm-opt skipped (--dev profile)"
+    elif [ -f "$wasm_in" ] && command -v wasm-opt &> /dev/null; then
         info "Running wasm-opt -O2 (best-effort size + speed pass)…"
         local before
         before=$(stat -c '%s' "$wasm_in" 2>/dev/null || stat -f '%z' "$wasm_in")
@@ -271,7 +283,9 @@ Run: cargo run -p lunco-assets -- download"
         fi
         # wasm-opt the worker too, same flags as the main bundle.
         local worker_wasm_in="$worker_bindgen_dir/${worker_bin}_bg.wasm"
-        if [ -f "$worker_wasm_in" ] && command -v wasm-opt &> /dev/null; then
+        if [ "${BUILD_PROFILE:-web-release}" = "web-dev" ]; then
+            info "Worker wasm-opt skipped (--dev profile)"
+        elif [ -f "$worker_wasm_in" ] && command -v wasm-opt &> /dev/null; then
             local tmp="$worker_wasm_in.opt.tmp"
             if wasm-opt -O2 --strip-debug -o "$tmp" "$worker_wasm_in"; then
                 mv "$tmp" "$worker_wasm_in"
@@ -403,7 +417,28 @@ main() {
     local command="${1:-help}"
     local binary="${2:-}"
     local port="${3:-}"
-    
+
+    # Pull `--dev` out of the positional args so it can appear in any
+    # slot (`build lunica_web --dev`, `--dev build lunica_web`, …).
+    # Sets `BUILD_PROFILE=web-dev` for `build_wasm` + `generate_bindings`,
+    # which selects the fast-iteration cargo profile and skips the
+    # `wasm-opt` size pass.
+    export BUILD_PROFILE="web-release"
+    local positional=()
+    for arg in "$@"; do
+        case "$arg" in
+            --dev)
+                export BUILD_PROFILE="web-dev"
+                ;;
+            *)
+                positional+=("$arg")
+                ;;
+        esac
+    done
+    command="${positional[0]:-help}"
+    binary="${positional[1]:-}"
+    port="${positional[2]:-}"
+
     case "$command" in
         build)
             if [ -z "$binary" ]; then

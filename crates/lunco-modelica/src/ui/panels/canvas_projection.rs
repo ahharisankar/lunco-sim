@@ -1007,8 +1007,35 @@ fn register_local_class(
     // yet in the session, the icon resolves to None and the caller
     // skips registration; the next projection (after the sync system
     // catches up) picks it up.
-    let icon = crate::engine_resource::global_engine_handle()
+    // Two-tier resolution so the canvas can render local-class icons
+    // even before MSL has been ingested into the workspace engine
+    // (web boot: ~22 s gap between page load and `EngineBootstrap`).
+    //
+    // 1. Engine-merged icon: full `extends` chain walked, MSL bases
+    //    resolved. Best output when available.
+    // 2. Direct AST extract on this class's own `annotation`: no
+    //    inheritance, but ALL primitives the user authored on the
+    //    class itself render immediately. The Engine class drawn at
+    //    the top of `AnnotatedRocketStage` is exactly this path —
+    //    its `Icon(graphics={...})` is local; no MSL lookup needed.
+    //
+    // Skip the node only if BOTH resolvers come up empty. Even an
+    // icon with zero graphics is preferable to a missing component
+    // (the canvas's default rectangle still names the component).
+    let engine_icon = crate::engine_resource::global_engine_handle()
         .and_then(|handle| handle.lock().icon_for(&class_context));
+    let local_icon = crate::annotations::extract_icon(&class_def.annotation);
+    let icon = match (engine_icon, local_icon) {
+        // Prefer engine result only when it actually has graphics —
+        // otherwise the local AST may carry primitives the engine
+        // walk dropped (typical when MSL bases haven't been ingested
+        // yet). Empty engine icons are explicit "no inheritance
+        // contribution"; the local annotation fills the gap.
+        (Some(eng), local) if !eng.graphics.is_empty() => Some(eng),
+        (_, Some(local)) => Some(local),
+        (Some(eng), None) => Some(eng),
+        (None, None) => None,
+    };
     if icon.is_none() {
         let _ = class_def;
         return;

@@ -58,6 +58,38 @@ fn command_label(cmd: &ModelicaCommand) -> String {
         ModelicaCommand::Despawn { entity } => format!("Despawn entity={entity:?}"),
     }
 }
+
+/// `(entity, session_id)` for the in-flight command, so a panic-recovery
+/// path can synthesize a `ModelicaResult` that resolves the UI's session.
+/// Without this the UI keeps a "Compiling…" spinner running forever
+/// after a rumoca panic.
+fn command_session(cmd: &ModelicaCommand) -> (bevy::prelude::Entity, u64) {
+    use bevy::prelude::Entity;
+    match cmd {
+        ModelicaCommand::Step { entity, session_id, .. }
+        | ModelicaCommand::Compile { entity, session_id, .. }
+        | ModelicaCommand::UpdateParameters { entity, session_id, .. }
+        | ModelicaCommand::Reset { entity, session_id, .. } => (*entity, *session_id),
+        ModelicaCommand::Despawn { entity } => (*entity, 0),
+    }
+}
+
+fn synth_panic_result(entity: bevy::prelude::Entity, session_id: u64, msg: &str) -> ModelicaResult {
+    ModelicaResult {
+        entity,
+        session_id,
+        new_time: 0.0,
+        outputs: Vec::new(),
+        detected_symbols: Vec::new(),
+        error: Some(format!("Worker panic: {msg}")),
+        log_message: Some(format!("Worker panicked while processing command — recovered: {msg}")),
+        is_new_model: false,
+        is_parameter_update: false,
+        is_reset: false,
+        detected_input_names: Vec::new(),
+        detected_descriptions: Vec::new(),
+    }
+}
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -136,25 +168,61 @@ pub fn run() -> Result<(), JsValue> {
             WireMessage::Command(cmd) => {
                 let scope = scope_for_cb.clone();
                 let label = command_label(&cmd);
+                // Capture session BEFORE moving `cmd` into the
+                // dispatch closure — needed for the panic-recovery
+                // synthetic result so the UI's spinner clears.
+                let (entity, session_id) = command_session(&cmd);
                 let started = web_time::Instant::now();
-                post_log(&scope, format!("recv: {label}"));
+                // `Step` fires at ~60 Hz once a model is running and
+                // floods the console with `[worker] recv: Step …` /
+                // `done: Step …` pairs that drown out everything
+                // useful. Suppress recv/done log for Step but keep
+                // panic logging on the error path so a step that
+                // crashes still shows up.
+                let is_hot_path = matches!(cmd, ModelicaCommand::Step { .. });
+                if !is_hot_path {
+                    post_log(&scope, format!("recv: {label}"));
+                }
+                // STATE is held across the whole dispatch. If a
+                // panic unwinds *while* the RefCell mutable borrow is
+                // active, the next message would hit `BorrowMutError`
+                // and panic the worker. Drop the borrow before
+                // `catch_unwind` returns by scoping it tightly.
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     STATE.with(|s| {
-                        let mut state = s.borrow_mut();
-                        process_inline_command(&mut state, cmd, |result| {
-                            post_result(&scope, result);
-                        });
+                        // `try_borrow_mut` so a poisoned borrow from
+                        // a previous panic doesn't crash this one too.
+                        match s.try_borrow_mut() {
+                            Ok(mut state) => {
+                                process_inline_command(&mut state, cmd, |result| {
+                                    post_result(&scope, result);
+                                });
+                            }
+                            Err(e) => {
+                                post_log(
+                                    &scope,
+                                    format!("STATE borrow refused: {e} — resetting"),
+                                );
+                                // Replace the cell wholesale so the
+                                // next command starts fresh. Loses
+                                // cached compilers but avoids a
+                                // wedge.
+                                s.replace(InlineWorkerInner::default());
+                            }
+                        }
                     });
                 }));
                 match outcome {
                     Ok(()) => {
-                        post_log(
-                            &scope,
-                            format!(
-                                "done: {label} in {:.2}s",
-                                started.elapsed().as_secs_f64()
-                            ),
-                        );
+                        if !is_hot_path {
+                            post_log(
+                                &scope,
+                                format!(
+                                    "done: {label} in {:.2}s",
+                                    started.elapsed().as_secs_f64()
+                                ),
+                            );
+                        }
                     }
                     Err(e) => {
                         let msg = e
@@ -169,6 +237,20 @@ pub fn run() -> Result<(), JsValue> {
                                 started.elapsed().as_secs_f64()
                             ),
                         );
+                        // Synthesize an error result so the UI's
+                        // session resolves. Without this the spinner
+                        // stays in "Compiling…" forever after a
+                        // rumoca panic (the Balloon example
+                        // reproduces this).
+                        post_result(&scope, synth_panic_result(entity, session_id, msg));
+                        // Reset state — a panic mid-dispatch likely
+                        // left the per-entity steppers / compiler
+                        // in an inconsistent state. Better to lose
+                        // caches than wedge every subsequent compile.
+                        STATE.with(|s| {
+                            s.replace(InlineWorkerInner::default());
+                        });
+                        post_log(&scope, "STATE reset after panic — caches cleared");
                     }
                 }
             }

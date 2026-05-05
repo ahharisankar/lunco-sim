@@ -1751,9 +1751,19 @@ fn spawn_duplicate_class_task(world: &mut World, qualified: String, name_hint: S
             );
         };
         let resolve_ms = t_resolve.elapsed().as_secs_f64() * 1000.0;
-        // 2. Read file. I/O — fine off-thread.
+        // 2. Read file via the unified MSL source — handles both the
+        //    native filesystem (`MslAssetSource::Filesystem`) and the
+        //    wasm in-memory bundle (`MslAssetSource::InMemory`). Going
+        //    through `std::fs::read_to_string` directly would panic on
+        //    wasm32-unknown-unknown when `path` is a relative
+        //    in-memory key (`Modelica/Blocks/package.mo`) because the
+        //    libstd resolver calls `current_dir()` which is fatal
+        //    there ("no filesystem on this platform").
         let t_read = web_time::Instant::now();
-        let source_full = std::fs::read_to_string(&path).unwrap_or_default();
+        let source_full = lunco_assets::msl::global_msl_source()
+            .and_then(|s| s.read(&path))
+            .and_then(|b| String::from_utf8(b).ok())
+            .unwrap_or_default();
         let read_ms = t_read.elapsed().as_secs_f64() * 1000.0;
         let source_len = source_full.len();
         // 3. Extract just the target class. We mask out string
@@ -2033,6 +2043,18 @@ fn find_nested_by_short_name<'a>(
 /// inside `Modelica.Blocks.Examples.PID_Controller` but not in a
 /// naïvely extracted copy.
 fn collect_parent_imports(class_file: &std::path::Path) -> Vec<String> {
+    // Wasm has no filesystem, and the MSL bundle is pre-parsed and
+    // already in `GLOBAL_PARSED_MSL` with all its imports. The
+    // parent-walk + `read_to_string(<relative>)` chain panics on
+    // wasm32-unknown-unknown ("no filesystem on this platform")
+    // because libstd resolves relative paths through `current_dir()`.
+    // No-op on web; rumoca's session-level resolver fills the same
+    // role.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = class_file;
+        return Vec::new();
+    }
     let mut chain: Vec<String> = Vec::new();
     let mut dir = class_file.parent();
     while let Some(d) = dir {
