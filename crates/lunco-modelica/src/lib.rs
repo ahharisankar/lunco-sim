@@ -446,34 +446,42 @@ impl ModelicaCompiler {
         // assumes the worker hung. Spawn a tiny thread that emits an
         // INFO log every 5s while the synchronous compile is in
         // flight; signal it to stop on return.
+        //
+        // Wasm note: `std::thread::spawn` panics on wasm32-unknown-unknown
+        // (single-threaded target). The compile already runs on the main
+        // task there via the inline worker, so the user sees the freeze
+        // anyway — heartbeat would just be cosmetic. Skip it.
         use std::sync::atomic::{AtomicBool, Ordering};
         let still_compiling = std::sync::Arc::new(AtomicBool::new(true));
-        let stopper = std::sync::Arc::clone(&still_compiling);
-        let model_for_thread = model_name.to_string();
-        // Spawn detached — we deliberately do NOT join after compile
-        // returns. The heartbeat sleeps in 5-second chunks; joining
-        // would block the worker for up to a full tick (5 s) on EVERY
-        // compile, even fast cache-hit ones. The workbench's
-        // is_compiling flag would then stay set for that whole window,
-        // and the Step dispatcher would idle visibly. Letting the
-        // JoinHandle drop detaches the thread; it self-exits within
-        // 5 s of `stopper=false` with at most one stray "still
-        // compiling +N s" log line if the timing aligns badly.
-        let _ = std::thread::spawn(move || {
-            let started = web_time::Instant::now();
-            let tick = std::time::Duration::from_secs(5);
-            loop {
-                std::thread::sleep(tick);
-                if !stopper.load(Ordering::Relaxed) {
-                    return;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let stopper = std::sync::Arc::clone(&still_compiling);
+            let model_for_thread = model_name.to_string();
+            // Spawn detached — we deliberately do NOT join after compile
+            // returns. The heartbeat sleeps in 5-second chunks; joining
+            // would block the worker for up to a full tick (5 s) on EVERY
+            // compile, even fast cache-hit ones. The workbench's
+            // is_compiling flag would then stay set for that whole window,
+            // and the Step dispatcher would idle visibly. Letting the
+            // JoinHandle drop detaches the thread; it self-exits within
+            // 5 s of `stopper=false` with at most one stray "still
+            // compiling +N s" log line if the timing aligns badly.
+            let _ = std::thread::spawn(move || {
+                let started = web_time::Instant::now();
+                let tick = std::time::Duration::from_secs(5);
+                loop {
+                    std::thread::sleep(tick);
+                    if !stopper.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    log::info!(
+                        "[ModelicaCompiler] still compiling `{}` (+{:.0}s)",
+                        model_for_thread,
+                        started.elapsed().as_secs_f64()
+                    );
                 }
-                log::info!(
-                    "[ModelicaCompiler] still compiling `{}` (+{:.0}s)",
-                    model_for_thread,
-                    started.elapsed().as_secs_f64()
-                );
-            }
-        });
+            });
+        }
 
         let result = self
             .session
