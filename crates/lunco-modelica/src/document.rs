@@ -408,12 +408,34 @@ impl ModelicaDocument {
             parts.join(".")
         };
 
-        let mut parsed = rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()])
-            .map_err(|e| format!("parse failed `{}`: {e}", path.display()))?;
-        let (_uri, ast) = parsed
-            .drain(..)
-            .next()
-            .ok_or_else(|| format!("rumoca returned no parse result for `{}`", path.display()))?;
+        // **Wasm: use the pre-parsed MSL bundle.** A synchronous
+        // `parse_files_parallel` on a 100 KB MSL package file blocks
+        // `AsyncComputeTaskPool` (which IS the main thread on
+        // wasm32-unknown-unknown) for tens of seconds — exactly the
+        // freeze users see clicking sub-classes inside a Continuous /
+        // Blocks tab. The MSL bundle already has every file's AST
+        // resident; look it up by path key. Native still parses
+        // because it has real worker threads.
+        #[cfg(target_arch = "wasm32")]
+        let ast: rumoca_session::parsing::ast::StoredDefinition = {
+            let key = path.to_string_lossy().to_string();
+            crate::msl_remote::global_parsed_msl()
+                .and_then(|b| b.iter().find(|(k, _)| k == &key).map(|(_, a)| a.clone()))
+                .ok_or_else(|| format!(
+                    "load_msl_class: pre-parsed AST missing for `{key}` \
+                     (MSL bundle not yet ready or path mismatch)"
+                ))?
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let ast: rumoca_session::parsing::ast::StoredDefinition = {
+            let mut parsed = rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()])
+                .map_err(|e| format!("parse failed `{}`: {e}", path.display()))?;
+            let (_uri, ast) = parsed
+                .drain(..)
+                .next()
+                .ok_or_else(|| format!("rumoca returned no parse result for `{}`", path.display()))?;
+            ast
+        };
 
         let class_def = find_class_by_short_name_recursive(&ast, short_name)
             .ok_or_else(|| format!("class `{qualified}` not found in `{}`", path.display()))?;
@@ -463,17 +485,38 @@ impl ModelicaDocument {
         //    is essentially free. The strict `StoredDefinition` flows
         //    into the lenient `SyntaxCache` (single canonical local
         //    Arc); `AstCache` records only success/failure.
+        //
+        // Wasm: `parse_files_parallel` runs synchronously on the
+        // calling thread which on wasm32-unknown-unknown is the main
+        // thread (AsyncComputeTaskPool is cooperative). Re-parsing a
+        // 100 KB MSL file freezes the UI for tens of seconds. Look up
+        // the AST in the pre-parsed bundle instead.
         let parsed: Result<Arc<StoredDefinition>, String> =
             if std::env::var_os("LUNCO_NO_PARSE").is_some() {
                 Err("LUNCO_NO_PARSE diagnostic — parse skipped".into())
             } else {
-                match rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()]) {
-                    Ok(mut pairs) if !pairs.is_empty() => {
-                        let (_, stored) = pairs.remove(0);
-                        Ok(Arc::new(stored))
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let key = path.to_string_lossy().to_string();
+                    crate::msl_remote::global_parsed_msl()
+                        .and_then(|b| b.iter()
+                            .find(|(k, _)| k == &key)
+                            .map(|(_, a)| Arc::new(a.clone())))
+                        .ok_or_else(|| format!(
+                            "load_msl_file: pre-parsed AST missing for `{key}` \
+                             (MSL bundle not yet ready or path mismatch)"
+                        ))
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    match rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()]) {
+                        Ok(mut pairs) if !pairs.is_empty() => {
+                            let (_, stored) = pairs.remove(0);
+                            Ok(Arc::new(stored))
+                        }
+                        Ok(_) => Err("rumoca returned no parse result".into()),
+                        Err(e) => Err(e.to_string()),
                     }
-                    Ok(_) => Err("rumoca returned no parse result".into()),
-                    Err(e) => Err(e.to_string()),
                 }
             };
 
@@ -730,14 +773,50 @@ impl ModelicaDocument {
         };
         let t = web_time::Instant::now();
         let bytes = self.source.len();
-        // Route through engine: synchronous upsert (rumoca's
-        // content-hash cache makes unchanged sources free), then
-        // pull the strict AST back. Engine remains the canonical
-        // store; doc-side cache is its mirror.
+        // Pre-parsed MSL bundle short-circuit. If this doc came from
+        // a file in the MSL bundle, the parsed AST is already in
+        // `crate::msl_remote::global_parsed_msl()` — call directly,
+        // skip the synchronous rumoca parse (which would freeze the
+        // UI for minutes on a 150 KB MSL file on wasm).
+        let bundle_ast: Option<Arc<StoredDefinition>> = match &self.origin {
+            DocumentOrigin::File { path, .. } => {
+                let key = path.to_string_lossy().to_string();
+                crate::msl_remote::global_parsed_msl().and_then(|b| {
+                    b.iter()
+                        .find(|(k, _)| k == &key)
+                        .map(|(_, ast)| Arc::new(ast.clone()))
+                })
+            }
+            _ => None,
+        };
+        // Route through engine: install the cached AST when
+        // available. On wasm a cache miss MUST NOT trigger a
+        // synchronous parse — that would freeze the UI for minutes
+        // on a 150 KB MSL file. Native still parses sync (real
+        // worker threads); wasm bails out and lets the worker-parse
+        // pipeline catch up async on the next `drive_engine_sync`
+        // tick.
         let arc_ast: Option<Arc<StoredDefinition>> = {
             let mut engine = handle.lock();
-            let _ = engine.upsert_document(self.id, &self.source);
-            engine.parsed_for_doc(self.id).cloned().map(Arc::new)
+            if let Some(ast) = bundle_ast.as_ref() {
+                engine.upsert_document_with_ast(self.id, (**ast).clone());
+                Some(Arc::clone(ast))
+            } else {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    bevy::log::debug!(
+                        "[Doc] refresh_ast_now: wasm cache miss doc={} — \
+                         deferring to worker (no sync parse)",
+                        self.id.raw(),
+                    );
+                    None
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let _ = engine.upsert_document(self.id, &self.source);
+                    engine.parsed_for_doc(self.id).cloned().map(Arc::new)
+                }
+            }
         }; // engine lock released before rebuild_index re-acquires it
         match arc_ast {
             Some(ast) => {

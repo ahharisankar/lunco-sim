@@ -2179,6 +2179,69 @@ fn instantiate_on_active_canvas(
     }
 }
 
+/// Resolve an `msl_path:` id (e.g. `Blocks.ImpureRandom`) to the
+/// actual MSL bundle key (e.g. `Modelica/Blocks/package.mo`). Walks
+/// the dotted path in the same order the bg task used to: try
+/// `<seg…>.mo`, then `<seg…>/package.mo`; first match wins.
+///
+/// Native: walks the `<cache>/msl/Modelica/` filesystem.
+/// Wasm: walks the in-memory bundle's HashMap keys (microseconds).
+fn resolve_msl_path_to_file(rel_path: &str) -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let parts: Vec<&str> = rel_path.split('.').collect();
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        let bundle = match lunco_assets::msl::global_msl_source()? {
+            lunco_assets::msl::MslAssetSource::InMemory(b) => b.clone(),
+            _ => return None,
+        };
+        for end in (1..=parts.len()).rev() {
+            let mut as_file = String::from("Modelica");
+            for seg in &parts[..end] {
+                as_file.push('/');
+                as_file.push_str(seg);
+            }
+            let key_file = PathBuf::from(format!("{as_file}.mo"));
+            if bundle.files.contains_key(&key_file) {
+                return Some(key_file);
+            }
+            let key_pkg = PathBuf::from(format!("{as_file}/package.mo"));
+            if bundle.files.contains_key(&key_pkg) {
+                return Some(key_pkg);
+            }
+        }
+        let root = PathBuf::from("Modelica/package.mo");
+        if bundle.files.contains_key(&root) {
+            return Some(root);
+        }
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let msl_root = lunco_assets::msl_dir();
+        for end in (1..=parts.len()).rev() {
+            let mut as_file = msl_root.join("Modelica");
+            as_file.push(parts[..end].join("/"));
+            as_file.set_extension("mo");
+            if as_file.exists() {
+                return Some(as_file);
+            }
+            let mut as_pkg = msl_root.join("Modelica");
+            as_pkg.push(parts[..end].join("/"));
+            as_pkg.push("package.mo");
+            if as_pkg.exists() {
+                return Some(as_pkg);
+            }
+        }
+        let root = msl_root.join("Modelica").join("package.mo");
+        if root.is_file() {
+            return Some(root);
+        }
+        None
+    }
+}
+
 pub(crate) fn open_model(world: &mut World, id: String, name: String, library: ModelLibrary) {
     // Before navigating away, flush any in-progress work on the current
     // model into its Document. Matches the text editor's focus-loss
@@ -2308,7 +2371,19 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
     // opened on the first click. Without these the second click
     // reserves a new DocumentId, spawns a second parse, and the
     // user ends up with a duplicate tab once both land.
-    let path_buf = std::path::PathBuf::from(&id);
+    // For `msl_path:Foo.Bar` ids, pre-resolve to the actual MSL file
+    // path on the main thread (HashMap lookups, microseconds) so the
+    // doc's `DocumentOrigin::File.path` carries a real bundle key
+    // (`Modelica/Blocks/Sources.mo`). The wasm short-circuit in
+    // `drive_engine_sync` looks the path up in the pre-parsed MSL
+    // bundle to skip the worker round-trip; without a real key it
+    // always misses, and the worker spends minutes re-parsing a
+    // 152 KB file the bundle already has the AST for.
+    let path_buf: std::path::PathBuf = if let Some(rel) = id.strip_prefix("msl_path:") {
+        resolve_msl_path_to_file(rel).unwrap_or_else(|| std::path::PathBuf::from(&id))
+    } else {
+        std::path::PathBuf::from(&id)
+    };
     let already_open: Option<lunco_doc::DocumentId> = world
         .resource::<ModelicaDocumentRegistry>()
         .find_by_path(&path_buf);

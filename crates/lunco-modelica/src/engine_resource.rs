@@ -466,6 +466,63 @@ pub fn drive_engine_sync(
         #[cfg(target_arch = "wasm32")]
         let dispatched_to_worker = match handle.mark_pending_for_worker(doc_id) {
             Some(uri) => {
+                // MSL-bundle short-circuit: every file under
+                // `Modelica/` (and the extra-library trees) was
+                // pre-parsed at build time and bincode-shipped in
+                // `parsed-<sha>.bin.zst`; on wasm those ASTs live in
+                // `crate::msl_remote::global_parsed_msl()` keyed by
+                // their original MSL-relative path
+                // (`Modelica/Blocks/Sources.mo`, etc.). If the doc
+                // we're about to parse came from one of those files,
+                // grab the cached `StoredDefinition` and skip the
+                // worker round-trip — re-parsing a 150 KB MSL file
+                // takes minutes on wasm and produces a byte-identical
+                // result.
+                //
+                // Identification: the doc's `DocumentOrigin::File`
+                // path is the same key the MSL bundle uses.
+                let cached_ast: Option<rumoca_session::parsing::ast::StoredDefinition> = {
+                    let host = registry.host(doc_id);
+                    let origin_path = host
+                        .map(|h| h.document().origin().clone())
+                        .and_then(|o| match o {
+                            lunco_doc::DocumentOrigin::File { path, .. } => Some(path),
+                            _ => None,
+                        });
+                    origin_path.and_then(|path| {
+                        let key = path.to_string_lossy().to_string();
+                        crate::msl_remote::global_parsed_msl().and_then(|bundle| {
+                            bundle
+                                .iter()
+                                .find(|(k, _)| k == &key)
+                                .map(|(_, ast)| ast.clone())
+                        })
+                    })
+                };
+                if let Some(ast) = cached_ast {
+                    let t0 = web_time::Instant::now();
+                    handle.install_worker_parsed_ast(doc_id, gen, ast.clone());
+                    let t_engine = t0.elapsed().as_secs_f64() * 1000.0;
+                    let t1 = web_time::Instant::now();
+                    if let Some(host) = registry.host_mut(doc_id) {
+                        let syntax = crate::document::SyntaxCache {
+                            generation: gen,
+                            ast: std::sync::Arc::new(ast),
+                            errors: Vec::new(),
+                        };
+                        host.document_mut().install_parse_results(syntax);
+                    }
+                    let t_doc = t1.elapsed().as_secs_f64() * 1000.0;
+                    bevy::log::info!(
+                        "[EngineSync] reuse pre-parsed MSL AST doc={} gen={} \
+                         engine={:.0}ms doc={:.0}ms",
+                        doc_id.raw(),
+                        gen,
+                        t_engine,
+                        t_doc,
+                    );
+                    continue;
+                }
                 if crate::worker_transport::dispatch_parse_to_worker(doc_id, gen, uri, source.clone()) {
                     true
                 } else {

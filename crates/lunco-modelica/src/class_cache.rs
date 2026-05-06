@@ -97,9 +97,36 @@ pub fn peek_or_load_msl_class_blocking(
     if !engine.has_class(qualified) {
         let path = resolve_class_path_indexed(qualified)
             .or_else(|| locate_library_file(qualified))?;
-        let source = read_msl_source_bytes(&path)?;
         let uri = path.to_string_lossy().replace('\\', "/");
-        engine.session_mut().add_document(&uri, &source).ok()?;
+        // Pre-parsed MSL bundle short-circuit — install the cached
+        // AST without re-parsing. On wasm this is the ONLY allowed
+        // path: `add_document` calls rumoca synchronously which
+        // freezes the UI for minutes on a 150 KB MSL file.
+        let cached_ast = crate::msl_remote::global_parsed_msl()
+            .and_then(|b| b.iter().find(|(k, _)| k == &uri).map(|(_, ast)| ast.clone()));
+        if let Some(ast) = cached_ast {
+            engine.session_mut().add_parsed_batch(vec![(uri, ast)]);
+        } else {
+            // Cache miss. Native: parse synchronously (real worker
+            // threads make this acceptable). Wasm: refuse — UI
+            // responsiveness is non-negotiable. Caller gets None,
+            // renders default; the worker / next sync tick will
+            // populate the engine async and the next render will
+            // pick up the real class.
+            #[cfg(target_arch = "wasm32")]
+            {
+                bevy::log::warn!(
+                    "[class_cache] MSL cache miss for {qualified} (uri={uri}); \
+                     wasm refuses sync parse — rendering default until worker fills"
+                );
+                return None;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let source = read_msl_source_bytes(&path)?;
+                engine.session_mut().add_document(&uri, &source).ok()?;
+            }
+        }
     }
     engine.class_def(qualified).map(Arc::new)
 }

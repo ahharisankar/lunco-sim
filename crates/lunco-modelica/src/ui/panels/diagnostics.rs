@@ -284,6 +284,26 @@ pub fn refresh_diagnostics(
             entries.extend(cached);
         }
         if need_spawn {
+            // **Wasm: lint disabled.** `rumoca_tool_lint::lint` does a
+            // synchronous rumoca parse on the source. On
+            // `wasm32-unknown-unknown`, `AsyncComputeTaskPool` runs
+            // cooperatively on the main thread — a 150 KB MSL file
+            // (e.g. `Modelica/Blocks/Continuous.mo`) freezes the UI
+            // for tens of seconds inside that single parse. Park the
+            // empty entry list as a permanent cache so the dedup gate
+            // never tries to spawn again for this (doc, ast_gen).
+            // Native gets the lint via real worker threads.
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = (source_owned, display_name, tag_for_worker);
+                if let Ok(mut state) = lint_worker_state().lock() {
+                    state.cached_for = Some(dispatch_key);
+                    state.cached_entries = Vec::new();
+                    state.inflight_for = None;
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
             let result_slot = lint_result_slot().clone();
             bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
                 let opts = rumoca_tool_lint::LintOptions::default();
@@ -318,6 +338,7 @@ pub fn refresh_diagnostics(
                     *slot = Some((dispatch_key, out));
                 }
             }).detach();
+            }
         }
 
         // If a worker finished since we last looked, promote its
