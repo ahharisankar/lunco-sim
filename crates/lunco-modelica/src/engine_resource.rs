@@ -255,13 +255,9 @@ pub fn drive_engine_sync(
                 let syntax = crate::document::SyntaxCache {
                     generation: parse_gen,
                     ast: arc_ast,
-                    has_errors: false,
+                    errors: Vec::new(),
                 };
-                let ast_cache = crate::document::AstCache {
-                    generation: parse_gen,
-                    result: Ok(()),
-                };
-                host.document_mut().install_parse_results(ast_cache, syntax);
+                host.document_mut().install_parse_results(syntax);
                 bevy::log::info!(
                     "[EngineSync] async parse complete doc={} gen={} → backfilled doc.syntax",
                     doc_id.raw(),
@@ -270,21 +266,18 @@ pub fn drive_engine_sync(
             }
             (None, _) => {
                 // Strict parse failed (recovered into session via
-                // lenient fallback). Mark doc's AstCache Err so
-                // diagnostics panel knows.
+                // lenient fallback). Surface the failure into the
+                // doc's parse cache so the diagnostics panel can
+                // show a row.
                 if let Some(host) = registry.host_mut(doc_id) {
                     let syntax = crate::document::SyntaxCache {
                         generation: parse_gen,
                         ast: std::sync::Arc::new(
                             rumoca_session::parsing::ast::StoredDefinition::default(),
                         ),
-                        has_errors: true,
+                        errors: vec!["strict parse failed (lenient recovered)".into()],
                     };
-                    let ast_cache = crate::document::AstCache {
-                        generation: parse_gen,
-                        result: Err("strict parse failed (lenient recovered)".into()),
-                    };
-                    host.document_mut().install_parse_results(ast_cache, syntax);
+                    host.document_mut().install_parse_results(syntax);
                 }
                 bevy::log::warn!(
                     "[EngineSync] async parse strict-failed doc={} gen={}",
@@ -519,13 +512,33 @@ pub fn drive_engine_sync(
 /// Native: still registered but always sees an empty queue (worker
 /// never runs there), so the system is a per-tick HashMap miss —
 /// negligible.
-pub fn drain_worker_parse_results(handle: Res<ModelicaEngineHandle>) {
+pub fn drain_worker_parse_results(
+    handle: Res<ModelicaEngineHandle>,
+    mut registry: ResMut<crate::ui::state::ModelicaDocumentRegistry>,
+) {
     #[cfg(target_arch = "wasm32")]
     {
+        use crate::document::SyntaxCache;
+        use std::sync::Arc;
         while let Some(env) = crate::worker_transport::try_recv_parse_done() {
             match env.ast {
                 Some(ast) => {
-                    handle.install_worker_parsed_ast(env.doc_id, env.gen, ast);
+                    let ast_arc = Arc::new(ast);
+                    handle.install_worker_parsed_ast(env.doc_id, env.gen, (*ast_arc).clone());
+                    // Backfill the doc's own parse cache so panels
+                    // reading `host.document().ast()` see the worker-
+                    // parsed result instead of the empty placeholder
+                    // we constructed with on wasm. Skip when the
+                    // doc's gen has moved past ours —
+                    // `install_parse_results` checks that and bails.
+                    if let Some(host) = registry.host_mut(env.doc_id) {
+                        let syntax = SyntaxCache {
+                            generation: env.gen,
+                            ast: ast_arc,
+                            errors: Vec::new(),
+                        };
+                        host.document_mut().install_parse_results(syntax);
+                    }
                     bevy::log::info!(
                         "[EngineSync] worker-parsed install doc={} gen={}",
                         env.doc_id.raw(),
@@ -545,7 +558,7 @@ pub fn drain_worker_parse_results(handle: Res<ModelicaEngineHandle>) {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = handle;
+        let _ = (handle, registry);
     }
 }
 

@@ -217,7 +217,7 @@ pub fn refresh_diagnostics(
     let model_tag = Some(host.document().origin().display_name().to_string());
 
     // 1. AST parse errors — caught by rumoca's recovering parser.
-    if let Err(msg) = &host.document().ast().result {
+    for msg in host.document().ast().errors.iter() {
         entries.push(LogEntry {
             at: web_time::Instant::now(),
             level: LogLevel::Error,

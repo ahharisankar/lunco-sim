@@ -3256,47 +3256,45 @@ fn on_inspect_active_doc(_trigger: On<InspectActiveDoc>, mut commands: Commands)
             document.source().len(),
             cache.generation,
         );
-        match (cache.result.as_ref(), document.strict_ast()) {
-            (Ok(()), Some(ast)) => {
-                bevy::log::info!(
-                    "[InspectActiveDoc]   parse OK; within={:?}",
-                    ast.within.as_ref().map(|w| w.to_string()),
-                );
-                fn dump(
-                    name: &str,
-                    class: &rumoca_session::parsing::ast::ClassDef,
-                    depth: usize,
-                ) {
-                    let indent = "  ".repeat(depth + 1);
-                    let comps: Vec<String> = class
-                        .components
-                        .iter()
-                        .map(|(n, c)| format!("{}: {}", n, c.type_name))
-                        .collect();
-                    bevy::log::info!(
-                        "[InspectActiveDoc]{}{} ({:?}) extends={} components=[{}]",
-                        indent,
-                        name,
-                        class.class_type,
-                        class.extends.len(),
-                        comps.join(", "),
-                    );
-                    for (cn, child) in &class.classes {
-                        dump(cn, child, depth + 1);
-                    }
-                }
-                for (n, c) in &ast.classes {
-                    dump(n, c, 0);
-                }
-            }
-            (Ok(()), None) => {
-                bevy::log::warn!(
-                    "[InspectActiveDoc]   strict result OK but no AST available — caches out of sync"
-                );
-            }
-            (Err(e), _) => {
+        if cache.has_errors() {
+            for e in &cache.errors {
                 bevy::log::warn!("[InspectActiveDoc]   parse ERR: {}", e);
             }
+        } else if let Some(ast) = document.strict_ast() {
+            bevy::log::info!(
+                "[InspectActiveDoc]   parse OK; within={:?}",
+                ast.within.as_ref().map(|w| w.to_string()),
+            );
+            fn dump(
+                name: &str,
+                class: &rumoca_session::parsing::ast::ClassDef,
+                depth: usize,
+            ) {
+                let indent = "  ".repeat(depth + 1);
+                let comps: Vec<String> = class
+                    .components
+                    .iter()
+                    .map(|(n, c)| format!("{}: {}", n, c.type_name))
+                    .collect();
+                bevy::log::info!(
+                    "[InspectActiveDoc]{}{} ({:?}) extends={} components=[{}]",
+                    indent,
+                    name,
+                    class.class_type,
+                    class.extends.len(),
+                    comps.join(", "),
+                );
+                for (cn, child) in &class.classes {
+                    dump(cn, child, depth + 1);
+                }
+            }
+            for (n, c) in &ast.classes {
+                dump(n, c, 0);
+            }
+        } else {
+            bevy::log::warn!(
+                "[InspectActiveDoc]   parse cache empty — likely worker parse pending"
+            );
         }
     });
 }
