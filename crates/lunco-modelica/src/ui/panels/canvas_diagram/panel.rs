@@ -1275,7 +1275,7 @@ impl CanvasDiagramPanel {
         //      misrepresent what's going on.
         //   2. Projection task in flight → "Projecting…" spinner.
         //   3. Empty scene, no task → equation-only model summary.
-        let (loading_info, projecting, show_empty_overlay, scene_has_content) = {
+        let (loading_info, projecting, parse_pending, show_empty_overlay, scene_has_content) = {
             let state = world.resource::<CanvasDiagramState>();
             let loads = world.resource::<DrillInLoads>();
             let dup_loads = world.resource::<DuplicateLoads>();
@@ -1290,6 +1290,23 @@ impl CanvasDiagramPanel {
                     .map(|(q, secs)| (q.to_string(), secs))
             });
             let has_content = docstate.canvas.scene.node_count() > 0;
+            // Parse pending = doc's syntax cache hasn't been populated
+            // by the off-thread worker yet (or is behind the current
+            // source generation). With the wasm worker-parse pipeline
+            // every fresh tab spends a brief window in this state
+            // before its AST lands; without an explicit overlay the
+            // canvas just shows the "no diagram" empty card, which
+            // looks broken. The flag piggybacks on `ast_is_stale()`
+            // so we don't have to plumb the engine pending set into
+            // the panel.
+            let parse_pending = active_doc
+                .and_then(|d| {
+                    world
+                        .resource::<crate::ui::ModelicaDocumentRegistry>()
+                        .host(d)
+                        .map(|h| h.document().ast_is_stale())
+                })
+                .unwrap_or(false);
             // Diagnostic: log the overlay state once per (doc, state)
             // combination so we can tell whether the loading branch is
             // ever entered. Throw-away — gated behind LUNCO_OVERLAY_TRACE
@@ -1318,7 +1335,10 @@ impl CanvasDiagramPanel {
             (
                 info,
                 docstate.projection_task.is_some(),
-                !has_content && docstate.projection_task.is_none(),
+                parse_pending,
+                !has_content
+                    && docstate.projection_task.is_none()
+                    && !parse_pending,
                 has_content,
             )
         };
@@ -1334,6 +1354,14 @@ impl CanvasDiagramPanel {
             if !scene_has_content {
                 overlays::render_drill_in_loading_overlay(ui, response.rect, &class, secs, &theme_snapshot_for_overlay);
             }
+        } else if parse_pending && !scene_has_content {
+            // Worker parse hasn't landed yet — show the same spinner
+            // the projecting state uses. Without this branch the
+            // user sees the "no diagram" empty card during the brief
+            // gap between tab open and worker parse completion,
+            // which reads as broken.
+            overlays::render_projecting_overlay(ui, response.rect, &theme_snapshot_for_overlay);
+            ui.ctx().request_repaint();
         } else if projecting && !scene_has_content {
             overlays::render_projecting_overlay(ui, response.rect, &theme_snapshot_for_overlay);
         } else if show_empty_overlay {

@@ -2507,10 +2507,23 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
         // Use the name from the UI immediately instead of parsing the whole AST.
         let detected_name = Some(name_clone);
 
-        // Pre-compute text layout in the background (no fonts needed for LayoutJob logic)
-        let style = egui::Style::default();
-        let mut layout_job = crate::ui::panels::code_editor::modelica_layouter(&style, &source_text);
-        layout_job.wrap.max_width = f32::INFINITY;
+        // Pre-compute text layout in the background. Skip on wasm —
+        // `AsyncComputeTaskPool` runs cooperatively on the main thread
+        // there, so this 184 KB-MSL-tokeniser walk is exactly the
+        // stall the user sees clicking a Modelica.Blocks node. egui
+        // recomputes layout on first render anyway, but only for the
+        // visible rect (not the whole 150 KB file), which is cheap.
+        // Native: keep the pre-compute — real worker threads, free.
+        #[cfg(target_arch = "wasm32")]
+        let layout_job: Option<bevy_egui::egui::text::LayoutJob> = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        let layout_job = {
+            let style = egui::Style::default();
+            let mut job =
+                crate::ui::panels::code_editor::modelica_layouter(&style, &source_text);
+            job.wrap.max_width = f32::INFINITY;
+            Some(job)
+        };
 
         // Heavy: rumoca parse happens here, off the UI thread. The
         // resulting `ModelicaDocument` carries its own copy of the
@@ -2530,7 +2543,7 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
             source: source_text.into(),
             line_starts: line_starts.into(),
             detected_name,
-            layout_job: Some(layout_job),
+            layout_job,
             doc_id: reserved_doc_id,
             doc,
         }

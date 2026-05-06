@@ -521,38 +521,34 @@ pub fn drain_worker_parse_results(
         use crate::document::SyntaxCache;
         use std::sync::Arc;
         while let Some(env) = crate::worker_transport::try_recv_parse_done() {
-            match env.ast {
-                Some(ast) => {
-                    let ast_arc = Arc::new(ast);
-                    handle.install_worker_parsed_ast(env.doc_id, env.gen, (*ast_arc).clone());
-                    // Backfill the doc's own parse cache so panels
-                    // reading `host.document().ast()` see the worker-
-                    // parsed result instead of the empty placeholder
-                    // we constructed with on wasm. Skip when the
-                    // doc's gen has moved past ours —
-                    // `install_parse_results` checks that and bails.
-                    if let Some(host) = registry.host_mut(env.doc_id) {
-                        let syntax = SyntaxCache {
-                            generation: env.gen,
-                            ast: ast_arc,
-                            errors: Vec::new(),
-                        };
-                        host.document_mut().install_parse_results(syntax);
-                    }
-                    bevy::log::info!(
-                        "[EngineSync] worker-parsed install doc={} gen={}",
-                        env.doc_id.raw(),
-                        env.gen,
-                    );
-                }
-                None => {
-                    handle.finish_pending_failed(env.doc_id, env.gen);
-                    bevy::log::warn!(
-                        "[EngineSync] worker parse failed doc={} gen={} — clearing pending",
-                        env.doc_id.raw(),
-                        env.gen,
-                    );
-                }
+            // Lenient parser always returns an AST. `errors` carries
+            // any recovery diagnostics; `is_empty()` ⇒ source was
+            // well-formed. Both fields land in the doc's single
+            // `SyntaxCache` and the engine session adopts the AST as
+            // its canonical view.
+            let ast_arc = Arc::new(env.ast);
+            handle.install_worker_parsed_ast(env.doc_id, env.gen, (*ast_arc).clone());
+            if let Some(host) = registry.host_mut(env.doc_id) {
+                let syntax = SyntaxCache {
+                    generation: env.gen,
+                    ast: ast_arc,
+                    errors: env.errors.clone(),
+                };
+                host.document_mut().install_parse_results(syntax);
+            }
+            if env.errors.is_empty() {
+                bevy::log::info!(
+                    "[EngineSync] worker-parsed install doc={} gen={}",
+                    env.doc_id.raw(),
+                    env.gen,
+                );
+            } else {
+                bevy::log::warn!(
+                    "[EngineSync] worker-parsed install doc={} gen={} with {} parse error(s)",
+                    env.doc_id.raw(),
+                    env.gen,
+                    env.errors.len(),
+                );
             }
         }
     }

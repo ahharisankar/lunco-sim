@@ -110,15 +110,23 @@ pub enum WireResult {
     /// inaccessible from the page.
     Log(String),
     /// Parsed-AST result for a previously-sent
-    /// [`WireMessage::ParseDocument`] request. `gen` is the doc's
-    /// generation at parse-spawn time so the main side can drop stale
-    /// results. `ast` is `None` when the parse failed (rumoca returned
-    /// an Err); main handles that by leaving the doc in pending state
-    /// for a retry on the next gen bump.
+    /// [`WireMessage::ParseDocument`] request.
+    ///
+    /// `ast` is the lenient parser's best-effort result (always
+    /// produced, even on broken sources). `errors` is the diagnostic
+    /// list emitted by rumoca's recovery — empty when the source is
+    /// well-formed. `gen` is the doc's generation at parse-spawn time
+    /// so main can drop stale results.
+    ///
+    /// Both fields together replace the previous strict-style
+    /// `Option<AST>`; merging them lets the receiver reconstruct the
+    /// dual-cache state (now collapsed into a single `SyntaxCache`)
+    /// in one shot.
     ParseDocumentDone {
         doc_id: lunco_doc::DocumentId,
         gen: u64,
-        ast: Option<rumoca_session::parsing::StoredDefinition>,
+        ast: rumoca_session::parsing::StoredDefinition,
+        errors: Vec<String>,
     },
 }
 
@@ -161,7 +169,8 @@ static COMMAND_TX: OnceLock<crossbeam_channel::Sender<ModelicaCommand>> = OnceLo
 pub struct ParseDoneEnvelope {
     pub doc_id: lunco_doc::DocumentId,
     pub gen: u64,
-    pub ast: Option<rumoca_session::parsing::StoredDefinition>,
+    pub ast: rumoca_session::parsing::StoredDefinition,
+    pub errors: Vec<String>,
 }
 static PARSE_DONE_TX: OnceLock<crossbeam_channel::Sender<ParseDoneEnvelope>> = OnceLock::new();
 static PARSE_DONE_RX: OnceLock<crossbeam_channel::Receiver<ParseDoneEnvelope>> = OnceLock::new();
@@ -244,9 +253,9 @@ pub fn install_worker(worker_url: &str) -> Result<(), JsValue> {
                     let _ = tx.send(result);
                 }
             }
-            Ok(WireResult::ParseDocumentDone { doc_id, gen, ast }) => {
+            Ok(WireResult::ParseDocumentDone { doc_id, gen, ast, errors }) => {
                 let tx = ensure_parse_done_channel();
-                let _ = tx.send(ParseDoneEnvelope { doc_id, gen, ast });
+                let _ = tx.send(ParseDoneEnvelope { doc_id, gen, ast, errors });
             }
             Ok(WireResult::Log(line)) => {
                 // Surface worker-side diagnostics in the main page's
