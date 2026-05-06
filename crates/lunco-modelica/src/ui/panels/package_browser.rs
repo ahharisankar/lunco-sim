@@ -1577,15 +1577,36 @@ fn commit_current_model_edits(world: &mut World) {
     // enough, but the user may switch panels before the widget has
     // fired `lost_focus()`, so we force a checkpoint on model switch.
     let _ = model_name; // kept above for future per-class targeting
-    let buffer = world
+    // Only commit when the editor buffer is bound to the *currently
+    // active* doc. `EditorBufferState` is a singleton (one buffer
+    // shared across every tab) — when the user switches tabs, the
+    // buffer still holds the previous tab's text until `code_editor`
+    // re-mirrors `open_model.source` into it on the next render.
+    // Checkpointing without this guard pushes the previous tab's
+    // bytes into the *new* active doc on every switch, bumping its
+    // `generation` and triggering a spurious 5 s rumoca reparse on
+    // wasm — the "switching back to AnnotatedRocketStage stalls"
+    // symptom. `EditorBufferState.model_path` is updated to the
+    // active model's path each time the editor mirrors the source;
+    // if it matches `state.open_model.model_path` we know the buffer
+    // genuinely belongs to this doc.
+    let active_path = {
+        let state = world.resource::<WorkbenchState>();
+        state.open_model.as_ref().map(|m| m.model_path.clone())
+    };
+    let (buffer_path, buffer_text) = world
         .get_resource::<crate::ui::panels::code_editor::EditorBufferState>()
-        .map(|b| b.text.clone());
-    if let Some(src) = buffer {
-        if !src.is_empty() {
-            world
-                .resource_mut::<ModelicaDocumentRegistry>()
-                .checkpoint_source(doc_id, src);
-        }
+        .map(|b| (b.model_path.clone(), b.text.clone()))
+        .unwrap_or_default();
+    if active_path.as_deref() != Some(buffer_path.as_str()) {
+        // Buffer hasn't been mirrored to the active doc yet — skip;
+        // its contents belong to whichever tab the user just left.
+        return;
+    }
+    if !buffer_text.is_empty() {
+        world
+            .resource_mut::<ModelicaDocumentRegistry>()
+            .checkpoint_source(doc_id, buffer_text);
     }
 }
 

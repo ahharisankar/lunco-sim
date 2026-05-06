@@ -177,7 +177,15 @@ pub fn drive_engine_sync(
     mut registry: ResMut<crate::ui::state::ModelicaDocumentRegistry>,
     mut cursor: ResMut<EngineSyncCursor>,
     activity: Res<crate::ui::input_activity::InputActivity>,
+    workspace: Option<Res<lunco_workbench::WorkspaceResource>>,
 ) {
+    // Active tab's doc id (if any). Used below to prioritise its
+    // reparse over any background tabs queued behind it. `Option`
+    // because the workspace resource may not be installed yet during
+    // very-early boot ticks.
+    let active_doc: Option<DocumentId> = workspace
+        .as_deref()
+        .and_then(|ws| ws.active_document);
     // ── 1. Drain async-parse completions ──────────────────────────────
     // Pull every completion the workers have queued since the last
     // tick. For each, fetch the strict AST from the session and
@@ -342,9 +350,51 @@ pub fn drive_engine_sync(
     //     Lets a typing burst settle before paying for a parse.
     let pool = bevy::tasks::AsyncComputeTaskPool::get();
     let now = web_time::Instant::now();
+    // Active-doc-first ordering. The active tab's reparse takes
+    // priority over background tabs because the user is staring at
+    // its canvas; any other tab can wait. On wasm
+    // `AsyncComputeTaskPool` runs cooperatively on the main thread,
+    // so the order in which we *spawn* dictates the order in which
+    // they run.
+    if let Some(active) = active_doc {
+        async_only.sort_by_key(|(doc_id, _, _)| {
+            if *doc_id == active { 0 } else { 1 }
+        });
+    }
+    // Wasm throttle: at most one parse in flight at a time. Rumoca
+    // parses on wasm32-unknown-unknown each take ~5 s of main-thread
+    // time; queueing five up at once means the active tab waits
+    // through four background reparses before getting a slot. The
+    // budget is global (counted across all docs) so a background tab
+    // can't sneak in either.
+    //
+    // Native: pool has real worker threads; concurrency is fine and
+    // uncapped.
+    #[cfg(target_arch = "wasm32")]
+    let max_in_flight: usize = 1;
+    #[cfg(not(target_arch = "wasm32"))]
+    let max_in_flight: usize = usize::MAX;
+
     for (doc_id, gen, source) in async_only {
-        if handle.lock().is_doc_pending(doc_id) {
-            continue;
+        let pending_count = {
+            let eng = handle.lock();
+            if eng.is_doc_pending(doc_id) {
+                continue;
+            }
+            eng.pending_count()
+        };
+        if pending_count >= max_in_flight {
+            // Bail out of the *whole loop* — subsequent iterations
+            // would only enqueue more work onto an already-saturated
+            // wasm pool. The next tick will retry the docs we
+            // skipped in the same priority order (active first).
+            bevy::log::debug!(
+                "[EngineSync] parse queue full ({pending_count} in flight) — \
+                 deferring doc={} gen={} until next tick",
+                doc_id.raw(),
+                gen,
+            );
+            break;
         }
         // Look up the doc to decide first-parse-vs-edit-reparse.
         let (was_parsed, last_edit) = match registry.host(doc_id) {
@@ -372,14 +422,16 @@ pub fn drive_engine_sync(
             pool.spawn(async move { task() }).detach();
         });
         bevy::log::info!(
-            "[EngineSync] async parse spawned doc={} gen={} src={}B (first_parse={})",
+            "[EngineSync] async parse spawned doc={} gen={} src={}B (first_parse={}{})",
             doc_id.raw(),
             gen,
             src_len,
             !was_parsed,
+            if Some(doc_id) == active_doc { ", priority=active" } else { "" },
         );
     }
 }
+
 
 /// Plugin registering the engine handle, sync cursor, and sync
 /// system. Add once at app build; safe to add multiple times because

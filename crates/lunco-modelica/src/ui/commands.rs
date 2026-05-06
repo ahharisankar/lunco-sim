@@ -1943,10 +1943,26 @@ fn extract_class_spans_via_path(
     source: &str,
     class_name: &str,
 ) -> Option<DuplicateExtract> {
-    let mut parsed =
-        rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()]).ok()?;
-    let (_uri, ast) = parsed.drain(..).next()?;
-    spans_from_ast(&ast, source, class_name)
+    // `parse_files_parallel` resolves a per-file artifact cache rooted
+    // under `std::env::temp_dir()`, which on wasm32-unknown-unknown
+    // panics with "no filesystem on this platform" — `temp_dir()`'s
+    // libstd stub is fatal there. On wasm we already have the source
+    // bytes in memory (caller fetched them from the in-memory MSL
+    // bundle), so the cache buys us nothing; parse the in-memory
+    // source directly via `parse_to_ast`, same `StoredDefinition`,
+    // no fs touch.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = path;
+        return extract_class_spans_inline(source, class_name);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut parsed =
+            rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()]).ok()?;
+        let (_uri, ast) = parsed.drain(..).next()?;
+        spans_from_ast(&ast, source, class_name)
+    }
 }
 
 /// In-memory variant: parses `source` directly (no path / cache) and

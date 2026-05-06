@@ -3,10 +3,31 @@
 use bevy::prelude::*;
 use bevy_egui::egui;
 use lunco_workbench::{Panel, PanelId, PanelSlot};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::ast_extract::{extract_model_name, hash_content};
 use crate::ui::{ModelicaDocumentRegistry, WorkbenchState};
+
+/// Per-tab editor buffer snapshot. Stashed in `EditorBufferState.per_doc`
+/// when the user switches tabs and restored when they switch back, so
+/// in-progress edits survive tab navigation. Without this each tab
+/// switch re-mirrored `open_model.source` and clobbered any
+/// uncommitted typing.
+///
+/// Lives keyed by `model_path` (the same string `EditorBufferState`
+/// carries to identify "which doc this buffer belongs to") rather
+/// than `DocumentId` so the rest of the editor's plumbing — which
+/// already passes `model_path` around — doesn't need to change.
+#[derive(Default, Clone)]
+pub struct TabBuffer {
+    pub source_hash: u64,
+    pub text: String,
+    pub line_starts: Arc<[usize]>,
+    pub detected_name: Option<String>,
+    pub cached_galley: Option<Arc<egui::Galley>>,
+    pub pending_commit_at: Option<f64>,
+}
 
 /// Tracks which model the editor buffer belongs to, to detect model switches.
 #[derive(Resource)]
@@ -45,6 +66,14 @@ pub struct EditorBufferState {
     /// typing, the buffer is checkpointed into the document in one
     /// shot.
     pub pending_commit_at: Option<f64>,
+    /// Per-tab buffer snapshots keyed by `model_path`. Save on tab
+    /// switch (current `text`/`line_starts`/etc → `per_doc[old]`),
+    /// restore on tab switch back (`per_doc[new]` → live fields).
+    /// Without this, switching to a new tab clobbered any
+    /// uncommitted edits in the previous tab — the buffer is a
+    /// singleton bound to egui's `TextEdit`, so two tabs can't share
+    /// it without an off-screen save slot.
+    pub per_doc: HashMap<String, TabBuffer>,
 }
 
 /// Return the byte index of the newline character when `new` differs
@@ -91,8 +120,83 @@ impl Default for EditorBufferState {
             word_wrap: false,
             auto_indent: true,
             pending_commit_at: None,
+            per_doc: HashMap::new(),
         }
     }
+}
+
+impl EditorBufferState {
+    /// Save the live fields into `per_doc[model_path]`. Call before
+    /// overwriting them with another tab's content so uncommitted
+    /// edits aren't lost.
+    pub fn snapshot_current(&mut self) {
+        if self.model_path.is_empty() {
+            return;
+        }
+        self.per_doc.insert(
+            self.model_path.clone(),
+            TabBuffer {
+                source_hash: self.source_hash,
+                text: self.text.clone(),
+                line_starts: self.line_starts.clone(),
+                detected_name: self.detected_name.clone(),
+                cached_galley: self.cached_galley.clone(),
+                pending_commit_at: self.pending_commit_at,
+            },
+        );
+    }
+
+    /// Pull a previously-saved snapshot for `model_path` into the live
+    /// fields. Returns `true` if a snapshot was found (caller can skip
+    /// the `open_model.source` re-sync), `false` otherwise.
+    pub fn restore_snapshot(&mut self, model_path: &str) -> bool {
+        if let Some(snap) = self.per_doc.remove(model_path) {
+            self.source_hash = snap.source_hash;
+            self.text = snap.text;
+            self.line_starts = snap.line_starts;
+            self.detected_name = snap.detected_name;
+            self.cached_galley = snap.cached_galley;
+            self.pending_commit_at = snap.pending_commit_at;
+            self.model_path = model_path.to_string();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Drop a tab's snapshot when its document is closed. Prevents
+    /// unbounded `per_doc` growth across long sessions.
+    pub fn forget_doc(&mut self, model_path: &str) {
+        self.per_doc.remove(model_path);
+    }
+}
+
+/// Pull the live source for `path` out of `WorkbenchState.open_model`
+/// and stuff it into `EditorBufferState`'s live fields. Used by the
+/// "first time we see this tab" / "external edit invalidated our
+/// snapshot" branches of the tab-switch sync logic.
+fn sync_buffer_from_open_model(world: &mut World, path: &str) {
+    let (source, line_starts, detected_name, galley) = {
+        let state = world.resource::<WorkbenchState>();
+        let Some(m) = state.open_model.as_ref() else {
+            return;
+        };
+        (
+            m.source.to_string(),
+            m.line_starts.clone(),
+            m.detected_name.clone(),
+            m.cached_galley.clone(),
+        )
+    };
+    let mut buf_state = world.resource_mut::<EditorBufferState>();
+    buf_state.text = source;
+    buf_state.line_starts = line_starts;
+    buf_state.model_path = path.to_string();
+    buf_state.source_hash = hash_content(&buf_state.text);
+    buf_state.detected_name = detected_name;
+    buf_state.cached_galley = galley;
+    // Fresh load from doc → no pending commit yet.
+    buf_state.pending_commit_at = None;
 }
 
 /// Code Editor panel — central viewport for Modelica source code.
@@ -189,19 +293,55 @@ impl Panel for CodeEditorPanel {
             model_switched = path_changed;
 
             if needs_sync {
-                let (source, line_starts, detected_name, galley) = {
-                    let state = world.resource::<WorkbenchState>();
-                    let m = state.open_model.as_ref().unwrap();
-                    (m.source.to_string(), m.line_starts.clone(), m.detected_name.clone(), m.cached_galley.clone())
-                };
-
-                let mut buf_state = world.resource_mut::<EditorBufferState>();
-                buf_state.text = source;
-                buf_state.line_starts = line_starts;
-                buf_state.model_path = path.clone();
-                buf_state.source_hash = hash_content(&buf_state.text);
-                buf_state.detected_name = detected_name;
-                buf_state.cached_galley = galley;
+                // Tab-switch path: snapshot the OLD tab's buffer
+                // (whatever's in the live fields right now belongs to
+                // the previous `model_path`) before we overwrite.
+                // Try to restore the NEW tab's snapshot first; only
+                // fall back to re-syncing from `open_model.source`
+                // when this is the first time we've seen the tab —
+                // otherwise the user's uncommitted edits get clobbered.
+                if path_changed {
+                    let mut buf_state = world.resource_mut::<EditorBufferState>();
+                    buf_state.snapshot_current();
+                    let restored = buf_state.restore_snapshot(path);
+                    drop(buf_state);
+                    if restored {
+                        // Restored from snapshot — no source pull
+                        // needed. But if `open_model.source` has
+                        // diverged since we saved (some other panel
+                        // mutated it), the restored buffer is stale
+                        // relative to `external_hash`. Detect that
+                        // and fall through to re-sync.
+                        let external_hash = world
+                            .resource::<WorkbenchState>()
+                            .open_model
+                            .as_ref()
+                            .map(|m| hash_content(&m.source))
+                            .unwrap_or(0);
+                        let buf_hash = world.resource::<EditorBufferState>().source_hash;
+                        if buf_hash == external_hash {
+                            // In sync; nothing more to do.
+                            // (Skip the open_model re-sync below.)
+                        } else {
+                            // External edit happened while this tab
+                            // was hidden; drop the stale snapshot
+                            // and pull the fresh source.
+                            sync_buffer_from_open_model(world, path);
+                        }
+                    } else {
+                        sync_buffer_from_open_model(world, path);
+                    }
+                } else {
+                    // Same tab, but content hash diverged (some
+                    // panel mutated `open_model.source` — typically
+                    // the diagram panel after applying AST ops).
+                    // Pull the fresh source. This still clobbers
+                    // uncommitted text edits for now; the long-term
+                    // fix is to write every keystroke through a
+                    // Document op so the buffer never diverges from
+                    // the doc to begin with.
+                    sync_buffer_from_open_model(world, path);
+                }
             }
         }
 
