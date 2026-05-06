@@ -298,6 +298,18 @@ impl Panel for CanvasDiagramPanel {
                 None => false,
             };
             if stale {
+                // Cooperative-cancel the old task before dropping it.
+                // Bevy's AsyncCompute on wasm runs cooperatively on
+                // the main thread — a not-cancelled task keeps running
+                // through every `should_stop()` check it makes (which
+                // returns false) all the way to completion, burning
+                // main-thread time the active tab needs. Flipping the
+                // `cancel` AtomicBool means the next `should_stop()`
+                // check inside the task short-circuits and returns an
+                // empty Scene.
+                if let Some(t) = docstate.projection_task.as_ref() {
+                    t.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 docstate.projection_task = None;
             }
             if docstate.projection_task.is_none() {

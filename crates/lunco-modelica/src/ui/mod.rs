@@ -693,6 +693,12 @@ impl Plugin for ModelicaUiPlugin {
             .init_resource::<panels::canvas_diagram::DuplicateLoads>()
             .add_systems(Update, panels::canvas_diagram::drive_drill_in_loads)
             .add_systems(Update, panels::canvas_diagram::drive_duplicate_loads)
+            // Flip `cancel` on every non-active tab's in-flight
+            // canvas projection. On wasm `AsyncCompute` runs
+            // cooperatively on the main thread; uncancelled stale
+            // projections steal cycles the active tab's projection
+            // needs. See `cancel_inactive_projections` rustdoc.
+            .add_systems(Update, panels::canvas_diagram::cancel_inactive_projections)
             .register_panel(panels::inspector::InspectorPanel)
             .register_panel(panels::palette::ComponentPalettePanel)
             // Multi-instance: one tab per open document. Instances are

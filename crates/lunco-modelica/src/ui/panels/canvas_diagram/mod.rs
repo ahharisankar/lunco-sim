@@ -612,6 +612,46 @@ impl CanvasDiagramState {
     pub fn has_entry(&self, doc: lunco_doc::DocumentId) -> bool {
         self.per_doc.contains_key(&doc)
     }
+
+    /// Mutable iterator over (doc_id, state) pairs. Used by the
+    /// inactive-tab projection-cancel system to flip
+    /// `projection_task.cancel` on every non-active tab without
+    /// re-walking the HashMap per id.
+    pub fn iter_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (lunco_doc::DocumentId, &mut CanvasDocState)> + '_ {
+        self.per_doc.iter_mut().map(|(k, v)| (*k, v))
+    }
+}
+
+/// Cancel any in-flight projection task on a tab that isn't the
+/// active tab.
+///
+/// On wasm, `AsyncComputeTaskPool` runs cooperatively on the main
+/// thread. A projection that started for a tab the user has since
+/// navigated away from keeps running through every `should_stop()`
+/// check (which returns false because nobody flips its `cancel`
+/// flag) all the way to completion, burning main-thread cycles the
+/// active tab needs. This system flips the flag on every non-active
+/// tab each Update tick — the running task short-circuits at its
+/// next yield point and returns an empty Scene we'll discard.
+///
+/// Native: harmless. Real worker threads make the cooperative cancel
+/// less critical (the projection still runs to completion off-thread)
+/// but throwing away its result earlier saves a tiny amount of work.
+pub fn cancel_inactive_projections(
+    workspace: Option<Res<lunco_workbench::WorkspaceResource>>,
+    mut state: ResMut<CanvasDiagramState>,
+) {
+    let active = workspace.as_deref().and_then(|ws| ws.active_document);
+    for (doc_id, ds) in state.iter_mut() {
+        if Some(doc_id) == active {
+            continue;
+        }
+        if let Some(t) = ds.projection_task.as_ref() {
+            t.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 // ─── Animation: pending API-focus queue ────────────────────────────────
