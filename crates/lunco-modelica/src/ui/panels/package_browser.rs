@@ -132,6 +132,16 @@ pub struct PackageTreeCache {
     pub twin_scan_task: Option<Task<TwinState>>,
     /// Path currently being renamed (if any) + its edit buffer.
     pub rename: RenameState,
+    /// Whether the bundled tree has been rebuilt with the indexer's
+    /// per-file class trees. `PackageTreeCache::new()` runs at app
+    /// startup — on wasm that's *before* the MSL bundle (which
+    /// carries `msl_index.json`) finishes fetching, so the first
+    /// pass falls back to flat-leaf rendering of every bundled file.
+    /// `handle_package_loading_tasks` flips this to `true` once it
+    /// re-runs `build_bundled_tree()` against a populated index, so
+    /// LunCo Examples expand into their inner classes (Engine,
+    /// Tank, RocketStage, …) instead of staying as opaque leaves.
+    pub bundled_tree_indexed: bool,
 }
 
 /// User's Twin workspace — a folder on disk being browsed as a tree.
@@ -245,6 +255,13 @@ impl PackageTreeCache {
             is_loading: false,
         });
 
+        // Native: msl_index.json is on disk synchronously at build
+        // time, so `build_bundled_tree()` above already returned the
+        // indexed shape — no rebuild needed. Wasm: bundle still
+        // fetching, so the eager call returned flat leaves; mark for
+        // rebuild once `handle_package_loading_tasks` sees the
+        // indexer settle.
+        let bundled_tree_indexed = !crate::visual_diagram::msl_bundled_trees().is_empty();
         Self {
             roots,
             tasks: Vec::new(),
@@ -254,6 +271,7 @@ impl PackageTreeCache {
             twin: None,
             twin_scan_task: None,
             rename: RenameState::default(),
+            bundled_tree_indexed,
         }
     }
 }
@@ -437,20 +455,32 @@ fn scan_msl_inmem(package_path: &str) -> Vec<PackageNode> {
             } else {
                 format!("{package_path}.{display_name}")
             };
-            // Read bytes + peek class kind so leaf rows get the right
-            // badge (`model` vs `connector` vs `function` …). Falls
-            // back to None on any error — the leaf still shows.
             let key = if prefix.is_empty() {
                 first.to_string()
             } else {
                 format!("{prefix}/{first}")
             };
-            let kind_str = in_mem
-                .files
-                .get(&PathBuf::from(&key))
-                .and_then(|bytes| std::str::from_utf8(bytes).ok())
-                .and_then(peek_class_kind_from_source);
-            results.push(leaf_model_node(&qualified, &display_name, kind_str));
+            // Multi-class package files (e.g.
+            // `Modelica/Blocks/Continuous.mo` containing
+            // `package Continuous ... block Integrator ... block
+            // Derivative ...`) need to render as expandable tree
+            // nodes, not opaque leaves. Use the pre-parsed AST from
+            // the MSL bundle (cheap dictionary lookup; no parse on
+            // the main thread) and, if the top class is a package
+            // with children, emit a Category whose children are the
+            // inner classes. Falls back to a flat leaf when the file
+            // holds a single class (the common MSL leaf shape) or
+            // when no parsed AST is available yet.
+            if let Some(node) = parsed_msl_to_package_node(&key, &qualified, &display_name) {
+                results.push(node);
+            } else {
+                let kind_str = in_mem
+                    .files
+                    .get(&PathBuf::from(&key))
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                    .and_then(peek_class_kind_from_source);
+                results.push(leaf_model_node(&qualified, &display_name, kind_str));
+            }
         }
     }
 
@@ -489,6 +519,32 @@ fn scan_msl_inmem(package_path: &str) -> Vec<PackageNode> {
 
     results.sort_by_key(omedit_sort_key);
     results
+}
+
+/// Build a `PackageNode` for a multi-class MSL file by reading its
+/// pre-parsed AST out of [`crate::msl_remote::global_parsed_msl`].
+/// Returns `None` when no parsed AST is available (cold boot before
+/// MSL bundle ready, or a file that isn't part of the bundle), when
+/// the source is a single-class leaf (the common MSL shape — caller
+/// emits a flat leaf in that case), or when the top class has no
+/// inner classes (e.g. an empty package). Wasm-only — native takes
+/// the disk-walking path.
+#[cfg(target_arch = "wasm32")]
+fn parsed_msl_to_package_node(
+    bundle_key: &str,
+    qualified: &str,
+    short_name: &str,
+) -> Option<PackageNode> {
+    use rumoca_session::parsing::ClassType;
+    use std::path::PathBuf;
+    let bundle = crate::msl_remote::global_parsed_msl()?;
+    let ast = bundle.iter().find(|(k, _)| k == bundle_key).map(|(_, a)| a)?;
+    let (_top_name, top_class) = ast.classes.iter().next()?;
+    if !matches!(top_class.class_type, ClassType::Package) || top_class.classes.is_empty() {
+        return None;
+    }
+    let bundle_path = PathBuf::from(bundle_key);
+    Some(class_def_to_node(&bundle_path, qualified, short_name, top_class))
 }
 
 /// Cheap class-kind sniffer for leaf MSL files. Returns `Some("model")`
@@ -825,6 +881,29 @@ pub fn handle_package_loading_tasks(
 
     for result in finished_results {
         find_and_update_node(&mut cache.roots, &result.parent_id, result.children);
+    }
+
+    // Bundled tree rebuild on wasm. The eager build at
+    // `PackageTreeCache::new()` ran before the MSL bundle finished
+    // fetching, so every file showed as a flat leaf instead of an
+    // expandable package. As soon as the indexer's per-file class
+    // trees become available (i.e. after `MslRemotePlugin` installs
+    // the `MslAssetSource::InMemory`), rebuild the `bundled_root`
+    // children once so LunCo Examples / future bundled libraries
+    // expose their inner classes (Engine, Tank, RocketStage, …).
+    if !cache.bundled_tree_indexed
+        && !crate::visual_diagram::msl_bundled_trees().is_empty()
+    {
+        let new_children = build_bundled_tree();
+        for root in cache.roots.iter_mut() {
+            if let PackageNode::Category { id, children, .. } = root {
+                if id == "bundled_root" {
+                    *children = Some(new_children);
+                    break;
+                }
+            }
+        }
+        cache.bundled_tree_indexed = true;
     }
 
     // Process file loading tasks
