@@ -80,6 +80,19 @@ pub enum WireMessage {
     /// the worker is alive and responding without sending an actual
     /// Modelica command.
     Ping(String),
+    /// Parse a single document's source off the main thread.
+    /// `engine_resource::drive_engine_sync` posts this when an open
+    /// doc's source advances; the worker runs `parse_source_to_ast`
+    /// in its own wasm instance and returns the resulting AST as a
+    /// [`WireResult::ParseDocumentDone`]. UI thread receives it and
+    /// installs into the engine session via `upsert_document_with_ast`.
+    /// Eliminates the ~5 s rumoca freeze on AnnotatedRocketStage.
+    ParseDocument {
+        doc_id: lunco_doc::DocumentId,
+        gen: u64,
+        uri: String,
+        source: String,
+    },
 }
 
 /// Wire-format envelope from worker → main. Same multiplexing principle as
@@ -96,6 +109,17 @@ pub enum WireResult {
     /// how long it took, panic/recover) since the worker's own console is
     /// inaccessible from the page.
     Log(String),
+    /// Parsed-AST result for a previously-sent
+    /// [`WireMessage::ParseDocument`] request. `gen` is the doc's
+    /// generation at parse-spawn time so the main side can drop stale
+    /// results. `ast` is `None` when the parse failed (rumoca returned
+    /// an Err); main handles that by leaving the doc in pending state
+    /// for a retry on the next gen bump.
+    ParseDocumentDone {
+        doc_id: lunco_doc::DocumentId,
+        gen: u64,
+        ast: Option<rumoca_session::parsing::StoredDefinition>,
+    },
 }
 
 /// Process-wide handle to the JS `Worker` running the off-thread Modelica
@@ -125,6 +149,38 @@ static RESULT_TX: OnceLock<Sender<ModelicaResult>> = OnceLock::new();
 /// `__lc_test_dispatch_compile` JS bridge to fire commands without going
 /// through the UI (for autonomous test loops).
 static COMMAND_TX: OnceLock<crossbeam_channel::Sender<ModelicaCommand>> = OnceLock::new();
+
+/// Process-wide channel carrying parse-done results back from the
+/// worker into the main thread. The JS `onmessage` handler decodes
+/// [`WireResult::ParseDocumentDone`] and pushes here; the Bevy system
+/// `drain_worker_parse_results` (engine_resource.rs) drains each tick
+/// and installs the AST into the engine session.
+///
+/// Crossbeam unbounded — parse-completion rate is well below tab-open
+/// rate so it never grows.
+pub struct ParseDoneEnvelope {
+    pub doc_id: lunco_doc::DocumentId,
+    pub gen: u64,
+    pub ast: Option<rumoca_session::parsing::StoredDefinition>,
+}
+static PARSE_DONE_TX: OnceLock<crossbeam_channel::Sender<ParseDoneEnvelope>> = OnceLock::new();
+static PARSE_DONE_RX: OnceLock<crossbeam_channel::Receiver<ParseDoneEnvelope>> = OnceLock::new();
+
+fn ensure_parse_done_channel() -> &'static crossbeam_channel::Sender<ParseDoneEnvelope> {
+    PARSE_DONE_TX.get_or_init(|| {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let _ = PARSE_DONE_RX.set(rx);
+        tx
+    })
+}
+
+/// Drain a single completed parse result, if any. Bevy system on the
+/// main thread polls this each tick; returns `None` when the queue
+/// is empty.
+pub fn try_recv_parse_done() -> Option<ParseDoneEnvelope> {
+    let _ = ensure_parse_done_channel();
+    PARSE_DONE_RX.get()?.try_recv().ok()
+}
 
 thread_local! {
     /// Holds the `onmessage` closure for the lifetime of the page so the
@@ -187,6 +243,10 @@ pub fn install_worker(worker_url: &str) -> Result<(), JsValue> {
                 if let Some(tx) = RESULT_TX.get() {
                     let _ = tx.send(result);
                 }
+            }
+            Ok(WireResult::ParseDocumentDone { doc_id, gen, ast }) => {
+                let tx = ensure_parse_done_channel();
+                let _ = tx.send(ParseDoneEnvelope { doc_id, gen, ast });
             }
             Ok(WireResult::Log(line)) => {
                 // Surface worker-side diagnostics in the main page's
@@ -269,6 +329,29 @@ fn post_to_worker(msg: &WireMessage, label: &str) {
 pub fn __lc_test_worker_ping(tag: &str) {
     bevy::log::info!("[worker_transport] sending ping: {tag}");
     post_to_worker(&WireMessage::Ping(tag.to_string()), "ping");
+}
+
+/// Send a doc to the worker for off-thread parsing. Used by
+/// `engine_resource::drive_engine_sync` on wasm in place of the
+/// main-thread parse spawn. The result lands via the parse-done
+/// channel ([`try_recv_parse_done`]).
+///
+/// Returns `false` when the worker isn't installed (very early boot
+/// or worker init failed); callers fall back to local parsing.
+pub fn dispatch_parse_to_worker(
+    doc_id: lunco_doc::DocumentId,
+    gen: u64,
+    uri: String,
+    source: String,
+) -> bool {
+    if WORKER.get().is_none() {
+        return false;
+    }
+    post_to_worker(
+        &WireMessage::ParseDocument { doc_id, gen, uri, source },
+        "parse",
+    );
+    true
 }
 
 /// JS-callable bridge that synthesizes a `ModelicaCommand::Compile` and

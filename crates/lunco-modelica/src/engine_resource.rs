@@ -100,6 +100,45 @@ impl ModelicaEngineHandle {
     /// crate Bevy-agnostic at the engine layer.
     ///
     /// No-op if a parse for `doc_id` is already in flight (dedupe).
+    /// Mark a doc as pending-parse and return its URI without spawning
+    /// any parser. Used by the wasm path that ships parsing to the
+    /// Web Worker — see `worker_transport::dispatch_parse_to_worker`
+    /// and `drain_worker_parse_results` (engine_resource).
+    ///
+    /// Returns `None` when another parse is already in flight for the
+    /// same doc (dedup, same as `upsert_document_async`).
+    pub fn mark_pending_for_worker(
+        &self,
+        doc_id: DocumentId,
+    ) -> Option<String> {
+        let mut engine = self.lock();
+        if !engine.mark_pending(doc_id) {
+            return None;
+        }
+        Some(engine.uri_for(doc_id))
+    }
+
+    /// Install a worker-parsed AST and clear the pending slot in one
+    /// atomic step. Counterpart to `mark_pending_for_worker`.
+    pub fn install_worker_parsed_ast(
+        &self,
+        doc_id: DocumentId,
+        gen: u64,
+        ast: rumoca_session::parsing::ast::StoredDefinition,
+    ) {
+        let mut engine = self.lock();
+        engine.install_parsed_ast(doc_id, ast);
+        engine.finish_parse(doc_id, gen);
+    }
+
+    /// Drop the pending slot without installing anything — used when
+    /// the worker reports a parse failure so the dedup gate clears
+    /// and the next gen can retry.
+    pub fn finish_pending_failed(&self, doc_id: DocumentId, gen: u64) {
+        let mut engine = self.lock();
+        engine.finish_parse(doc_id, gen);
+    }
+
     pub fn upsert_document_async<F>(
         &self,
         doc_id: DocumentId,
@@ -418,17 +457,95 @@ pub fn drive_engine_sync(
             }
         }
         let src_len = source.len();
-        handle.upsert_document_async(doc_id, gen, source, |task| {
-            pool.spawn(async move { task() }).detach();
-        });
+        // Wasm path: ship parsing to the off-thread Web Worker. Rumoca
+        // parse on wasm32-unknown-unknown is ~5 s for a real model
+        // and runs synchronously on the main thread (Bevy's
+        // `AsyncComputeTaskPool` is cooperative there). The worker
+        // bundle has its own wasm instance; parsing there leaves the
+        // UI thread free to render. The result lands via the parse-
+        // done channel that `drain_worker_parse_results` polls each
+        // tick.
+        //
+        // Falls back to the local pool spawn if the worker isn't
+        // installed yet (very early boot before
+        // `worker_transport::install_worker` lands) or returned an
+        // error.
+        #[cfg(target_arch = "wasm32")]
+        let dispatched_to_worker = match handle.mark_pending_for_worker(doc_id) {
+            Some(uri) => {
+                if crate::worker_transport::dispatch_parse_to_worker(doc_id, gen, uri, source.clone()) {
+                    true
+                } else {
+                    handle.finish_pending_failed(doc_id, gen);
+                    false
+                }
+            }
+            None => {
+                // Already in flight — let the next tick retry once
+                // the current parse finishes.
+                continue;
+            }
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let dispatched_to_worker = false;
+
+        if !dispatched_to_worker {
+            handle.upsert_document_async(doc_id, gen, source, |task| {
+                pool.spawn(async move { task() }).detach();
+            });
+        }
         bevy::log::info!(
-            "[EngineSync] async parse spawned doc={} gen={} src={}B (first_parse={}{})",
+            "[EngineSync] async parse spawned doc={} gen={} src={}B (first_parse={}, target={}{})",
             doc_id.raw(),
             gen,
             src_len,
             !was_parsed,
+            if dispatched_to_worker { "worker" } else { "main" },
             if Some(doc_id) == active_doc { ", priority=active" } else { "" },
         );
+    }
+}
+
+/// Drain parse-done envelopes from the off-thread Web Worker and
+/// install each AST into the engine session.
+///
+/// Wasm-only system. The worker emits one
+/// [`crate::worker_transport::WireResult::ParseDocumentDone`] per
+/// finished parse; the transport layer pushes each into a crossbeam
+/// channel; this system pulls them off the channel and routes each
+/// through [`ModelicaEngineHandle::install_worker_parsed_ast`] (success)
+/// or [`ModelicaEngineHandle::finish_pending_failed`] (parse error).
+///
+/// Native: still registered but always sees an empty queue (worker
+/// never runs there), so the system is a per-tick HashMap miss —
+/// negligible.
+pub fn drain_worker_parse_results(handle: Res<ModelicaEngineHandle>) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        while let Some(env) = crate::worker_transport::try_recv_parse_done() {
+            match env.ast {
+                Some(ast) => {
+                    handle.install_worker_parsed_ast(env.doc_id, env.gen, ast);
+                    bevy::log::info!(
+                        "[EngineSync] worker-parsed install doc={} gen={}",
+                        env.doc_id.raw(),
+                        env.gen,
+                    );
+                }
+                None => {
+                    handle.finish_pending_failed(env.doc_id, env.gen);
+                    bevy::log::warn!(
+                        "[EngineSync] worker parse failed doc={} gen={} — clearing pending",
+                        env.doc_id.raw(),
+                        env.gen,
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = handle;
     }
 }
 
@@ -449,7 +566,10 @@ impl Plugin for ModelicaEnginePlugin {
         app.insert_resource(handle)
             .init_resource::<EngineSyncCursor>()
             .init_resource::<MslBootstrapState>()
-            .add_systems(Update, (drive_engine_sync, drive_msl_bootstrap));
+            .add_systems(
+                Update,
+                (drive_engine_sync, drive_msl_bootstrap, drain_worker_parse_results),
+            );
     }
 }
 

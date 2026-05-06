@@ -37,9 +37,13 @@ pub const MODEL_VIEW_KIND: PanelId = PanelId("modelica_model_view");
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ModelViewMode {
     /// Raw Modelica source (egui TextEdit).
-    #[default]
     Text,
     /// Block-diagram canvas, rendered on `lunco-canvas`.
+    /// Default for new tabs — composed-model examples (the
+    /// majority of MSL bundle and LunCo bundle) make sense visually
+    /// before they make sense as text. Users who want code first
+    /// flip the toolbar toggle.
+    #[default]
     Canvas,
     /// The class's own `Icon` annotation rendering — what the
     /// component looks like when instantiated in a parent diagram.

@@ -277,6 +277,40 @@ pub fn run() -> Result<(), JsValue> {
                     ),
                 );
             }
+            WireMessage::ParseDocument { doc_id, gen, uri, source } => {
+                let started = web_time::Instant::now();
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    rumoca_session::parsing::parse_source_to_ast(&source, &uri).ok()
+                }));
+                let ast = match outcome {
+                    Ok(opt) => opt,
+                    Err(e) => {
+                        let msg = e
+                            .downcast_ref::<&'static str>()
+                            .copied()
+                            .or_else(|| e.downcast_ref::<String>().map(|s| s.as_str()))
+                            .unwrap_or("(unknown panic payload)");
+                        post_log(
+                            &scope_for_cb,
+                            format!("PANIC during ParseDocument doc={doc_id:?}: {msg}"),
+                        );
+                        None
+                    }
+                };
+                let ms = started.elapsed().as_secs_f64() * 1000.0;
+                post_log(
+                    &scope_for_cb,
+                    format!(
+                        "parsed doc={doc_id:?} gen={gen} src={}B in {ms:.0}ms (ok={})",
+                        source.len(),
+                        ast.is_some(),
+                    ),
+                );
+                post_wire(
+                    &scope_for_cb,
+                    &WireResult::ParseDocumentDone { doc_id, gen, ast },
+                );
+            }
         }
     }) as Box<dyn FnMut(MessageEvent)>);
 

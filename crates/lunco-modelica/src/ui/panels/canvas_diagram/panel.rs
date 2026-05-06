@@ -362,6 +362,19 @@ impl Panel for CanvasDiagramPanel {
                             source_bytes_for_log,
                             target_for_log,
                         );
+                        // Yield to the runtime BEFORE doing any heavy
+                        // work. On wasm `AsyncComputeTaskPool` runs
+                        // cooperatively on the main thread under
+                        // `wasm_bindgen_futures`; without explicit
+                        // `await` points the spawned future runs to
+                        // completion in one synchronous burst,
+                        // freezing egui for ~800 ms on a fresh
+                        // AnnotatedRocketStage projection. Each
+                        // `yield_now().await` returns control to the
+                        // microtask queue so the next egui frame can
+                        // paint before we resume. Native: noop, the
+                        // thread-pool worker isn't on the UI thread.
+                        futures_lite::future::yield_now().await;
                         if should_stop() {
                             return Scene::new();
                         }
@@ -386,6 +399,7 @@ impl Panel for CanvasDiagramPanel {
                             diagram.nodes.len(),
                             diagram.edges.len(),
                         );
+                        futures_lite::future::yield_now().await;
                         if should_stop() {
                             return Scene::new();
                         }
@@ -396,6 +410,7 @@ impl Panel for CanvasDiagramPanel {
                             t1.elapsed().as_secs_f64() * 1000.0,
                             diagram.edges.len(),
                         );
+                        futures_lite::future::yield_now().await;
                         if should_stop() {
                             return Scene::new();
                         }

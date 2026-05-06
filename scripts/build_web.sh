@@ -416,6 +416,32 @@ build_msl_bundle() {
     local dist_dir="$PROJECT_DIR/dist/$binary"
     local msl_dir="$dist_dir/msl"
 
+    # Skip the rumoca pre-parse + tar+zstd pass when nothing under
+    # `.cache/msl/` is newer than the existing `manifest.json`. Pack
+    # is content-addressed (`parsed-<sha>.bin.zst`), so a no-op rerun
+    # produces byte-identical output anyway — the only thing the
+    # script saves is ~2 s of parse + compress work.
+    #
+    # Override with `MSL_REBUILD=force` if you've changed the
+    # bundler binary itself (`build_msl_assets`) or its serialisation
+    # format and want a guaranteed re-pack.
+    if [ "${MSL_REBUILD:-}" != "force" ] && [ -f "$msl_dir/manifest.json" ]; then
+        local msl_src
+        for candidate in \
+            "$PROJECT_DIR/../.cache/msl" \
+            "$PROJECT_DIR/.cache/msl"; do
+            if [ -d "$candidate" ]; then msl_src="$candidate"; break; fi
+        done
+        if [ -n "$msl_src" ]; then
+            local newer
+            newer=$(find "$msl_src" -name '*.mo' -newer "$msl_dir/manifest.json" -print -quit 2>/dev/null)
+            if [ -z "$newer" ]; then
+                info "MSL bundle up-to-date ($msl_src) — skipping pack (set MSL_REBUILD=force to override)"
+                return 0
+            fi
+        fi
+    fi
+
     info "Packing MSL bundle for $binary..."
 
     # The bundler walks `lunco_assets::msl_source_root_path()` on the host,
