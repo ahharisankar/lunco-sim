@@ -688,12 +688,26 @@ impl Panel for CanvasDiagramPanel {
                 // trigger the follow-up projection, correct.
                 docstate.last_seen_source_hash = source_hash;
                 if is_initial_projection {
+                    // Fit synchronously against the ui's pending
+                    // allocation size — this is the same size
+                    // `Canvas::ui` will hand to `allocate_exact_size`
+                    // a few lines below, so the camera lands inside
+                    // the actual canvas rect and the very first paint
+                    // is already framed (no one-frame "wrong zoom"
+                    // flash, no animated glide). Falls back to a
+                    // physical-zoom snap at the origin when the scene
+                    // is empty.
                     let physical_zoom =
                         lunco_canvas::Viewport::physical_mm_zoom(ui.ctx());
                     if let Some(world_rect) = docstate.canvas.scene.bounds() {
+                        let avail = ui.available_size();
+                        let origin = ui.cursor().min;
                         let screen = lunco_canvas::Rect::from_min_max(
-                            lunco_canvas::Pos::new(0.0, 0.0),
-                            lunco_canvas::Pos::new(800.0, 600.0),
+                            lunco_canvas::Pos::new(origin.x, origin.y),
+                            lunco_canvas::Pos::new(
+                                origin.x + avail.x.max(1.0),
+                                origin.y + avail.y.max(1.0),
+                            ),
                         );
                         let (c, z) = docstate
                             .canvas
