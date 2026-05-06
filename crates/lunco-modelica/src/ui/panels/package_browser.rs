@@ -326,6 +326,202 @@ fn should_skip(name: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 fn scan_msl_dir(dir: &std::path::Path, package_path: String) -> Vec<PackageNode> {
+    // Wasm: enumerate from the in-memory MSL bundle instead of the
+    // filesystem (which doesn't exist). The bundle is a `HashMap<
+    // PathBuf, Vec<u8>>` keyed by the same relative paths the
+    // filesystem would have (`Modelica/Blocks/package.mo`,
+    // `Modelica/Blocks/Discrete.mo`, …), so the same package_path
+    // → tree-node mapping applies — we just read the listing from
+    // hashmap keys instead of `read_dir`.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = dir;
+        return scan_msl_inmem(&package_path);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        scan_msl_dir_native(dir, package_path)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn scan_msl_inmem(package_path: &str) -> Vec<PackageNode> {
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    let Some(source) = lunco_assets::msl::global_msl_source() else {
+        return Vec::new();
+    };
+    let in_mem = match source {
+        lunco_assets::msl::MslAssetSource::InMemory(m) => m,
+        // Filesystem-backed `MslAssetSource` shouldn't occur on wasm
+        // (no fs), but bail safely if it does.
+        _ => return Vec::new(),
+    };
+
+    // Translate the dotted package path to a slash-prefixed key.
+    // Empty package_path is the bundle root (rare; only the very
+    // top-level call before "Modelica" was pushed).
+    let prefix: String = package_path.replace('.', "/");
+    let prefix_with_slash = if prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{prefix}/")
+    };
+
+    let mut results: Vec<PackageNode> = Vec::new();
+    let mut seen_subpkg: HashSet<String> = HashSet::new();
+    // Two passes over the same key set:
+    //   1. Spot direct subdirs (those that contain a `package.mo`
+    //      one segment deeper) and direct `.mo` files.
+    //   2. Inline-child harvest from this package's own `package.mo`
+    //      (handled below, after the main loop).
+    for (path, _) in in_mem.files.iter() {
+        let Some(rel) = path.to_str().and_then(|s| s.strip_prefix(&prefix_with_slash)) else {
+            // Allow the bundle's root scan (`prefix == ""`) — every
+            // key strips trivially.
+            if prefix_with_slash.is_empty() {
+                if let Some(s) = path.to_str() {
+                    s
+                } else {
+                    continue;
+                };
+                // Fall through; handled by the explicit loop below.
+                // (Kept simple — root scan rarely runs.)
+            }
+            continue;
+        };
+        // First segment after the prefix. Exactly one segment → leaf
+        // file or top-level marker (`package.mo`); two or more → a
+        // sub-package (we record the first segment).
+        let mut segs = rel.split('/');
+        let first = match segs.next() {
+            Some(s) if !s.is_empty() => s,
+            _ => continue,
+        };
+        let is_deeper = segs.next().is_some();
+        if is_deeper {
+            // Sub-package candidate. Only count it if the bundle
+            // actually has `<prefix>/<first>/package.mo` — that's the
+            // marker that distinguishes a package directory from a
+            // stray nested file (rare in MSL but possible).
+            if seen_subpkg.contains(first) {
+                continue;
+            }
+            let pkg_key = if prefix.is_empty() {
+                format!("{first}/package.mo")
+            } else {
+                format!("{prefix}/{first}/package.mo")
+            };
+            if in_mem.files.contains_key(&PathBuf::from(&pkg_key)) {
+                seen_subpkg.insert(first.to_string());
+                let sub_path = if package_path.is_empty() {
+                    first.to_string()
+                } else {
+                    format!("{package_path}.{first}")
+                };
+                let id = format!("msl_{}", sub_path.replace('.', "_"));
+                results.push(PackageNode::Category {
+                    id,
+                    name: first.to_string(),
+                    package_path: sub_path,
+                    fs_path: PathBuf::from(&pkg_key),
+                    children: None,
+                    is_loading: false,
+                });
+            }
+        } else if first.ends_with(".mo") && first != "package.mo" {
+            let display_name = first.trim_end_matches(".mo").to_string();
+            let qualified = if package_path.is_empty() {
+                display_name.clone()
+            } else {
+                format!("{package_path}.{display_name}")
+            };
+            // Read bytes + peek class kind so leaf rows get the right
+            // badge (`model` vs `connector` vs `function` …). Falls
+            // back to None on any error — the leaf still shows.
+            let key = if prefix.is_empty() {
+                first.to_string()
+            } else {
+                format!("{prefix}/{first}")
+            };
+            let kind_str = in_mem
+                .files
+                .get(&PathBuf::from(&key))
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .and_then(peek_class_kind_from_source);
+            results.push(leaf_model_node(&qualified, &display_name, kind_str));
+        }
+    }
+
+    // Inline children harvest from `<prefix>/package.mo` — same as
+    // the native path, but reading from in-memory bundle.
+    let pkg_key = if prefix.is_empty() {
+        "package.mo".to_string()
+    } else {
+        format!("{prefix}/package.mo")
+    };
+    if let Some(bytes) = in_mem.files.get(&PathBuf::from(&pkg_key)) {
+        if let Ok(source_str) = std::str::from_utf8(bytes) {
+            let ast = rumoca_phase_parse::parse_to_recovered_ast(source_str, &pkg_key);
+            if let Some((_, top_class)) = ast.classes.iter().next() {
+                let existing_names: HashSet<String> =
+                    results.iter().map(|n| n.name().to_string()).collect();
+                for (child_short, child_def) in &top_class.classes {
+                    if existing_names.contains(child_short) {
+                        continue;
+                    }
+                    let child_qualified = if package_path.is_empty() {
+                        child_short.to_string()
+                    } else {
+                        format!("{package_path}.{child_short}")
+                    };
+                    results.push(class_def_to_node(
+                        &PathBuf::from(&pkg_key),
+                        &child_qualified,
+                        child_short,
+                        child_def,
+                    ));
+                }
+            }
+        }
+    }
+
+    results.sort_by_key(omedit_sort_key);
+    results
+}
+
+/// Cheap class-kind sniffer for leaf MSL files. Returns `Some("model")`
+/// / `"connector"` / `"package"` / etc. by scanning the first
+/// non-comment, non-encapsulated keyword in the source. Native uses
+/// `peek_class_header` which calls into the rumoca lexer and also
+/// reads the file from disk; this duplicate avoids the read step on
+/// wasm where the source is already in memory.
+#[cfg(target_arch = "wasm32")]
+fn peek_class_kind_from_source(src: &str) -> Option<String> {
+    for line in src.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("//") || line.starts_with("/*") {
+            continue;
+        }
+        for word in line.split_whitespace() {
+            match word {
+                "model" | "block" | "connector" | "package"
+                | "record" | "type" | "function" | "class" => {
+                    return Some(word.to_string());
+                }
+                "encapsulated" | "partial" | "operator" | "expandable"
+                | "pure" | "impure" | "redeclare" | "final"
+                | "inner" | "outer" | "replaceable" => continue,
+                _ => return None,
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn scan_msl_dir_native(dir: &std::path::Path, package_path: String) -> Vec<PackageNode> {
     let mut results = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -1257,10 +1453,37 @@ fn render_node(
                     msl_path: msl_path_for_id(id, library),
                 });
             } else if resp.double_clicked() {
-                result = Some(PackageAction::Instantiate {
-                    msl_path: msl_path_for_id(id, library),
-                    display_name: name.clone(),
-                });
+                // `id` shape decides Open vs Instantiate:
+                //   * `bundled://X.mo`            → top-level file
+                //                                    row → Open as a
+                //                                    new tab.
+                //   * `bundled://X.mo#Class.Sub`  → nested-class row
+                //                                    → instantiate
+                //                                    into the active
+                //                                    doc's canvas
+                //                                    (palette
+                //                                    parity).
+                //
+                // Previous behaviour always emitted `Instantiate`,
+                // which silently no-op'd whenever the active-doc
+                // tracker was None — every other example open after
+                // a tab-close logged `[PackageBrowser] double-click
+                // on … ignored — no active document` and dropped the
+                // user's intent. Closing every tab and reopening
+                // worked because that path re-bound active_doc.
+                let is_nested = id.contains('#');
+                if is_nested {
+                    result = Some(PackageAction::Instantiate {
+                        msl_path: msl_path_for_id(id, library),
+                        display_name: name.clone(),
+                    });
+                } else {
+                    result = Some(PackageAction::Open(
+                        id.clone(),
+                        name.clone(),
+                        library.clone(),
+                    ));
+                }
             } else if resp.clicked() {
                 result = Some(PackageAction::Open(
                     id.clone(),
@@ -2146,42 +2369,110 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
             // the `/package.mo` of the directory at that level. First
             // existing match wins. Drill-in (queued separately) lands
             // on the specific class within the loaded file.
-            let msl_root = lunco_assets::msl_dir();
+            //
+            // Native: filesystem under `<cache>/msl/Modelica/`.
+            // Wasm: in-memory bundle (`MslAssetSource::InMemory`) keyed
+            //       by the same relative paths the filesystem uses, so
+            //       the same walking algorithm applies — we just call
+            //       `.contains_key` instead of `.exists()` and route
+            //       reads through the bundle rather than `std::fs`.
             let parts: Vec<&str> = rel_path.split('.').collect();
-            let mut full_path: std::path::PathBuf = msl_root.join("Modelica");
-            'walk: for end in (1..=parts.len()).rev() {
-                // <Modelica>/<segment0>/<...>/<segmentN>.mo
-                let mut as_file = msl_root.join("Modelica");
-                as_file.push(parts[..end].join("/"));
-                as_file.set_extension("mo");
-                if as_file.exists() {
-                    full_path = as_file;
-                    break 'walk;
+            #[cfg(target_arch = "wasm32")]
+            {
+                use std::path::PathBuf;
+                let bundle = match lunco_assets::msl::global_msl_source() {
+                    Some(lunco_assets::msl::MslAssetSource::InMemory(b)) => Some(b.clone()),
+                    _ => None,
+                };
+                let mut chosen_key: Option<PathBuf> = None;
+                if let Some(b) = bundle.as_ref() {
+                    'walk: for end in (1..=parts.len()).rev() {
+                        let mut as_file = String::from("Modelica");
+                        for seg in &parts[..end] {
+                            as_file.push('/');
+                            as_file.push_str(seg);
+                        }
+                        let key_file = PathBuf::from(format!("{as_file}.mo"));
+                        if b.files.contains_key(&key_file) {
+                            chosen_key = Some(key_file);
+                            break 'walk;
+                        }
+                        let key_pkg = PathBuf::from(format!("{as_file}/package.mo"));
+                        if b.files.contains_key(&key_pkg) {
+                            chosen_key = Some(key_pkg);
+                            break 'walk;
+                        }
+                    }
+                    if chosen_key.is_none() {
+                        let root_pkg = PathBuf::from("Modelica/package.mo");
+                        if b.files.contains_key(&root_pkg) {
+                            chosen_key = Some(root_pkg);
+                        }
+                    }
                 }
-                // <Modelica>/<segment0>/<...>/<segmentN>/package.mo
-                let mut as_pkg = msl_root.join("Modelica");
-                as_pkg.push(parts[..end].join("/"));
-                as_pkg.push("package.mo");
-                if as_pkg.exists() {
-                    full_path = as_pkg;
-                    break 'walk;
+                let bytes = chosen_key
+                    .as_ref()
+                    .and_then(|k| bundle.as_ref().and_then(|b| b.files.get(k).cloned()));
+                match bytes.and_then(|v| String::from_utf8(v).ok()) {
+                    Some(s) => s,
+                    None => format!(
+                        "// Could not locate `{rel_path}` in the in-memory MSL bundle.\n\
+                         // (Bundle status: {})\n",
+                        if bundle.is_some() {
+                            "loaded but key missing"
+                        } else {
+                            "not yet installed (MSL fetch may still be in flight)"
+                        }
+                    ),
                 }
             }
-            // Final fallback: Modelica's own package.mo. Catches the
-            // case where the class is defined inline inside the
-            // root MSL package itself (rare, but valid Modelica).
-            if !full_path.is_file() {
-                full_path = msl_root.join("Modelica").join("package.mo");
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let msl_root = lunco_assets::msl_dir();
+                let mut full_path: std::path::PathBuf = msl_root.join("Modelica");
+                'walk: for end in (1..=parts.len()).rev() {
+                    let mut as_file = msl_root.join("Modelica");
+                    as_file.push(parts[..end].join("/"));
+                    as_file.set_extension("mo");
+                    if as_file.exists() {
+                        full_path = as_file;
+                        break 'walk;
+                    }
+                    let mut as_pkg = msl_root.join("Modelica");
+                    as_pkg.push(parts[..end].join("/"));
+                    as_pkg.push("package.mo");
+                    if as_pkg.exists() {
+                        full_path = as_pkg;
+                        break 'walk;
+                    }
+                }
+                if !full_path.is_file() {
+                    full_path = msl_root.join("Modelica").join("package.mo");
+                }
+                std::fs::read_to_string(&full_path).unwrap_or_else(|e| {
+                    format!("// Error reading {}\n// {:?}", full_path.display(), e)
+                })
             }
-            std::fs::read_to_string(&full_path).unwrap_or_else(|e| {
-                format!("// Error reading {}\n// {:?}", full_path.display(), e)
-            })
         } else {
-            // Default User model load
-            let path = std::path::PathBuf::from(&id_clone);
-            std::fs::read_to_string(&path).unwrap_or_else(|e| {
-                format!("// Error reading {:?}\n// {:?}", path, e)
-            })
+            // Default User model load. Wasm has no filesystem at runtime
+            // — return a placeholder rather than panicking inside
+            // `read_to_string` (the libstd wasm32-unknown-unknown stub
+            // resolves relative paths via `current_dir()` which fatals
+            // with "no filesystem on this platform").
+            #[cfg(target_arch = "wasm32")]
+            {
+                format!(
+                    "// User-model load not supported on web (no filesystem).\n\
+                     // id = {id_clone}\n"
+                )
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let path = std::path::PathBuf::from(&id_clone);
+                std::fs::read_to_string(&path).unwrap_or_else(|e| {
+                    format!("// Error reading {:?}\n// {:?}", path, e)
+                })
+            }
         };
 
         // Compute line starts (zero allocation scan)

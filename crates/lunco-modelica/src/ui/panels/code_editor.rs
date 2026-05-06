@@ -111,13 +111,30 @@ impl Panel for CodeEditorPanel {
         }
 
         // ── Determine what model to show (fetch metadata first) ──
+        // `is_loading` is a *global* WorkbenchState flag set the moment
+        // any `open_model` click fires. When the user clicks several
+        // examples in quick succession, the flag stays true until ALL
+        // pending bg tasks drain — and any tab being rendered during
+        // that window paints the "Opening model…" spinner even though
+        // its own document already has source. Filter the flag through
+        // a per-tab check: if the visible doc's source is non-empty,
+        // it's loaded, period — do not show the spinner regardless of
+        // whatever async work is in flight elsewhere.
         let (display_name, is_read_only, model_path, compilation_error, selected_entity, is_loading) = {
             let state = world.resource::<WorkbenchState>();
-            let meta = state.open_model.as_ref().map(|m| (m.display_name.clone(), m.read_only, m.model_path.clone()));
+            let meta = state.open_model.as_ref().map(|m| {
+                (
+                    m.display_name.clone(),
+                    m.read_only,
+                    m.model_path.clone(),
+                    m.source.len(),
+                )
+            });
             let err = state.compilation_error.clone();
             let entity = state.selected_entity;
-            let loading = state.is_loading;
-            (meta.as_ref().map(|m| m.0.clone()), 
+            let visible_source_len = meta.as_ref().map(|m| m.3).unwrap_or(0);
+            let loading = state.is_loading && visible_source_len == 0;
+            (meta.as_ref().map(|m| m.0.clone()),
              meta.as_ref().map(|m| m.1).unwrap_or(false),
              meta.as_ref().map(|m| m.2.clone()),
              err, entity, loading)

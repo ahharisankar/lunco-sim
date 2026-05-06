@@ -6403,6 +6403,7 @@ dependencies = [
  "lunco-assets",
  "serde",
  "serde_json",
+ "web-sys",
 ]
 
 [[package]]

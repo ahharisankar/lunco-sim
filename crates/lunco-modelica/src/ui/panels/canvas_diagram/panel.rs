@@ -709,13 +709,23 @@ impl Panel for CanvasDiagramPanel {
                 }
             }
         }
-        // 8ms threshold — half a 60 Hz frame; anything beyond this
-        // is enough to cause a visible animation hiccup on a
-        // 120 Hz monitor.
-        if total_ms > 8.0 || force_log {
-            bevy::log::info!(
-                "[CanvasDiagram] frame: total={total_ms:.1}ms render_canvas={render_canvas_ms:.1}ms{}",
-                if force_log { " (post-apply window)" } else { "" }
+        // Logging policy:
+        //  - Post-`apply_ops` window (`force_log`) → `debug!`. The
+        //    window fires for 2 s after every structural edit and on
+        //    a busy canvas every frame is over 8 ms, so this used to
+        //    spam Console for the entire interactive session.
+        //    `RUST_LOG=debug` still surfaces it when chasing
+        //    apply-cost regressions.
+        //  - Slow frames > 16 ms (one vsync budget) → `warn!`. The
+        //    previous 8 ms threshold flagged every healthy egui
+        //    frame on a busy canvas as "slow"; not actionable.
+        if force_log {
+            bevy::log::debug!(
+                "[CanvasDiagram] frame: total={total_ms:.1}ms render_canvas={render_canvas_ms:.1}ms (post-apply window)"
+            );
+        } else if total_ms > 16.0 {
+            bevy::log::warn!(
+                "[CanvasDiagram] slow frame: total={total_ms:.1}ms render_canvas={render_canvas_ms:.1}ms"
             );
         }
     }
