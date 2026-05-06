@@ -69,6 +69,13 @@ pub struct ScanResult {
 
 pub struct FileLoadResult {
     pub id: String,
+    /// Stable dedup key — canonical filesystem path string for disk-
+    /// backed loads, raw `id` for in-memory schemes (`bundled://`).
+    /// Indexes [`PackageTreeCache::loading_ids`] and
+    /// [`crate::ui::browser_dispatch::PendingDrillIns`] so that
+    /// re-clicks on a different MSL class that resolves to the same
+    /// `.mo` file dedup against the in-flight load.
+    pub dedup_key: String,
     pub name: String,
     pub library: ModelLibrary,
     pub source: std::sync::Arc<str>,
@@ -655,10 +662,11 @@ pub fn handle_package_loading_tasks(
     }
 
     for result in finished_files {
-        // Drop the dedup guard: subsequent clicks on the same row
+        // Drop the dedup guard: subsequent clicks on the same file
         // now go through the registry-lookup branch and re-focus
-        // the existing tab instead of spawning another parse.
-        cache.loading_ids.remove(&result.id);
+        // the existing tab instead of spawning another parse. Keyed
+        // by canonical path so sibling-class clicks share the slot.
+        cache.loading_ids.remove(&result.dedup_key);
         // Final font-dependent shaping on main thread
         let cached_galley = result.layout_job.map(|job| {
             egui_ctx.ctx_mut().unwrap().fonts_mut(|f| f.layout_job(job))
@@ -675,7 +683,7 @@ pub fn handle_package_loading_tasks(
         // file, apply it now. The canvas projector reads
         // `DrilledInClassNames` on its next tick and lands on the
         // requested class — saves a second click.
-        let queued_qualified = pending_drill_ins.take(&result.id);
+        let queued_qualified = pending_drill_ins.take(&result.dedup_key);
         if let Some(qualified) = queued_qualified {
             drilled_in.set(doc_id, qualified);
         }
@@ -2057,13 +2065,13 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
 
     // Background load for all other types (Disk or Bundled).
     //
-    // Dedup: if a tab is already open for this id (registered
-    // doc whose origin path matches `id`) — focus it. If a load
-    // for this id is already in flight (user double-clicked while
-    // the bg parse is running), focus the placeholder tab we
-    // opened on the first click. Without these the second click
-    // reserves a new DocumentId, spawns a second parse, and the
-    // user ends up with a duplicate tab once both land.
+    // Dedup keys on the raw `id` so each MSL inner-class click gets
+    // its own tab — `UsersGuide.Connectors` and `UsersGuide.Conventions`
+    // open as two tabs even though both live in `Modelica/UsersGuide.mo`.
+    // Sharing the underlying parse across those clicks is Phase-2 work
+    // (source-root model + per-(doc, qualified) tab key); for now each
+    // click reserves its own DocumentId.
+    let dedup_key = id.clone();
     let path_buf = std::path::PathBuf::from(&id);
     let already_open: Option<lunco_doc::DocumentId> = world
         .resource::<ModelicaDocumentRegistry>()
@@ -2076,17 +2084,23 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
             kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
             instance: doc.raw(),
         });
+        if let Some(mut state) = world.get_resource_mut::<WorkbenchState>() {
+            state.is_loading = false;
+        }
         return;
     }
     if let Some(&doc) = world
         .resource::<PackageTreeCache>()
         .loading_ids
-        .get(&id)
+        .get(&dedup_key)
     {
         world.commands().trigger(lunco_workbench::OpenTab {
             kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
             instance: doc.raw(),
         });
+        if let Some(mut state) = world.get_resource_mut::<WorkbenchState>() {
+            state.is_loading = false;
+        }
         return;
     }
     // Reserve a `DocumentId` up front so the bg task can build a
@@ -2099,7 +2113,7 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
     world
         .resource_mut::<PackageTreeCache>()
         .loading_ids
-        .insert(id.clone(), reserved_doc_id);
+        .insert(dedup_key.clone(), reserved_doc_id);
     // Open the tab immediately so the user gets visible feedback
     // even though the parse is still running off-thread. The model
     // view paints a "Loading…" overlay while the registry has no
@@ -2118,6 +2132,7 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
     };
     let pool = AsyncComputeTaskPool::get();
     let id_clone = id.clone();
+    let dedup_key_clone = dedup_key.clone();
     let name_clone = name.clone();
     let name_result = name.clone();
     let lib_clone = library.clone();
@@ -2213,6 +2228,7 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
 
         FileLoadResult {
             id: id_clone,
+            dedup_key: dedup_key_clone,
             name: name_result,
             library: lib_clone,
             source: source_text.into(),
