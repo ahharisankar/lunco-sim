@@ -135,14 +135,14 @@ impl Canvas {
             egui::Sense::click_and_drag() | egui::Sense::click(),
         );
         // Hard-clip every paint inside the canvas to its allocated
-        // rect. Without this, node visuals and overlays positioned
-        // near the canvas edge bleed past the boundary into adjacent
-        // egui content (side panels, neighbour widgets) — egui's
-        // default clip_rect is the parent UI, which is wider than
-        // the canvas's own rect when there are docked panels in the
-        // same parent. Tightening it here makes the rule explicit:
-        // we draw on the canvas, nothing outside it.
-        ui.set_clip_rect(rect);
+        // rect, intersected with the parent ui's existing clip.
+        // `set_clip_rect` *replaces* the clip; passing `rect` alone
+        // would widen the clip past whatever the host (egui_dock leaf
+        // body, scroll viewport, …) already set, and node icons /
+        // ports / overlays painted near the canvas edge would bleed
+        // into neighbour panes. Intersecting keeps the canvas's own
+        // clip but never grows beyond the host-visible area.
+        ui.set_clip_rect(rect.intersect(ui.clip_rect()));
         let screen_rect = Rect::from_min_max(
             Pos::new(rect.min.x, rect.min.y),
             Pos::new(rect.max.x, rect.max.y),
@@ -442,10 +442,10 @@ impl Canvas {
         // overlays paint via `ctx.ui.painter()` whose clip is the
         // parent ui's max_rect — so nodes near the top of the
         // canvas's coordinate space spill out and visually overlap
-        // sibling widgets above (e.g. the model-view toolbar). The
-        // clip is intersected with the existing one, so no
-        // unintended side effects in tightly-laid-out hosts.
-        ui.set_clip_rect(rect);
+        // sibling widgets above (e.g. the model-view toolbar).
+        // Intersected with the existing parent clip so we tighten —
+        // never widen — the host-visible region.
+        ui.set_clip_rect(rect.intersect(ui.clip_rect()));
         // Wipe the previous frame's widget-rect reservations right
         // before scene draw. In-canvas widgets (sliders on node
         // icons) re-publish their rects in this frame's draw pass,

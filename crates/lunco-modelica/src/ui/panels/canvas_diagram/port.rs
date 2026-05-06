@@ -71,6 +71,13 @@ pub(super) fn paint_input_control_widget(
     }
     bound.sort_by(|a, b| a.0.cmp(&b.0));
 
+    // Clip to the canvas widget rect so a slider on a node near the
+    // canvas edge can't paint into a neighbour pane (telemetry,
+    // inspector). Mirrors the explicit clip applied at the icon paint
+    // site — see `IconNodeVisual::draw`.
+    let canvas_clip = ui.clip_rect();
+    let painter = ui.painter().clone().with_clip_rect(canvas_clip);
+
     let strip_width = (icon_rect.height() * 0.08).max(4.0);
     let strip_gap = strip_width * 0.4;
     let strip_pad = strip_width * 0.5;
@@ -92,7 +99,7 @@ pub(super) fn paint_input_control_widget(
 
         let trough_color = egui::Color32::from_rgba_unmultiplied(28, 30, 38, 220);
         let radius = (strip_width * 0.45).min(5.0);
-        ui.painter().rect_filled(strip_rect, radius, trough_color);
+        painter.rect_filled(strip_rect, radius, trough_color);
 
         let frac = ((*value - *mn) / (*mx - *mn)).clamp(0.0, 1.0) as f32;
         if frac > 0.0 {
@@ -102,15 +109,15 @@ pub(super) fn paint_input_control_widget(
                 egui::vec2(strip_rect.width(), fill_h),
             );
             let fill_color = egui::Color32::from_rgb(70, 160, 240);
-            ui.painter().rect_filled(fill_rect, radius, fill_color);
+            painter.rect_filled(fill_rect, radius, fill_color);
             let y = strip_rect.max.y - fill_h;
-            ui.painter().line_segment(
+            painter.line_segment(
                 [egui::pos2(strip_rect.min.x, y), egui::pos2(strip_rect.max.x, y)],
                 egui::Stroke::new(1.5 * s, egui::Color32::from_rgb(220, 235, 250)),
             );
         }
 
-        ui.painter().rect_stroke(
+        painter.rect_stroke(
             strip_rect,
             radius,
             egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 130, 145)),

@@ -138,7 +138,13 @@ impl Overlay for NavBarOverlay {
             egui::Order::Middle,
             ui.id().with("canvas_nav_bar"),
         );
-        let painter = ui.ctx().layer_painter(fg_layer);
+        // Clip the foreground layer to the canvas's host-visible
+        // clip — `layer_painter` defaults to the layer's full screen
+        // bounds, so without this the bar paints over neighbour
+        // panes when the canvas's own rect extends past the host
+        // viewport (egui_dock leaf, scroll area, …).
+        let host_clip = ui.clip_rect();
+        let painter = ui.ctx().layer_painter(fg_layer).with_clip_rect(host_clip);
         painter.rect_filled(
             bar_rect.translate(egui::vec2(0.0, 2.0)),
             8.0,
@@ -161,6 +167,9 @@ impl Overlay for NavBarOverlay {
                 .layout(egui::Layout::left_to_right(egui::Align::Center))
                 .layer_id(fg_layer),
         );
+        // Inherit the host clip so button chrome (hover bg, label)
+        // is also constrained to the canvas pane.
+        child.set_clip_rect(host_clip);
         child.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
 
         let zoom = ctx.viewport.zoom;

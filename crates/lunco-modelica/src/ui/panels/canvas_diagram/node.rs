@@ -159,7 +159,27 @@ impl NodeVisual for IconNodeVisual {
             egui::pos2(r.min.x, r.min.y),
             egui::pos2(r.max.x, r.max.y),
         );
-        let painter = ctx.ui.painter();
+        // Hard-clip every primitive this draw emits to the canvas's
+        // allocated rect. `Canvas::ui` already calls
+        // `ui.set_clip_rect(rect)`, but in some host layouts (docked
+        // canvas next to a side panel) that implicit clip wasn't
+        // holding — icons authored to extend past their node rect
+        // (Modelica labels, port arrows on a node near the right
+        // edge) bled into the neighbouring telemetry / inspector
+        // panes. Re-applying the clip on the painter we hand to
+        // `paint_graphics_themed` / `paint_port_shape` makes the
+        // boundary explicit at the paint site, the same way
+        // `paint_hover_card` already does for the foreground tooltip
+        // layer.
+        // Use the ui's *current* clip (already intersected with the
+        // host pane in `Canvas::ui`), not `ctx.screen_rect`.
+        // `screen_rect` is the canvas's full allocated rect, which
+        // can extend past the visible pane when the host (egui_dock
+        // leaf, scroll viewport) is narrower than the allocation —
+        // clipping to it would still let icons paint over the
+        // neighbour pane.
+        let canvas_clip = ctx.ui.clip_rect();
+        let clipped_painter = ctx.ui.painter().clone().with_clip_rect(canvas_clip);
         let theme_snap = canvas_theme_from_ctx(ctx.ui.ctx());
         // Conditional components (`Component X if cond`) — render at
         // reduced opacity so every primitive (icon shapes, text,
@@ -168,12 +188,12 @@ impl NodeVisual for IconNodeVisual {
         // components.
         let _dimmed_painter;
         let painter: &egui::Painter = if self.is_conditional {
-            let mut p = painter.clone();
+            let mut p = clipped_painter.clone();
             p.set_opacity(0.4);
             _dimmed_painter = p;
             &_dimmed_painter
         } else {
-            painter
+            &clipped_painter
         };
 
         // No always-on card fill. Icons that need a body (Resistor's
