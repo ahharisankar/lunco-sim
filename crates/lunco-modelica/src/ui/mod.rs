@@ -610,6 +610,14 @@ impl Plugin for ModelicaUiPlugin {
             .add_systems(Update, panels::package_browser::handle_package_loading_tasks)
             .add_systems(Update, cleanup_removed_documents)
             .add_systems(Update, drain_document_changes)
+            // Mirror the active document's volatile fields (source,
+            // line_starts, detected_name) into `WorkbenchState.open_model`
+            // every Update tick. Half-step Fix 3: until the 91 read
+            // sites migrate off `open_model` directly, this re-derives
+            // it from the registry so multiple writers (file load,
+            // diagram apply_ops, undo/redo, API edits) can't leave
+            // it stale. See `mirror_active_open_model` rustdoc.
+            .add_systems(Update, crate::ui::state::mirror_active_open_model)
             // Workspace shadow-sync: keep `WorkspaceResource` populated
             // from the existing document-registry lifecycle so the new
             // session surface is ready for step 5b.2 readers.

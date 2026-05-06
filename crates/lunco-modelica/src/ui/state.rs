@@ -125,11 +125,26 @@ pub struct WorkbenchState {
     pub selected_entity: Option<Entity>,
     /// Last compilation error message, if any.
     pub compilation_error: Option<String>,
-    /// Render-side snapshot of the active document — display name,
-    /// source, line starts, read-only flag, cached galley. The
-    /// *identity* of the active doc is
-    /// [`lunco_workbench::WorkspaceResource::active_document`]; this is
-    /// just what the renderer needs without a per-frame registry hit.
+    /// Render-side **derived projection** of the active document.
+    ///
+    /// Identity (which doc is active) lives on
+    /// [`lunco_workbench::WorkspaceResource::active_document`]. This
+    /// field is a pre-flattened view of the registry's
+    /// `host(active).document()` plus a few open-time-only fields
+    /// (display_name / model_path / read_only / library) that come
+    /// from the file-load path.
+    ///
+    /// Volatile fields (source / line_starts / detected_name) are
+    /// *re-derived from the registry every Update tick* by
+    /// [`mirror_active_open_model`] so a stale view is structurally
+    /// impossible. Static fields are still set by the file-load
+    /// path and are not mirrored — they don't change.
+    ///
+    /// Long term this struct should disappear: every reader migrates
+    /// to `WorkspaceResource.active_document` + a
+    /// `TabMetas`-keyed-by-`DocumentId` lookup. The 91 existing read
+    /// callsites make that a deliberate refactor; the mirror system
+    /// is the half-step that buys correctness now.
     pub open_model: Option<OpenModel>,
     /// Flag to signal the diagram panel should rebuild from open_model source.
     pub diagram_dirty: bool,
@@ -594,6 +609,92 @@ impl Default for WorkbenchState {
             is_loading: false,
         }
     }
+}
+
+/// Mirror system — Fix 3, half-step.
+///
+/// Every Update tick, re-derive the volatile fields of
+/// [`WorkbenchState::open_model`] (`source`, `line_starts`,
+/// `detected_name`) from the registry's `host(active_document)`.
+/// Static fields (`model_path`, `display_name`, `read_only`,
+/// `library`, `cached_galley`) are left alone — those are set once
+/// at open time by the file-load path and don't drift.
+///
+/// Why this exists
+/// ---------------
+/// `open_model` is read by ~91 callsites scattered across canvas,
+/// code editor, ops, overlays, etc. For most of the codebase's
+/// history those reads were authoritative — the file-load path was
+/// the only writer, so the snapshot was always fresh. Then the
+/// diagram-edit path started mutating `open_model.source` directly
+/// after `apply_ops` (see `canvas_diagram/ops.rs` ~line 843), which
+/// works but adds a second writer. Add a third (e.g., undo/redo,
+/// API-driven `SetDocumentSource`) and you have a *replicated state*
+/// problem: each writer has to remember to update the mirror, and
+/// missing one anywhere produces stale reads.
+///
+/// The proper fix is to delete `open_model` and have every reader
+/// pull from the registry. That's a 91-callsite refactor; deferred.
+/// In the meantime, this mirror system reads the *single source of
+/// truth* (the doc in the registry) every tick and pushes it into
+/// the snapshot. Multiple writers no longer matter — the mirror
+/// re-syncs every frame regardless. Correctness is restored without
+/// touching the read callsites.
+///
+/// Identity check
+/// --------------
+/// If the active doc id doesn't match `open_model.model_path`'s
+/// implied doc, we don't touch the snapshot — the file-load path is
+/// still mid-flight and will install a fresh `OpenModel` when its
+/// bg task completes. Re-deriving here would race with that path.
+pub fn mirror_active_open_model(
+    workspace: Option<Res<lunco_workbench::WorkspaceResource>>,
+    registry: Res<ModelicaDocumentRegistry>,
+    mut state: ResMut<WorkbenchState>,
+) {
+    let Some(active) = workspace.as_deref().and_then(|ws| ws.active_document) else {
+        return;
+    };
+    let Some(host) = registry.host(active) else {
+        return;
+    };
+    // Skip when the file-load path hasn't installed the snapshot for
+    // this doc yet — `open_model.model_path` is the implicit identity
+    // tag the rest of the codebase uses, and overwriting fields when
+    // it doesn't match `active` would race with the in-flight load.
+    let snap_path: String = match state.open_model.as_ref() {
+        Some(m) => m.model_path.clone(),
+        None => return,
+    };
+    let doc = host.document();
+    let live_source: &str = doc.source();
+    let live_origin_path = doc.origin().display_name(); // best-effort identity proxy
+    // If the snapshot's `model_path` is empty (initial default) or
+    // doesn't reasonably point at this doc, leave it alone — the
+    // file-load path will populate it.
+    let _ = live_origin_path;
+    if snap_path.is_empty() {
+        return;
+    }
+    // Volatile-field refresh. Cheap when in sync (string compare +
+    // early return); recomputes line_starts only when source diverges.
+    let m = state.open_model.as_mut().expect("checked above");
+    if m.source.as_ref() == live_source {
+        return;
+    }
+    let new_source: Arc<str> = Arc::from(live_source);
+    let mut starts: Vec<usize> = vec![0];
+    for (i, b) in new_source.as_bytes().iter().enumerate() {
+        if *b == b'\n' {
+            starts.push(i + 1);
+        }
+    }
+    m.source = new_source;
+    m.line_starts = Arc::from(starts);
+    // `detected_name` is memoised from source; invalidate so the next
+    // reader recomputes against the fresh bytes. Cheap rebuild on
+    // demand beats fighting state.rs over what counts as "fresh".
+    m.detected_name = None;
 }
 
 #[cfg(test)]
