@@ -115,6 +115,10 @@ impl std::fmt::Display for AstMutError {
                 f,
                 "component `{component}` already exists in class `{class}`"
             ),
+            AstMutError::DuplicateClass { parent, name } => write!(
+                f,
+                "class `{name}` already exists under `{parent}`"
+            ),
             AstMutError::ConnectionNotFound { class, from, to } => write!(
                 f,
                 "connection `connect({from}, {to})` not found in class `{class}`"
@@ -679,6 +683,28 @@ where
     }
 
     Ok((start..end, regen))
+}
+
+/// Run an AST mutation against the whole `StoredDefinition` and
+/// return a `(0..source.len(), regen)` whole-document patch.
+///
+/// Used by ops that change the document's class set: `AddClass` /
+/// `RemoveClass`, where there's no single class span to splice
+/// against. Whole-document replacement loses byte-stability for
+/// unchanged classes (formatter may normalise whitespace), which is
+/// the same trade-off the AST-canonical roadmap accepts on save.
+pub fn regenerate_document_patch<F>(
+    source: &str,
+    parsed: &StoredDefinition,
+    mutate: F,
+) -> Result<(Range<usize>, String), AstMutError>
+where
+    F: FnOnce(&mut StoredDefinition) -> Result<(), AstMutError>,
+{
+    let mut sd_clone = parsed.clone();
+    mutate(&mut sd_clone)?;
+    let regen = sd_clone.to_modelica();
+    Ok((0..source.len(), regen))
 }
 
 /// Walk back from `name_start` (the byte offset of the class name in

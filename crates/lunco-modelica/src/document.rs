@@ -1620,7 +1620,17 @@ fn op_to_patch(
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::AddClass { parent, name, kind, description, partial } => {
-            let (r, rp) = compute_add_class_patch(source, ast, parsed, &parent, &name, kind, &description, partial)?;
+            // AST-canonical (A.2 batch 3). AddClass / RemoveClass
+            // change the document's class set, not a single class
+            // span — use the whole-document patch helper. The
+            // formatter is idempotent (verified by `ast_roundtrip`),
+            // so unchanged classes round-trip byte-stably; only the
+            // newly-added or removed class block actually shifts.
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_document_patch(source, parsed, |sd| {
+                crate::ast_mut::add_class(sd, &parent, &name, kind, &description, partial)
+            })
+            .map_err(ast_mut_to_doc_error)?;
             let qualified = if parent.is_empty() {
                 name.clone()
             } else {
@@ -1629,7 +1639,11 @@ fn op_to_patch(
             Ok((r, rp, ModelicaChange::ClassAdded { qualified, kind }))
         }
         ModelicaOp::RemoveClass { qualified } => {
-            let (r, rp) = compute_remove_class_patch(source, ast, parsed, &qualified)?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_document_patch(source, parsed, |sd| {
+                crate::ast_mut::remove_class(sd, &qualified)
+            })
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::ClassRemoved { qualified }))
         }
         ModelicaOp::AddShortClass { parent, name, kind, base, prefixes, modifications } => {
@@ -1644,22 +1658,32 @@ fn op_to_patch(
             Ok((r, rp, ModelicaChange::ClassAdded { qualified, kind }))
         }
         ModelicaOp::AddVariable { class, decl } => {
-            let (r, rp) = compute_add_variable_patch(source, ast, parsed, &class, &decl)?;
-            // Variables and typed components share the AST `components`
-            // table — emit the same `ComponentAdded` event so panel-side
-            // observers and the per-doc Index don't have to special-case
-            // variables vs. typed components.
+            // Variables and typed components share `components: IndexMap`
+            // in the AST. Same regenerate-class path as AddComponent.
+            ast_check_no_parse_error(ast)?;
+            let added_name = decl.name.clone();
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::add_variable(c, &decl),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             let change = ModelicaChange::ComponentAdded {
                 class,
-                name: decl.name.clone(),
+                name: added_name,
             };
             Ok((r, rp, change))
         }
         ModelicaOp::RemoveVariable { class, name } => {
-            // Variables and components share the same AST table — reuse
-            // both the source patch helper and the `ComponentRemoved`
-            // event so consumers see one signal for both decl kinds.
-            let (r, rp) = compute_remove_component_patch(source, ast, parsed, &class, &name)?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::remove_variable(c, &name),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             let change = ModelicaChange::ComponentRemoved { class, name };
             Ok((r, rp, change))
         }
