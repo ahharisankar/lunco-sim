@@ -171,30 +171,53 @@ impl EditorBufferState {
     }
 }
 
-/// Pull the live source for `path` out of `WorkbenchState.open_model`
-/// and stuff it into `EditorBufferState`'s live fields. Used by the
-/// "first time we see this tab" / "external edit invalidated our
-/// snapshot" branches of the tab-switch sync logic.
+/// Pull the live source for `path` from the document registry by
+/// `doc` id and stuff it into `EditorBufferState`'s live fields.
+/// Per-tab routing (split views) requires the doc-id keyed lookup —
+/// the legacy `WorkbenchState.open_model`-based variant returned
+/// whichever tab rendered last.
 fn sync_buffer_from_open_model(world: &mut World, path: &str) {
-    let (source, line_starts, detected_name, galley) = {
-        let state = world.resource::<WorkbenchState>();
-        let Some(m) = state.open_model.as_ref() else {
-            return;
-        };
-        (
-            m.source.to_string(),
-            m.line_starts.clone(),
-            m.detected_name.clone(),
-            m.cached_galley.clone(),
-        )
+    // Resolve the rendering tab's doc the same way the editor body
+    // does — TabRenderContext first, active_document fallback.
+    let target_doc = world
+        .get_resource::<crate::ui::panels::model_view::TabRenderContext>()
+        .and_then(|c| c.doc)
+        .or_else(|| {
+            world
+                .get_resource::<lunco_workbench::WorkspaceResource>()
+                .and_then(|ws| ws.active_document)
+        });
+    let Some(doc) = target_doc else { return };
+    let (source, line_starts, detected_name) = {
+        let registry = world.resource::<ModelicaDocumentRegistry>();
+        let Some(host) = registry.host(doc) else { return };
+        let document = host.document();
+        let src = document.source().to_string();
+        let mut starts: Vec<usize> = vec![0];
+        for (i, b) in src.as_bytes().iter().enumerate() {
+            if *b == b'\n' {
+                starts.push(i + 1);
+            }
+        }
+        // Cheap per-doc detected name from the AST index (no parse).
+        let detected = document
+            .index()
+            .classes
+            .values()
+            .find(|c| !matches!(c.kind, crate::index::ClassKind::Package))
+            .map(|c| c.name.clone());
+        (src, starts.into(), detected)
     };
+    // Galley cache is layout-tied; can't pull it from the registry.
+    // Letting it be None here forces a one-frame relayout — same
+    // cost path tab-switch already takes. Cheap on text bodies.
     let mut buf_state = world.resource_mut::<EditorBufferState>();
     buf_state.text = source;
     buf_state.line_starts = line_starts;
     buf_state.model_path = path.to_string();
     buf_state.source_hash = hash_content(&buf_state.text);
     buf_state.detected_name = detected_name;
-    buf_state.cached_galley = galley;
+    buf_state.cached_galley = None;
     // Fresh load from doc → no pending commit yet.
     buf_state.pending_commit_at = None;
 }
@@ -214,34 +237,49 @@ impl Panel for CodeEditorPanel {
             world.insert_resource(EditorBufferState::default());
         }
 
-        // ── Determine what model to show (fetch metadata first) ──
-        // `is_loading` is a *global* WorkbenchState flag set the moment
-        // any `open_model` click fires. When the user clicks several
-        // examples in quick succession, the flag stays true until ALL
-        // pending bg tasks drain — and any tab being rendered during
-        // that window paints the "Opening model…" spinner even though
-        // its own document already has source. Filter the flag through
-        // a per-tab check: if the visible doc's source is non-empty,
-        // it's loaded, period — do not show the spinner regardless of
-        // whatever async work is in flight elsewhere.
-        let (display_name, is_read_only, model_path, compilation_error, selected_entity, is_loading) = {
-            let state = world.resource::<WorkbenchState>();
-            let meta = state.open_model.as_ref().map(|m| {
-                (
-                    m.display_name.clone(),
-                    m.read_only,
-                    m.model_path.clone(),
-                    m.source.len(),
-                )
+        // ── Determine what model to show ──
+        // Resolve *this tab's* doc via the per-render
+        // [`TabRenderContext`] — splits each render in the same
+        // frame, so reading the singleton `WorkbenchState.open_model`
+        // would mirror whichever tab rendered last. Fall back to the
+        // workspace-wide active doc for non-tab render paths
+        // (welcome screen, no tab open).
+        let tab_target: Option<lunco_doc::DocumentId> = world
+            .get_resource::<crate::ui::panels::model_view::TabRenderContext>()
+            .and_then(|c| c.doc)
+            .or_else(|| {
+                world
+                    .get_resource::<lunco_workbench::WorkspaceResource>()
+                    .and_then(|ws| ws.active_document)
             });
+        // Pull display fields from the registry directly — this
+        // bypasses the `WorkbenchState.open_model` snapshot which is
+        // a singleton stamped by whichever tab rendered last.
+        let (display_name, is_read_only, model_path, source_len) = match tab_target
+            .and_then(|d| world.resource::<ModelicaDocumentRegistry>().host(d))
+        {
+            Some(host) => {
+                let document = host.document();
+                let display = document.origin().display_name();
+                let path_str = document
+                    .canonical_path()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| format!("mem://{display}"));
+                (
+                    Some(display),
+                    document.is_read_only(),
+                    Some(path_str),
+                    document.source().len(),
+                )
+            }
+            None => (None, false, None, 0),
+        };
+        let (compilation_error, selected_entity, is_loading) = {
+            let state = world.resource::<WorkbenchState>();
             let err = state.compilation_error.clone();
             let entity = state.selected_entity;
-            let visible_source_len = meta.as_ref().map(|m| m.3).unwrap_or(0);
-            let loading = state.is_loading && visible_source_len == 0;
-            (meta.as_ref().map(|m| m.0.clone()),
-             meta.as_ref().map(|m| m.1).unwrap_or(false),
-             meta.as_ref().map(|m| m.2.clone()),
-             err, entity, loading)
+            let loading = state.is_loading && source_len == 0;
+            (err, entity, loading)
         };
 
         if is_loading {
@@ -280,13 +318,15 @@ impl Panel for CodeEditorPanel {
             // diagram edit, the resync clobbers them. That's a known
             // transitional gap until the code editor writes every
             // keystroke through the Document (its own `EditText` op).
+            // External hash from the tab's *own* doc (not the
+            // singleton open_model snapshot) so split-Text panes
+            // don't fight over each other's content.
+            let external_hash = tab_target
+                .and_then(|d| world.resource::<ModelicaDocumentRegistry>().host(d))
+                .map(|h| hash_content(h.document().source()))
+                .unwrap_or(0);
             let (needs_sync, path_changed) = {
                 let buf_state = world.resource::<EditorBufferState>();
-                let external_hash = world.resource::<WorkbenchState>()
-                    .open_model
-                    .as_ref()
-                    .map(|m| hash_content(&m.source))
-                    .unwrap_or(0);
                 let path_changed = buf_state.model_path != *path;
                 (path_changed || buf_state.source_hash != external_hash, path_changed)
             };
@@ -312,11 +352,13 @@ impl Panel for CodeEditorPanel {
                         // mutated it), the restored buffer is stale
                         // relative to `external_hash`. Detect that
                         // and fall through to re-sync.
-                        let external_hash = world
-                            .resource::<WorkbenchState>()
-                            .open_model
-                            .as_ref()
-                            .map(|m| hash_content(&m.source))
+                        let external_hash = tab_target
+                            .and_then(|d| {
+                                world
+                                    .resource::<ModelicaDocumentRegistry>()
+                                    .host(d)
+                            })
+                            .map(|h| hash_content(h.document().source()))
                             .unwrap_or(0);
                         let buf_hash = world.resource::<EditorBufferState>().source_hash;
                         if buf_hash == external_hash {
@@ -370,13 +412,12 @@ impl Panel for CodeEditorPanel {
         // `selected_entity → document_of(entity)` lookup only when
         // there's no active document, which covers the brief window
         // before workspace state is initialised.
-        let doc_id = world
-            .get_resource::<lunco_workbench::WorkspaceResource>()
-            .and_then(|ws| ws.active_document)
-            .or_else(|| {
-                selected_entity
-                    .and_then(|e| world.resource::<ModelicaDocumentRegistry>().document_of(e))
-            });
+        // Use this tab's resolved doc (TabRenderContext-aware) so a
+        // split-Text edit commits into the right document.
+        let doc_id = tab_target.or_else(|| {
+            selected_entity
+                .and_then(|e| world.resource::<ModelicaDocumentRegistry>().document_of(e))
+        });
 
         // ── Settings menu (gear button) ──
         //

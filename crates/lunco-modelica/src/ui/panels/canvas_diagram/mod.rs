@@ -554,73 +554,122 @@ impl Default for CanvasDocState {
 /// [`CanvasDocState`] entry so viewport/selection/projection/context
 /// menu never bleed between tabs. `fallback` is used only when no
 /// document is bound (startup, every tab closed).
+/// Per-tab key for [`CanvasDiagramState`]. Two splits of the same
+/// document with different drill-in targets get distinct keys, so
+/// they project independent scenes / hold independent viewports.
+pub type CanvasKey = (lunco_doc::DocumentId, Option<String>);
+
 #[derive(Resource, Default)]
 pub struct CanvasDiagramState {
-    per_doc: std::collections::HashMap<lunco_doc::DocumentId, CanvasDocState>,
+    per_tab: std::collections::HashMap<CanvasKey, CanvasDocState>,
     fallback: CanvasDocState,
 }
 
 impl CanvasDiagramState {
-    /// Read-only view of the state for a given doc. Falls back to an
-    /// empty canvas when `doc` is `None` or no entry exists yet — used
-    /// during the one-frame window between panel mount and first
-    /// projection.
+    /// Legacy single-key lookup (no drill scope). Equivalent to
+    /// `get_for(doc, None)`. Most non-render call sites (event
+    /// observers, ops layer) still use this; the canvas render path
+    /// uses [`get_for`] to disambiguate same-doc splits.
     pub fn get(&self, doc: Option<lunco_doc::DocumentId>) -> &CanvasDocState {
-        doc.and_then(|d| self.per_doc.get(&d)).unwrap_or(&self.fallback)
+        self.get_for(doc, None)
     }
 
-    /// Mutable view, creating the entry on first access. `None` routes
-    /// writes to the shared fallback so "no doc bound" doesn't crash.
+    /// Legacy mutable lookup; routes to `(doc, None)`.
     pub fn get_mut(
         &mut self,
         doc: Option<lunco_doc::DocumentId>,
     ) -> &mut CanvasDocState {
+        self.get_mut_for(doc, None)
+    }
+
+    /// Read-only view scoped to `(doc, drilled)`. Falls back to an
+    /// empty canvas when `doc` is `None` or no entry exists yet —
+    /// used during the one-frame window between panel mount and
+    /// first projection.
+    pub fn get_for(
+        &self,
+        doc: Option<lunco_doc::DocumentId>,
+        drilled: Option<&str>,
+    ) -> &CanvasDocState {
         match doc {
-            Some(d) => self.per_doc.entry(d).or_default(),
+            Some(d) => self
+                .per_tab
+                .get(&(d, drilled.map(str::to_string)))
+                .unwrap_or(&self.fallback),
+            None => &self.fallback,
+        }
+    }
+
+    /// Mutable view, creating the entry on first access. `None`
+    /// routes writes to the shared fallback so "no doc bound"
+    /// doesn't crash.
+    pub fn get_mut_for(
+        &mut self,
+        doc: Option<lunco_doc::DocumentId>,
+        drilled: Option<&str>,
+    ) -> &mut CanvasDocState {
+        match doc {
+            Some(d) => self
+                .per_tab
+                .entry((d, drilled.map(str::to_string)))
+                .or_default(),
             None => &mut self.fallback,
         }
     }
 
-    /// Drop a doc's entry when its document is removed from the
-    /// registry (tab closed, file unloaded). Called from
-    /// [`cleanup_removed_documents`].
+    /// Drop *every* per-tab entry for this doc when the document is
+    /// removed from the registry. Multi-tab on a single doc means
+    /// closing the doc must clean up all its drill scopes.
     pub fn drop_doc(&mut self, doc: lunco_doc::DocumentId) {
-        self.per_doc.remove(&doc);
+        self.per_tab.retain(|(d, _), _| *d != doc);
     }
 
-    /// Iterate the document ids that currently have canvas state.
-    /// Used by the vello-canvas plugin to allocate / reclaim
-    /// per-tab render targets.
+    /// Iterate the *distinct* document ids that currently have
+    /// canvas state. Used by the vello-canvas plugin to allocate /
+    /// reclaim per-doc render targets — render targets are still
+    /// shared across drill scopes for a given doc.
     pub fn iter_doc_ids(&self) -> impl Iterator<Item = lunco_doc::DocumentId> + '_ {
-        self.per_doc.keys().copied()
+        let mut seen = std::collections::HashSet::new();
+        self.per_tab
+            .keys()
+            .filter_map(move |(d, _)| seen.insert(*d).then_some(*d))
     }
 
-    /// Read-only state for an explicit doc id, or `None` when no
-    /// canvas state exists yet. Distinguishes "doc absent" from
-    /// "doc present but empty", which the fallback-returning `get`
-    /// can't.
+    /// Read-only state for an explicit doc id (no drill scope), or
+    /// `None` when no canvas state exists yet. Distinguishes "doc
+    /// absent" from "doc present but empty", which the
+    /// fallback-returning `get` can't.
     pub fn get_for_doc(
         &self,
         doc: lunco_doc::DocumentId,
     ) -> Option<&CanvasDocState> {
-        self.per_doc.get(&doc)
+        self.per_tab.get(&(doc, None))
     }
 
-    /// Has this doc ever been projected? `false` until
-    /// `get_mut(Some(doc))` inserts — the trigger the render loop
-    /// uses to force an initial projection.
+    /// Has this doc ever been projected at the no-drill scope?
+    /// `false` until `get_mut_for(Some(doc), None)` inserts — the
+    /// trigger the render loop uses to force an initial projection.
     pub fn has_entry(&self, doc: lunco_doc::DocumentId) -> bool {
-        self.per_doc.contains_key(&doc)
+        self.has_entry_for(doc, None)
     }
 
-    /// Mutable iterator over (doc_id, state) pairs. Used by the
+    /// Has `(doc, drilled)` ever been projected?
+    pub fn has_entry_for(
+        &self,
+        doc: lunco_doc::DocumentId,
+        drilled: Option<&str>,
+    ) -> bool {
+        self.per_tab.contains_key(&(doc, drilled.map(str::to_string)))
+    }
+
+    /// Mutable iterator over (key, state) pairs. Used by the
     /// inactive-tab projection-cancel system to flip
     /// `projection_task.cancel` on every non-active tab without
-    /// re-walking the HashMap per id.
+    /// re-walking the HashMap per key.
     pub fn iter_mut(
         &mut self,
-    ) -> impl Iterator<Item = (lunco_doc::DocumentId, &mut CanvasDocState)> + '_ {
-        self.per_doc.iter_mut().map(|(k, v)| (*k, v))
+    ) -> impl Iterator<Item = (CanvasKey, &mut CanvasDocState)> + '_ {
+        self.per_tab.iter_mut().map(|(k, v)| (k.clone(), v))
     }
 }
 
@@ -644,7 +693,11 @@ pub fn cancel_inactive_projections(
     mut state: ResMut<CanvasDiagramState>,
 ) {
     let active = workspace.as_deref().and_then(|ws| ws.active_document);
-    for (doc_id, ds) in state.iter_mut() {
+    for ((doc_id, _drilled), ds) in state.iter_mut() {
+        // Cancel projections on any tab whose doc isn't the active
+        // doc. Same-doc-different-drill tabs all get a chance — the
+        // cost of reprojecting a still-relevant scope is small and
+        // we'd rather over-keep than mis-cancel the focused split.
         if Some(doc_id) == active {
             continue;
         }

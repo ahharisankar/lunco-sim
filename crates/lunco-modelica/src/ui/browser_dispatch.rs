@@ -100,11 +100,13 @@ pub fn drain_browser_actions(world: &mut World) {
                     .and_then(|s| s.to_str())
                     .unwrap_or("Untitled")
                     .to_string();
+                // Twin Browser file click → preview slot.
                 crate::ui::panels::package_browser::open_model(
                     world,
                     id,
                     name,
                     ModelLibrary::User,
+                    false,
                 );
             }
             BrowserAction::OpenModelicaClass {
@@ -133,11 +135,14 @@ pub fn drain_browser_actions(world: &mut World) {
                 world
                     .resource_mut::<PendingDrillIns>()
                     .queue(id.clone(), qualified_path);
+                // Twin Browser class click → preview slot (with
+                // a queued drill-in target above).
                 crate::ui::panels::package_browser::open_model(
                     world,
                     id,
                     name,
                     ModelLibrary::User,
+                    false,
                 );
             }
             BrowserAction::OpenLoadedClass {
@@ -156,7 +161,7 @@ pub fn drain_browser_actions(world: &mut World) {
                 let tab_id = {
                     let mut model_tabs = world
                         .resource_mut::<crate::ui::panels::model_view::ModelTabs>();
-                    model_tabs.ensure_for(doc, Some(qualified_path))
+                    model_tabs.ensure_preview_for(doc, Some(qualified_path))
                 };
                 world
                     .resource_mut::<lunco_workbench::WorkbenchLayout>()

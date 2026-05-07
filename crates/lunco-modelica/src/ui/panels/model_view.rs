@@ -76,6 +76,15 @@ pub struct ModelTabState {
     pub drilled_class: Option<String>,
     /// Text vs Diagram vs Icon vs Docs.
     pub view_mode: ModelViewMode,
+    /// VS Code-style preview tab semantics. An *unpinned* tab is the
+    /// "preview" — clicking another class in the package browser
+    /// repurposes it (changes its `doc` / `drilled_class`) instead
+    /// of opening a third tab, so casual browse-around clicks don't
+    /// pile up dozens of tabs. The first edit, drill-in, or explicit
+    /// "Pin" action sets `pinned = true` and the tab becomes a
+    /// permanent fixture; the next browser click then opens a fresh
+    /// preview alongside it.
+    pub pinned: bool,
 }
 
 /// Newtype-ish alias for tab instance ids. Stored on the workbench
@@ -135,8 +144,10 @@ impl ModelTabs {
     }
 
     /// Find an existing tab matching `(doc, drilled_class)` or
-    /// allocate a fresh one. Returns its [`TabId`]. The caller pairs
-    /// this with [`lunco_workbench::OpenTab`] to mount the dock tab.
+    /// allocate a fresh one. The newly-created tab is **pinned** by
+    /// default — this entry point is for deliberate opens (drill-in,
+    /// New, Open File) that should produce a persistent tab. Browser
+    /// single-clicks should use [`ensure_preview_for`] instead.
     pub fn ensure_for(
         &mut self,
         doc: DocumentId,
@@ -154,14 +165,55 @@ impl ModelTabs {
                 doc,
                 drilled_class,
                 view_mode: ModelViewMode::default(),
+                pinned: true,
+            },
+        );
+        id
+    }
+
+    /// Browser-click entry point with VS Code preview-tab semantics:
+    ///
+    /// 1. If a tab already matches `(doc, drilled_class)` → focus it
+    ///    (no churn, no duplication).
+    /// 2. Else if an *unpinned* preview tab exists → repurpose it
+    ///    (mutate its `doc`/`drilled_class` in place, keep `view_mode`)
+    ///    so casual click-around doesn't pile up dozens of tabs.
+    /// 3. Else → allocate a fresh **unpinned** tab.
+    ///
+    /// Pinning happens automatically on the first edit / drill-in
+    /// (see [`pin`]) or explicitly via the tab's right-click menu.
+    pub fn ensure_preview_for(
+        &mut self,
+        doc: DocumentId,
+        drilled_class: Option<String>,
+    ) -> TabId {
+        if let Some((id, _)) = self.tabs.iter().find(|(_, s)| {
+            s.doc == doc && s.drilled_class.as_deref() == drilled_class.as_deref()
+        }) {
+            return *id;
+        }
+        if let Some((id, state)) = self.tabs.iter_mut().find(|(_, s)| !s.pinned) {
+            state.doc = doc;
+            state.drilled_class = drilled_class;
+            return *id;
+        }
+        let id = self.allocate_id();
+        self.tabs.insert(
+            id,
+            ModelTabState {
+                doc,
+                drilled_class,
+                view_mode: ModelViewMode::default(),
+                pinned: false,
             },
         );
         id
     }
 
     /// Always allocate a fresh tab for `(doc, drilled_class)` even
-    /// when one already exists. Used by future "Open in new view"
-    /// actions (split-view).
+    /// when one already exists. Used by the "Open in new view"
+    /// (split) action — pinned by default since the user
+    /// deliberately asked for a duplicate.
     pub fn open_new(
         &mut self,
         doc: DocumentId,
@@ -174,9 +226,29 @@ impl ModelTabs {
                 doc,
                 drilled_class,
                 view_mode: ModelViewMode::default(),
+                pinned: true,
             },
         );
         id
+    }
+
+    /// Mark `tab_id` as pinned (no-op if already pinned). Called
+    /// from edit hooks and the tab's right-click "Pin" action.
+    pub fn pin(&mut self, tab_id: TabId) {
+        if let Some(state) = self.tabs.get_mut(&tab_id) {
+            state.pinned = true;
+        }
+    }
+
+    /// Pin every tab currently viewing `doc`. Used by the
+    /// edit-side hook that promotes a preview tab to persistent
+    /// the moment the user makes any structural change.
+    pub fn pin_all_for_doc(&mut self, doc: DocumentId) {
+        for state in self.tabs.values_mut() {
+            if state.doc == doc {
+                state.pinned = true;
+            }
+        }
     }
 
     /// Back-compat shim: ensure a no-drilled-class tab for `doc`.
@@ -314,11 +386,23 @@ impl InstancePanel for ModelViewPanel {
 
     fn title(&self, world: &World, instance: u64) -> String {
         // Tab title mirrors VS Code's pattern:
-        //   `●` prefix   → unsaved changes
-        //   `🔒` prefix  → read-only (Example / library — edits won't save)
-        // Both can stack: `🔒 ● Battery` = read-only model the user tried to edit.
+        //   `●` prefix    → unsaved changes
+        //   `🔒` prefix   → read-only (Example / library — edits won't save)
+        //   *italic-ish*  → preview tab (unpinned). egui's tab strip
+        //                   draws the title plain, so we surround the
+        //                   text with U+2009 thin spaces and use the
+        //                   half-bracket conventions VS Code uses in
+        //                   keyboard-only listings: a leading `~`
+        //                   marks the preview tab. Cheap visual cue
+        //                   without needing a custom RichText pipeline
+        //                   at the dock layer.
         let (doc, drilled) = resolve_tab_target(world, instance);
         let (base, dirty, read_only) = resolve_tab_title(world, doc, drilled.as_deref());
+        let pinned = world
+            .get_resource::<ModelTabs>()
+            .and_then(|t| t.get(instance))
+            .map(|s| s.pinned)
+            .unwrap_or(true);
         let mut prefix = String::new();
         if read_only {
             prefix.push_str("🔒 ");
@@ -326,10 +410,17 @@ impl InstancePanel for ModelViewPanel {
         if dirty {
             prefix.push_str("● ");
         }
-        if prefix.is_empty() {
+        let body = if prefix.is_empty() {
             base
         } else {
             format!("{prefix}{base}")
+        };
+        if pinned {
+            body
+        } else {
+            // Curly-quote wrap reads as "preview-y" and survives any
+            // monospaced or non-italic font the dock uses.
+            format!("‹ {body} ›")
         }
     }
 
@@ -482,6 +573,67 @@ impl InstancePanel for ModelViewPanel {
             ModelViewMode::Docs => render_docs_view(ui, world),
         }
         *world.resource_mut::<TabRenderContext>() = prev_ctx;
+    }
+
+    /// Right-click on a model tab → VS Code-style menu:
+    ///
+    /// - **Pin** / **Unpin** — toggles the preview-tab state.
+    ///   Pinned tabs survive the next browser click.
+    /// - **Open in new view** — clones the tab (same `doc` +
+    ///   `drilled_class`) into a fresh, pinned tab. The user then
+    ///   drags it into a split or switches its view mode (Text /
+    ///   Diagram / Icon / Docs) to create the side-by-side layout
+    ///   they're after — the canonical Canvas-+-Text recipe.
+    fn tab_context_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        world: &mut World,
+        instance: u64,
+    ) {
+        let tab_id: TabId = instance;
+        let (doc, drilled, pinned) = match world
+            .resource::<ModelTabs>()
+            .get(tab_id)
+            .map(|s| (s.doc, s.drilled_class.clone(), s.pinned))
+        {
+            Some(t) => t,
+            None => return,
+        };
+
+        if ui
+            .button(if pinned { "📌 Unpin" } else { "📌 Pin tab" })
+            .on_hover_text(
+                "Pinned tabs survive the next browser click — \
+                 unpinned (preview) tabs get replaced.",
+            )
+            .clicked()
+        {
+            if let Some(state) = world.resource_mut::<ModelTabs>().get_mut(tab_id) {
+                state.pinned = !pinned;
+            }
+            ui.close();
+        }
+
+        ui.separator();
+
+        if ui
+            .button("🪟 Open in new view")
+            .on_hover_text(
+                "Open this same model in a second tab. Drag it to a \
+                 dock edge to make a split, then switch one to Text \
+                 to get a side-by-side Canvas + Text view.",
+            )
+            .clicked()
+        {
+            let new_id = world
+                .resource_mut::<ModelTabs>()
+                .open_new(doc, drilled.clone());
+            world.commands().trigger(lunco_workbench::OpenTab {
+                kind: MODEL_VIEW_KIND,
+                instance: new_id,
+            });
+            ui.close();
+        }
     }
 }
 

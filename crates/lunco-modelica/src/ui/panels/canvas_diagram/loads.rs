@@ -378,6 +378,10 @@ pub fn drill_into_class(world: &mut World, qualified: &str) {
         let tab_id = {
             let mut tabs = world
                 .resource_mut::<crate::ui::panels::model_view::ModelTabs>();
+            // Drill-in is a deliberate navigation gesture (canvas
+            // double-click), so the tab is pinned via ensure_for —
+            // not the preview slot. Same-class re-drill focuses;
+            // sibling drills still get their own tabs.
             let tab_id = tabs.ensure_for(doc_id, Some(qualified.to_string()));
             if let Some(tab) = tabs.get_mut(tab_id) {
                 tab.view_mode = crate::ui::panels::model_view::ModelViewMode::Canvas;

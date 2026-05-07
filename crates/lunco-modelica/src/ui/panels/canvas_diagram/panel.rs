@@ -56,6 +56,15 @@ impl Panel for CanvasDiagramPanel {
             world.insert_resource(CanvasDiagramState::default());
         }
 
+        // Snapshot the rendering tab's drill scope once so every
+        // CanvasDiagramState lookup below keys the per-tab entry,
+        // not the doc-level entry. Two splits of the same doc with
+        // different drill targets each get an independent scene /
+        // viewport / projection cursor.
+        let render_drilled: Option<String> =
+            render_target(world).and_then(|(_, drilled)| drilled);
+        let render_drilled_ref: Option<&str> = render_drilled.as_deref();
+
         // Decide whether to rebuild the scene. Per-doc state means
         // "bound_doc" is implicit in the map key — a fresh entry has
         // `last_seen_gen == 0` so the first render after tab open
@@ -94,8 +103,8 @@ impl Panel for CanvasDiagramPanel {
             //      first-render is the right fix.
             //   2. **Doc mutated** — generation bumped past
             //      `last_seen_gen`. Standard edit-reproject path.
-            let docstate = state.get(Some(doc_id));
-            let first_render = !state.has_entry(doc_id);
+            let docstate = state.get_for(Some(doc_id), render_drilled_ref);
+            let first_render = !state.has_entry_for(doc_id, render_drilled_ref);
             // `gen_advanced` is the source-of-truth-changed signal,
             // but a canvas-originated edit (drag, menu Add) has
             // already mutated the scene and bumped
@@ -164,7 +173,7 @@ impl Panel for CanvasDiagramPanel {
                         drop(state);
                         let mut state =
                             world.resource_mut::<CanvasDiagramState>();
-                        let docstate = state.get_mut(Some(doc_id));
+                        let docstate = state.get_mut_for(Some(doc_id), render_drilled_ref);
                         docstate.last_seen_gen = gen;
                         bevy::log::debug!(
                             "[CanvasDiagram] skipping reproject for gen={gen} (source-hash unchanged)"
@@ -266,7 +275,7 @@ impl Panel for CanvasDiagramPanel {
                 .cloned()
                 .unwrap_or_default();
             let mut state = world.resource_mut::<CanvasDiagramState>();
-            let docstate = state.get_mut(Some(doc_id));
+            let docstate = state.get_mut_for(Some(doc_id), render_drilled_ref);
             // If the user just changed drill-in target (clicked a
             // different class in the Twin Browser), the new scene's
             // bounds usually have nothing to do with the old one —
@@ -474,7 +483,7 @@ impl Panel for CanvasDiagramPanel {
                     .map(|h| h.document().generation())
             });
             let mut state = world.resource_mut::<CanvasDiagramState>();
-            let docstate = state.get_mut(active_doc);
+            let docstate = state.get_mut_for(active_doc, render_drilled_ref);
             let is_initial_projection = docstate.last_seen_gen == 0;
 
             // Deadline guard. If the task has been running past its
@@ -834,6 +843,13 @@ pub(super) static LAST_APPLY_AT: std::sync::Mutex<Option<web_time::Instant>> =
 
 impl CanvasDiagramPanel {
     fn render_canvas(&self, ui: &mut egui::Ui, world: &mut World) {
+        // Same per-render-call drill scope snapshot as the parent
+        // `render` method — needed because `render_canvas` itself
+        // does many `state.get_*` lookups and must hit *this* tab's
+        // entry, not the doc's no-drill entry.
+        let render_drilled: Option<String> =
+            render_target(world).and_then(|(_, drilled)| drilled);
+        let render_drilled_ref: Option<&str> = render_drilled.as_deref();
         // Per-phase timing harness — gated on `RENDER_CANVAS_TRACE`
         // env var so the SLOW-frame log can pinpoint the heavy phase
         // without flooding normal runs. Set the var to anything
@@ -962,7 +978,7 @@ impl CanvasDiagramPanel {
         if let (Some(d), Some(sim)) = (doc_id, canvas_sim) {
             let new_bits = sim.to_bits();
             let mut state = world.resource_mut::<CanvasDiagramState>();
-            let docstate = state.get_mut(Some(d));
+            let docstate = state.get_mut_for(Some(d), render_drilled_ref);
             let plot_ids: Vec<lunco_canvas::NodeId> = docstate
                 .canvas
                 .scene
@@ -1080,7 +1096,7 @@ impl CanvasDiagramPanel {
 
         let (response, events) = {
             let mut state = world.resource_mut::<CanvasDiagramState>();
-            let docstate = state.get_mut(active_doc);
+            let docstate = state.get_mut_for(active_doc, render_drilled_ref);
             docstate.canvas.read_only = tab_read_only;
             docstate.canvas.snap = snap_settings;
             docstate.canvas.ui(ui)
@@ -1211,13 +1227,13 @@ impl CanvasDiagramPanel {
                         } else {
                             let instance_name = {
                                 let state = world.resource::<CanvasDiagramState>();
-                                ops::pick_add_instance_name(&def, &state.get(Some(doc_id)).canvas.scene)
+                                ops::pick_add_instance_name(&def, &state.get_for(Some(doc_id), render_drilled_ref).canvas.scene)
                             };
                             // 1. Optimistic synth — node appears immediately.
                             {
                                 let mut state =
                                     world.resource_mut::<CanvasDiagramState>();
-                                let docstate = state.get_mut(Some(doc_id));
+                                let docstate = state.get_mut_for(Some(doc_id), render_drilled_ref);
                                 ops::synthesize_msl_node(
                                     &mut docstate.canvas.scene,
                                     &def,
@@ -1283,7 +1299,7 @@ impl CanvasDiagramPanel {
         // the flag so the math runs against the real screen size.
         {
             let mut state = world.resource_mut::<CanvasDiagramState>();
-            let docstate = state.get_mut(active_doc);
+            let docstate = state.get_mut_for(active_doc, render_drilled_ref);
             if docstate.pending_fit {
                 docstate.pending_fit = false;
                 if let Some(bounds) = docstate.canvas.scene.bounds() {
@@ -1308,7 +1324,7 @@ impl CanvasDiagramPanel {
             let state = world.resource::<CanvasDiagramState>();
             let loads = world.resource::<DrillInLoads>();
             let dup_loads = world.resource::<DuplicateLoads>();
-            let docstate = state.get(active_doc);
+            let docstate = state.get_for(active_doc, render_drilled_ref);
             // Unify drill-in + duplicate into a single loading
             // overlay — both are "document is being built off-thread,
             // canvas will populate when the bg task lands."
@@ -1486,7 +1502,7 @@ impl CanvasDiagramPanel {
                     // reflects the right-click (before any menu-entry
                     // click overwrites it).
                     let state = world.resource::<CanvasDiagramState>();
-                    let docstate = state.get(active_doc);
+                    let docstate = state.get_for(active_doc, render_drilled_ref);
                     let world_pos = docstate.canvas.viewport.screen_to_world(
                         lunco_canvas::Pos::new(p.x, p.y),
                         screen_rect,

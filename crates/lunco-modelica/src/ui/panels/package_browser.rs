@@ -1215,7 +1215,9 @@ impl Panel for PackageBrowserPanel {
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| id.clone());
-            open_model(world, id, name, ModelLibrary::User);
+            // Files-panel "Open this file" → pinned (deliberate
+            // file-system pick, not a casual browser click).
+            open_model(world, id, name, ModelLibrary::User, true);
         }
 
         // Commit a rename — std::fs::rename, then trigger a rescan so
@@ -1274,9 +1276,9 @@ impl Panel for PackageBrowserPanel {
 
         if let Some(action) = to_open {
             match action {
-                PackageAction::Open(id, name, lib) => {
+                PackageAction::Open(id, name, lib, pinned) => {
                     queue_drill_in_if_inline(world, &id, &lib);
-                    open_model(world, id, name, lib);
+                    open_model(world, id, name, lib, pinned);
                 }
                 PackageAction::Instantiate { msl_path, display_name } => {
                     instantiate_on_active_canvas(world, &msl_path, &display_name);
@@ -1288,21 +1290,30 @@ impl Panel for PackageBrowserPanel {
         // Re-open an already-allocated in-memory model. We pass the id;
         // `open_model`'s mem:// branch now consults the registry to
         // restore the user's current source rather than regenerating
-        // from a template.
+        // from a template. Reopen via section header → pinned (the
+        // user picked a specific entry, not a casual browse).
         if let Some(id) = reopen_in_memory {
             // Name is the part after "mem://".
             let name = id.strip_prefix("mem://").unwrap_or(&id).to_string();
-            open_model(world, id, name, ModelLibrary::InMemory);
+            open_model(world, id, name, ModelLibrary::InMemory, true);
         }
     }
 }
 
 enum PackageAction {
-    Open(String, String, ModelLibrary),
-    /// Double-click on a class row — instantiate it on the currently
-    /// active canvas tab. Routes through the same `AddModelicaComponent`
-    /// Reflect event the palette uses, so origin-level read-only
-    /// rejection applies uniformly.
+    /// Open the class as a tab. `pinned` follows VS Code's preview
+    /// semantics: single-click in the browser opens unpinned (the
+    /// "preview" slot — replaces the previous preview tab); double-
+    /// click opens pinned (a permanent tab that won't be replaced
+    /// by the next browser click).
+    Open(String, String, ModelLibrary, bool),
+    /// Instantiate a class on the currently active canvas tab.
+    /// Routes through the same `AddModelicaComponent` Reflect event
+    /// the palette uses, so origin-level read-only rejection applies
+    /// uniformly. Currently unreachable from the tree (drag-and-drop
+    /// is the canonical instantiate gesture); kept for use by the
+    /// right-click context menu and for future palette wiring.
+    #[allow(dead_code)]
     Instantiate { msl_path: String, display_name: String },
     /// User started dragging a class row — stash a
     /// [`ComponentDragPayload`] (same resource the palette uses) so
@@ -1538,42 +1549,24 @@ fn render_node(
                     msl_path: msl_path_for_id(id, library),
                 });
             } else if resp.double_clicked() {
-                // `id` shape decides Open vs Instantiate:
-                //   * `bundled://X.mo`            → top-level file
-                //                                    row → Open as a
-                //                                    new tab.
-                //   * `bundled://X.mo#Class.Sub`  → nested-class row
-                //                                    → instantiate
-                //                                    into the active
-                //                                    doc's canvas
-                //                                    (palette
-                //                                    parity).
-                //
-                // Previous behaviour always emitted `Instantiate`,
-                // which silently no-op'd whenever the active-doc
-                // tracker was None — every other example open after
-                // a tab-close logged `[PackageBrowser] double-click
-                // on … ignored — no active document` and dropped the
-                // user's intent. Closing every tab and reopening
-                // worked because that path re-bound active_doc.
-                let is_nested = id.contains('#');
-                if is_nested {
-                    result = Some(PackageAction::Instantiate {
-                        msl_path: msl_path_for_id(id, library),
-                        display_name: name.clone(),
-                    });
-                } else {
-                    result = Some(PackageAction::Open(
-                        id.clone(),
-                        name.clone(),
-                        library.clone(),
-                    ));
-                }
-            } else if resp.clicked() {
+                // VS Code semantics: double-click in browser opens
+                // pinned (permanent tab). Instantiation is the
+                // drag-and-drop gesture.
                 result = Some(PackageAction::Open(
                     id.clone(),
                     name.clone(),
                     library.clone(),
+                    true,
+                ));
+            } else if resp.clicked() {
+                // Single-click opens in the *preview* slot —
+                // replaces the previous unpinned tab so casual
+                // click-around doesn't pile up dozens of tabs.
+                result = Some(PackageAction::Open(
+                    id.clone(),
+                    name.clone(),
+                    library.clone(),
+                    false,
                 ));
             }
 
@@ -1692,6 +1685,12 @@ fn commit_current_model_edits(world: &mut World) {
         world
             .resource_mut::<ModelicaDocumentRegistry>()
             .checkpoint_source(doc_id, buffer_text);
+        // VS Code semantics: a text edit promotes the tab from
+        // preview to pinned so the next browser click doesn't
+        // replace it.
+        world
+            .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
+            .pin_all_for_doc(doc_id);
     }
 }
 
@@ -2327,7 +2326,17 @@ fn resolve_msl_path_to_file(rel_path: &str) -> Option<std::path::PathBuf> {
     }
 }
 
-pub(crate) fn open_model(world: &mut World, id: String, name: String, library: ModelLibrary) {
+/// Open or focus a tab for `id`. `pinned` follows VS Code preview
+/// semantics: `false` opens in (or replaces) the unpinned preview
+/// slot; `true` opens a permanent tab that subsequent browser
+/// clicks won't replace.
+pub(crate) fn open_model(
+    world: &mut World,
+    id: String,
+    name: String,
+    library: ModelLibrary,
+    pinned: bool,
+) {
     // Before navigating away, flush any in-progress work on the current
     // model into its Document. Matches the text editor's focus-loss
     // commit so the user's changes survive a round-trip.
@@ -2489,6 +2498,17 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
     let already_open: Option<lunco_doc::DocumentId> = world
         .resource::<ModelicaDocumentRegistry>()
         .find_by_path(&path_buf);
+    // Closure picks `ensure_for` (pinned, persistent) vs
+    // `ensure_preview_for` (replaces the unpinned preview slot).
+    let acquire_tab = |world: &mut World, doc: lunco_doc::DocumentId| {
+        let mut tabs = world
+            .resource_mut::<crate::ui::panels::model_view::ModelTabs>();
+        if pinned {
+            tabs.ensure_for(doc, target_class.clone())
+        } else {
+            tabs.ensure_preview_for(doc, target_class.clone())
+        }
+    };
     if let Some(doc) = already_open {
         // Sibling classes from the same .mo file get distinct tabs.
         // Seed `DrilledInClassNames[doc]` for the projector before
@@ -2501,9 +2521,7 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
                 .resource_mut::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
                 .set(doc, q.to_string());
         }
-        let tab_id = world
-            .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
-            .ensure_for(doc, target_class.clone());
+        let tab_id = acquire_tab(world, doc);
         world.commands().trigger(lunco_workbench::OpenTab {
             kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
             instance: tab_id,
@@ -2520,9 +2538,7 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
                 .resource_mut::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
                 .set(doc, q.to_string());
         }
-        let tab_id = world
-            .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
-            .ensure_for(doc, target_class.clone());
+        let tab_id = acquire_tab(world, doc);
         world.commands().trigger(lunco_workbench::OpenTab {
             kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
             instance: tab_id,
@@ -2544,9 +2560,7 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
     // even though the parse is still running off-thread. The model
     // view paints a "Loading…" overlay while the registry has no
     // host for the reserved id yet.
-    let tab_id = world
-        .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
-        .ensure_for(reserved_doc_id, target_class.clone());
+    let tab_id = acquire_tab(world, reserved_doc_id);
     world.commands().trigger(lunco_workbench::OpenTab {
         kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
         instance: tab_id,
@@ -2866,9 +2880,9 @@ pub(crate) fn render_root_subtree(world: &mut World, ui: &mut egui::Ui, root_id:
     }
     if let Some(a) = action {
         match a {
-            PackageAction::Open(id, name, lib) => {
+            PackageAction::Open(id, name, lib, pinned) => {
                 queue_drill_in_if_inline(world, &id, &lib);
-                open_model(world, id, name, lib);
+                open_model(world, id, name, lib, pinned);
             }
             PackageAction::Instantiate {
                 msl_path,
