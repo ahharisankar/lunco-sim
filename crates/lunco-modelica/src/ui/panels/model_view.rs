@@ -476,7 +476,28 @@ fn resolve_tab_title(
         // own `drilled_class` short name when present.
         let base = drilled_class
             .and_then(|qualified| qualified.rsplit('.').next().map(str::to_string))
-            .unwrap_or_else(|| document.origin().display_name());
+            .unwrap_or_else(|| {
+                // MSL packages live in `package.mo` files — the raw
+                // basename "package" is meaningless to the user (every
+                // package has it), so fall back to the parent folder
+                // name (`Continuous`, `Examples`, …) which is the
+                // package's actual short name.
+                let raw = document.origin().display_name();
+                if raw == "package" {
+                    if let lunco_doc::DocumentOrigin::File { path, .. } =
+                        document.origin()
+                    {
+                        if let Some(parent) = path
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .and_then(|s| s.to_str())
+                        {
+                            return parent.to_string();
+                        }
+                    }
+                }
+                raw
+            });
         return (base, document.is_dirty(), document.is_read_only());
     }
 
