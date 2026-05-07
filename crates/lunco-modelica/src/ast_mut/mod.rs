@@ -40,6 +40,8 @@ use std::sync::Arc;
 use rumoca_session::parsing::ast::{ClassDef, Expression, StoredDefinition, Token, TerminalType};
 use rumoca_phase_parse::parse_to_ast;
 
+use crate::pretty;
+
 /// Errors from structural AST mutation. Stays small on purpose —
 /// callers (e.g. `op_to_patch`) translate these into `DocumentError`.
 #[derive(Debug, Clone, PartialEq)]
@@ -167,6 +169,89 @@ pub fn set_parameter(
         }
     }
     Ok(())
+}
+
+/// Set or replace the `Placement(...)` annotation on a component.
+///
+/// Mirrors `ModelicaOp::SetPlacement`: locates `component` inside
+/// `class`, finds any existing `Placement(...)` entry in
+/// `Component.annotation` and replaces it; appends a fresh one if
+/// absent. Other annotation entries (`Dialog`, `__LunCo`, …) are
+/// preserved.
+///
+/// **How the new `Expression` is built:** rumoca's parser only consumes
+/// whole files, so we wrap the rendered `Placement(...)` text in a
+/// stub class and extract `comp.annotation[0]`. Same trick as
+/// [`set_parameter`]'s `parse_value_fragment`. The placement payload
+/// always parses cleanly because `pretty::placement_inner` produces
+/// canonical text from typed numeric fields — no user-supplied
+/// strings cross this boundary.
+pub fn set_placement(
+    class: &mut ClassDef,
+    component: &str,
+    placement: &pretty::Placement,
+) -> Result<(), AstMutError> {
+    let class_name = class.name.text.to_string();
+    let comp = class
+        .components
+        .get_mut(component)
+        .ok_or_else(|| AstMutError::ComponentNotFound {
+            class: class_name,
+            component: component.to_string(),
+        })?;
+    let new_placement_expr = parse_placement_expression(placement)?;
+    if let Some(slot) = comp
+        .annotation
+        .iter_mut()
+        .find(|expr| is_annotation_entry_named(expr, "Placement"))
+    {
+        *slot = new_placement_expr;
+    } else {
+        comp.annotation.push(new_placement_expr);
+    }
+    Ok(())
+}
+
+/// Parse a `Placement(...)` fragment into an [`Expression`] using the
+/// stub-class trick (see [`parse_value_fragment`] for the rationale).
+/// Returns the single annotation expression rumoca lifts onto the
+/// component's `annotation` vector.
+fn parse_placement_expression(placement: &pretty::Placement) -> Result<Expression, AstMutError> {
+    let placement_text = pretty::placement_inner(placement);
+    let stub = format!(
+        "model __LunCoFragment\n  Real __v annotation({placement_text});\nend __LunCoFragment;\n"
+    );
+    let parsed = parse_to_ast(&stub, "__lunco_fragment.mo").map_err(|_| {
+        AstMutError::ValueParseFailed { value: placement_text.clone() }
+    })?;
+    let class = parsed.classes.get("__LunCoFragment").ok_or_else(|| {
+        AstMutError::ValueParseFailed { value: placement_text.clone() }
+    })?;
+    let comp = class.components.get("__v").ok_or_else(|| {
+        AstMutError::ValueParseFailed { value: placement_text.clone() }
+    })?;
+    comp.annotation
+        .first()
+        .cloned()
+        .ok_or(AstMutError::ValueParseFailed { value: placement_text })
+}
+
+/// True when `expr` is `Name(...)` at the top level — used to find a
+/// specific annotation entry (`Placement`, `Dialog`, `Icon`, …)
+/// without descending into argument expressions.
+///
+/// Rumoca parses annotation entries as `Expression::ClassModification`
+/// (the `Foo(x = 1, y = 2)` shape used for declaration / extends
+/// modifications), *not* as `FunctionCall`. The two are syntactically
+/// identical but semantically distinct (see the `Expression` enum
+/// docstring on those variants). Annotation predicates must match
+/// `ClassModification`.
+fn is_annotation_entry_named(expr: &Expression, name: &str) -> bool {
+    if let Expression::ClassModification { target, .. } = expr {
+        target.parts.len() == 1 && &*target.parts[0].ident.text == name
+    } else {
+        false
+    }
 }
 
 /// Parse a Modelica value fragment (the right-hand side of a binding
