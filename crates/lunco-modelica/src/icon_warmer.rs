@@ -25,6 +25,7 @@
 //! no peeking at the source bytes.
 
 use bevy::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
 use bevy::tasks::AsyncComputeTaskPool;
 use lunco_doc::DocumentId;
 use lunco_doc_bevy::DocumentOpened;
@@ -62,12 +63,27 @@ fn on_document_opened_warm(
     // dev. The engine catches up async via `drive_engine_sync`
     // anyway; an icon paint that misses the warm cache falls
     // through to `engine.icon_for` which has its own MSL fallback.
-    let types = collect_referenced_types(&host.document().syntax_arc().ast);
-
-    if types.is_empty() {
+    // **Wasm: warmer disabled.** `AsyncComputeTaskPool` is the main
+    // thread on wasm32-unknown-unknown, so the warm task's
+    // `engine.icon_for(ty)` calls — each up to ~1.3 s on a cold MSL
+    // qualified-name lookup — block the UI exactly as if they ran
+    // synchronously. Field telemetry showed `[IconWarmer] doc=N
+    // warmed 0/1 types in 1314ms` immediately after a drill-in,
+    // freezing the first-paint. Native still benefits because
+    // AsyncCompute there has its own threads.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = doc_id;
         return;
     }
-    spawn_warm_task(doc_id, types);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let types = collect_referenced_types(&host.document().syntax_arc().ast);
+        if types.is_empty() {
+            return;
+        }
+        spawn_warm_task(doc_id, types);
+    }
 }
 
 /// Walk `ast` collecting every unique fully-qualified or partially-
@@ -119,6 +135,7 @@ fn interesting_type(name: &str) -> bool {
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn spawn_warm_task(doc_id: DocumentId, types: Vec<String>) {
     let n = types.len();
     let started = web_time::Instant::now();
@@ -144,14 +161,22 @@ fn spawn_warm_task(doc_id: DocumentId, types: Vec<String>) {
             // drills into them. Future: pre-load MSL files in tiny
             // batches between frames to trickle them in without
             // mutex contention.
+            // Per-type lock + yield. On wasm `AsyncComputeTaskPool`
+            // **is** the main thread, so a single 1.3 s loop holding
+            // the engine mutex stalls every frame inside it. Drop
+            // the lock between types and yield back to the runtime
+            // so input + render systems get to run; resume on the
+            // next tick. Native gets a tiny per-iteration overhead
+            // but the warmer is best-effort anyway.
             let mut warmed = 0usize;
-            if let Some(handle) = crate::engine_resource::global_engine_handle() {
-                let mut engine = handle.lock();
-                for ty in &types {
+            for ty in &types {
+                if let Some(handle) = crate::engine_resource::global_engine_handle() {
+                    let mut engine = handle.lock();
                     if engine.icon_for(ty).is_some() {
                         warmed += 1;
                     }
                 }
+                futures_lite::future::yield_now().await;
             }
             bevy::log::info!(
                 "[IconWarmer] doc={} warmed {}/{} types in {:.0}ms (cache-only)",

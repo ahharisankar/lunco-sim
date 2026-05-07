@@ -443,7 +443,7 @@ impl ApiQueryProvider for CompileStatusProvider {
         let registry = world.resource::<ModelicaDocumentRegistry>();
         let (candidates, has_ast) = match registry.host(doc_id) {
             Some(host) => {
-                let has_ast = host.document().ast().result.is_ok();
+                let has_ast = !host.document().ast().has_errors();
                 // Non-package class qualified names from the per-doc
                 // Index — sees optimistic patches and avoids walking
                 // the AST. Same pattern as the candidates query above.

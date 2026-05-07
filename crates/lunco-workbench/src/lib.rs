@@ -856,6 +856,29 @@ impl<'a> TabViewer for PanelTabViewer<'a> {
         }
     }
 
+    fn context_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        tab: &mut Self::Tab,
+        _surface: egui_dock::SurfaceIndex,
+        _node: egui_dock::NodeIndex,
+    ) {
+        // Domain hook: dispatch to the registered InstancePanel so it
+        // can draw its own menu items (Pin, Open in new view, …).
+        // Singletons and unknown-kind instance tabs get no extras —
+        // egui_dock still surfaces its built-in "Close" item below.
+        if let TabId::Instance { kind, instance } = *tab {
+            // Take the panel out so it can mutably borrow `self.world`
+            // freely while drawing its menu, then put it back. Mirrors
+            // how `tab_ui` swaps panels in/out for render to dodge the
+            // self-borrow conflict.
+            if let Some(mut panel) = self.instance_panels.remove(&kind) {
+                panel.tab_context_menu(ui, self.world, instance);
+                self.instance_panels.insert(kind, panel);
+            }
+        }
+    }
+
     fn tab_style_override(
         &self,
         tab: &Self::Tab,

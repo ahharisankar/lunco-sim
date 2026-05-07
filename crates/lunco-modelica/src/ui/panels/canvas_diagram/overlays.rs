@@ -32,7 +32,13 @@ pub(super) fn render_drill_in_loading_overlay(
         canvas_rect.center(),
         egui::vec2(card_w, card_h),
     );
-    let painter = ui.painter();
+    // Clip the overlay to the canvas rect so a small canvas pane
+    // can't paint the loading card over its neighbour panes.
+    // Use the ui's tightened clip rather than the canvas's full
+    // allocated rect — the rect can extend past the visible pane
+    // and clipping to it would still leak into neighbour panes.
+    let painter = ui.painter().clone().with_clip_rect(ui.clip_rect().intersect(canvas_rect));
+    let painter = &painter;
     let shadow = {
         let b = theme.colors.base;
         egui::Color32::from_rgba_unmultiplied(b.r(), b.g(), b.b(), 100)
@@ -110,7 +116,11 @@ pub(super) fn render_projecting_overlay(ui: &mut egui::Ui, canvas_rect: egui::Re
         canvas_rect.center(),
         egui::vec2(card_w, card_h),
     );
-    let painter = ui.painter();
+    // Use the ui's tightened clip rather than the canvas's full
+    // allocated rect — the rect can extend past the visible pane
+    // and clipping to it would still leak into neighbour panes.
+    let painter = ui.painter().clone().with_clip_rect(ui.clip_rect().intersect(canvas_rect));
+    let painter = &painter;
     let shadow = {
         let b = theme.colors.base;
         egui::Color32::from_rgba_unmultiplied(b.r(), b.g(), b.b(), 90)

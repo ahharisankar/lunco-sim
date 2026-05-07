@@ -277,6 +277,56 @@ pub fn run() -> Result<(), JsValue> {
                     ),
                 );
             }
+            WireMessage::ParseDocument { doc_id, gen, uri, source } => {
+                let started = web_time::Instant::now();
+                // Lenient parser: always returns a usable
+                // `StoredDefinition` plus a list of recovery errors.
+                // Replaces the previous `parse_source_to_ast` (strict)
+                // call so the receiver gets both the AST and the
+                // diagnostics in one round-trip — matching the single
+                // `SyntaxCache` shape the doc now uses.
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let recovery = rumoca_phase_parse::parse_to_syntax(&source, &uri);
+                    let errors: Vec<String> = recovery
+                        .parse_errors()
+                        .iter()
+                        .map(|e| format!("{e:?}"))
+                        .collect();
+                    let ast = recovery.best_effort().clone();
+                    (ast, errors)
+                }));
+                let (ast, errors) = match outcome {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        let msg = e
+                            .downcast_ref::<&'static str>()
+                            .copied()
+                            .or_else(|| e.downcast_ref::<String>().map(|s| s.as_str()))
+                            .unwrap_or("(unknown panic payload)");
+                        post_log(
+                            &scope_for_cb,
+                            format!("PANIC during ParseDocument doc={doc_id:?}: {msg}"),
+                        );
+                        (
+                            rumoca_session::parsing::ast::StoredDefinition::default(),
+                            vec![format!("worker panic: {msg}")],
+                        )
+                    }
+                };
+                let ms = started.elapsed().as_secs_f64() * 1000.0;
+                post_log(
+                    &scope_for_cb,
+                    format!(
+                        "parsed doc={doc_id:?} gen={gen} src={}B in {ms:.0}ms (errors={})",
+                        source.len(),
+                        errors.len(),
+                    ),
+                );
+                post_wire(
+                    &scope_for_cb,
+                    &WireResult::ParseDocumentDone { doc_id, gen, ast, errors },
+                );
+            }
         }
     }) as Box<dyn FnMut(MessageEvent)>);
 

@@ -100,6 +100,45 @@ impl ModelicaEngineHandle {
     /// crate Bevy-agnostic at the engine layer.
     ///
     /// No-op if a parse for `doc_id` is already in flight (dedupe).
+    /// Mark a doc as pending-parse and return its URI without spawning
+    /// any parser. Used by the wasm path that ships parsing to the
+    /// Web Worker — see `worker_transport::dispatch_parse_to_worker`
+    /// and `drain_worker_parse_results` (engine_resource).
+    ///
+    /// Returns `None` when another parse is already in flight for the
+    /// same doc (dedup, same as `upsert_document_async`).
+    pub fn mark_pending_for_worker(
+        &self,
+        doc_id: DocumentId,
+    ) -> Option<String> {
+        let mut engine = self.lock();
+        if !engine.mark_pending(doc_id) {
+            return None;
+        }
+        Some(engine.uri_for(doc_id))
+    }
+
+    /// Install a worker-parsed AST and clear the pending slot in one
+    /// atomic step. Counterpart to `mark_pending_for_worker`.
+    pub fn install_worker_parsed_ast(
+        &self,
+        doc_id: DocumentId,
+        gen: u64,
+        ast: rumoca_session::parsing::ast::StoredDefinition,
+    ) {
+        let mut engine = self.lock();
+        engine.install_parsed_ast(doc_id, ast);
+        engine.finish_parse(doc_id, gen);
+    }
+
+    /// Drop the pending slot without installing anything — used when
+    /// the worker reports a parse failure so the dedup gate clears
+    /// and the next gen can retry.
+    pub fn finish_pending_failed(&self, doc_id: DocumentId, gen: u64) {
+        let mut engine = self.lock();
+        engine.finish_parse(doc_id, gen);
+    }
+
     pub fn upsert_document_async<F>(
         &self,
         doc_id: DocumentId,
@@ -177,7 +216,15 @@ pub fn drive_engine_sync(
     mut registry: ResMut<crate::ui::state::ModelicaDocumentRegistry>,
     mut cursor: ResMut<EngineSyncCursor>,
     activity: Res<crate::ui::input_activity::InputActivity>,
+    workspace: Option<Res<lunco_workbench::WorkspaceResource>>,
 ) {
+    // Active tab's doc id (if any). Used below to prioritise its
+    // reparse over any background tabs queued behind it. `Option`
+    // because the workspace resource may not be installed yet during
+    // very-early boot ticks.
+    let active_doc: Option<DocumentId> = workspace
+        .as_deref()
+        .and_then(|ws| ws.active_document);
     // ── 1. Drain async-parse completions ──────────────────────────────
     // Pull every completion the workers have queued since the last
     // tick. For each, fetch the strict AST from the session and
@@ -208,13 +255,9 @@ pub fn drive_engine_sync(
                 let syntax = crate::document::SyntaxCache {
                     generation: parse_gen,
                     ast: arc_ast,
-                    has_errors: false,
+                    errors: Vec::new(),
                 };
-                let ast_cache = crate::document::AstCache {
-                    generation: parse_gen,
-                    result: Ok(()),
-                };
-                host.document_mut().install_parse_results(ast_cache, syntax);
+                host.document_mut().install_parse_results(syntax);
                 bevy::log::info!(
                     "[EngineSync] async parse complete doc={} gen={} → backfilled doc.syntax",
                     doc_id.raw(),
@@ -223,21 +266,18 @@ pub fn drive_engine_sync(
             }
             (None, _) => {
                 // Strict parse failed (recovered into session via
-                // lenient fallback). Mark doc's AstCache Err so
-                // diagnostics panel knows.
+                // lenient fallback). Surface the failure into the
+                // doc's parse cache so the diagnostics panel can
+                // show a row.
                 if let Some(host) = registry.host_mut(doc_id) {
                     let syntax = crate::document::SyntaxCache {
                         generation: parse_gen,
                         ast: std::sync::Arc::new(
                             rumoca_session::parsing::ast::StoredDefinition::default(),
                         ),
-                        has_errors: true,
+                        errors: vec!["strict parse failed (lenient recovered)".into()],
                     };
-                    let ast_cache = crate::document::AstCache {
-                        generation: parse_gen,
-                        result: Err("strict parse failed (lenient recovered)".into()),
-                    };
-                    host.document_mut().install_parse_results(ast_cache, syntax);
+                    host.document_mut().install_parse_results(syntax);
                 }
                 bevy::log::warn!(
                     "[EngineSync] async parse strict-failed doc={} gen={}",
@@ -342,9 +382,51 @@ pub fn drive_engine_sync(
     //     Lets a typing burst settle before paying for a parse.
     let pool = bevy::tasks::AsyncComputeTaskPool::get();
     let now = web_time::Instant::now();
+    // Active-doc-first ordering. The active tab's reparse takes
+    // priority over background tabs because the user is staring at
+    // its canvas; any other tab can wait. On wasm
+    // `AsyncComputeTaskPool` runs cooperatively on the main thread,
+    // so the order in which we *spawn* dictates the order in which
+    // they run.
+    if let Some(active) = active_doc {
+        async_only.sort_by_key(|(doc_id, _, _)| {
+            if *doc_id == active { 0 } else { 1 }
+        });
+    }
+    // Wasm throttle: at most one parse in flight at a time. Rumoca
+    // parses on wasm32-unknown-unknown each take ~5 s of main-thread
+    // time; queueing five up at once means the active tab waits
+    // through four background reparses before getting a slot. The
+    // budget is global (counted across all docs) so a background tab
+    // can't sneak in either.
+    //
+    // Native: pool has real worker threads; concurrency is fine and
+    // uncapped.
+    #[cfg(target_arch = "wasm32")]
+    let max_in_flight: usize = 1;
+    #[cfg(not(target_arch = "wasm32"))]
+    let max_in_flight: usize = usize::MAX;
+
     for (doc_id, gen, source) in async_only {
-        if handle.lock().is_doc_pending(doc_id) {
-            continue;
+        let pending_count = {
+            let eng = handle.lock();
+            if eng.is_doc_pending(doc_id) {
+                continue;
+            }
+            eng.pending_count()
+        };
+        if pending_count >= max_in_flight {
+            // Bail out of the *whole loop* — subsequent iterations
+            // would only enqueue more work onto an already-saturated
+            // wasm pool. The next tick will retry the docs we
+            // skipped in the same priority order (active first).
+            bevy::log::debug!(
+                "[EngineSync] parse queue full ({pending_count} in flight) — \
+                 deferring doc={} gen={} until next tick",
+                doc_id.raw(),
+                gen,
+            );
+            break;
         }
         // Look up the doc to decide first-parse-vs-edit-reparse.
         let (was_parsed, last_edit) = match registry.host(doc_id) {
@@ -368,18 +450,171 @@ pub fn drive_engine_sync(
             }
         }
         let src_len = source.len();
-        handle.upsert_document_async(doc_id, gen, source, |task| {
-            pool.spawn(async move { task() }).detach();
-        });
+        // Wasm path: ship parsing to the off-thread Web Worker. Rumoca
+        // parse on wasm32-unknown-unknown is ~5 s for a real model
+        // and runs synchronously on the main thread (Bevy's
+        // `AsyncComputeTaskPool` is cooperative there). The worker
+        // bundle has its own wasm instance; parsing there leaves the
+        // UI thread free to render. The result lands via the parse-
+        // done channel that `drain_worker_parse_results` polls each
+        // tick.
+        //
+        // Falls back to the local pool spawn if the worker isn't
+        // installed yet (very early boot before
+        // `worker_transport::install_worker` lands) or returned an
+        // error.
+        #[cfg(target_arch = "wasm32")]
+        let dispatched_to_worker = match handle.mark_pending_for_worker(doc_id) {
+            Some(uri) => {
+                // MSL-bundle short-circuit: every file under
+                // `Modelica/` (and the extra-library trees) was
+                // pre-parsed at build time and bincode-shipped in
+                // `parsed-<sha>.bin.zst`; on wasm those ASTs live in
+                // `crate::msl_remote::global_parsed_msl()` keyed by
+                // their original MSL-relative path
+                // (`Modelica/Blocks/Sources.mo`, etc.). If the doc
+                // we're about to parse came from one of those files,
+                // grab the cached `StoredDefinition` and skip the
+                // worker round-trip — re-parsing a 150 KB MSL file
+                // takes minutes on wasm and produces a byte-identical
+                // result.
+                //
+                // Identification: the doc's `DocumentOrigin::File`
+                // path is the same key the MSL bundle uses.
+                let cached_ast: Option<rumoca_session::parsing::ast::StoredDefinition> = {
+                    let host = registry.host(doc_id);
+                    let origin_path = host
+                        .map(|h| h.document().origin().clone())
+                        .and_then(|o| match o {
+                            lunco_doc::DocumentOrigin::File { path, .. } => Some(path),
+                            _ => None,
+                        });
+                    origin_path.and_then(|path| {
+                        let key = path.to_string_lossy().to_string();
+                        crate::msl_remote::global_parsed_msl().and_then(|bundle| {
+                            bundle
+                                .iter()
+                                .find(|(k, _)| k == &key)
+                                .map(|(_, ast)| ast.clone())
+                        })
+                    })
+                };
+                if let Some(ast) = cached_ast {
+                    let t0 = web_time::Instant::now();
+                    handle.install_worker_parsed_ast(doc_id, gen, ast.clone());
+                    let t_engine = t0.elapsed().as_secs_f64() * 1000.0;
+                    let t1 = web_time::Instant::now();
+                    if let Some(host) = registry.host_mut(doc_id) {
+                        let syntax = crate::document::SyntaxCache {
+                            generation: gen,
+                            ast: std::sync::Arc::new(ast),
+                            errors: Vec::new(),
+                        };
+                        host.document_mut().install_parse_results(syntax);
+                    }
+                    let t_doc = t1.elapsed().as_secs_f64() * 1000.0;
+                    bevy::log::info!(
+                        "[EngineSync] reuse pre-parsed MSL AST doc={} gen={} \
+                         engine={:.0}ms doc={:.0}ms",
+                        doc_id.raw(),
+                        gen,
+                        t_engine,
+                        t_doc,
+                    );
+                    continue;
+                }
+                if crate::worker_transport::dispatch_parse_to_worker(doc_id, gen, uri, source.clone()) {
+                    true
+                } else {
+                    handle.finish_pending_failed(doc_id, gen);
+                    false
+                }
+            }
+            None => {
+                // Already in flight — let the next tick retry once
+                // the current parse finishes.
+                continue;
+            }
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let dispatched_to_worker = false;
+
+        if !dispatched_to_worker {
+            handle.upsert_document_async(doc_id, gen, source, |task| {
+                pool.spawn(async move { task() }).detach();
+            });
+        }
         bevy::log::info!(
-            "[EngineSync] async parse spawned doc={} gen={} src={}B (first_parse={})",
+            "[EngineSync] async parse spawned doc={} gen={} src={}B (first_parse={}, target={}{})",
             doc_id.raw(),
             gen,
             src_len,
             !was_parsed,
+            if dispatched_to_worker { "worker" } else { "main" },
+            if Some(doc_id) == active_doc { ", priority=active" } else { "" },
         );
     }
 }
+
+/// Drain parse-done envelopes from the off-thread Web Worker and
+/// install each AST into the engine session.
+///
+/// Wasm-only system. The worker emits one
+/// [`crate::worker_transport::WireResult::ParseDocumentDone`] per
+/// finished parse; the transport layer pushes each into a crossbeam
+/// channel; this system pulls them off the channel and routes each
+/// through [`ModelicaEngineHandle::install_worker_parsed_ast`] (success)
+/// or [`ModelicaEngineHandle::finish_pending_failed`] (parse error).
+///
+/// Native: still registered but always sees an empty queue (worker
+/// never runs there), so the system is a per-tick HashMap miss —
+/// negligible.
+pub fn drain_worker_parse_results(
+    handle: Res<ModelicaEngineHandle>,
+    mut registry: ResMut<crate::ui::state::ModelicaDocumentRegistry>,
+) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use crate::document::SyntaxCache;
+        use std::sync::Arc;
+        while let Some(env) = crate::worker_transport::try_recv_parse_done() {
+            // Lenient parser always returns an AST. `errors` carries
+            // any recovery diagnostics; `is_empty()` ⇒ source was
+            // well-formed. Both fields land in the doc's single
+            // `SyntaxCache` and the engine session adopts the AST as
+            // its canonical view.
+            let ast_arc = Arc::new(env.ast);
+            handle.install_worker_parsed_ast(env.doc_id, env.gen, (*ast_arc).clone());
+            if let Some(host) = registry.host_mut(env.doc_id) {
+                let syntax = SyntaxCache {
+                    generation: env.gen,
+                    ast: ast_arc,
+                    errors: env.errors.clone(),
+                };
+                host.document_mut().install_parse_results(syntax);
+            }
+            if env.errors.is_empty() {
+                bevy::log::info!(
+                    "[EngineSync] worker-parsed install doc={} gen={}",
+                    env.doc_id.raw(),
+                    env.gen,
+                );
+            } else {
+                bevy::log::warn!(
+                    "[EngineSync] worker-parsed install doc={} gen={} with {} parse error(s)",
+                    env.doc_id.raw(),
+                    env.gen,
+                    env.errors.len(),
+                );
+            }
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (handle, registry);
+    }
+}
+
 
 /// Plugin registering the engine handle, sync cursor, and sync
 /// system. Add once at app build; safe to add multiple times because
@@ -397,7 +632,10 @@ impl Plugin for ModelicaEnginePlugin {
         app.insert_resource(handle)
             .init_resource::<EngineSyncCursor>()
             .init_resource::<MslBootstrapState>()
-            .add_systems(Update, (drive_engine_sync, drive_msl_bootstrap));
+            .add_systems(
+                Update,
+                (drive_engine_sync, drive_msl_bootstrap, drain_worker_parse_results),
+            );
     }
 }
 

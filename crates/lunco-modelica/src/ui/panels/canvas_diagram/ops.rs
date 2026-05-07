@@ -658,6 +658,13 @@ pub(super) fn apply_ops(
     // right-click menu. Each phase is timed independently so we
     // know which one to optimise.
     let t_start = web_time::Instant::now();
+    // Auto-pin every tab pointing at this doc — VS Code semantics:
+    // any edit to a preview tab promotes it to a permanent tab so
+    // the next browser click doesn't replace it. Cheap (one
+    // HashMap walk over open tabs).
+    world
+        .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
+        .pin_all_for_doc(doc_id);
     // Stamp the post-apply window so the canvas frame logger
     // captures every subsequent frame's timing for ~2 seconds.
     if let Ok(mut guard) = super::panel::LAST_APPLY_AT.lock() {

@@ -3,10 +3,31 @@
 use bevy::prelude::*;
 use bevy_egui::egui;
 use lunco_workbench::{Panel, PanelId, PanelSlot};
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::ast_extract::{extract_model_name, hash_content};
+use crate::ast_extract::hash_content;
 use crate::ui::{ModelicaDocumentRegistry, WorkbenchState};
+
+/// Per-tab editor buffer snapshot. Stashed in `EditorBufferState.per_doc`
+/// when the user switches tabs and restored when they switch back, so
+/// in-progress edits survive tab navigation. Without this each tab
+/// switch re-mirrored `open_model.source` and clobbered any
+/// uncommitted typing.
+///
+/// Lives keyed by `model_path` (the same string `EditorBufferState`
+/// carries to identify "which doc this buffer belongs to") rather
+/// than `DocumentId` so the rest of the editor's plumbing — which
+/// already passes `model_path` around — doesn't need to change.
+#[derive(Default, Clone)]
+pub struct TabBuffer {
+    pub source_hash: u64,
+    pub text: String,
+    pub line_starts: Arc<[usize]>,
+    pub detected_name: Option<String>,
+    pub cached_galley: Option<Arc<egui::Galley>>,
+    pub pending_commit_at: Option<f64>,
+}
 
 /// Tracks which model the editor buffer belongs to, to detect model switches.
 #[derive(Resource)]
@@ -45,6 +66,14 @@ pub struct EditorBufferState {
     /// typing, the buffer is checkpointed into the document in one
     /// shot.
     pub pending_commit_at: Option<f64>,
+    /// Per-tab buffer snapshots keyed by `model_path`. Save on tab
+    /// switch (current `text`/`line_starts`/etc → `per_doc[old]`),
+    /// restore on tab switch back (`per_doc[new]` → live fields).
+    /// Without this, switching to a new tab clobbered any
+    /// uncommitted edits in the previous tab — the buffer is a
+    /// singleton bound to egui's `TextEdit`, so two tabs can't share
+    /// it without an off-screen save slot.
+    pub per_doc: HashMap<String, TabBuffer>,
 }
 
 /// Return the byte index of the newline character when `new` differs
@@ -91,8 +120,106 @@ impl Default for EditorBufferState {
             word_wrap: false,
             auto_indent: true,
             pending_commit_at: None,
+            per_doc: HashMap::new(),
         }
     }
+}
+
+impl EditorBufferState {
+    /// Save the live fields into `per_doc[model_path]`. Call before
+    /// overwriting them with another tab's content so uncommitted
+    /// edits aren't lost.
+    pub fn snapshot_current(&mut self) {
+        if self.model_path.is_empty() {
+            return;
+        }
+        self.per_doc.insert(
+            self.model_path.clone(),
+            TabBuffer {
+                source_hash: self.source_hash,
+                text: self.text.clone(),
+                line_starts: self.line_starts.clone(),
+                detected_name: self.detected_name.clone(),
+                cached_galley: self.cached_galley.clone(),
+                pending_commit_at: self.pending_commit_at,
+            },
+        );
+    }
+
+    /// Pull a previously-saved snapshot for `model_path` into the live
+    /// fields. Returns `true` if a snapshot was found (caller can skip
+    /// the `open_model.source` re-sync), `false` otherwise.
+    pub fn restore_snapshot(&mut self, model_path: &str) -> bool {
+        if let Some(snap) = self.per_doc.remove(model_path) {
+            self.source_hash = snap.source_hash;
+            self.text = snap.text;
+            self.line_starts = snap.line_starts;
+            self.detected_name = snap.detected_name;
+            self.cached_galley = snap.cached_galley;
+            self.pending_commit_at = snap.pending_commit_at;
+            self.model_path = model_path.to_string();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Drop a tab's snapshot when its document is closed. Prevents
+    /// unbounded `per_doc` growth across long sessions.
+    pub fn forget_doc(&mut self, model_path: &str) {
+        self.per_doc.remove(model_path);
+    }
+}
+
+/// Pull the live source for `path` from the document registry by
+/// `doc` id and stuff it into `EditorBufferState`'s live fields.
+/// Per-tab routing (split views) requires the doc-id keyed lookup —
+/// the legacy `WorkbenchState.open_model`-based variant returned
+/// whichever tab rendered last.
+fn sync_buffer_from_open_model(world: &mut World, path: &str) {
+    // Resolve the rendering tab's doc the same way the editor body
+    // does — TabRenderContext first, active_document fallback.
+    let target_doc = world
+        .get_resource::<crate::ui::panels::model_view::TabRenderContext>()
+        .and_then(|c| c.doc)
+        .or_else(|| {
+            world
+                .get_resource::<lunco_workbench::WorkspaceResource>()
+                .and_then(|ws| ws.active_document)
+        });
+    let Some(doc) = target_doc else { return };
+    let (source, line_starts, detected_name) = {
+        let registry = world.resource::<ModelicaDocumentRegistry>();
+        let Some(host) = registry.host(doc) else { return };
+        let document = host.document();
+        let src = document.source().to_string();
+        let mut starts: Vec<usize> = vec![0];
+        for (i, b) in src.as_bytes().iter().enumerate() {
+            if *b == b'\n' {
+                starts.push(i + 1);
+            }
+        }
+        // Cheap per-doc detected name from the AST index (no parse).
+        let detected = document
+            .index()
+            .classes
+            .values()
+            .find(|c| !matches!(c.kind, crate::index::ClassKind::Package))
+            .map(|c| c.name.clone());
+        (src, starts.into(), detected)
+    };
+    // Galley cache is layout-tied; can't pull it from the registry.
+    // Letting it be None here forces a one-frame relayout — same
+    // cost path tab-switch already takes. Cheap on text bodies.
+    let mut buf_state = world.resource_mut::<EditorBufferState>();
+    buf_state.text = source;
+    buf_state.line_starts = line_starts;
+    buf_state.model_path = path.to_string();
+    buf_state.source_hash = hash_content(&buf_state.text);
+    buf_state.detected_name = detected_name;
+    buf_state.cached_galley = None;
+    // Fresh load from doc → no pending commit yet.
+    buf_state.pending_commit_at = None;
 }
 
 /// Code Editor panel — central viewport for Modelica source code.
@@ -110,17 +237,49 @@ impl Panel for CodeEditorPanel {
             world.insert_resource(EditorBufferState::default());
         }
 
-        // ── Determine what model to show (fetch metadata first) ──
-        let (display_name, is_read_only, model_path, compilation_error, selected_entity, is_loading) = {
+        // ── Determine what model to show ──
+        // Resolve *this tab's* doc via the per-render
+        // [`TabRenderContext`] — splits each render in the same
+        // frame, so reading the singleton `WorkbenchState.open_model`
+        // would mirror whichever tab rendered last. Fall back to the
+        // workspace-wide active doc for non-tab render paths
+        // (welcome screen, no tab open).
+        let tab_target: Option<lunco_doc::DocumentId> = world
+            .get_resource::<crate::ui::panels::model_view::TabRenderContext>()
+            .and_then(|c| c.doc)
+            .or_else(|| {
+                world
+                    .get_resource::<lunco_workbench::WorkspaceResource>()
+                    .and_then(|ws| ws.active_document)
+            });
+        // Pull display fields from the registry directly — this
+        // bypasses the `WorkbenchState.open_model` snapshot which is
+        // a singleton stamped by whichever tab rendered last.
+        let (display_name, is_read_only, model_path, source_len) = match tab_target
+            .and_then(|d| world.resource::<ModelicaDocumentRegistry>().host(d))
+        {
+            Some(host) => {
+                let document = host.document();
+                let display = document.origin().display_name();
+                let path_str = document
+                    .canonical_path()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| format!("mem://{display}"));
+                (
+                    Some(display),
+                    document.is_read_only(),
+                    Some(path_str),
+                    document.source().len(),
+                )
+            }
+            None => (None, false, None, 0),
+        };
+        let (compilation_error, selected_entity, is_loading) = {
             let state = world.resource::<WorkbenchState>();
-            let meta = state.open_model.as_ref().map(|m| (m.display_name.clone(), m.read_only, m.model_path.clone()));
             let err = state.compilation_error.clone();
             let entity = state.selected_entity;
-            let loading = state.is_loading;
-            (meta.as_ref().map(|m| m.0.clone()), 
-             meta.as_ref().map(|m| m.1).unwrap_or(false),
-             meta.as_ref().map(|m| m.2.clone()),
-             err, entity, loading)
+            let loading = state.is_loading && source_len == 0;
+            (err, entity, loading)
         };
 
         if is_loading {
@@ -159,32 +318,72 @@ impl Panel for CodeEditorPanel {
             // diagram edit, the resync clobbers them. That's a known
             // transitional gap until the code editor writes every
             // keystroke through the Document (its own `EditText` op).
+            // External hash from the tab's *own* doc (not the
+            // singleton open_model snapshot) so split-Text panes
+            // don't fight over each other's content.
+            let external_hash = tab_target
+                .and_then(|d| world.resource::<ModelicaDocumentRegistry>().host(d))
+                .map(|h| hash_content(h.document().source()))
+                .unwrap_or(0);
             let (needs_sync, path_changed) = {
                 let buf_state = world.resource::<EditorBufferState>();
-                let external_hash = world.resource::<WorkbenchState>()
-                    .open_model
-                    .as_ref()
-                    .map(|m| hash_content(&m.source))
-                    .unwrap_or(0);
                 let path_changed = buf_state.model_path != *path;
                 (path_changed || buf_state.source_hash != external_hash, path_changed)
             };
             model_switched = path_changed;
 
             if needs_sync {
-                let (source, line_starts, detected_name, galley) = {
-                    let state = world.resource::<WorkbenchState>();
-                    let m = state.open_model.as_ref().unwrap();
-                    (m.source.to_string(), m.line_starts.clone(), m.detected_name.clone(), m.cached_galley.clone())
-                };
-
-                let mut buf_state = world.resource_mut::<EditorBufferState>();
-                buf_state.text = source;
-                buf_state.line_starts = line_starts;
-                buf_state.model_path = path.clone();
-                buf_state.source_hash = hash_content(&buf_state.text);
-                buf_state.detected_name = detected_name;
-                buf_state.cached_galley = galley;
+                // Tab-switch path: snapshot the OLD tab's buffer
+                // (whatever's in the live fields right now belongs to
+                // the previous `model_path`) before we overwrite.
+                // Try to restore the NEW tab's snapshot first; only
+                // fall back to re-syncing from `open_model.source`
+                // when this is the first time we've seen the tab —
+                // otherwise the user's uncommitted edits get clobbered.
+                if path_changed {
+                    let mut buf_state = world.resource_mut::<EditorBufferState>();
+                    buf_state.snapshot_current();
+                    let restored = buf_state.restore_snapshot(path);
+                    drop(buf_state);
+                    if restored {
+                        // Restored from snapshot — no source pull
+                        // needed. But if `open_model.source` has
+                        // diverged since we saved (some other panel
+                        // mutated it), the restored buffer is stale
+                        // relative to `external_hash`. Detect that
+                        // and fall through to re-sync.
+                        let external_hash = tab_target
+                            .and_then(|d| {
+                                world
+                                    .resource::<ModelicaDocumentRegistry>()
+                                    .host(d)
+                            })
+                            .map(|h| hash_content(h.document().source()))
+                            .unwrap_or(0);
+                        let buf_hash = world.resource::<EditorBufferState>().source_hash;
+                        if buf_hash == external_hash {
+                            // In sync; nothing more to do.
+                            // (Skip the open_model re-sync below.)
+                        } else {
+                            // External edit happened while this tab
+                            // was hidden; drop the stale snapshot
+                            // and pull the fresh source.
+                            sync_buffer_from_open_model(world, path);
+                        }
+                    } else {
+                        sync_buffer_from_open_model(world, path);
+                    }
+                } else {
+                    // Same tab, but content hash diverged (some
+                    // panel mutated `open_model.source` — typically
+                    // the diagram panel after applying AST ops).
+                    // Pull the fresh source. This still clobbers
+                    // uncommitted text edits for now; the long-term
+                    // fix is to write every keystroke through a
+                    // Document op so the buffer never diverges from
+                    // the doc to begin with.
+                    sync_buffer_from_open_model(world, path);
+                }
             }
         }
 
@@ -213,13 +412,12 @@ impl Panel for CodeEditorPanel {
         // `selected_entity → document_of(entity)` lookup only when
         // there's no active document, which covers the brief window
         // before workspace state is initialised.
-        let doc_id = world
-            .get_resource::<lunco_workbench::WorkspaceResource>()
-            .and_then(|ws| ws.active_document)
-            .or_else(|| {
-                selected_entity
-                    .and_then(|e| world.resource::<ModelicaDocumentRegistry>().document_of(e))
-            });
+        // Use this tab's resolved doc (TabRenderContext-aware) so a
+        // split-Text edit commits into the right document.
+        let doc_id = tab_target.or_else(|| {
+            selected_entity
+                .and_then(|e| world.resource::<ModelicaDocumentRegistry>().document_of(e))
+        });
 
         // ── Settings menu (gear button) ──
         //
@@ -288,6 +486,83 @@ impl Panel for CodeEditorPanel {
         // a hash from the widget's location and we can't target it
         // from outside the closure.
         let text_edit_id = egui::Id::new("modelica_code_editor");
+        // Snapshot the cursor range BEFORE TextEdit runs. We use it
+        // to derive `selection_chars` so the toolbar / keyboard /
+        // paste handlers know what range was selected at the start
+        // of this frame, even after TextEdit's own pointer logic
+        // mutates the cursor.
+        let pre_cursor: Option<egui::text::CCursorRange> =
+            egui::TextEdit::load_state(ui.ctx(), text_edit_id)
+                .and_then(|s| s.cursor.char_range());
+
+        // ── No right-click context menu ──
+        //
+        // We don't ship a right-click menu inside the editor. Two
+        // upstream egui issues make a usable one impossible without
+        // forking the crate:
+        //
+        //   1. `TextEdit::pointer_interaction` collapses the active
+        //      selection on every pointer press, including
+        //      secondary, and the fields needed to suppress that
+        //      (`PointerState.pointer_events` etc.) are
+        //      `pub(crate)`. See egui issue #5382 ("Context menu on
+        //      selected text") — open since Nov 2024 with no fix.
+        //
+        //   2. egui only paints the selection highlight while
+        //      TextEdit owns focus (`paint_text_selection` gate at
+        //      `text_edit/builder.rs:719`). Any popup steals focus
+        //      to handle keyboard nav, so even after restoring the
+        //      cursor range the highlight disappears.
+        //
+        // We tried snapshot/restore + force-focus + manual popup
+        // rendering across several iterations; every patch exposed
+        // the next layer of upstream behaviour. The toolbar below is
+        // the pragmatic alternative — visible affordance for Copy /
+        // Cut / Paste / Select all that doesn't fight egui. Keyboard
+        // shortcuts (Ctrl/Cmd+C/X/V) keep working independently via
+        // the wasm clipboard bridge + the keyboard handler further
+        // down.
+        let selection_chars: Option<(usize, usize)> = pre_cursor.and_then(|r| {
+            let a = r.primary.index;
+            let b = r.secondary.index;
+            let (s, e) = (a.min(b), a.max(b));
+            if e > s { Some((s, e)) } else { None }
+        });
+        let has_selection = selection_chars.is_some();
+
+        let mut tb_copy = false;
+        let mut tb_cut = false;
+        let mut tb_paste = false;
+        let mut tb_select_all = false;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if ui
+                .add_enabled(has_selection, egui::Button::new("Copy"))
+                .on_hover_text("Ctrl/Cmd+C")
+                .clicked()
+            {
+                tb_copy = true;
+            }
+            if ui
+                .add_enabled(has_selection && !is_ro, egui::Button::new("Cut"))
+                .on_hover_text("Ctrl/Cmd+X")
+                .clicked()
+            {
+                tb_cut = true;
+            }
+            if ui
+                .add_enabled(!is_ro, egui::Button::new("Paste"))
+                .on_hover_text("Ctrl/Cmd+V (no permission prompt) or this button (prompts once)")
+                .clicked()
+            {
+                tb_paste = true;
+            }
+            ui.separator();
+            if ui.button("Select all").on_hover_text("Ctrl/Cmd+A").clicked() {
+                tb_select_all = true;
+            }
+        });
+        ui.separator();
         // When word-wrap is off we need the TextEdit widget's rect to
         // be AT LEAST as wide as the longest line — otherwise egui's
         // TextEdit auto-scrolls horizontally *inside its own rect* to
@@ -374,6 +649,216 @@ impl Panel for CodeEditorPanel {
             })
             .inner;
 
+        // Pre-extract the selected text now that `text` is in scope
+        // — keyboard / toolbar handlers below need it for the
+        // clipboard write.
+        let selected_text: Option<String> = selection_chars.map(|(s, e)| {
+            text.chars().skip(s).take(e - s).collect::<String>()
+        });
+
+        // Translate toolbar button clicks into the same
+        // `copy_payload` / `cut_range` / `select_all_request` flags
+        // the keyboard handler uses, so all three input paths share
+        // one set of action processors below.
+        let mut copy_payload: Option<String> = None;
+        let mut cut_range: Option<(usize, usize)> = None;
+        let mut select_all_request = false;
+        if tb_copy && has_selection {
+            copy_payload = selected_text.clone();
+        }
+        if tb_cut && has_selection && !is_ro {
+            copy_payload = selected_text.clone();
+            cut_range = selection_chars;
+        }
+        if tb_paste && !is_ro {
+            crate::ui::wasm_clipboard::request_paste_from_clipboard();
+        }
+        if tb_select_all {
+            select_all_request = true;
+        }
+
+        // Apply menu actions outside the menu closure — `text`,
+        // `new_text`, and `buffer_changed` are exclusively borrowed
+        // here so we can mutate freely.
+        if let Some(payload) = copy_payload {
+            if !payload.is_empty() {
+                ui.ctx().copy_text(payload);
+            }
+        }
+        if let Some((cut_start, cut_end)) = cut_range {
+            let mut out = String::with_capacity(text.len());
+            for (i, c) in text.chars().enumerate() {
+                if i < cut_start || i >= cut_end {
+                    out.push(c);
+                }
+            }
+            text = out;
+            new_text = text.clone();
+            buffer_changed = true;
+            if let Some(mut state) =
+                egui::TextEdit::load_state(ui.ctx(), text_edit_id)
+            {
+                state.cursor.set_char_range(Some(
+                    egui::text::CCursorRange::one(egui::text::CCursor::new(cut_start)),
+                ));
+                state.store(ui.ctx(), text_edit_id);
+            }
+        }
+        if select_all_request {
+            if let Some(mut state) =
+                egui::TextEdit::load_state(ui.ctx(), text_edit_id)
+            {
+                let n = text.chars().count();
+                state.cursor.set_char_range(Some(
+                    egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(0),
+                        egui::text::CCursor::new(n),
+                    ),
+                ));
+                state.store(ui.ctx(), text_edit_id);
+            }
+        }
+
+        // ── Keyboard clipboard shortcuts ──
+        //
+        // On wasm, the browser's native `copy`/`cut`/`paste` JS
+        // events are suppressed by Bevy's
+        // `prevent_default_event_handling: true` window setting (see
+        // `bin/lunica_web.rs`). That means neither bevy_egui's
+        // built-in clipboard listeners nor any custom JS listener
+        // can ever fire for Ctrl/Cmd+C/X/V. Egui's keyboard input,
+        // however, *is* delivered correctly — so we detect the
+        // shortcut here and run the same code path the right-click
+        // menu's Copy/Cut already use (which we know works because
+        // the user confirmed menu Copy works).
+        //
+        // For paste we kick off an async
+        // `navigator.clipboard.readText()` and pick the resolved
+        // text up on the next visit via `take_pending_paste()`.
+        let (kbd_copy, kbd_cut) = ui.input(|i| {
+            let cmd = i.modifiers.command;
+            (
+                cmd && i.key_pressed(egui::Key::C),
+                cmd && i.key_pressed(egui::Key::X),
+            )
+        });
+        if kbd_copy && has_selection {
+            if let Some(s) = selected_text.as_ref() {
+                if !s.is_empty() {
+                    ui.ctx().copy_text(s.clone());
+                }
+            }
+        }
+        if kbd_cut && has_selection && !is_ro {
+            if let Some(s) = selected_text.as_ref() {
+                if !s.is_empty() {
+                    ui.ctx().copy_text(s.clone());
+                }
+            }
+            // Reuse the menu's `cut_range` so the splice happens in
+            // the cut-handler block below — no duplicate splice loop.
+            cut_range = selection_chars;
+        }
+        // Ctrl/Cmd+V is intentionally not handled here: the document
+        // capture-phase keydown listener in `wasm_clipboard.rs` lets
+        // the browser fire its native `paste` event, and the
+        // capture-phase `paste` listener queues `pending_paste`
+        // synchronously without prompting the user. Drained below.
+
+        // Re-run the cut splice from the menu block — `cut_range` may
+        // have just been populated by the keyboard handler above.
+        // (The earlier menu-action block ran before this point with
+        // `cut_range=None` for the keyboard path.) Idempotent if
+        // already applied.
+        if let Some((cut_start, cut_end)) = cut_range {
+            // Guard against double-apply: only splice if `text` still
+            // contains the original range. Cheap heuristic — compare
+            // the slice we'd remove against `selected_text`.
+            let still_present = selected_text.as_deref().map(|sel| {
+                let extracted: String =
+                    text.chars().skip(cut_start).take(cut_end - cut_start).collect();
+                extracted == sel
+            }).unwrap_or(false);
+            if still_present {
+                let mut out = String::with_capacity(text.len());
+                for (i, c) in text.chars().enumerate() {
+                    if i < cut_start || i >= cut_end {
+                        out.push(c);
+                    }
+                }
+                text = out;
+                new_text = text.clone();
+                buffer_changed = true;
+                if let Some(mut state) =
+                    egui::TextEdit::load_state(ui.ctx(), text_edit_id)
+                {
+                    state.cursor.set_char_range(Some(
+                        egui::text::CCursorRange::one(egui::text::CCursor::new(cut_start)),
+                    ));
+                    state.store(ui.ctx(), text_edit_id);
+                }
+            }
+        }
+
+        // Drain any paste text the async clipboard read resolved
+        // since the previous frame, and apply it at the cursor (or
+        // replace the selection).
+        if !is_ro {
+            if let Some(raw_paste) = crate::ui::wasm_clipboard::take_pending_paste() {
+                // Normalise line endings + strip a leading BOM. The
+                // OS clipboard frequently delivers CRLF (Windows) or
+                // CR-only (rare, but some terminals) sequences;
+                // rumoca's lexer expects LF and panics on a non-
+                // char-boundary slice when it tries to advance over
+                // a CR. The BOM strip handles UTF-8-with-BOM text
+                // pasted from Windows tools.
+                let paste_text = raw_paste
+                    .replace("\r\n", "\n")
+                    .replace('\r', "\n");
+                let paste_text = paste_text
+                    .strip_prefix('\u{FEFF}')
+                    .map(|s| s.to_string())
+                    .unwrap_or(paste_text);
+                let (start, end) = selection_chars.unwrap_or_else(|| {
+                    let cur = egui::TextEdit::load_state(ui.ctx(), text_edit_id)
+                        .and_then(|s| s.cursor.char_range())
+                        .map(|r| r.primary.index)
+                        .unwrap_or(text.chars().count());
+                    (cur, cur)
+                });
+                let total = text.chars().count();
+                let mut out =
+                    String::with_capacity(text.len() + paste_text.len());
+                let mut inserted = false;
+                for (i, c) in text.chars().enumerate() {
+                    if i == start {
+                        out.push_str(&paste_text);
+                        inserted = true;
+                    }
+                    if i < start || i >= end {
+                        out.push(c);
+                    }
+                }
+                if !inserted && start >= total {
+                    out.push_str(&paste_text);
+                }
+                text = out;
+                new_text = text.clone();
+                buffer_changed = true;
+                let new_caret = start + paste_text.chars().count();
+                if let Some(mut state) =
+                    egui::TextEdit::load_state(ui.ctx(), text_edit_id)
+                {
+                    state.cursor.set_char_range(Some(
+                        egui::text::CCursorRange::one(
+                            egui::text::CCursor::new(new_caret),
+                        ),
+                    ));
+                    state.store(ui.ctx(), text_edit_id);
+                }
+            }
+        }
+
         if output.changed() && !is_ro {
             new_text = text.clone();
             buffer_changed = true;
@@ -448,7 +933,17 @@ impl Panel for CodeEditorPanel {
                 }
             }
             buf_state.line_starts = new_starts.into();
-            buf_state.detected_name = extract_model_name(&buf_state.text);
+            // NOTE: do NOT call `extract_model_name(&buf_state.text)`
+            // here. That function runs a full rumoca parse which
+            // takes seconds on a non-trivial source and visibly
+            // stalls the UI on every keystroke (see warning in
+            // `ast_extract.rs::extract_model_name` doc — and we
+            // hit a real freeze + occasional rumoca panic when this
+            // ran per-edit). `detected_name` is updated through the
+            // worker-parsed AST path on commit/flush; the live UI
+            // consumers (inspector, model_view, package_browser,
+            // canvas overlays) all read `WorkbenchState.open_model
+            // .detected_name`, which is refreshed off-thread.
             // Mark the buffer as dirty vs. the document. The flush
             // block below only commits once `now - pending_commit_at
             // >= EDIT_DEBOUNCE_SEC`, so a burst of typing resets this

@@ -971,11 +971,13 @@ impl Panel for WelcomePanel {
                 .strip_suffix(".mo")
                 .unwrap_or(filename)
                 .to_string();
+            // Welcome card click is deliberate → pinned tab.
             crate::ui::panels::package_browser::open_model(
                 world,
                 id,
                 name,
                 ModelLibrary::Bundled,
+                true,
             );
         }
         if let Some(qualified) = open_msl {

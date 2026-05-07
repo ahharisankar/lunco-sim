@@ -80,6 +80,19 @@ pub enum WireMessage {
     /// the worker is alive and responding without sending an actual
     /// Modelica command.
     Ping(String),
+    /// Parse a single document's source off the main thread.
+    /// `engine_resource::drive_engine_sync` posts this when an open
+    /// doc's source advances; the worker runs `parse_source_to_ast`
+    /// in its own wasm instance and returns the resulting AST as a
+    /// [`WireResult::ParseDocumentDone`]. UI thread receives it and
+    /// installs into the engine session via `upsert_document_with_ast`.
+    /// Eliminates the ~5 s rumoca freeze on AnnotatedRocketStage.
+    ParseDocument {
+        doc_id: lunco_doc::DocumentId,
+        gen: u64,
+        uri: String,
+        source: String,
+    },
 }
 
 /// Wire-format envelope from worker → main. Same multiplexing principle as
@@ -96,6 +109,25 @@ pub enum WireResult {
     /// how long it took, panic/recover) since the worker's own console is
     /// inaccessible from the page.
     Log(String),
+    /// Parsed-AST result for a previously-sent
+    /// [`WireMessage::ParseDocument`] request.
+    ///
+    /// `ast` is the lenient parser's best-effort result (always
+    /// produced, even on broken sources). `errors` is the diagnostic
+    /// list emitted by rumoca's recovery — empty when the source is
+    /// well-formed. `gen` is the doc's generation at parse-spawn time
+    /// so main can drop stale results.
+    ///
+    /// Both fields together replace the previous strict-style
+    /// `Option<AST>`; merging them lets the receiver reconstruct the
+    /// dual-cache state (now collapsed into a single `SyntaxCache`)
+    /// in one shot.
+    ParseDocumentDone {
+        doc_id: lunco_doc::DocumentId,
+        gen: u64,
+        ast: rumoca_session::parsing::StoredDefinition,
+        errors: Vec<String>,
+    },
 }
 
 /// Process-wide handle to the JS `Worker` running the off-thread Modelica
@@ -125,6 +157,39 @@ static RESULT_TX: OnceLock<Sender<ModelicaResult>> = OnceLock::new();
 /// `__lc_test_dispatch_compile` JS bridge to fire commands without going
 /// through the UI (for autonomous test loops).
 static COMMAND_TX: OnceLock<crossbeam_channel::Sender<ModelicaCommand>> = OnceLock::new();
+
+/// Process-wide channel carrying parse-done results back from the
+/// worker into the main thread. The JS `onmessage` handler decodes
+/// [`WireResult::ParseDocumentDone`] and pushes here; the Bevy system
+/// `drain_worker_parse_results` (engine_resource.rs) drains each tick
+/// and installs the AST into the engine session.
+///
+/// Crossbeam unbounded — parse-completion rate is well below tab-open
+/// rate so it never grows.
+pub struct ParseDoneEnvelope {
+    pub doc_id: lunco_doc::DocumentId,
+    pub gen: u64,
+    pub ast: rumoca_session::parsing::StoredDefinition,
+    pub errors: Vec<String>,
+}
+static PARSE_DONE_TX: OnceLock<crossbeam_channel::Sender<ParseDoneEnvelope>> = OnceLock::new();
+static PARSE_DONE_RX: OnceLock<crossbeam_channel::Receiver<ParseDoneEnvelope>> = OnceLock::new();
+
+fn ensure_parse_done_channel() -> &'static crossbeam_channel::Sender<ParseDoneEnvelope> {
+    PARSE_DONE_TX.get_or_init(|| {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let _ = PARSE_DONE_RX.set(rx);
+        tx
+    })
+}
+
+/// Drain a single completed parse result, if any. Bevy system on the
+/// main thread polls this each tick; returns `None` when the queue
+/// is empty.
+pub fn try_recv_parse_done() -> Option<ParseDoneEnvelope> {
+    let _ = ensure_parse_done_channel();
+    PARSE_DONE_RX.get()?.try_recv().ok()
+}
 
 thread_local! {
     /// Holds the `onmessage` closure for the lifetime of the page so the
@@ -187,6 +252,10 @@ pub fn install_worker(worker_url: &str) -> Result<(), JsValue> {
                 if let Some(tx) = RESULT_TX.get() {
                     let _ = tx.send(result);
                 }
+            }
+            Ok(WireResult::ParseDocumentDone { doc_id, gen, ast, errors }) => {
+                let tx = ensure_parse_done_channel();
+                let _ = tx.send(ParseDoneEnvelope { doc_id, gen, ast, errors });
             }
             Ok(WireResult::Log(line)) => {
                 // Surface worker-side diagnostics in the main page's
@@ -271,6 +340,109 @@ pub fn __lc_test_worker_ping(tag: &str) {
     post_to_worker(&WireMessage::Ping(tag.to_string()), "ping");
 }
 
+// ── Boot-race gate for parse requests ──
+//
+// Empirically the worker can be bootstrapped (the JS shim has loaded
+// and we can `postMessage` to it) seconds before its WASM module is
+// initialised AND seconds before the MSL bundle has landed. A parse
+// request that arrives during that window is delivered to the worker
+// in *some* order — sometimes ahead of the MSL install, sometimes
+// after — and either way we've seen the request silently dropped /
+// produce no `ParseDocumentDone` reply. The user-visible symptom is
+// "Loading resource…" forever for whichever doc was unlucky enough
+// to fire on the boot frame (most often the first restored autosave
+// doc).
+//
+// Fix: queue parses on the host side until `install_msl_in_worker`
+// has run. After that point the worker has its ready ack out *and*
+// has the MSL index, so parses can resolve imports against it. Drain
+// the queue right after we ship MSL so the gap is invisible to
+// callers.
+//
+// `wasm32-unknown-unknown` is single-threaded so a `RefCell` in a
+// `thread_local!` is enough — no `Mutex` needed.
+struct PendingParse {
+    doc_id: lunco_doc::DocumentId,
+    gen: u64,
+    uri: String,
+    source: String,
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static MSL_INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static PENDING_PARSES: std::cell::RefCell<Vec<PendingParse>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn msl_installed() -> bool { true }
+#[cfg(target_arch = "wasm32")]
+fn msl_installed() -> bool {
+    MSL_INSTALLED.with(|c| c.get())
+}
+
+/// Send a doc to the worker for off-thread parsing. Used by
+/// `engine_resource::drive_engine_sync` on wasm in place of the
+/// main-thread parse spawn. The result lands via the parse-done
+/// channel ([`try_recv_parse_done`]).
+///
+/// Returns `false` when the worker isn't installed (very early boot
+/// or worker init failed); callers fall back to local parsing.
+/// Returns `true` when the request has been posted *or queued*
+/// behind the MSL-install gate (see the boot-race note above) — in
+/// both cases the host should consider it accepted.
+pub fn dispatch_parse_to_worker(
+    doc_id: lunco_doc::DocumentId,
+    gen: u64,
+    uri: String,
+    source: String,
+) -> bool {
+    if WORKER.get().is_none() {
+        return false;
+    }
+    if !msl_installed() {
+        #[cfg(target_arch = "wasm32")]
+        PENDING_PARSES.with(|q| {
+            q.borrow_mut().push(PendingParse { doc_id, gen, uri, source });
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = (doc_id, gen, uri, source);
+        return true;
+    }
+    post_to_worker(
+        &WireMessage::ParseDocument { doc_id, gen, uri, source },
+        "parse",
+    );
+    true
+}
+
+/// Drain any parse requests queued by `dispatch_parse_to_worker`
+/// while the MSL install was still pending. Called from
+/// `install_msl_in_worker` after MSL is shipped to the worker.
+#[cfg(target_arch = "wasm32")]
+fn flush_pending_parses() {
+    let drained: Vec<PendingParse> = PENDING_PARSES.with(|q| q.borrow_mut().drain(..).collect());
+    if drained.is_empty() {
+        return;
+    }
+    bevy::log::info!(
+        "[worker_transport] flushing {} parse request(s) queued during MSL install",
+        drained.len()
+    );
+    for p in drained {
+        post_to_worker(
+            &WireMessage::ParseDocument {
+                doc_id: p.doc_id,
+                gen: p.gen,
+                uri: p.uri,
+                source: p.source,
+            },
+            "parse(flushed)",
+        );
+    }
+}
+
 /// JS-callable bridge that synthesizes a `ModelicaCommand::Compile` and
 /// pushes it through the same channel the UI uses. Bypasses the canvas
 /// click pathway — synthetic mouse events don't reach egui reliably from
@@ -340,5 +512,13 @@ pub fn install_msl_in_worker(
             parsed.len(),
             len
         );
+        // Open the parse-request gate now that the worker has its
+        // index. Any parse request that came in earlier this session
+        // was buffered in `PENDING_PARSES`; drain it.
+        #[cfg(target_arch = "wasm32")]
+        {
+            MSL_INSTALLED.with(|c| c.set(true));
+            flush_pending_parses();
+        }
     }
 }

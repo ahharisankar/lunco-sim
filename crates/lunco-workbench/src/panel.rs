@@ -140,6 +140,20 @@ pub trait InstancePanel: Send + Sync + 'static {
 
     /// Render one tab instance.
     fn render(&mut self, ui: &mut egui::Ui, world: &mut World, instance: u64);
+
+    /// Optional right-click context menu shown when the user
+    /// secondary-clicks the tab header. Default is a no-op (egui_dock
+    /// renders no menu, falling back to its built-in close item).
+    /// Domains that want richer per-tab actions (Pin, Open in new
+    /// view, Close Others, …) override this to draw their own menu
+    /// items.
+    fn tab_context_menu(
+        &mut self,
+        _ui: &mut egui::Ui,
+        _world: &mut World,
+        _instance: u64,
+    ) {
+    }
 }
 
 /// Identity of a tab in the dock.

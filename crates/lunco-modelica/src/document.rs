@@ -156,62 +156,25 @@ pub enum ModelicaChange {
     },
 }
 
-/// Eagerly-refreshed AST cache attached to a [`ModelicaDocument`].
+/// Single parse cache attached to a [`ModelicaDocument`].
 ///
-/// Every mutation replaces this with a freshly-parsed cache so readers
-/// never observe a stale parse status. Cheap to clone via `Arc`.
+/// Lenient parser (rumoca's `parse_to_syntax`) always produces a
+/// best-effort `StoredDefinition`. `errors` carries any diagnostics
+/// rumoca's recovery emitted; empty when source is well-formed.
 ///
-/// **Note on canonical AST**: this cache no longer carries the parsed
-/// `StoredDefinition` — that storage is owned by the engine
-/// (`crate::engine::ModelicaEngine` session) and the lenient
-/// [`SyntaxCache`]. `AstCache` now records *whether* the strict parse
-/// succeeded plus the diagnostic message on failure. Callers that want
-/// the AST itself use [`ModelicaDocument::strict_ast`] (vends the
-/// lenient cache's `Arc<StoredDefinition>` when strict parse succeeded,
-/// `None` when it failed) or read the engine directly.
-#[derive(Debug, Clone)]
-pub struct AstCache {
-    /// Document generation at which this cache was produced.
-    pub generation: u64,
-    /// Parse outcome. `Ok(())` means the strict parse succeeded;
-    /// `Err(msg)` carries a human-readable parser diagnostic
-    /// (preserved so panels can show syntax errors without reparsing).
-    pub result: Result<(), String>,
-}
-
-impl AstCache {
-    /// Derive a parse-status cache from an existing [`SyntaxCache`] —
-    /// no second parse. Loses the rumoca-strict-parser error string;
-    /// uses a generic "parse errors" message when `has_errors`. Use
-    /// this on the refresh hot path; use [`Self::from_source`] only
-    /// when the caller specifically wants the strict-parser
-    /// diagnostic.
-    pub fn from_syntax(syntax: &SyntaxCache) -> Self {
-        Self {
-            generation: syntax.generation,
-            result: if syntax.has_errors {
-                Err("source has parse errors — see syntax cache for details".into())
-            } else {
-                Ok(())
-            },
-        }
-    }
-}
-
-/// Lenient, error-recovering parse cache attached to a
-/// [`ModelicaDocument`].
+/// Replaces the previous `AstCache` (strict, Result-shaped) +
+/// `SyntaxCache` (lenient, AST-shaped) pair. The two parsers ran the
+/// same source through rumoca twice on every edit; for valid sources
+/// they produced byte-identical ASTs, and for invalid sources only
+/// strict actually rejected — but `parse_to_syntax` already exposes
+/// the same error list, so the strict parse was redundant. Folding
+/// into one type halves the parse cost and removes the dual-staleness
+/// state-machine the readers had to keep coherent.
 ///
-/// Sibling to [`AstCache`]. Where `AstCache` carries `Result` (strict
-/// parser via `parse_to_ast` — `Err` on any error), `SyntaxCache`
-/// always carries an AST: rumoca's `parse_to_syntax` salvages what it
-/// can even on broken sources. Used by panels that must keep
-/// rendering through partial-parse states (the Twin Browser shows a
-/// "broken file" badge but never blanks the class tree).
-///
-/// Both caches are populated by the same off-thread refresh in
-/// [`crate::ui::ast_refresh`], so they always advance together —
-/// callers comparing `ast.generation` and `syntax.generation` can
-/// rely on them being equal.
+/// Old name `SyntaxCache` is kept as a type alias so the migration
+/// doesn't have to touch every reader at once. Old `AstCache` is
+/// removed; sites that read `cache.result` migrate to
+/// `cache.has_errors()` / `cache.errors`.
 #[derive(Debug, Clone)]
 pub struct SyntaxCache {
     /// Document generation at which this cache was produced.
@@ -220,31 +183,81 @@ pub struct SyntaxCache {
     /// has parse errors — rumoca's lenient parser returns whatever it
     /// could recover.
     pub ast: Arc<StoredDefinition>,
-    /// Whether the lenient parse reported any errors. UIs that show a
-    /// "broken file" badge read this; an `ast` with parts missing
-    /// but `has_errors == false` means the source is genuinely valid
-    /// (e.g. an empty model file).
-    pub has_errors: bool,
+    /// Diagnostic strings from the parse. Empty when the source is
+    /// well-formed. UIs that show a "broken file" badge read
+    /// `has_errors()`; the diagnostics panel shows each entry as a
+    /// row.
+    pub errors: Vec<String>,
 }
 
+/// Back-compat alias for the removed strict-parse cache. Existing
+/// callers reading `doc.ast()` keep working — both methods now return
+/// the same single `SyntaxCache`.
+pub type AstCache = SyntaxCache;
+
 impl SyntaxCache {
-    /// Parse `source` into a fresh cache at the given generation.
-    pub fn from_source(source: &str, generation: u64) -> Self {
-        if std::env::var_os("LUNCO_NO_PARSE").is_some() {
-            return Self {
-                generation,
-                ast: Arc::new(StoredDefinition::default()),
-                has_errors: false,
-            };
-        }
-        let syntax = parse_to_syntax(source, "model.mo");
-        let has_errors = syntax.has_errors();
-        let ast = Arc::new(syntax.best_effort().clone());
+    /// Empty placeholder cache. Used at document construction on
+    /// wasm so the heavy rumoca parse can be ran by the off-thread
+    /// worker and its result backfilled here later.
+    pub fn empty(generation: u64) -> Self {
         Self {
             generation,
-            ast,
-            has_errors,
+            ast: Arc::new(StoredDefinition::default()),
+            errors: Vec::new(),
         }
+    }
+
+    /// Parse `source` into a fresh cache at the given generation.
+    /// Wasm path returns an empty placeholder; the worker parse fills
+    /// it via [`Self::install_from_worker`].
+    pub fn from_source(source: &str, generation: u64) -> Self {
+        if std::env::var_os("LUNCO_NO_PARSE").is_some() {
+            return Self::empty(generation);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = source;
+            return Self::empty(generation);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let recovery = parse_to_syntax(source, "model.mo");
+            let errors = recovery
+                .parse_errors()
+                .iter()
+                .map(|e| format!("{e:?}"))
+                .collect();
+            let ast = Arc::new(recovery.best_effort().clone());
+            Self {
+                generation,
+                ast,
+                errors,
+            }
+        }
+    }
+
+    /// Install a worker-parsed AST + errors. Replaces the
+    /// previously-empty placeholder once the off-thread parse lands.
+    pub fn install_from_worker(
+        &mut self,
+        ast: Arc<StoredDefinition>,
+        errors: Vec<String>,
+    ) {
+        self.ast = ast;
+        self.errors = errors;
+    }
+
+    /// `true` when the parse emitted any diagnostics. Source might
+    /// still have produced a partial AST — readers walk `ast`
+    /// regardless and use this flag for the "broken file" badge.
+    pub fn has_errors(&self) -> bool {
+        !self.errors.is_empty()
+    }
+
+    /// First diagnostic, if any. Convenience for "Err-shaped" old
+    /// callsites that wanted a single message string.
+    pub fn first_error(&self) -> Option<&str> {
+        self.errors.first().map(|s| s.as_str())
     }
 
     /// Shortcut: the salvaged AST.
@@ -263,9 +276,10 @@ impl SyntaxCache {
 pub struct ModelicaDocument {
     id: DocumentId,
     source: String,
-    ast: Arc<AstCache>,
-    /// Lenient parse cache. Populated by the same off-thread refresh
-    /// as [`Self::ast`] — see [`SyntaxCache`] for why we keep both.
+    /// Single parse cache (lenient). Replaces the old AstCache /
+    /// SyntaxCache duo — they redundantly held the same lenient AST
+    /// after the strict parser was retired. See [`SyntaxCache`] for
+    /// the full rationale.
     syntax: Arc<SyntaxCache>,
     /// UI-projection of the current AST. Rebuilt from `syntax` on every
     /// successful parse install. Panels read this instead of the AST
@@ -327,16 +341,8 @@ impl ModelicaDocument {
         origin: DocumentOrigin,
     ) -> Self {
         let source = source.into();
-        let syntax = Arc::new(SyntaxCache {
-            generation: 0,
-            ast: Arc::new(StoredDefinition::default()),
-            has_errors: false,
-        });
-        let ast = Arc::new(AstCache {
-            generation: 0,
-            result: Err("parse pending".into()),
-        });
-        let mut doc = Self::from_parts(id, source, origin, ast, syntax);
+        let syntax = Arc::new(SyntaxCache::empty(0));
+        let mut doc = Self::from_parts(id, source, origin, syntax);
         doc.last_source_edit_at = Some(web_time::Instant::now());
         doc.generation = 1;
         doc
@@ -402,12 +408,34 @@ impl ModelicaDocument {
             parts.join(".")
         };
 
-        let mut parsed = rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()])
-            .map_err(|e| format!("parse failed `{}`: {e}", path.display()))?;
-        let (_uri, ast) = parsed
-            .drain(..)
-            .next()
-            .ok_or_else(|| format!("rumoca returned no parse result for `{}`", path.display()))?;
+        // **Wasm: use the pre-parsed MSL bundle.** A synchronous
+        // `parse_files_parallel` on a 100 KB MSL package file blocks
+        // `AsyncComputeTaskPool` (which IS the main thread on
+        // wasm32-unknown-unknown) for tens of seconds — exactly the
+        // freeze users see clicking sub-classes inside a Continuous /
+        // Blocks tab. The MSL bundle already has every file's AST
+        // resident; look it up by path key. Native still parses
+        // because it has real worker threads.
+        #[cfg(target_arch = "wasm32")]
+        let ast: rumoca_session::parsing::ast::StoredDefinition = {
+            let key = path.to_string_lossy().to_string();
+            crate::msl_remote::global_parsed_msl()
+                .and_then(|b| b.iter().find(|(k, _)| k == &key).map(|(_, a)| a.clone()))
+                .ok_or_else(|| format!(
+                    "load_msl_class: pre-parsed AST missing for `{key}` \
+                     (MSL bundle not yet ready or path mismatch)"
+                ))?
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let ast: rumoca_session::parsing::ast::StoredDefinition = {
+            let mut parsed = rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()])
+                .map_err(|e| format!("parse failed `{}`: {e}", path.display()))?;
+            let (_uri, ast) = parsed
+                .drain(..)
+                .next()
+                .ok_or_else(|| format!("rumoca returned no parse result for `{}`", path.display()))?;
+            ast
+        };
 
         let class_def = find_class_by_short_name_recursive(&ast, short_name)
             .ok_or_else(|| format!("class `{qualified}` not found in `{}`", path.display()))?;
@@ -457,42 +485,57 @@ impl ModelicaDocument {
         //    is essentially free. The strict `StoredDefinition` flows
         //    into the lenient `SyntaxCache` (single canonical local
         //    Arc); `AstCache` records only success/failure.
+        //
+        // Wasm: `parse_files_parallel` runs synchronously on the
+        // calling thread which on wasm32-unknown-unknown is the main
+        // thread (AsyncComputeTaskPool is cooperative). Re-parsing a
+        // 100 KB MSL file freezes the UI for tens of seconds. Look up
+        // the AST in the pre-parsed bundle instead.
         let parsed: Result<Arc<StoredDefinition>, String> =
             if std::env::var_os("LUNCO_NO_PARSE").is_some() {
                 Err("LUNCO_NO_PARSE diagnostic — parse skipped".into())
             } else {
-                match rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()]) {
-                    Ok(mut pairs) if !pairs.is_empty() => {
-                        let (_, stored) = pairs.remove(0);
-                        Ok(Arc::new(stored))
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let key = path.to_string_lossy().to_string();
+                    crate::msl_remote::global_parsed_msl()
+                        .and_then(|b| b.iter()
+                            .find(|(k, _)| k == &key)
+                            .map(|(_, a)| Arc::new(a.clone())))
+                        .ok_or_else(|| format!(
+                            "load_msl_file: pre-parsed AST missing for `{key}` \
+                             (MSL bundle not yet ready or path mismatch)"
+                        ))
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    match rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()]) {
+                        Ok(mut pairs) if !pairs.is_empty() => {
+                            let (_, stored) = pairs.remove(0);
+                            Ok(Arc::new(stored))
+                        }
+                        Ok(_) => Err("rumoca returned no parse result".into()),
+                        Err(e) => Err(e.to_string()),
                     }
-                    Ok(_) => Err("rumoca returned no parse result".into()),
-                    Err(e) => Err(e.to_string()),
                 }
             };
 
-        let ast = Arc::new(AstCache {
-            generation: 0,
-            result: parsed.as_ref().map(|_| ()).map_err(|e| e.clone()),
-        });
-
-        // 3. Lenient `SyntaxCache` adopts the strict StoredDef when
-        //    parsing succeeded — same reasoning as the previous
-        //    `ModelicaFileLoader` path: re-running `parse_to_syntax`
-        //    on a 184 KB MSL file (Continuous.mo) costs minutes in
-        //    debug because it bypasses rumoca's cache. On strict
-        //    failure we ship an empty SyntaxCache; the doc's
-        //    edit-driven `ast_refresh` will rebuild it.
+        // Single canonical parse cache. Strict success → adopt the
+        // parsed `StoredDefinition`, errors empty. Strict failure →
+        // empty AST + the rumoca diagnostic surfaced into `errors`,
+        // matching what `parse_to_syntax` would have produced. The
+        // doc's edit-driven refresh fills in lenient salvage on the
+        // next Update if the user keeps editing.
         let syntax = Arc::new(match parsed {
             Ok(strict) => SyntaxCache {
                 generation: 0,
                 ast: strict,
-                has_errors: false,
+                errors: Vec::new(),
             },
-            Err(_) => SyntaxCache {
+            Err(msg) => SyntaxCache {
                 generation: 0,
                 ast: Arc::new(StoredDefinition::default()),
-                has_errors: true,
+                errors: vec![msg],
             },
         });
 
@@ -500,25 +543,19 @@ impl ModelicaDocument {
             path: path.to_path_buf(),
             writable: false,
         };
-        Ok(Self::from_parts(id, source, origin, ast, syntax))
+        Ok(Self::from_parts(id, source, origin, syntax))
     }
 
     /// Build a document from pre-computed parts. Skips the rumoca
-    /// parses — callers must supply an [`AstCache`] **and** a
-    /// [`SyntaxCache`] whose `generation` fields are both `0`. Used
-    /// by the class cache to avoid re-parsing a class every time a
-    /// tab binds to it.
+    /// parse — callers must supply a [`SyntaxCache`] whose
+    /// `generation` is `0`. Used by the class cache to avoid
+    /// re-parsing every time a tab binds to a known class.
     pub fn from_parts(
         id: DocumentId,
         source: String,
         origin: DocumentOrigin,
-        ast: Arc<AstCache>,
         syntax: Arc<SyntaxCache>,
     ) -> Self {
-        debug_assert_eq!(
-            ast.generation, 0,
-            "from_parts expects a freshly-parsed AstCache"
-        );
         debug_assert_eq!(
             syntax.generation, 0,
             "from_parts expects a freshly-parsed SyntaxCache"
@@ -528,12 +565,12 @@ impl ModelicaDocument {
         } else {
             Some(0)
         };
+        let has_errors = syntax.has_errors();
         let mut index = crate::index::ModelicaIndex::new();
-        index.rebuild_with_errors(&syntax.ast, &source, syntax.has_errors);
+        index.rebuild_with_errors(&syntax.ast, &source, has_errors);
         Self {
             id,
             source,
-            ast,
             syntax,
             index,
             generation: 0,
@@ -558,22 +595,20 @@ impl ModelicaDocument {
         &self.source
     }
 
-    /// The cached parsed AST. Always present, but may be *stale* —
-    /// AST reparse is debounced (see `apply_patch`), so immediately
-    /// after a rapid edit burst the returned `AstCache.generation`
-    /// can lag `self.generation`. For read-only UI (syntax highlight,
-    /// diagram projection, lint) staleness is harmless. Callers that
-    /// must see the current source reflected in the AST should call
-    /// [`refresh_ast_now`](Self::refresh_ast_now) first.
-    pub fn ast(&self) -> &AstCache {
-        &self.ast
+    /// Back-compat accessor for the parse cache. After the dual-cache
+    /// collapse this returns the same single `SyntaxCache` as
+    /// [`Self::syntax`]; callers haven't yet been migrated. Old code
+    /// reading `cache.result` should switch to `cache.has_errors()` /
+    /// `cache.first_error()`.
+    pub fn ast(&self) -> &SyntaxCache {
+        &self.syntax
     }
 
     /// Returns `true` when the source has been edited since the last
-    /// AST reparse. Used by the debouncing refresh system in
-    /// `ui/ast_refresh.rs` to decide whether a reparse is needed.
+    /// parse. Same as [`Self::syntax_is_stale`]; alias kept while
+    /// callers migrate.
     pub fn ast_is_stale(&self) -> bool {
-        self.ast.generation != self.generation
+        self.syntax.generation != self.generation
     }
 
     /// Wall-clock time of the last source mutation, or `None` if the
@@ -629,7 +664,7 @@ impl ModelicaDocument {
     /// [`AstCache`] — engine + lenient cache are the canonical
     /// storage.
     pub fn strict_ast(&self) -> Option<Arc<StoredDefinition>> {
-        if self.ast.result.is_ok() {
+        if !self.syntax.has_errors() {
             Some(Arc::clone(&self.syntax.ast))
         } else {
             None
@@ -642,25 +677,17 @@ impl ModelicaDocument {
         self.syntax.generation != self.generation
     }
 
-    /// Atomically install both the strict and the lenient parse
-    /// caches from a single off-thread refresh pass. Either both land
-    /// or neither does — readers comparing `ast.generation` to
-    /// `syntax.generation` can rely on them being equal after a
-    /// successful install.
+    /// Install the parse cache from an off-thread refresh pass. The
+    /// cache's `generation` must match `self.generation` — otherwise
+    /// the source has moved on while parsing was in flight and the
+    /// result is stale (the next debounce will kick a fresh parse).
     ///
-    /// Both caches must carry the same generation **and** that
-    /// generation must match `self.generation` — otherwise the
-    /// source has moved on while parsing was in flight and the
-    /// results are stale (the next debounce will kick a fresh parse).
-    pub fn install_parse_results(&mut self, ast: AstCache, syntax: SyntaxCache) {
-        debug_assert_eq!(
-            ast.generation, syntax.generation,
-            "install_parse_results expects ast and syntax at the same generation"
-        );
-        if ast.generation != self.generation {
+    /// The two-arg `(ast, syntax)` form pre-collapse is gone; one
+    /// `SyntaxCache` carries both pieces of information.
+    pub fn install_parse_results(&mut self, syntax: SyntaxCache) {
+        if syntax.generation != self.generation {
             return;
         }
-        self.ast = Arc::new(ast);
         self.syntax = Arc::new(syntax);
         self.rebuild_index();
         self.last_source_edit_at = None;
@@ -707,7 +734,7 @@ impl ModelicaDocument {
         self.index.rebuild_with_errors(
             &self.syntax.ast,
             &self.source,
-            self.syntax.has_errors,
+            self.syntax.has_errors(),
         );
     }
 
@@ -746,35 +773,68 @@ impl ModelicaDocument {
         };
         let t = web_time::Instant::now();
         let bytes = self.source.len();
-        // Route through engine: synchronous upsert (rumoca's
-        // content-hash cache makes unchanged sources free), then
-        // pull the strict AST back. Engine remains the canonical
-        // store; doc-side cache is its mirror.
+        // Pre-parsed MSL bundle short-circuit. If this doc came from
+        // a file in the MSL bundle, the parsed AST is already in
+        // `crate::msl_remote::global_parsed_msl()` — call directly,
+        // skip the synchronous rumoca parse (which would freeze the
+        // UI for minutes on a 150 KB MSL file on wasm).
+        let bundle_ast: Option<Arc<StoredDefinition>> = match &self.origin {
+            DocumentOrigin::File { path, .. } => {
+                let key = path.to_string_lossy().to_string();
+                crate::msl_remote::global_parsed_msl().and_then(|b| {
+                    b.iter()
+                        .find(|(k, _)| k == &key)
+                        .map(|(_, ast)| Arc::new(ast.clone()))
+                })
+            }
+            _ => None,
+        };
+        // Route through engine: install the cached AST when
+        // available. On wasm a cache miss MUST NOT trigger a
+        // synchronous parse — that would freeze the UI for minutes
+        // on a 150 KB MSL file. Native still parses sync (real
+        // worker threads); wasm bails out and lets the worker-parse
+        // pipeline catch up async on the next `drive_engine_sync`
+        // tick.
         let arc_ast: Option<Arc<StoredDefinition>> = {
             let mut engine = handle.lock();
-            let _ = engine.upsert_document(self.id, &self.source);
-            engine.parsed_for_doc(self.id).cloned().map(Arc::new)
+            if let Some(ast) = bundle_ast.as_ref() {
+                engine.upsert_document_with_ast(self.id, (**ast).clone());
+                Some(Arc::clone(ast))
+            } else {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    bevy::log::debug!(
+                        "[Doc] refresh_ast_now: wasm cache miss doc={} — \
+                         deferring to worker (no sync parse)",
+                        self.id.raw(),
+                    );
+                    None
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let _ = engine.upsert_document(self.id, &self.source);
+                    engine.parsed_for_doc(self.id).cloned().map(Arc::new)
+                }
+            }
         }; // engine lock released before rebuild_index re-acquires it
         match arc_ast {
             Some(ast) => {
                 self.syntax = Arc::new(SyntaxCache {
                     generation: self.generation,
                     ast,
-                    has_errors: false,
-                });
-                self.ast = Arc::new(AstCache {
-                    generation: self.generation,
-                    result: Ok(()),
+                    errors: Vec::new(),
                 });
             }
             None => {
-                // Strict parse failed inside engine — keep stale
-                // caches (callers like Compile read `ast.result` to
-                // bail) and just bump the generation marker on the
-                // existing tree so the staleness check doesn't loop.
-                self.ast = Arc::new(AstCache {
+                // Strict parse failed inside engine — bump the
+                // generation marker on a parsing-failed cache so the
+                // staleness check doesn't loop. Callers that gate on
+                // success read `has_errors()`.
+                self.syntax = Arc::new(SyntaxCache {
                     generation: self.generation,
-                    result: Err("strict parse failed".into()),
+                    ast: Arc::new(StoredDefinition::default()),
+                    errors: vec!["strict parse failed".into()],
                 });
             }
         }
@@ -1231,7 +1291,7 @@ impl Document for ModelicaDocument {
         // no special-casing needed below. Every op follows the same
         // mutate / bump-generation / refresh-cache / emit-change path.
         let (range, replacement, change) =
-            op_to_patch(&self.source, &self.ast, &self.syntax.ast, op)?;
+            op_to_patch(&self.source, &self.syntax, &self.syntax.ast, op)?;
         self.apply_patch(range, replacement, change)
     }
 }
@@ -1577,7 +1637,7 @@ fn resolve_class<'a>(
     parsed: &'a StoredDefinition,
     class: &str,
 ) -> Result<&'a rumoca_session::parsing::ast::ClassDef, DocumentError> {
-    if let Err(msg) = &ast.result {
+    if let Some(msg) = ast.first_error() {
         return Err(DocumentError::ValidationFailed(format!(
             "cannot apply AST op while source has a parse error: {}",
             msg
@@ -3487,7 +3547,7 @@ mod tests {
         })
         .unwrap();
         host.document_mut().refresh_ast_now();
-        assert!(host.document().ast().result.is_err());
+        assert!(host.document().ast().has_errors());
     }
 
     #[test]

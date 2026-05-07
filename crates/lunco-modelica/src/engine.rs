@@ -117,6 +117,14 @@ impl ModelicaEngine {
         self.pending.contains(&doc_id)
     }
 
+    /// Number of async parses currently in flight. Used by
+    /// `drive_engine_sync` on wasm to throttle the cooperative
+    /// `AsyncComputeTaskPool` to one parse at a time so a 5 s rumoca
+    /// parse for a hidden tab can't starve the active tab.
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
     /// Take all completions accumulated since the last drain. Bevy
     /// adapter calls this once per `Update` tick.
     pub fn drain_completed(&mut self) -> Vec<(DocumentId, u64)> {

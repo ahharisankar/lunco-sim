@@ -48,6 +48,14 @@ impl PendingDrillIns {
     pub fn take(&mut self, file_id: &str) -> Option<String> {
         self.by_file_id.remove(file_id)
     }
+
+    /// Look up the queued qualified path for `file_id` without
+    /// removing it. Used by `open_model` so the dedup branches
+    /// (already-open / loading) can scope the tab to the same class
+    /// the post-load installer will eventually drill into.
+    pub fn peek(&self, file_id: &str) -> Option<&str> {
+        self.by_file_id.get(file_id).map(String::as_str)
+    }
 }
 
 /// Drain the Twin Browser action outbox each frame and dispatch.
@@ -92,11 +100,13 @@ pub fn drain_browser_actions(world: &mut World) {
                     .and_then(|s| s.to_str())
                     .unwrap_or("Untitled")
                     .to_string();
+                // Twin Browser file click → preview slot.
                 crate::ui::panels::package_browser::open_model(
                     world,
                     id,
                     name,
                     ModelLibrary::User,
+                    false,
                 );
             }
             BrowserAction::OpenModelicaClass {
@@ -125,11 +135,14 @@ pub fn drain_browser_actions(world: &mut World) {
                 world
                     .resource_mut::<PendingDrillIns>()
                     .queue(id.clone(), qualified_path);
+                // Twin Browser class click → preview slot (with
+                // a queued drill-in target above).
                 crate::ui::panels::package_browser::open_model(
                     world,
                     id,
                     name,
                     ModelLibrary::User,
+                    false,
                 );
             }
             BrowserAction::OpenLoadedClass {
@@ -141,20 +154,20 @@ pub fn drain_browser_actions(world: &mut World) {
                 // the canvas projector picks it up on first paint.
                 world
                     .resource_mut::<DrilledInClassNames>()
-                    .set(doc, qualified_path);
-                // Ensure the model-view tab exists / is focused for
-                // this document. Same call the package-browser load
-                // handler makes after a fresh allocation.
-                {
+                    .set(doc, qualified_path.clone());
+                // Allocate (or focus) a tab dedicated to this
+                // `(doc, qualified_path)` pair. Sibling classes in
+                // the same package now get distinct tabs.
+                let tab_id = {
                     let mut model_tabs = world
                         .resource_mut::<crate::ui::panels::model_view::ModelTabs>();
-                    model_tabs.ensure(doc);
-                }
+                    model_tabs.ensure_preview_for(doc, Some(qualified_path))
+                };
                 world
                     .resource_mut::<lunco_workbench::WorkbenchLayout>()
                     .open_instance(
                         crate::ui::panels::model_view::MODEL_VIEW_KIND,
-                        doc.raw(),
+                        tab_id,
                     );
                 // Make this doc the active workspace doc so the
                 // canvas (which reads `WorkspaceResource::active_document`

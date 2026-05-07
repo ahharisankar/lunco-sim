@@ -75,6 +75,7 @@ pub mod uri_handler;
 pub mod loaded_classes;
 pub mod text_node;
 pub mod wasm_autosave;
+pub mod wasm_clipboard;
 pub mod welcome_progress;
 /// Debounced AST reparse driver — see module docs.
 pub mod input_activity;
@@ -575,6 +576,7 @@ impl Plugin for ModelicaUiPlugin {
             .init_resource::<ModelicaDocumentRegistry>()
             .init_resource::<CompileStates>()
             .init_resource::<panels::model_view::ModelTabs>()
+            .init_resource::<panels::model_view::TabRenderContext>()
             .init_resource::<panels::code_editor::EditorBufferState>()
             .init_resource::<panels::console::ConsoleLog>()
             .init_resource::<panels::diagnostics::DiagnosticsLog>()
@@ -610,6 +612,14 @@ impl Plugin for ModelicaUiPlugin {
             .add_systems(Update, panels::package_browser::handle_package_loading_tasks)
             .add_systems(Update, cleanup_removed_documents)
             .add_systems(Update, drain_document_changes)
+            // Mirror the active document's volatile fields (source,
+            // line_starts, detected_name) into `WorkbenchState.open_model`
+            // every Update tick. Half-step Fix 3: until the 91 read
+            // sites migrate off `open_model` directly, this re-derives
+            // it from the registry so multiple writers (file load,
+            // diagram apply_ops, undo/redo, API edits) can't leave
+            // it stale. See `mirror_active_open_model` rustdoc.
+            .add_systems(Update, crate::ui::state::mirror_active_open_model)
             // Workspace shadow-sync: keep `WorkspaceResource` populated
             // from the existing document-registry lifecycle so the new
             // session surface is ready for step 5b.2 readers.
@@ -685,6 +695,12 @@ impl Plugin for ModelicaUiPlugin {
             .init_resource::<panels::canvas_diagram::DuplicateLoads>()
             .add_systems(Update, panels::canvas_diagram::drive_drill_in_loads)
             .add_systems(Update, panels::canvas_diagram::drive_duplicate_loads)
+            // Flip `cancel` on every non-active tab's in-flight
+            // canvas projection. On wasm `AsyncCompute` runs
+            // cooperatively on the main thread; uncancelled stale
+            // projections steal cycles the active tab's projection
+            // needs. See `cancel_inactive_projections` rustdoc.
+            .add_systems(Update, panels::canvas_diagram::cancel_inactive_projections)
             .register_panel(panels::inspector::InspectorPanel)
             .register_panel(panels::palette::ComponentPalettePanel)
             // Multi-instance: one tab per open document. Instances are

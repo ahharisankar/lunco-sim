@@ -267,6 +267,34 @@ pub const DEFAULT_MAX_DIAGRAM_NODES: usize = 1000;
 /// [`DEFAULT_MAX_DIAGRAM_NODES`] for the conventional value; the
 /// canvas projection reads it from `DiagramProjectionLimits` so
 /// users editing deeply composed models can raise it in Settings.
+/// True when the AST's top-level class is a `package` (or contains
+/// many nested classes). Heuristic for the package-projection guard:
+/// projecting an MSL package wrapper without a `target_class` walks
+/// every nested class synchronously — 60 s of frozen UI on
+/// `Modelica/Blocks/Continuous.mo`. The tree browser already shows the
+/// package as a folder; drill-in into a class lands here with
+/// `target_class = Some(...)` and proceeds normally.
+fn ast_looks_like_package(
+    ast: &rumoca_session::parsing::ast::StoredDefinition,
+) -> bool {
+    use rumoca_session::parsing::ClassType;
+    for class in ast.classes.values() {
+        if matches!(
+            class.class_type,
+            ClassType::Package
+        ) {
+            return true;
+        }
+        // Even if not declared a package, a class with many nested
+        // classes is the package-shaped MSL pattern (e.g. some files
+        // declare `model X` containing `model Sub1 ... model Sub30`).
+        if class.classes.len() > 5 {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn import_model_to_diagram_from_ast(
     ast: std::sync::Arc<rumoca_session::parsing::ast::StoredDefinition>,
     _source: &str,
@@ -286,6 +314,20 @@ pub fn import_model_to_diagram_from_ast(
     // sibling class (dozens in `Blocks/package.mo`) and render a
     // Frankenstein diagram. With it, we get only the drilled-in
     // class's components and connect equations.
+    // **Package-file guard.** Opening `Modelica/Blocks/Continuous.mo`
+    // (or any single-file MSL package) with no `target_class` lands
+    // here with an AST holding 30+ sibling classes. The builder walks
+    // every class synchronously — no yield points — and locks the
+    // wasm main thread for 60 s before the projection deadline trips.
+    // A "Frankenstein" multi-class diagram isn't useful anyway: tree
+    // browsing renders the package as a *folder* and drill-in into a
+    // specific class lands here with `target_class` set. Bail early
+    // for the package case so the canvas paints empty instantly;
+    // drill-in still works because that path goes through this same
+    // function with `target_class = Some(...)`.
+    if target_class.is_none() && ast_looks_like_package(&ast) {
+        return None;
+    }
     let mut builder = ModelicaComponentBuilder::from_ast(std::sync::Arc::clone(&ast));
     if let Some(target) = target_class {
         builder = builder.target_class(target);

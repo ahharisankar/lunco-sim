@@ -106,6 +106,55 @@ check_prerequisites() {
     fi
 }
 
+# Should we rebuild the off-thread worker bundle?
+#
+# The worker bin pulls all of `lunco-modelica` (lib + UI), so most
+# inner-loop UI edits invalidate it. But you DO want to skip it when
+# only HTML/JS/asset/build-script files changed, or — crucially —
+# when nothing under `crates/` changed since the last successful
+# worker build (re-running `build_web.sh` on a clean tree shouldn't
+# re-link 54 MB of wasm twice).
+#
+# Heuristic: rebuild iff any `.rs` or `Cargo.toml` under any local
+# crate is newer than the existing `lunica_worker.wasm` cargo output.
+# `find -newer` is cheap (one stat per file). False positive on a
+# changed third-party crate version is fine — that's a real rebuild.
+# False negative on a manual `cargo clean` is mitigated by the
+# `[ ! -f "$worker_wasm" ]` short-circuit below.
+#
+# Set `WORKER_REBUILD=force` to override (e.g. switching profiles).
+should_rebuild_worker() {
+    local worker_wasm="$1"
+    if [ "${WORKER_REBUILD:-}" = "force" ]; then
+        return 0
+    fi
+    if [ ! -f "$worker_wasm" ]; then
+        return 0
+    fi
+    # First file newer than the worker wasm = needs rebuild.
+    local newer
+    newer=$(find "$PROJECT_DIR/crates" \
+        \( -name '*.rs' -o -name 'Cargo.toml' \) \
+        -newer "$worker_wasm" -print -quit 2>/dev/null)
+    [ -n "$newer" ]
+}
+
+# Wrap cargo with sccache when it's installed.
+#
+# sccache caches per-rustc-invocation across worktrees / branches /
+# `cargo clean` cycles — biggest win on the cold rebuild that follows
+# a dependency-version bump. Disables Cargo incremental (sccache and
+# incremental fight; sccache is the better trade-off for our flow).
+maybe_sccache_env() {
+    if command -v sccache &> /dev/null; then
+        export RUSTC_WRAPPER="${RUSTC_WRAPPER:-sccache}"
+        export CARGO_INCREMENTAL=0
+        info "sccache: enabled (RUSTC_WRAPPER=$RUSTC_WRAPPER, CARGO_INCREMENTAL=0)"
+    else
+        info "sccache: not installed — install with \`cargo install sccache\` for cross-worktree caching"
+    fi
+}
+
 # Build the WASM binary
 build_wasm() {
     local binary="$1"
@@ -121,6 +170,8 @@ build_wasm() {
     info "Crate: $crate"
     info "Target: wasm32-unknown-unknown"
     info "Profile: $profile"
+
+    maybe_sccache_env
 
     # We use --no-default-features to avoid pulling in the full tokio/axum stack
     # from lunco-api, which depends on mio and other networking primitives
@@ -138,11 +189,22 @@ build_wasm() {
     # For lunica_web, also build the off-thread worker bundle. It runs in a
     # Web Worker so rumoca's compile (~20s) doesn't block the UI.
     if [ "$binary" = "lunica_web" ]; then
-        info "Building companion worker bundle: lunica_worker"
-        RUSTFLAGS="${RUSTFLAGS:-} --cfg=web_sys_unstable_apis" \
-            cargo build --profile "$profile" --target wasm32-unknown-unknown --bin lunica_worker -p "$crate" --no-default-features
+        local base_target_dir
+        base_target_dir=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
+        local worker_wasm="$base_target_dir/wasm32-unknown-unknown/$profile/lunica_worker.wasm"
+        if should_rebuild_worker "$worker_wasm"; then
+            info "Building companion worker bundle: lunica_worker"
+            RUSTFLAGS="${RUSTFLAGS:-} --cfg=web_sys_unstable_apis" \
+                cargo build --profile "$profile" --target wasm32-unknown-unknown --bin lunica_worker -p "$crate" --no-default-features
+        else
+            # Stamp the existing wasm so the next freshness check
+            # references "now" — cheap dependency change in a sibling
+            # script (build_web.sh edit, copying assets) won't
+            # otherwise re-trigger this reasoning every run.
+            info "Worker bundle up-to-date; skipping cargo build (set WORKER_REBUILD=force to override)"
+        fi
     fi
-    
+
     if [ $? -eq 0 ]; then
         success "WASM binary built successfully"
     else
@@ -227,9 +289,25 @@ generate_bindings() {
     # Assemble the bundle: bindings + index.html in one place.
     # Use a fresh dist dir so stale files from a previous binary version
     # don't get served accidentally.
+    #
+    # Stash the worker subdir before the wipe so the worker-bindgen
+    # skip path can restore it without re-running bindgen / wasm-opt.
+    # Without this, the wipe deletes a still-up-to-date worker bundle,
+    # the freshness check below sees a missing dist file, and the
+    # skip can never fire.
+    local stashed_worker=""
+    if [ -d "$dist_dir/worker" ]; then
+        stashed_worker=$(mktemp -d)
+        cp -r "$dist_dir/worker"/. "$stashed_worker/"
+    fi
     rm -rf "$dist_dir"
     mkdir -p "$dist_dir"
     cp "$bindgen_out_dir"/* "$dist_dir/"
+    if [ -n "$stashed_worker" ]; then
+        mkdir -p "$dist_dir/worker"
+        cp -r "$stashed_worker"/. "$dist_dir/worker/"
+        rm -rf "$stashed_worker"
+    fi
     if [ -f "$index_html" ]; then
         cp "$index_html" "$dist_dir/index.html"
     else
@@ -272,9 +350,24 @@ Run: cargo run -p lunco-assets -- download"
         local worker_bin="lunica_worker"
         local worker_bindgen_dir="$base_target_dir/web/$worker_bin"
         local worker_dist_dir="$dist_dir/worker"
+        local worker_wasm_src="$cargo_out_dir/${worker_bin}.wasm"
+        local worker_wasm_dist="$worker_dist_dir/${worker_bin}_bg.wasm"
+        # Skip the bindgen + wasm-opt + copy work entirely if the
+        # cargo output didn't move since the last dist build. Pairs
+        # with the `should_rebuild_worker` cargo-build skip in
+        # `build_wasm`. Set `WORKER_REBUILD=force` to override.
+        if [ "${WORKER_REBUILD:-}" != "force" ] \
+            && [ -f "$worker_wasm_src" ] \
+            && [ -f "$worker_wasm_dist" ] \
+            && [ ! "$worker_wasm_src" -nt "$worker_wasm_dist" ]; then
+            local worker_size
+            worker_size=$(du -h "$worker_wasm_dist" | cut -f1)
+            info "Worker bundle up-to-date ($worker_size) — bindgen skipped"
+            return 0
+        fi
         info "Generating bindings for worker bundle: $worker_bin"
         mkdir -p "$worker_bindgen_dir" "$worker_dist_dir"
-        $wasm_bindgen_cmd "$cargo_out_dir/${worker_bin}.wasm" \
+        $wasm_bindgen_cmd "$worker_wasm_src" \
             --out-dir "$worker_bindgen_dir" \
             --target web
         if [ $? -ne 0 ]; then
@@ -322,6 +415,32 @@ build_msl_bundle() {
     fi
     local dist_dir="$PROJECT_DIR/dist/$binary"
     local msl_dir="$dist_dir/msl"
+
+    # Skip the rumoca pre-parse + tar+zstd pass when nothing under
+    # `.cache/msl/` is newer than the existing `manifest.json`. Pack
+    # is content-addressed (`parsed-<sha>.bin.zst`), so a no-op rerun
+    # produces byte-identical output anyway — the only thing the
+    # script saves is ~2 s of parse + compress work.
+    #
+    # Override with `MSL_REBUILD=force` if you've changed the
+    # bundler binary itself (`build_msl_assets`) or its serialisation
+    # format and want a guaranteed re-pack.
+    if [ "${MSL_REBUILD:-}" != "force" ] && [ -f "$msl_dir/manifest.json" ]; then
+        local msl_src
+        for candidate in \
+            "$PROJECT_DIR/../.cache/msl" \
+            "$PROJECT_DIR/.cache/msl"; do
+            if [ -d "$candidate" ]; then msl_src="$candidate"; break; fi
+        done
+        if [ -n "$msl_src" ]; then
+            local newer
+            newer=$(find "$msl_src" -name '*.mo' -newer "$msl_dir/manifest.json" -print -quit 2>/dev/null)
+            if [ -z "$newer" ]; then
+                info "MSL bundle up-to-date ($msl_src) — skipping pack (set MSL_REBUILD=force to override)"
+                return 0
+            fi
+        fi
+    fi
 
     info "Packing MSL bundle for $binary..."
 

@@ -327,7 +327,10 @@ pub fn drive_drill_in_loads(
             crate::ui::loaded_classes::is_icon_only_class(&qualified)
                 || has_components == Some(false);
         if land_in_icon_view {
-            if let Some(tab) = tabs.get_mut(doc_id) {
+            // Update the drilled-in tab's view mode. Multiple tabs
+            // may now point at the same doc (sibling drill-ins);
+            // scope by `(doc, qualified)`.
+            if let Some(tab) = tabs.find_for_mut(doc_id, Some(qualified.as_str())) {
                 tab.view_mode = crate::ui::panels::model_view::ModelViewMode::Icon;
             }
         }
@@ -368,15 +371,28 @@ pub fn drill_into_class(world: &mut World, qualified: &str) {
         })
     };
     if let Some(doc_id) = target_doc {
-        // Switch focus to this doc's tab and record the drilled-in
-        // class so the canvas projection scopes itself.
-        if let Some(mut tabs) =
-            world.get_resource_mut::<crate::ui::panels::model_view::ModelTabs>()
-        {
-            if let Some(tab) = tabs.get_mut(doc_id) {
+        // Allocate (or focus) a tab dedicated to this `(doc, class)`.
+        // Distinct sibling classes from the same `.mo` file get their
+        // own tabs — that's the whole point of keying ModelTabs by
+        // TabId rather than DocumentId.
+        let tab_id = {
+            let mut tabs = world
+                .resource_mut::<crate::ui::panels::model_view::ModelTabs>();
+            // Drill-in is a deliberate navigation gesture (canvas
+            // double-click), so the tab is pinned via ensure_for —
+            // not the preview slot. Same-class re-drill focuses;
+            // sibling drills still get their own tabs.
+            let tab_id = tabs.ensure_for(doc_id, Some(qualified.to_string()));
+            if let Some(tab) = tabs.get_mut(tab_id) {
                 tab.view_mode = crate::ui::panels::model_view::ModelViewMode::Canvas;
             }
-        }
+            tab_id
+        };
+        // `DrilledInClassNames[doc]` is now refreshed every render
+        // pass by `sync_active_tab_to_doc`, but seed it here too so
+        // any system that runs between the OpenTab dispatch and the
+        // first render (e.g. canvas projection's drive system) sees
+        // the right scope immediately.
         if let Some(mut names) =
             world.get_resource_mut::<DrilledInClassNames>()
         {
@@ -387,8 +403,12 @@ pub fn drill_into_class(world: &mut World, qualified: &str) {
         {
             workspace.active_document = Some(doc_id);
         }
+        world.commands().trigger(lunco_workbench::OpenTab {
+            kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
+            instance: tab_id,
+        });
         bevy::log::info!(
-            "[CanvasDiagram] drill-in: focused open doc for `{}`",
+            "[CanvasDiagram] drill-in: opened tab #{tab_id} for `{}` on existing doc",
             qualified,
         );
         return;
@@ -426,10 +446,14 @@ fn open_drill_in_tab(
     let existing_doc = {
         let registry = world.resource::<ModelicaDocumentRegistry>();
         let tabs = world.resource::<crate::ui::panels::model_view::ModelTabs>();
-        let class_names = world.resource::<DrilledInClassNames>();
-        tabs.iter_docs().find(|&doc_id| {
+        // A tab whose `(doc.file, drilled_class)` matches the new
+        // request — re-focus it instead of allocating a duplicate.
+        tabs.iter().find_map(|(_id, state)| {
+            if state.drilled_class.as_deref() != Some(qualified) {
+                return None;
+            }
             let same_file = registry
-                .host(doc_id)
+                .host(state.doc)
                 .and_then(|h| match h.document().origin() {
                     lunco_doc::DocumentOrigin::File { path, .. } => {
                         Some(path == file_path)
@@ -437,11 +461,7 @@ fn open_drill_in_tab(
                     _ => None,
                 })
                 .unwrap_or(false);
-            same_file
-                && class_names
-                    .get(doc_id)
-                    .map(|n| n == qualified)
-                    .unwrap_or(false)
+            same_file.then_some(state.doc)
         })
     };
     let (doc_id, needs_load) = if let Some(id) = existing_doc {
@@ -500,17 +520,19 @@ fn open_drill_in_tab(
     // drilled FROM a canvas, so the canvas is what they expect
     // to see). Default `view_mode` is Text for newly-created
     // scratch models; drill-in is a different use case.
-    {
+    let tab_id = {
         let mut model_tabs =
             world.resource_mut::<crate::ui::panels::model_view::ModelTabs>();
-        model_tabs.ensure(doc_id);
-        if let Some(tab) = model_tabs.get_mut(doc_id) {
+        let tab_id =
+            model_tabs.ensure_for(doc_id, Some(qualified.to_string()));
+        if let Some(tab) = model_tabs.get_mut(tab_id) {
             tab.view_mode = crate::ui::panels::model_view::ModelViewMode::Canvas;
         }
-    }
+        tab_id
+    };
     world.commands().trigger(lunco_workbench::OpenTab {
         kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
-        instance: doc_id.raw(),
+        instance: tab_id,
     });
 
     bevy::log::info!(

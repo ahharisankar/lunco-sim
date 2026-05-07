@@ -139,6 +139,16 @@ pub struct PackageTreeCache {
     pub twin_scan_task: Option<Task<TwinState>>,
     /// Path currently being renamed (if any) + its edit buffer.
     pub rename: RenameState,
+    /// Whether the bundled tree has been rebuilt with the indexer's
+    /// per-file class trees. `PackageTreeCache::new()` runs at app
+    /// startup — on wasm that's *before* the MSL bundle (which
+    /// carries `msl_index.json`) finishes fetching, so the first
+    /// pass falls back to flat-leaf rendering of every bundled file.
+    /// `handle_package_loading_tasks` flips this to `true` once it
+    /// re-runs `build_bundled_tree()` against a populated index, so
+    /// LunCo Examples expand into their inner classes (Engine,
+    /// Tank, RocketStage, …) instead of staying as opaque leaves.
+    pub bundled_tree_indexed: bool,
 }
 
 /// User's Twin workspace — a folder on disk being browsed as a tree.
@@ -252,6 +262,13 @@ impl PackageTreeCache {
             is_loading: false,
         });
 
+        // Native: msl_index.json is on disk synchronously at build
+        // time, so `build_bundled_tree()` above already returned the
+        // indexed shape — no rebuild needed. Wasm: bundle still
+        // fetching, so the eager call returned flat leaves; mark for
+        // rebuild once `handle_package_loading_tasks` sees the
+        // indexer settle.
+        let bundled_tree_indexed = !crate::visual_diagram::msl_bundled_trees().is_empty();
         Self {
             roots,
             tasks: Vec::new(),
@@ -261,6 +278,7 @@ impl PackageTreeCache {
             twin: None,
             twin_scan_task: None,
             rename: RenameState::default(),
+            bundled_tree_indexed,
         }
     }
 }
@@ -333,6 +351,240 @@ fn should_skip(name: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 fn scan_msl_dir(dir: &std::path::Path, package_path: String) -> Vec<PackageNode> {
+    // Wasm: enumerate from the in-memory MSL bundle instead of the
+    // filesystem (which doesn't exist). The bundle is a `HashMap<
+    // PathBuf, Vec<u8>>` keyed by the same relative paths the
+    // filesystem would have (`Modelica/Blocks/package.mo`,
+    // `Modelica/Blocks/Discrete.mo`, …), so the same package_path
+    // → tree-node mapping applies — we just read the listing from
+    // hashmap keys instead of `read_dir`.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = dir;
+        return scan_msl_inmem(&package_path);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        scan_msl_dir_native(dir, package_path)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn scan_msl_inmem(package_path: &str) -> Vec<PackageNode> {
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    let Some(source) = lunco_assets::msl::global_msl_source() else {
+        return Vec::new();
+    };
+    let in_mem = match source {
+        lunco_assets::msl::MslAssetSource::InMemory(m) => m,
+        // Filesystem-backed `MslAssetSource` shouldn't occur on wasm
+        // (no fs), but bail safely if it does.
+        _ => return Vec::new(),
+    };
+
+    // Translate the dotted package path to a slash-prefixed key.
+    // Empty package_path is the bundle root (rare; only the very
+    // top-level call before "Modelica" was pushed).
+    let prefix: String = package_path.replace('.', "/");
+    let prefix_with_slash = if prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{prefix}/")
+    };
+
+    let mut results: Vec<PackageNode> = Vec::new();
+    let mut seen_subpkg: HashSet<String> = HashSet::new();
+    // Two passes over the same key set:
+    //   1. Spot direct subdirs (those that contain a `package.mo`
+    //      one segment deeper) and direct `.mo` files.
+    //   2. Inline-child harvest from this package's own `package.mo`
+    //      (handled below, after the main loop).
+    for (path, _) in in_mem.files.iter() {
+        let Some(rel) = path.to_str().and_then(|s| s.strip_prefix(&prefix_with_slash)) else {
+            // Allow the bundle's root scan (`prefix == ""`) — every
+            // key strips trivially.
+            if prefix_with_slash.is_empty() {
+                if let Some(s) = path.to_str() {
+                    s
+                } else {
+                    continue;
+                };
+                // Fall through; handled by the explicit loop below.
+                // (Kept simple — root scan rarely runs.)
+            }
+            continue;
+        };
+        // First segment after the prefix. Exactly one segment → leaf
+        // file or top-level marker (`package.mo`); two or more → a
+        // sub-package (we record the first segment).
+        let mut segs = rel.split('/');
+        let first = match segs.next() {
+            Some(s) if !s.is_empty() => s,
+            _ => continue,
+        };
+        let is_deeper = segs.next().is_some();
+        if is_deeper {
+            // Sub-package candidate. Only count it if the bundle
+            // actually has `<prefix>/<first>/package.mo` — that's the
+            // marker that distinguishes a package directory from a
+            // stray nested file (rare in MSL but possible).
+            if seen_subpkg.contains(first) {
+                continue;
+            }
+            let pkg_key = if prefix.is_empty() {
+                format!("{first}/package.mo")
+            } else {
+                format!("{prefix}/{first}/package.mo")
+            };
+            if in_mem.files.contains_key(&PathBuf::from(&pkg_key)) {
+                seen_subpkg.insert(first.to_string());
+                let sub_path = if package_path.is_empty() {
+                    first.to_string()
+                } else {
+                    format!("{package_path}.{first}")
+                };
+                let id = format!("msl_{}", sub_path.replace('.', "_"));
+                results.push(PackageNode::Category {
+                    id,
+                    name: first.to_string(),
+                    package_path: sub_path,
+                    fs_path: PathBuf::from(&pkg_key),
+                    children: None,
+                    is_loading: false,
+                });
+            }
+        } else if first.ends_with(".mo") && first != "package.mo" {
+            let display_name = first.trim_end_matches(".mo").to_string();
+            let qualified = if package_path.is_empty() {
+                display_name.clone()
+            } else {
+                format!("{package_path}.{display_name}")
+            };
+            let key = if prefix.is_empty() {
+                first.to_string()
+            } else {
+                format!("{prefix}/{first}")
+            };
+            // Multi-class package files (e.g.
+            // `Modelica/Blocks/Continuous.mo` containing
+            // `package Continuous ... block Integrator ... block
+            // Derivative ...`) need to render as expandable tree
+            // nodes, not opaque leaves. Use the pre-parsed AST from
+            // the MSL bundle (cheap dictionary lookup; no parse on
+            // the main thread) and, if the top class is a package
+            // with children, emit a Category whose children are the
+            // inner classes. Falls back to a flat leaf when the file
+            // holds a single class (the common MSL leaf shape) or
+            // when no parsed AST is available yet.
+            if let Some(node) = parsed_msl_to_package_node(&key, &qualified, &display_name) {
+                results.push(node);
+            } else {
+                let kind_str = in_mem
+                    .files
+                    .get(&PathBuf::from(&key))
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                    .and_then(peek_class_kind_from_source);
+                results.push(leaf_model_node(&qualified, &display_name, kind_str));
+            }
+        }
+    }
+
+    // Inline children harvest from `<prefix>/package.mo` — same as
+    // the native path, but reading from in-memory bundle.
+    let pkg_key = if prefix.is_empty() {
+        "package.mo".to_string()
+    } else {
+        format!("{prefix}/package.mo")
+    };
+    if let Some(bytes) = in_mem.files.get(&PathBuf::from(&pkg_key)) {
+        if let Ok(source_str) = std::str::from_utf8(bytes) {
+            let ast = rumoca_phase_parse::parse_to_recovered_ast(source_str, &pkg_key);
+            if let Some((_, top_class)) = ast.classes.iter().next() {
+                let existing_names: HashSet<String> =
+                    results.iter().map(|n| n.name().to_string()).collect();
+                for (child_short, child_def) in &top_class.classes {
+                    if existing_names.contains(child_short) {
+                        continue;
+                    }
+                    let child_qualified = if package_path.is_empty() {
+                        child_short.to_string()
+                    } else {
+                        format!("{package_path}.{child_short}")
+                    };
+                    results.push(class_def_to_node(
+                        &PathBuf::from(&pkg_key),
+                        &child_qualified,
+                        child_short,
+                        child_def,
+                    ));
+                }
+            }
+        }
+    }
+
+    results.sort_by_key(omedit_sort_key);
+    results
+}
+
+/// Build a `PackageNode` for a multi-class MSL file by reading its
+/// pre-parsed AST out of [`crate::msl_remote::global_parsed_msl`].
+/// Returns `None` when no parsed AST is available (cold boot before
+/// MSL bundle ready, or a file that isn't part of the bundle), when
+/// the source is a single-class leaf (the common MSL shape — caller
+/// emits a flat leaf in that case), or when the top class has no
+/// inner classes (e.g. an empty package). Wasm-only — native takes
+/// the disk-walking path.
+#[cfg(target_arch = "wasm32")]
+fn parsed_msl_to_package_node(
+    bundle_key: &str,
+    qualified: &str,
+    short_name: &str,
+) -> Option<PackageNode> {
+    use rumoca_session::parsing::ClassType;
+    use std::path::PathBuf;
+    let bundle = crate::msl_remote::global_parsed_msl()?;
+    let ast = bundle.iter().find(|(k, _)| k == bundle_key).map(|(_, a)| a)?;
+    let (_top_name, top_class) = ast.classes.iter().next()?;
+    if !matches!(top_class.class_type, ClassType::Package) || top_class.classes.is_empty() {
+        return None;
+    }
+    let bundle_path = PathBuf::from(bundle_key);
+    Some(class_def_to_node(&bundle_path, qualified, short_name, top_class))
+}
+
+/// Cheap class-kind sniffer for leaf MSL files. Returns `Some("model")`
+/// / `"connector"` / `"package"` / etc. by scanning the first
+/// non-comment, non-encapsulated keyword in the source. Native uses
+/// `peek_class_header` which calls into the rumoca lexer and also
+/// reads the file from disk; this duplicate avoids the read step on
+/// wasm where the source is already in memory.
+#[cfg(target_arch = "wasm32")]
+fn peek_class_kind_from_source(src: &str) -> Option<String> {
+    for line in src.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("//") || line.starts_with("/*") {
+            continue;
+        }
+        for word in line.split_whitespace() {
+            match word {
+                "model" | "block" | "connector" | "package"
+                | "record" | "type" | "function" | "class" => {
+                    return Some(word.to_string());
+                }
+                "encapsulated" | "partial" | "operator" | "expandable"
+                | "pure" | "impure" | "redeclare" | "final"
+                | "inner" | "outer" | "replaceable" => continue,
+                _ => return None,
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn scan_msl_dir_native(dir: &std::path::Path, package_path: String) -> Vec<PackageNode> {
     let mut results = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -638,6 +890,29 @@ pub fn handle_package_loading_tasks(
         find_and_update_node(&mut cache.roots, &result.parent_id, result.children);
     }
 
+    // Bundled tree rebuild on wasm. The eager build at
+    // `PackageTreeCache::new()` ran before the MSL bundle finished
+    // fetching, so every file showed as a flat leaf instead of an
+    // expandable package. As soon as the indexer's per-file class
+    // trees become available (i.e. after `MslRemotePlugin` installs
+    // the `MslAssetSource::InMemory`), rebuild the `bundled_root`
+    // children once so LunCo Examples / future bundled libraries
+    // expose their inner classes (Engine, Tank, RocketStage, …).
+    if !cache.bundled_tree_indexed
+        && !crate::visual_diagram::msl_bundled_trees().is_empty()
+    {
+        let new_children = build_bundled_tree();
+        for root in cache.roots.iter_mut() {
+            if let PackageNode::Category { id, children, .. } = root {
+                if id == "bundled_root" {
+                    *children = Some(new_children);
+                    break;
+                }
+            }
+        }
+        cache.bundled_tree_indexed = true;
+    }
+
     // Process file loading tasks
     let mut finished_files = Vec::new();
     cache.file_tasks.retain_mut(|task| {
@@ -682,10 +957,16 @@ pub fn handle_package_loading_tasks(
         // If the Twin Browser dispatcher queued a drill-in for this
         // file, apply it now. The canvas projector reads
         // `DrilledInClassNames` on its next tick and lands on the
-        // requested class — saves a second click.
-        let queued_qualified = pending_drill_ins.take(&result.dedup_key);
+        // requested class — saves a second click. Also stamp the
+        // tab's `drilled_class` so `sync_active_tab_to_doc` keeps
+        // republishing this scope on every render and so the tab
+        // title reflects the class name (not the package file).
+        let queued_qualified = pending_drill_ins.take(&result.id);
         if let Some(qualified) = queued_qualified {
-            drilled_in.set(doc_id, qualified);
+            drilled_in.set(doc_id, qualified.clone());
+            if let Some(tab) = model_tabs.find_for_mut(doc_id, None) {
+                tab.drilled_class = Some(qualified);
+            }
         }
 
         workbench.open_model = Some(OpenModel {
@@ -705,10 +986,10 @@ pub fn handle_package_loading_tasks(
         workspace.active_document = Some(doc_id);
 
         // Open (or focus) the multi-instance tab for this document.
-        model_tabs.ensure(doc_id);
+        let tab_id = model_tabs.ensure(doc_id);
         layout.open_instance(
             crate::ui::panels::model_view::MODEL_VIEW_KIND,
-            doc_id.raw(),
+            tab_id,
         );
     }
 }
@@ -942,7 +1223,9 @@ impl Panel for PackageBrowserPanel {
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| id.clone());
-            open_model(world, id, name, ModelLibrary::User);
+            // Files-panel "Open this file" → pinned (deliberate
+            // file-system pick, not a casual browser click).
+            open_model(world, id, name, ModelLibrary::User, true);
         }
 
         // Commit a rename — std::fs::rename, then trigger a rescan so
@@ -1001,9 +1284,9 @@ impl Panel for PackageBrowserPanel {
 
         if let Some(action) = to_open {
             match action {
-                PackageAction::Open(id, name, lib) => {
+                PackageAction::Open(id, name, lib, pinned) => {
                     queue_drill_in_if_inline(world, &id, &lib);
-                    open_model(world, id, name, lib);
+                    open_model(world, id, name, lib, pinned);
                 }
                 PackageAction::Instantiate { msl_path, display_name } => {
                     instantiate_on_active_canvas(world, &msl_path, &display_name);
@@ -1015,21 +1298,30 @@ impl Panel for PackageBrowserPanel {
         // Re-open an already-allocated in-memory model. We pass the id;
         // `open_model`'s mem:// branch now consults the registry to
         // restore the user's current source rather than regenerating
-        // from a template.
+        // from a template. Reopen via section header → pinned (the
+        // user picked a specific entry, not a casual browse).
         if let Some(id) = reopen_in_memory {
             // Name is the part after "mem://".
             let name = id.strip_prefix("mem://").unwrap_or(&id).to_string();
-            open_model(world, id, name, ModelLibrary::InMemory);
+            open_model(world, id, name, ModelLibrary::InMemory, true);
         }
     }
 }
 
 enum PackageAction {
-    Open(String, String, ModelLibrary),
-    /// Double-click on a class row — instantiate it on the currently
-    /// active canvas tab. Routes through the same `AddModelicaComponent`
-    /// Reflect event the palette uses, so origin-level read-only
-    /// rejection applies uniformly.
+    /// Open the class as a tab. `pinned` follows VS Code's preview
+    /// semantics: single-click in the browser opens unpinned (the
+    /// "preview" slot — replaces the previous preview tab); double-
+    /// click opens pinned (a permanent tab that won't be replaced
+    /// by the next browser click).
+    Open(String, String, ModelLibrary, bool),
+    /// Instantiate a class on the currently active canvas tab.
+    /// Routes through the same `AddModelicaComponent` Reflect event
+    /// the palette uses, so origin-level read-only rejection applies
+    /// uniformly. Currently unreachable from the tree (drag-and-drop
+    /// is the canonical instantiate gesture); kept for use by the
+    /// right-click context menu and for future palette wiring.
+    #[allow(dead_code)]
     Instantiate { msl_path: String, display_name: String },
     /// User started dragging a class row — stash a
     /// [`ComponentDragPayload`] (same resource the palette uses) so
@@ -1265,15 +1557,24 @@ fn render_node(
                     msl_path: msl_path_for_id(id, library),
                 });
             } else if resp.double_clicked() {
-                result = Some(PackageAction::Instantiate {
-                    msl_path: msl_path_for_id(id, library),
-                    display_name: name.clone(),
-                });
-            } else if resp.clicked() {
+                // VS Code semantics: double-click in browser opens
+                // pinned (permanent tab). Instantiation is the
+                // drag-and-drop gesture.
                 result = Some(PackageAction::Open(
                     id.clone(),
                     name.clone(),
                     library.clone(),
+                    true,
+                ));
+            } else if resp.clicked() {
+                // Single-click opens in the *preview* slot —
+                // replaces the previous unpinned tab so casual
+                // click-around doesn't pile up dozens of tabs.
+                result = Some(PackageAction::Open(
+                    id.clone(),
+                    name.clone(),
+                    library.clone(),
+                    false,
                 ));
             }
 
@@ -1362,15 +1663,42 @@ fn commit_current_model_edits(world: &mut World) {
     // enough, but the user may switch panels before the widget has
     // fired `lost_focus()`, so we force a checkpoint on model switch.
     let _ = model_name; // kept above for future per-class targeting
-    let buffer = world
+    // Only commit when the editor buffer is bound to the *currently
+    // active* doc. `EditorBufferState` is a singleton (one buffer
+    // shared across every tab) — when the user switches tabs, the
+    // buffer still holds the previous tab's text until `code_editor`
+    // re-mirrors `open_model.source` into it on the next render.
+    // Checkpointing without this guard pushes the previous tab's
+    // bytes into the *new* active doc on every switch, bumping its
+    // `generation` and triggering a spurious 5 s rumoca reparse on
+    // wasm — the "switching back to AnnotatedRocketStage stalls"
+    // symptom. `EditorBufferState.model_path` is updated to the
+    // active model's path each time the editor mirrors the source;
+    // if it matches `state.open_model.model_path` we know the buffer
+    // genuinely belongs to this doc.
+    let active_path = {
+        let state = world.resource::<WorkbenchState>();
+        state.open_model.as_ref().map(|m| m.model_path.clone())
+    };
+    let (buffer_path, buffer_text) = world
         .get_resource::<crate::ui::panels::code_editor::EditorBufferState>()
-        .map(|b| b.text.clone());
-    if let Some(src) = buffer {
-        if !src.is_empty() {
-            world
-                .resource_mut::<ModelicaDocumentRegistry>()
-                .checkpoint_source(doc_id, src);
-        }
+        .map(|b| (b.model_path.clone(), b.text.clone()))
+        .unwrap_or_default();
+    if active_path.as_deref() != Some(buffer_path.as_str()) {
+        // Buffer hasn't been mirrored to the active doc yet — skip;
+        // its contents belong to whichever tab the user just left.
+        return;
+    }
+    if !buffer_text.is_empty() {
+        world
+            .resource_mut::<ModelicaDocumentRegistry>()
+            .checkpoint_source(doc_id, buffer_text);
+        // VS Code semantics: a text edit promotes the tab from
+        // preview to pinned so the next browser click doesn't
+        // replace it.
+        world
+            .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
+            .pin_all_for_doc(doc_id);
     }
 }
 
@@ -1943,7 +2271,80 @@ fn instantiate_on_active_canvas(
     }
 }
 
-pub(crate) fn open_model(world: &mut World, id: String, name: String, library: ModelLibrary) {
+/// Resolve an `msl_path:` id (e.g. `Blocks.ImpureRandom`) to the
+/// actual MSL bundle key (e.g. `Modelica/Blocks/package.mo`). Walks
+/// the dotted path in the same order the bg task used to: try
+/// `<seg…>.mo`, then `<seg…>/package.mo`; first match wins.
+///
+/// Native: walks the `<cache>/msl/Modelica/` filesystem.
+/// Wasm: walks the in-memory bundle's HashMap keys (microseconds).
+fn resolve_msl_path_to_file(rel_path: &str) -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let parts: Vec<&str> = rel_path.split('.').collect();
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        let bundle = match lunco_assets::msl::global_msl_source()? {
+            lunco_assets::msl::MslAssetSource::InMemory(b) => b.clone(),
+            _ => return None,
+        };
+        for end in (1..=parts.len()).rev() {
+            let mut as_file = String::from("Modelica");
+            for seg in &parts[..end] {
+                as_file.push('/');
+                as_file.push_str(seg);
+            }
+            let key_file = PathBuf::from(format!("{as_file}.mo"));
+            if bundle.files.contains_key(&key_file) {
+                return Some(key_file);
+            }
+            let key_pkg = PathBuf::from(format!("{as_file}/package.mo"));
+            if bundle.files.contains_key(&key_pkg) {
+                return Some(key_pkg);
+            }
+        }
+        let root = PathBuf::from("Modelica/package.mo");
+        if bundle.files.contains_key(&root) {
+            return Some(root);
+        }
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let msl_root = lunco_assets::msl_dir();
+        for end in (1..=parts.len()).rev() {
+            let mut as_file = msl_root.join("Modelica");
+            as_file.push(parts[..end].join("/"));
+            as_file.set_extension("mo");
+            if as_file.exists() {
+                return Some(as_file);
+            }
+            let mut as_pkg = msl_root.join("Modelica");
+            as_pkg.push(parts[..end].join("/"));
+            as_pkg.push("package.mo");
+            if as_pkg.exists() {
+                return Some(as_pkg);
+            }
+        }
+        let root = msl_root.join("Modelica").join("package.mo");
+        if root.is_file() {
+            return Some(root);
+        }
+        None
+    }
+}
+
+/// Open or focus a tab for `id`. `pinned` follows VS Code preview
+/// semantics: `false` opens in (or replaces) the unpinned preview
+/// slot; `true` opens a permanent tab that subsequent browser
+/// clicks won't replace.
+pub(crate) fn open_model(
+    world: &mut World,
+    id: String,
+    name: String,
+    library: ModelLibrary,
+    pinned: bool,
+) {
     // Before navigating away, flush any in-progress work on the current
     // model into its Document. Matches the text editor's focus-loss
     // commit so the user's changes survive a round-trip.
@@ -2051,12 +2452,12 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
         // workbench's `on_open_tab` observer picks it up after the
         // render system completes.
         if let Some(doc) = doc_id {
-            world
+            let tab_id = world
                 .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
                 .ensure(doc);
             world.commands().trigger(lunco_workbench::OpenTab {
                 kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
-                instance: doc.raw(),
+                instance: tab_id,
             });
         }
         let _ = id;
@@ -2072,17 +2473,66 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
     // (source-root model + per-(doc, qualified) tab key); for now each
     // click reserves its own DocumentId.
     let dedup_key = id.clone();
-    let path_buf = std::path::PathBuf::from(&id);
+    // For `msl_path:Foo.Bar` ids, pre-resolve to the actual MSL file
+    // path on the main thread (HashMap lookups, microseconds) so the
+    // doc's `DocumentOrigin::File.path` carries a real bundle key
+    // (`Modelica/Blocks/Sources.mo`). The wasm short-circuit in
+    // `drive_engine_sync` looks the path up in the pre-parsed MSL
+    // bundle to skip the worker round-trip; without a real key it
+    // always misses, and the worker spends minutes re-parsing a
+    // 152 KB file the bundle already has the AST for.
+    let path_buf: std::path::PathBuf = if let Some(rel) = id.strip_prefix("msl_path:") {
+        resolve_msl_path_to_file(rel).unwrap_or_else(|| std::path::PathBuf::from(&id))
+    } else {
+        std::path::PathBuf::from(&id)
+    };
+    // Derive a qualified-class scope for the tab. Two sources:
+    // * `msl_path:Foo.Bar.Baz` — the suffix is the qualified name.
+    // * `bundled://file#Foo.Bar` — already routed via PendingDrillIns
+    //   above; peek into that queue here so the dedup branches below
+    //   can still scope the tab on a refocus. None when the user
+    //   clicked a bare file (whole-package view).
+    let target_class: Option<String> = if let Some(rel) =
+        id.strip_prefix("msl_path:")
+    {
+        Some(rel.to_string())
+    } else if let Some(pending) = world
+        .get_resource::<crate::ui::browser_dispatch::PendingDrillIns>()
+    {
+        pending.peek(&id).map(str::to_string)
+    } else {
+        None
+    };
     let already_open: Option<lunco_doc::DocumentId> = world
         .resource::<ModelicaDocumentRegistry>()
         .find_by_path(&path_buf);
+    // Closure picks `ensure_for` (pinned, persistent) vs
+    // `ensure_preview_for` (replaces the unpinned preview slot).
+    let acquire_tab = |world: &mut World, doc: lunco_doc::DocumentId| {
+        let mut tabs = world
+            .resource_mut::<crate::ui::panels::model_view::ModelTabs>();
+        if pinned {
+            tabs.ensure_for(doc, target_class.clone())
+        } else {
+            tabs.ensure_preview_for(doc, target_class.clone())
+        }
+    };
     if let Some(doc) = already_open {
-        world
-            .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
-            .ensure(doc);
+        // Sibling classes from the same .mo file get distinct tabs.
+        // Seed `DrilledInClassNames[doc]` for the projector before
+        // the tab renders — `sync_active_tab_to_doc` republishes from
+        // the tab on every render, and tabs without a `drilled_class`
+        // (legacy refocus) leave the resource untouched, so this
+        // initial set sticks.
+        if let Some(q) = target_class.as_deref() {
+            world
+                .resource_mut::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
+                .set(doc, q.to_string());
+        }
+        let tab_id = acquire_tab(world, doc);
         world.commands().trigger(lunco_workbench::OpenTab {
             kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
-            instance: doc.raw(),
+            instance: tab_id,
         });
         if let Some(mut state) = world.get_resource_mut::<WorkbenchState>() {
             state.is_loading = false;
@@ -2094,9 +2544,15 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
         .loading_ids
         .get(&dedup_key)
     {
+        if let Some(q) = target_class.as_deref() {
+            world
+                .resource_mut::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
+                .set(doc, q.to_string());
+        }
+        let tab_id = acquire_tab(world, doc);
         world.commands().trigger(lunco_workbench::OpenTab {
             kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
-            instance: doc.raw(),
+            instance: tab_id,
         });
         if let Some(mut state) = world.get_resource_mut::<WorkbenchState>() {
             state.is_loading = false;
@@ -2118,12 +2574,10 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
     // even though the parse is still running off-thread. The model
     // view paints a "Loading…" overlay while the registry has no
     // host for the reserved id yet.
-    world
-        .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
-        .ensure(reserved_doc_id);
+    let tab_id = acquire_tab(world, reserved_doc_id);
     world.commands().trigger(lunco_workbench::OpenTab {
         kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
-        instance: reserved_doc_id.raw(),
+        instance: tab_id,
     });
     let writable = matches!(library, ModelLibrary::User);
     let origin = lunco_doc::DocumentOrigin::File {
@@ -2161,42 +2615,110 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
             // the `/package.mo` of the directory at that level. First
             // existing match wins. Drill-in (queued separately) lands
             // on the specific class within the loaded file.
-            let msl_root = lunco_assets::msl_dir();
+            //
+            // Native: filesystem under `<cache>/msl/Modelica/`.
+            // Wasm: in-memory bundle (`MslAssetSource::InMemory`) keyed
+            //       by the same relative paths the filesystem uses, so
+            //       the same walking algorithm applies — we just call
+            //       `.contains_key` instead of `.exists()` and route
+            //       reads through the bundle rather than `std::fs`.
             let parts: Vec<&str> = rel_path.split('.').collect();
-            let mut full_path: std::path::PathBuf = msl_root.join("Modelica");
-            'walk: for end in (1..=parts.len()).rev() {
-                // <Modelica>/<segment0>/<...>/<segmentN>.mo
-                let mut as_file = msl_root.join("Modelica");
-                as_file.push(parts[..end].join("/"));
-                as_file.set_extension("mo");
-                if as_file.exists() {
-                    full_path = as_file;
-                    break 'walk;
+            #[cfg(target_arch = "wasm32")]
+            {
+                use std::path::PathBuf;
+                let bundle = match lunco_assets::msl::global_msl_source() {
+                    Some(lunco_assets::msl::MslAssetSource::InMemory(b)) => Some(b.clone()),
+                    _ => None,
+                };
+                let mut chosen_key: Option<PathBuf> = None;
+                if let Some(b) = bundle.as_ref() {
+                    'walk: for end in (1..=parts.len()).rev() {
+                        let mut as_file = String::from("Modelica");
+                        for seg in &parts[..end] {
+                            as_file.push('/');
+                            as_file.push_str(seg);
+                        }
+                        let key_file = PathBuf::from(format!("{as_file}.mo"));
+                        if b.files.contains_key(&key_file) {
+                            chosen_key = Some(key_file);
+                            break 'walk;
+                        }
+                        let key_pkg = PathBuf::from(format!("{as_file}/package.mo"));
+                        if b.files.contains_key(&key_pkg) {
+                            chosen_key = Some(key_pkg);
+                            break 'walk;
+                        }
+                    }
+                    if chosen_key.is_none() {
+                        let root_pkg = PathBuf::from("Modelica/package.mo");
+                        if b.files.contains_key(&root_pkg) {
+                            chosen_key = Some(root_pkg);
+                        }
+                    }
                 }
-                // <Modelica>/<segment0>/<...>/<segmentN>/package.mo
-                let mut as_pkg = msl_root.join("Modelica");
-                as_pkg.push(parts[..end].join("/"));
-                as_pkg.push("package.mo");
-                if as_pkg.exists() {
-                    full_path = as_pkg;
-                    break 'walk;
+                let bytes = chosen_key
+                    .as_ref()
+                    .and_then(|k| bundle.as_ref().and_then(|b| b.files.get(k).cloned()));
+                match bytes.and_then(|v| String::from_utf8(v).ok()) {
+                    Some(s) => s,
+                    None => format!(
+                        "// Could not locate `{rel_path}` in the in-memory MSL bundle.\n\
+                         // (Bundle status: {})\n",
+                        if bundle.is_some() {
+                            "loaded but key missing"
+                        } else {
+                            "not yet installed (MSL fetch may still be in flight)"
+                        }
+                    ),
                 }
             }
-            // Final fallback: Modelica's own package.mo. Catches the
-            // case where the class is defined inline inside the
-            // root MSL package itself (rare, but valid Modelica).
-            if !full_path.is_file() {
-                full_path = msl_root.join("Modelica").join("package.mo");
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let msl_root = lunco_assets::msl_dir();
+                let mut full_path: std::path::PathBuf = msl_root.join("Modelica");
+                'walk: for end in (1..=parts.len()).rev() {
+                    let mut as_file = msl_root.join("Modelica");
+                    as_file.push(parts[..end].join("/"));
+                    as_file.set_extension("mo");
+                    if as_file.exists() {
+                        full_path = as_file;
+                        break 'walk;
+                    }
+                    let mut as_pkg = msl_root.join("Modelica");
+                    as_pkg.push(parts[..end].join("/"));
+                    as_pkg.push("package.mo");
+                    if as_pkg.exists() {
+                        full_path = as_pkg;
+                        break 'walk;
+                    }
+                }
+                if !full_path.is_file() {
+                    full_path = msl_root.join("Modelica").join("package.mo");
+                }
+                std::fs::read_to_string(&full_path).unwrap_or_else(|e| {
+                    format!("// Error reading {}\n// {:?}", full_path.display(), e)
+                })
             }
-            std::fs::read_to_string(&full_path).unwrap_or_else(|e| {
-                format!("// Error reading {}\n// {:?}", full_path.display(), e)
-            })
         } else {
-            // Default User model load
-            let path = std::path::PathBuf::from(&id_clone);
-            std::fs::read_to_string(&path).unwrap_or_else(|e| {
-                format!("// Error reading {:?}\n// {:?}", path, e)
-            })
+            // Default User model load. Wasm has no filesystem at runtime
+            // — return a placeholder rather than panicking inside
+            // `read_to_string` (the libstd wasm32-unknown-unknown stub
+            // resolves relative paths via `current_dir()` which fatals
+            // with "no filesystem on this platform").
+            #[cfg(target_arch = "wasm32")]
+            {
+                format!(
+                    "// User-model load not supported on web (no filesystem).\n\
+                     // id = {id_clone}\n"
+                )
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let path = std::path::PathBuf::from(&id_clone);
+                std::fs::read_to_string(&path).unwrap_or_else(|e| {
+                    format!("// Error reading {:?}\n// {:?}", path, e)
+                })
+            }
         };
 
         // Compute line starts (zero allocation scan)
@@ -2210,10 +2732,23 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
         // Use the name from the UI immediately instead of parsing the whole AST.
         let detected_name = Some(name_clone);
 
-        // Pre-compute text layout in the background (no fonts needed for LayoutJob logic)
-        let style = egui::Style::default();
-        let mut layout_job = crate::ui::panels::code_editor::modelica_layouter(&style, &source_text);
-        layout_job.wrap.max_width = f32::INFINITY;
+        // Pre-compute text layout in the background. Skip on wasm —
+        // `AsyncComputeTaskPool` runs cooperatively on the main thread
+        // there, so this 184 KB-MSL-tokeniser walk is exactly the
+        // stall the user sees clicking a Modelica.Blocks node. egui
+        // recomputes layout on first render anyway, but only for the
+        // visible rect (not the whole 150 KB file), which is cheap.
+        // Native: keep the pre-compute — real worker threads, free.
+        #[cfg(target_arch = "wasm32")]
+        let layout_job: Option<bevy_egui::egui::text::LayoutJob> = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        let layout_job = {
+            let style = egui::Style::default();
+            let mut job =
+                crate::ui::panels::code_editor::modelica_layouter(&style, &source_text);
+            job.wrap.max_width = f32::INFINITY;
+            Some(job)
+        };
 
         // Heavy: rumoca parse happens here, off the UI thread. The
         // resulting `ModelicaDocument` carries its own copy of the
@@ -2234,7 +2769,7 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
             source: source_text.into(),
             line_starts: line_starts.into(),
             detected_name,
-            layout_job: Some(layout_job),
+            layout_job,
             doc_id: reserved_doc_id,
             doc,
         }
@@ -2361,9 +2896,9 @@ pub(crate) fn render_root_subtree(world: &mut World, ui: &mut egui::Ui, root_id:
     }
     if let Some(a) = action {
         match a {
-            PackageAction::Open(id, name, lib) => {
+            PackageAction::Open(id, name, lib, pinned) => {
                 queue_drill_in_if_inline(world, &id, &lib);
-                open_model(world, id, name, lib);
+                open_model(world, id, name, lib, pinned);
             }
             PackageAction::Instantiate {
                 msl_path,

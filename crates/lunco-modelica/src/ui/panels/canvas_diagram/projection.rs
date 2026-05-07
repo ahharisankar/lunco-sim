@@ -468,6 +468,30 @@ pub(super) fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramN
             }),
             origin: None,
         });
+        // ── DIAG: per-projection record of what flow_vars resolved
+        // for each edge. Lets us correlate "edge X had empty
+        // flow_vars on first projection but populated after re-
+        // projection on node move" with port-resolution behaviour.
+        let src_path_dbg = src_node
+            .map(|n| format!("{}.{}", n.instance_name, edge.source_port))
+            .unwrap_or_default();
+        let tgt_path_dbg = tgt_node
+            .map(|n| format!("{}.{}", n.instance_name, edge.target_port))
+            .unwrap_or_default();
+        let src_port_ports: Vec<String> = src_node
+            .map(|n| n.component_def.ports.iter().map(|p| p.name.clone()).collect())
+            .unwrap_or_default();
+        let resolved_flow_vars: Vec<String> = src_port_def
+            .as_ref()
+            .map(|p| p.flow_vars.iter().map(|f| f.name.clone()).collect())
+            .unwrap_or_default();
+        bevy::log::info!(
+            "[proj-diag] edge {src_path_dbg} -> {tgt_path_dbg} \
+             src_port_def_found={} src_node_ports={src_port_ports:?} \
+             flow_vars={resolved_flow_vars:?} connector_type={:?}",
+            src_port_def.is_some(),
+            connector_type,
+        );
     }
 
     (scene, id_map)
