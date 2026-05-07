@@ -949,10 +949,16 @@ pub fn handle_package_loading_tasks(
         // If the Twin Browser dispatcher queued a drill-in for this
         // file, apply it now. The canvas projector reads
         // `DrilledInClassNames` on its next tick and lands on the
-        // requested class — saves a second click.
+        // requested class — saves a second click. Also stamp the
+        // tab's `drilled_class` so `sync_active_tab_to_doc` keeps
+        // republishing this scope on every render and so the tab
+        // title reflects the class name (not the package file).
         let queued_qualified = pending_drill_ins.take(&result.id);
         if let Some(qualified) = queued_qualified {
-            drilled_in.set(doc_id, qualified);
+            drilled_in.set(doc_id, qualified.clone());
+            if let Some(tab) = model_tabs.find_for_mut(doc_id, None) {
+                tab.drilled_class = Some(qualified);
+            }
         }
 
         workbench.open_model = Some(OpenModel {
@@ -972,10 +978,10 @@ pub fn handle_package_loading_tasks(
         workspace.active_document = Some(doc_id);
 
         // Open (or focus) the multi-instance tab for this document.
-        model_tabs.ensure(doc_id);
+        let tab_id = model_tabs.ensure(doc_id);
         layout.open_instance(
             crate::ui::panels::model_view::MODEL_VIEW_KIND,
-            doc_id.raw(),
+            tab_id,
         );
     }
 }
@@ -2429,12 +2435,12 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
         // workbench's `on_open_tab` observer picks it up after the
         // render system completes.
         if let Some(doc) = doc_id {
-            world
+            let tab_id = world
                 .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
                 .ensure(doc);
             world.commands().trigger(lunco_workbench::OpenTab {
                 kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
-                instance: doc.raw(),
+                instance: tab_id,
             });
         }
         let _ = id;
@@ -2463,16 +2469,44 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
     } else {
         std::path::PathBuf::from(&id)
     };
+    // Derive a qualified-class scope for the tab. Two sources:
+    // * `msl_path:Foo.Bar.Baz` — the suffix is the qualified name.
+    // * `bundled://file#Foo.Bar` — already routed via PendingDrillIns
+    //   above; peek into that queue here so the dedup branches below
+    //   can still scope the tab on a refocus. None when the user
+    //   clicked a bare file (whole-package view).
+    let target_class: Option<String> = if let Some(rel) =
+        id.strip_prefix("msl_path:")
+    {
+        Some(rel.to_string())
+    } else if let Some(pending) = world
+        .get_resource::<crate::ui::browser_dispatch::PendingDrillIns>()
+    {
+        pending.peek(&id).map(str::to_string)
+    } else {
+        None
+    };
     let already_open: Option<lunco_doc::DocumentId> = world
         .resource::<ModelicaDocumentRegistry>()
         .find_by_path(&path_buf);
     if let Some(doc) = already_open {
-        world
+        // Sibling classes from the same .mo file get distinct tabs.
+        // Seed `DrilledInClassNames[doc]` for the projector before
+        // the tab renders — `sync_active_tab_to_doc` republishes from
+        // the tab on every render, and tabs without a `drilled_class`
+        // (legacy refocus) leave the resource untouched, so this
+        // initial set sticks.
+        if let Some(q) = target_class.as_deref() {
+            world
+                .resource_mut::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
+                .set(doc, q.to_string());
+        }
+        let tab_id = world
             .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
-            .ensure(doc);
+            .ensure_for(doc, target_class.clone());
         world.commands().trigger(lunco_workbench::OpenTab {
             kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
-            instance: doc.raw(),
+            instance: tab_id,
         });
         return;
     }
@@ -2481,9 +2515,17 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
         .loading_ids
         .get(&id)
     {
+        if let Some(q) = target_class.as_deref() {
+            world
+                .resource_mut::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
+                .set(doc, q.to_string());
+        }
+        let tab_id = world
+            .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
+            .ensure_for(doc, target_class.clone());
         world.commands().trigger(lunco_workbench::OpenTab {
             kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
-            instance: doc.raw(),
+            instance: tab_id,
         });
         return;
     }
@@ -2502,12 +2544,12 @@ pub(crate) fn open_model(world: &mut World, id: String, name: String, library: M
     // even though the parse is still running off-thread. The model
     // view paints a "Loading…" overlay while the registry has no
     // host for the reserved id yet.
-    world
+    let tab_id = world
         .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
-        .ensure(reserved_doc_id);
+        .ensure_for(reserved_doc_id, target_class.clone());
     world.commands().trigger(lunco_workbench::OpenTab {
         kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
-        instance: reserved_doc_id.raw(),
+        instance: tab_id,
     });
     let writable = matches!(library, ModelLibrary::User);
     let origin = lunco_doc::DocumentOrigin::File {

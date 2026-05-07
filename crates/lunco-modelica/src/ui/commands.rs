@@ -469,11 +469,23 @@ fn finish_close_after_save(
     let Some(mut pending) = pending else { return };
     let doc = trigger.event().doc;
     if pending.take(doc) {
-        commands.trigger(lunco_workbench::CloseTab {
-            kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
-            instance: doc.raw(),
+        // Multiple tabs may view the same doc (e.g. user opened
+        // sibling drill-ins or a future Text+Canvas split). Close
+        // every tab on this doc, then drop the doc.
+        commands.queue(move |world: &mut World| {
+            let tab_ids: Vec<u64> = world
+                .resource::<crate::ui::panels::model_view::ModelTabs>()
+                .iter()
+                .filter_map(|(id, s)| (s.doc == doc).then_some(id))
+                .collect();
+            for tab_id in tab_ids {
+                world.commands().trigger(lunco_workbench::CloseTab {
+                    kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
+                    instance: tab_id,
+                });
+            }
+            world.commands().trigger(CloseDocument { doc });
         });
-        commands.trigger(CloseDocument { doc });
     }
 }
 
@@ -483,6 +495,7 @@ fn finish_close_after_save(
 fn drain_pending_tab_closes(
     mut pending: ResMut<lunco_workbench::PendingTabCloses>,
     registry: Res<ModelicaDocumentRegistry>,
+    mut model_tabs: ResMut<crate::ui::panels::model_view::ModelTabs>,
     mut dialogs: ResMut<CloseDialogState>,
     mut commands: Commands,
 ) {
@@ -508,7 +521,14 @@ fn drain_pending_tab_closes(
         if kind != crate::ui::panels::model_view::MODEL_VIEW_KIND {
             continue; // Another domain's tab.
         }
-        let doc = DocumentId::new(instance);
+        // `instance` is now an opaque TabId — look up the doc that
+        // tab views.
+        let Some(doc) = model_tabs.get(instance).map(|s| s.doc) else {
+            // Tab vanished between request and drain. Forward the
+            // close so the dock layer drops it; nothing to do here.
+            commands.trigger(lunco_workbench::CloseTab { kind, instance });
+            continue;
+        };
         let (is_dirty, is_read_only) = registry
             .host(doc)
             .map(|h| {
@@ -524,8 +544,15 @@ fn drain_pending_tab_closes(
                 dialogs.pending.push(doc);
             }
         } else {
+            // Drop just this tab; only close the document when its
+            // last tab is going away. Multiple tabs viewing the
+            // same doc (split-view, sibling drill-ins) must outlive
+            // each individual close.
             commands.trigger(lunco_workbench::CloseTab { kind, instance });
-            commands.trigger(CloseDocument { doc });
+            model_tabs.close_tab(instance);
+            if model_tabs.count_for_doc(doc) == 0 {
+                commands.trigger(CloseDocument { doc });
+            }
         }
     }
 }
@@ -647,11 +674,24 @@ fn render_close_dialogs(
                 commands.trigger(SaveDocument { doc });
             }
             DialogAction::DontSave => {
-                commands.trigger(lunco_workbench::CloseTab {
-                    kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
-                    instance: doc.raw(),
+                // Close every tab pointing at this doc, then drop
+                // the doc. Multi-tab on a single doc (drill-in
+                // siblings, split-view) must all go together — the
+                // doc is what's being abandoned.
+                commands.queue(move |world: &mut World| {
+                    let tab_ids: Vec<u64> = world
+                        .resource::<crate::ui::panels::model_view::ModelTabs>()
+                        .iter()
+                        .filter_map(|(id, s)| (s.doc == doc).then_some(id))
+                        .collect();
+                    for tab_id in tab_ids {
+                        world.commands().trigger(lunco_workbench::CloseTab {
+                            kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
+                            instance: tab_id,
+                        });
+                    }
+                    world.commands().trigger(CloseDocument { doc });
                 });
-                commands.trigger(CloseDocument { doc });
             }
             DialogAction::Cancel => { /* drop from pending */ }
         }
@@ -728,11 +768,29 @@ fn resolve_editor_intent(
             // Ctrl+W goes through the same dirty-check + modal-prompt
             // pipeline as the tab × button. Push the tab id into the
             // workbench's close-request queue; `drain_pending_tab_closes`
-            // decides whether to close immediately or prompt.
-            pending_closes.push(lunco_workbench::TabId::Instance {
-                kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
-                instance: doc.raw(),
+            // decides whether to close immediately or prompt. Resolve
+            // a TabId for the active doc — Ctrl+W has no built-in
+            // notion of "which" tab when split-view is in use, so
+            // close any tab viewing the active doc.
+            commands.queue(move |world: &mut World| {
+                let Some(tab_id) = world
+                    .resource::<crate::ui::panels::model_view::ModelTabs>()
+                    .any_for_doc(doc)
+                else {
+                    return;
+                };
+                if let Some(mut q) = world
+                    .get_resource_mut::<lunco_workbench::PendingTabCloses>()
+                {
+                    q.push(lunco_workbench::TabId::Instance {
+                        kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
+                        instance: tab_id,
+                    });
+                }
             });
+            // `pending_closes` ResMut still required by signature; we
+            // do the queueing ourselves so we can read ModelTabs.
+            let _ = &mut pending_closes;
         }
         // Per AGENTS.md §4.1 rule 3: UI / keybinding gestures fire the
         // public Reflect command (`CompileActiveModel`), not the
@@ -1449,10 +1507,10 @@ fn on_create_new_scratch_model(
     // "active-document" pointer.
     workspace.active_document = Some(doc_id);
 
-    model_tabs.ensure(doc_id);
+    let tab_id = model_tabs.ensure(doc_id);
     commands.trigger(lunco_workbench::OpenTab {
         kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
-        instance: doc_id.raw(),
+        instance: tab_id,
     });
 }
 
@@ -1570,16 +1628,16 @@ fn on_duplicate_model_from_read_only(
             id: mem_id,
             doc: doc_id,
         });
-    model_tabs.ensure(doc_id);
+    let tab_id = model_tabs.ensure(doc_id);
     // Duplicated copies land in Canvas view — the whole point of
     // "make a playable copy of an MSL example" is to see the
     // diagram. Text view for editing is one toolbar click away.
-    if let Some(tab) = model_tabs.get_mut(doc_id) {
+    if let Some(tab) = model_tabs.get_mut(tab_id) {
         tab.view_mode = crate::ui::panels::model_view::ModelViewMode::Canvas;
     }
     commands.trigger(lunco_workbench::OpenTab {
         kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
-        instance: doc_id.raw(),
+        instance: tab_id,
     });
 
     // Spawn the heavy work off-thread. Task captures owned data
@@ -1726,17 +1784,18 @@ fn spawn_duplicate_class_task(world: &mut World, qualified: String, name_hint: S
     }
     // Examples are composed models — land in Canvas view so users
     // see the diagram on open, not the raw source.
-    {
+    let tab_id = {
         let mut model_tabs = world
             .resource_mut::<crate::ui::panels::model_view::ModelTabs>();
-        model_tabs.ensure(doc_id);
-        if let Some(tab) = model_tabs.get_mut(doc_id) {
+        let tab_id = model_tabs.ensure(doc_id);
+        if let Some(tab) = model_tabs.get_mut(tab_id) {
             tab.view_mode = crate::ui::panels::model_view::ModelViewMode::Canvas;
         }
-    }
+        tab_id
+    };
     world.commands().trigger(lunco_workbench::OpenTab {
         kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
-        instance: doc_id.raw(),
+        instance: tab_id,
     });
 
     // Bg task: resolve path → read file → extract target class →
@@ -2307,9 +2366,12 @@ fn on_focus_document_by_name(
             );
             return;
         };
+        let tab_id = world
+            .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
+            .ensure(doc);
         world.commands().trigger(lunco_workbench::OpenTab {
             kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
-            instance: doc.raw(),
+            instance: tab_id,
         });
     });
 }
@@ -2340,8 +2402,15 @@ fn on_set_view_mode(trigger: On<SetViewMode>, mut commands: Commands) {
             }
         };
         if let Some(mut tabs) = world.get_resource_mut::<ModelTabs>() {
-            if let Some(state) = tabs.get_mut(doc) {
-                state.view_mode = new_mode;
+            // ModelTabs is now keyed by TabId, not DocumentId. Find
+            // the first tab viewing `doc` and update it. Multi-tab
+            // (split-view) callers should use a per-tab variant when
+            // we expose one — for the API-driven SetViewMode there
+            // is no tab disambiguator yet.
+            if let Some(tab_id) = tabs.any_for_doc(doc) {
+                if let Some(state) = tabs.get_mut(tab_id) {
+                    state.view_mode = new_mode;
+                }
             }
         }
     });
@@ -3387,13 +3456,13 @@ fn on_open_file(trigger: On<OpenFile>, mut commands: Commands) {
         );
         // Land in Canvas view so the user sees the diagram.
         let mut tabs = world.resource_mut::<crate::ui::panels::model_view::ModelTabs>();
-        tabs.ensure(doc_id);
-        if let Some(tab) = tabs.get_mut(doc_id) {
+        let tab_id = tabs.ensure(doc_id);
+        if let Some(tab) = tabs.get_mut(tab_id) {
             tab.view_mode = crate::ui::panels::model_view::ModelViewMode::Canvas;
         }
         world.commands().trigger(lunco_workbench::OpenTab {
             kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
-            instance: doc_id.raw(),
+            instance: tab_id,
         });
         bevy::log::info!("[OpenFile] opened `{}` as `{}`", path, stem);
     });
@@ -3425,13 +3494,13 @@ fn open_bundled_in_world(world: &mut World, filename: &str) {
         lunco_doc::DocumentOrigin::untitled(display_name.clone()),
     );
     let mut tabs = world.resource_mut::<crate::ui::panels::model_view::ModelTabs>();
-    tabs.ensure(doc_id);
-    if let Some(tab) = tabs.get_mut(doc_id) {
+    let tab_id = tabs.ensure(doc_id);
+    if let Some(tab) = tabs.get_mut(tab_id) {
         tab.view_mode = crate::ui::panels::model_view::ModelViewMode::Canvas;
     }
     world.commands().trigger(lunco_workbench::OpenTab {
         kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
-        instance: doc_id.raw(),
+        instance: tab_id,
     });
     bevy::log::info!("[OpenFile] opened bundled `{}` as `{}`", filename, display_name);
 }
@@ -3457,9 +3526,12 @@ fn focus_in_memory_doc(world: &mut World, name: &str) {
         return;
     };
     // Re-fire OpenTab — workbench treats this as "focus existing".
+    let tab_id = world
+        .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
+        .ensure(doc_id);
     world.commands().trigger(lunco_workbench::OpenTab {
         kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
-        instance: doc_id.raw(),
+        instance: tab_id,
     });
 }
 

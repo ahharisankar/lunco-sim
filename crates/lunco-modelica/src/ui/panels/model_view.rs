@@ -57,76 +57,199 @@ pub enum ModelViewMode {
     Docs,
 }
 
-/// Per-tab state for a [`ModelViewPanel`] instance. One entry per
-/// currently-open document.
+/// Per-tab state for a [`ModelViewPanel`] instance.
 ///
-/// Kept minimal for v1 — currently just the view mode. Future fields
-/// (text cursor, scroll, pan, zoom, selection) land here when we move
-/// to truly independent split views.
+/// Tabs are now keyed by an opaque [`TabId`] (a counter-allocated
+/// `u64`) rather than the [`DocumentId`] they view. This lets the
+/// same document live in multiple tabs (e.g. a Text view and a
+/// Canvas view side-by-side) and lets sibling classes from the same
+/// `.mo` file open in distinct tabs (drilled-in classes set
+/// `drilled_class`).
 #[derive(Debug, Clone)]
 pub struct ModelTabState {
-    /// The Document this tab is viewing. Redundant with the
-    /// [`ModelTabs`] map key but kept on the value for ergonomic
-    /// access from render code.
+    /// The Document this tab is viewing.
     pub doc: DocumentId,
-    /// Text vs Diagram.
+    /// Qualified class name this tab is scoped to, when the tab was
+    /// opened via drill-in. `None` for plain "open document" tabs;
+    /// `Some("Modelica.Blocks.Continuous.PID")` for drilled-in tabs.
+    /// Distinct values produce distinct tabs even when `doc` matches.
+    pub drilled_class: Option<String>,
+    /// Text vs Diagram vs Icon vs Docs.
     pub view_mode: ModelViewMode,
 }
 
-/// Registry of open [`ModelViewPanel`] tabs, keyed by [`DocumentId`].
+/// Newtype-ish alias for tab instance ids. Stored on the workbench
+/// dock layer as a `u64`; we just give it a name here so call-site
+/// intent is readable.
+pub type TabId = u64;
+
+/// Registry of open [`ModelViewPanel`] tabs.
 ///
-/// "One tab per document" — opening the same `.mo` file twice focuses
-/// the existing tab instead of spawning a duplicate. Closing a tab
-/// drops the entry here but *does not* remove the underlying
-/// `ModelicaDocument` from [`ModelicaDocumentRegistry`]; the document
-/// survives in the Package Browser's "Your Models" list so the user
-/// can reopen it later.
+/// Keyed by [`TabId`] (allocated from `next_id`). Multiple tabs can
+/// reference the same [`DocumentId`] — distinguished by their
+/// `drilled_class` slot.
+///
+/// Closing a tab drops its entry here but *does not* remove the
+/// underlying `ModelicaDocument` from [`ModelicaDocumentRegistry`];
+/// the registry's lifetime is the union of all tabs viewing it.
 #[derive(Resource, Default)]
 pub struct ModelTabs {
-    tabs: HashMap<DocumentId, ModelTabState>,
+    tabs: HashMap<TabId, ModelTabState>,
+    next_id: u64,
 }
 
 impl ModelTabs {
-    /// Ensure a tab exists for `doc` and return its instance id.
-    ///
-    /// Call this together with
-    /// [`WorkbenchLayout::open_instance`](lunco_workbench::WorkbenchLayout::open_instance)
-    /// — that adds/focuses the dock tab, this records the per-tab
-    /// view state.
-    pub fn ensure(&mut self, doc: DocumentId) -> u64 {
-        self.tabs.entry(doc).or_insert_with(|| ModelTabState {
-            doc,
-            view_mode: ModelViewMode::default(),
-        });
-        doc.raw()
+    fn allocate_id(&mut self) -> TabId {
+        // Start at 1; 0 is sometimes used as an "unassigned" sentinel
+        // by API callers and we don't want a tab id to collide with
+        // it. Saturating-add since u64::MAX is a non-issue but the
+        // overflow check costs nothing.
+        self.next_id = self.next_id.saturating_add(1);
+        self.next_id
     }
 
-    /// Drop the per-tab state for `doc`. Pair with
-    /// [`WorkbenchLayout::close_instance`](lunco_workbench::WorkbenchLayout::close_instance).
+    /// Find an existing tab matching `(doc, drilled_class)` or
+    /// allocate a fresh one. Returns its [`TabId`]. The caller pairs
+    /// this with [`lunco_workbench::OpenTab`] to mount the dock tab.
+    pub fn ensure_for(
+        &mut self,
+        doc: DocumentId,
+        drilled_class: Option<String>,
+    ) -> TabId {
+        if let Some((id, _)) = self.tabs.iter().find(|(_, s)| {
+            s.doc == doc && s.drilled_class.as_deref() == drilled_class.as_deref()
+        }) {
+            return *id;
+        }
+        let id = self.allocate_id();
+        self.tabs.insert(
+            id,
+            ModelTabState {
+                doc,
+                drilled_class,
+                view_mode: ModelViewMode::default(),
+            },
+        );
+        id
+    }
+
+    /// Always allocate a fresh tab for `(doc, drilled_class)` even
+    /// when one already exists. Used by future "Open in new view"
+    /// actions (split-view).
+    pub fn open_new(
+        &mut self,
+        doc: DocumentId,
+        drilled_class: Option<String>,
+    ) -> TabId {
+        let id = self.allocate_id();
+        self.tabs.insert(
+            id,
+            ModelTabState {
+                doc,
+                drilled_class,
+                view_mode: ModelViewMode::default(),
+            },
+        );
+        id
+    }
+
+    /// Back-compat shim: ensure a no-drilled-class tab for `doc`.
+    /// Equivalent to `ensure_for(doc, None)`. Existing call sites
+    /// that opened "the tab for this doc" continue to work.
+    pub fn ensure(&mut self, doc: DocumentId) -> TabId {
+        self.ensure_for(doc, None)
+    }
+
+    /// Close the specific tab. Returns the tab state if it existed.
+    pub fn close_tab(&mut self, tab_id: TabId) -> Option<ModelTabState> {
+        self.tabs.remove(&tab_id)
+    }
+
+    /// Drop *every* tab pointing at `doc`. Used when a document is
+    /// fully closed (registry removal); all of its views must go
+    /// with it.
+    pub fn close_all_for_doc(&mut self, doc: DocumentId) -> Vec<TabId> {
+        let ids: Vec<TabId> = self
+            .tabs
+            .iter()
+            .filter_map(|(id, s)| (s.doc == doc).then_some(*id))
+            .collect();
+        for id in &ids {
+            self.tabs.remove(id);
+        }
+        ids
+    }
+
+    /// Back-compat shim for the old `close(doc)` API.
     pub fn close(&mut self, doc: DocumentId) {
-        self.tabs.remove(&doc);
+        let _ = self.close_all_for_doc(doc);
     }
 
-    /// Immutable lookup by document id.
-    pub fn get(&self, doc: DocumentId) -> Option<&ModelTabState> {
-        self.tabs.get(&doc)
+    /// Immutable lookup by tab id.
+    pub fn get(&self, tab_id: TabId) -> Option<&ModelTabState> {
+        self.tabs.get(&tab_id)
     }
 
-    /// Iterate the document ids of every currently-open tab.
-    /// Used by drill-in to avoid re-allocating a document when the
-    /// same class is already open in a tab.
+    /// Mutable lookup by tab id.
+    pub fn get_mut(&mut self, tab_id: TabId) -> Option<&mut ModelTabState> {
+        self.tabs.get_mut(&tab_id)
+    }
+
+    /// First tab viewing `doc` (any drilled class). Useful for
+    /// legacy code that wants "the" tab for a document.
+    pub fn any_for_doc(&self, doc: DocumentId) -> Option<TabId> {
+        self.tabs
+            .iter()
+            .find_map(|(id, s)| (s.doc == doc).then_some(*id))
+    }
+
+    /// Find a tab matching `(doc, drilled_class)`.
+    pub fn find_for(
+        &self,
+        doc: DocumentId,
+        drilled_class: Option<&str>,
+    ) -> Option<TabId> {
+        self.tabs.iter().find_map(|(id, s)| {
+            (s.doc == doc && s.drilled_class.as_deref() == drilled_class).then_some(*id)
+        })
+    }
+
+    /// Mutable variant of [`find_for`].
+    pub fn find_for_mut(
+        &mut self,
+        doc: DocumentId,
+        drilled_class: Option<&str>,
+    ) -> Option<&mut ModelTabState> {
+        self.tabs.iter_mut().find_map(|(_, s)| {
+            (s.doc == doc && s.drilled_class.as_deref() == drilled_class).then_some(s)
+        })
+    }
+
+    /// Iterate `(tab_id, state)` for all open tabs.
+    pub fn iter(&self) -> impl Iterator<Item = (TabId, &ModelTabState)> + '_ {
+        self.tabs.iter().map(|(id, s)| (*id, s))
+    }
+
+    /// Iterate the **distinct** document ids that have ≥1 tab open.
+    /// Drill-in dedup callers use this to avoid re-allocating a doc
+    /// for a class that's already on the dock.
     pub fn iter_docs(&self) -> impl Iterator<Item = DocumentId> + '_ {
-        self.tabs.keys().copied()
+        let mut seen = std::collections::HashSet::new();
+        self.tabs
+            .values()
+            .filter_map(move |s| seen.insert(s.doc).then_some(s.doc))
     }
 
-    /// Mutable lookup.
-    pub fn get_mut(&mut self, doc: DocumentId) -> Option<&mut ModelTabState> {
-        self.tabs.get_mut(&doc)
-    }
-
-    /// Whether a tab exists for `doc`.
+    /// Whether any tab is viewing `doc`.
     pub fn contains(&self, doc: DocumentId) -> bool {
-        self.tabs.contains_key(&doc)
+        self.any_for_doc(doc).is_some()
+    }
+
+    /// Count of tabs viewing `doc`. Lets close-flows decide whether
+    /// to remove the underlying document (count was 1) or leave it
+    /// alive for the remaining tabs.
+    pub fn count_for_doc(&self, doc: DocumentId) -> usize {
+        self.tabs.values().filter(|s| s.doc == doc).count()
     }
 }
 
@@ -168,8 +291,8 @@ impl InstancePanel for ModelViewPanel {
         //   `●` prefix   → unsaved changes
         //   `🔒` prefix  → read-only (Example / library — edits won't save)
         // Both can stack: `🔒 ● Battery` = read-only model the user tried to edit.
-        let doc = DocumentId::new(instance);
-        let (base, dirty, read_only) = resolve_tab_title(world, doc);
+        let (doc, drilled) = resolve_tab_target(world, instance);
+        let (base, dirty, read_only) = resolve_tab_title(world, doc, drilled.as_deref());
         let mut prefix = String::new();
         if read_only {
             prefix.push_str("🔒 ");
@@ -185,29 +308,38 @@ impl InstancePanel for ModelViewPanel {
     }
 
     fn render(&mut self, ui: &mut egui::Ui, world: &mut World, instance: u64) {
-        let doc = DocumentId::new(instance);
+        let tab_id: TabId = instance;
 
-        // Make sure the tab has a state entry (idempotent).
-        world.resource_mut::<ModelTabs>().ensure(doc);
+        // Resolve `(doc, drilled_class)` for this tab. If the tab id
+        // isn't yet registered (the workbench mounted us before our
+        // creator could record state — vanishingly rare path), bail
+        // gracefully rather than panicking.
+        let Some((doc, drilled)) = world
+            .resource::<ModelTabs>()
+            .get(tab_id)
+            .map(|s| (s.doc, s.drilled_class.clone()))
+        else {
+            return;
+        };
 
         // Sync the singleton `open_model` / editor buffer / diagram
-        // state to *this* tab before rendering. Side panels and the
-        // legacy body renderers all read these singletons; this is
-        // the v1 "active tab" signal. Splits of multiple tabs still
-        // share the singletons — per-tab buffers are a follow-up.
-        sync_active_tab_to_doc(world, doc);
+        // state to *this* tab before rendering. Also publishes the
+        // tab's drilled class into `DrilledInClassNames[doc]` so
+        // canvas projection / inspector / palette readers (which
+        // still key by doc) see this tab's scope.
+        sync_active_tab_to_doc(world, doc, drilled.as_deref());
 
         // Read the tab's desired view mode so the toolbar can reflect
         // (and, on click, mutate) it.
         let view_mode = world
             .resource::<ModelTabs>()
-            .get(doc)
+            .get(tab_id)
             .map(|s| s.view_mode)
             .unwrap_or_default();
 
         let new_view_mode = render_unified_toolbar(doc, view_mode, ui, world);
         if new_view_mode != view_mode {
-            if let Some(state) = world.resource_mut::<ModelTabs>().get_mut(doc) {
+            if let Some(state) = world.resource_mut::<ModelTabs>().get_mut(tab_id) {
                 state.view_mode = new_view_mode;
             }
         }
@@ -311,9 +443,26 @@ impl InstancePanel for ModelViewPanel {
     }
 }
 
-/// Compute `(base, dirty, read_only)` for `doc`. The tab's
-/// `InstancePanel::title` prefixes icons accordingly.
-fn resolve_tab_title(world: &World, doc: DocumentId) -> (String, bool, bool) {
+/// Resolve the `(doc, drilled_class)` pair this tab views from its
+/// stable [`TabId`]. Returns `(DocumentId::new(instance), None)` as
+/// a fallback for tab ids that haven't been registered yet — the
+/// workbench occasionally calls `title()` on freshly-restored
+/// layout entries before the creator has filled in [`ModelTabs`].
+fn resolve_tab_target(world: &World, instance: u64) -> (DocumentId, Option<String>) {
+    if let Some(state) = world.get_resource::<ModelTabs>().and_then(|t| t.get(instance)) {
+        return (state.doc, state.drilled_class.clone());
+    }
+    (DocumentId::new(instance), None)
+}
+
+/// Compute `(base, dirty, read_only)` for `doc` scoped to
+/// `drilled_class` when present. The tab's `InstancePanel::title`
+/// prefixes icons accordingly.
+fn resolve_tab_title(
+    world: &World,
+    doc: DocumentId,
+    drilled_class: Option<&str>,
+) -> (String, bool, bool) {
     if let Some(host) = world
         .get_resource::<ModelicaDocumentRegistry>()
         .and_then(|r| r.host(doc))
@@ -323,23 +472,11 @@ fn resolve_tab_title(world: &World, doc: DocumentId) -> (String, bool, bool) {
         // gesture) back onto a raw `.mo` file — often a package
         // aggregate like `Continuous.mo` that holds Der/PID/FirstOrder
         // side by side. The file's display name ("Continuous") then
-        // hides *which* class the user drilled into. Prefer the
-        // drilled-in class's short name when present.
-        let base = if let Some(class_names) = world
-            .get_resource::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
-        {
-            class_names
-                .get(doc)
-                .and_then(|qualified| {
-                    qualified
-                        .rsplit('.')
-                        .next()
-                        .map(str::to_string)
-                })
-                .unwrap_or_else(|| document.origin().display_name())
-        } else {
-            document.origin().display_name()
-        };
+        // hides *which* class the user drilled into. Prefer the tab's
+        // own `drilled_class` short name when present.
+        let base = drilled_class
+            .and_then(|qualified| qualified.rsplit('.').next().map(str::to_string))
+            .unwrap_or_else(|| document.origin().display_name());
         return (base, document.is_dirty(), document.is_read_only());
     }
 
@@ -368,7 +505,28 @@ fn resolve_tab_title(world: &World, doc: DocumentId) -> (String, bool, bool) {
 /// the active one). Mutates `selected_entity` to one of the entities
 /// linked to `doc`, if any — that's what the Telemetry / Inspector
 /// / Graphs side panels filter by.
-pub(crate) fn sync_active_tab_to_doc(world: &mut World, doc: DocumentId) {
+pub(crate) fn sync_active_tab_to_doc(
+    world: &mut World,
+    doc: DocumentId,
+    drilled_class: Option<&str>,
+) {
+    // Publish the active tab's drilled-class scope into the legacy
+    // `DrilledInClassNames[doc]` map so canvas projection /
+    // inspector / palette readers (still keyed by `doc`) see this
+    // tab's class — not whatever the previously-active tab put
+    // there. Only WRITE when the tab itself has a scope; never
+    // clear, because non-tab code paths (Twin Browser drill-in
+    // queue, browser_dispatch OpenLoadedClass) seed
+    // `DrilledInClassNames` directly and we must not overwrite
+    // their work just because *this* tab happens to have no
+    // explicit scope (which would unset their drill on the next
+    // render pass and the canvas would re-project at the package
+    // root, showing zero nodes).
+    if let Some(q) = drilled_class {
+        let mut names = world
+            .resource_mut::<crate::ui::panels::canvas_diagram::DrilledInClassNames>();
+        names.set(doc, q.to_string());
+    }
     // Already active AND the cached snapshot is from the real doc
     // (not a placeholder that filled in while a drill-in load was
     // still in flight). The check on non-empty source distinguishes:
