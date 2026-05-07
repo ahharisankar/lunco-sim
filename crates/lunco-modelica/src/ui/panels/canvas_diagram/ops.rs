@@ -1026,7 +1026,7 @@ pub(super) fn auto_arrange_now(world: &mut World, doc_id: lunco_doc::DocumentId)
 /// Resolve the active class name for an Auto-Arrange target. Prefers
 /// the drilled-in class name (for MSL drill-in tabs); falls back to
 /// the open document's detected model name.
-pub(super) fn active_class_for_doc(world: &mut World, doc_id: lunco_doc::DocumentId) -> Option<String> {
+pub fn active_class_for_doc(world: &mut World, doc_id: lunco_doc::DocumentId) -> Option<String> {
     if let Some(m) = world.get_resource::<DrilledInClassNames>() {
         if let Some(c) = m.get(doc_id) {
             return Some(c.to_string());

@@ -74,7 +74,7 @@ mod panel;
 pub use theme::CanvasThemeSnapshot;
 pub use panel::CanvasDiagramPanel;
 pub(crate) use panel::invalidate_port_icon_cache;
-pub use ops::{apply_one_op_as, apply_ops_as, apply_ops_public, on_auto_arrange_diagram};
+pub use ops::{active_class_for_doc, apply_one_op_as, apply_ops_as, apply_ops_public, on_auto_arrange_diagram};
 pub use pulse::{
     DEFAULT_EDGE_FLASH_MS, DEFAULT_PULSE_MS, EdgePulseHandle, PendingApiConnection,
     PendingApiConnectionQueue, PendingApiFocus, PendingApiFocusQueue, PulseEntry, PulseHandle,
@@ -788,7 +788,7 @@ pub enum ContextMenuTarget {
 /// to the workspace-wide focused tab. Code paths that aren't part
 /// of a tab body render (event observers, side-panel systems) hit
 /// the fallback.
-pub(super) fn active_doc_from_world(world: &World) -> Option<lunco_doc::DocumentId> {
+pub fn active_doc_from_world(world: &World) -> Option<lunco_doc::DocumentId> {
     if let Some((doc, _)) = world
         .get_resource::<crate::ui::panels::model_view::TabRenderContext>()
         .and_then(|c| c.current())

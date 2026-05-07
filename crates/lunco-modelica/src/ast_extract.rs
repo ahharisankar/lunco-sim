@@ -620,6 +620,325 @@ fn extract_numeric_binding(expr: &Option<Expression>) -> Option<f64> {
     numeric_of(expr)
 }
 
+/// Walk the component tree of a chosen root class (depth-first
+/// through nested instance components) and emit instance-qualified
+/// variable names — `tank.m`, `engine.thrust`, … — matching what the
+/// simulator publishes once compiled. Pre-compile, this lets the
+/// Variables list show "where" each value lives instead of a flat
+/// list of leaf identifiers that collide across components.
+///
+/// Stops recursing when a component's declared type isn't an AST
+/// class in this `StoredDefinition` (i.e. resolves to an MSL or
+/// user library that we'd need rumoca's resolver to walk). Those
+/// components are emitted as leaves under their qualified path —
+/// good enough for the common authored-domain models where Tank /
+/// Engine / Valve sit in the same file as RocketStage.
+/// Walk the component tree rooted at `root_class_short_name` and
+/// emit `(instance_qualified_name, optional_start_value)` for every
+/// continuous variable. `tank.m` etc — matches what the simulator
+/// publishes after compile, so pre-compile UI state is keyed the
+/// same way the canvas icons (`%tank.m` substitutions) and the
+/// post-compile worker do. `start = m_initial` modifications are
+/// resolved against `parameters` so tank-style icons render full
+/// before the user clicks Compile.
+pub fn extract_flat_variables_from_ast(
+    ast: &StoredDefinition,
+    root_class_short_name: &str,
+    parameters: &HashMap<String, f64>,
+) -> Vec<(String, Option<f64>)> {
+    let Some(root) = find_class_by_short_name(ast, root_class_short_name) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    walk_flat_vars(root, ast, "", parameters, &mut out);
+    out
+}
+
+/// Same flatten as [`extract_flat_variables_from_ast`] but for
+/// parameters — emits `(qualified_instance_path, leaf_name)` pairs
+/// like `("tank.m_initial", "m_initial")` so the UI can show
+/// users *which* component a parameter belongs to without losing
+/// the leaf identity that the existing edit / substitute pipeline
+/// expects. Top-level params on the root class come back with the
+/// leaf as the qualified path (no prefix).
+pub fn extract_flat_parameters_with_resolver(
+    ast: &StoredDefinition,
+    root_class_short_name: &str,
+    mut resolve_class: impl FnMut(&str) -> Option<ClassDef>,
+) -> Vec<(String, String)> {
+    let Some(root) = find_class_by_short_name(ast, root_class_short_name).cloned() else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut work: Vec<(ClassDef, String)> = vec![(root, String::new())];
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    while let Some((class, prefix)) = work.pop() {
+        for component in class.components.values() {
+            let is_input = matches!(component.causality, Causality::Input(_));
+            if is_input {
+                continue;
+            }
+            let qualified = if prefix.is_empty() {
+                component.name.clone()
+            } else {
+                format!("{prefix}{}", component.name)
+            };
+            let is_parameter = matches!(component.variability, Variability::Parameter(_));
+            let is_constant = matches!(component.variability, Variability::Constant(_));
+            if is_parameter || is_constant {
+                out.push((qualified, component.name.clone()));
+                continue;
+            }
+            // Non-parameter scalar — recurse into its type to find
+            // nested parameters. Same in-doc-then-cross-doc lookup
+            // as the variable walker.
+            let type_short = component
+                .type_name
+                .name
+                .last()
+                .map(|tok| tok.text.clone());
+            let type_qualified: String = component
+                .type_name
+                .name
+                .iter()
+                .map(|tok| tok.text.clone())
+                .collect::<Vec<_>>()
+                .join(".");
+            let in_doc = type_short
+                .as_deref()
+                .and_then(|n| find_class_by_short_name(ast, n))
+                .cloned();
+            let resolved = in_doc.or_else(|| resolve_class(&type_qualified));
+            if let Some(nested) = resolved {
+                if visited.insert(qualified.clone()) {
+                    work.push((nested, format!("{qualified}.")));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Same flatten as [`extract_flat_variables_from_ast`] but with a
+/// caller-supplied type resolver — typically wired to the workspace
+/// `ModelicaEngine` so connector classes defined in *other* open
+/// docs (or, eventually, MSL) round-trip into the variable list.
+/// Without this, components like `port_a: FluidPort` whose type
+/// isn't declared in the same `.mo` file resolve to nothing and the
+/// connector's `p`, `m_flow`, … scalars never appear pre-compile —
+/// matching exactly the bug the user spotted.
+///
+/// Iterative (work-queue) instead of recursive so the resolver
+/// closure doesn't have to be re-borrowed across recursion frames.
+pub fn extract_flat_variables_with_resolver(
+    ast: &StoredDefinition,
+    root_class_short_name: &str,
+    parameters: &HashMap<String, f64>,
+    mut resolve_class: impl FnMut(&str) -> Option<ClassDef>,
+) -> Vec<(String, Option<f64>)> {
+    let Some(root) = find_class_by_short_name(ast, root_class_short_name).cloned() else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, Option<f64>)> = Vec::new();
+    // (class, prefix) — `prefix` already includes a trailing `.`
+    // when non-empty so the leaf join is always `format!("{prefix}{name}")`.
+    let mut work: Vec<(ClassDef, String)> = vec![(root, String::new())];
+    // Cycle guard — won't recurse into a class we've already seen on
+    // the current path. Without this, a recursive type definition
+    // (rare but legal) would loop forever.
+    let mut visited_at_prefix: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    while let Some((class, prefix)) = work.pop() {
+        for component in class.components.values() {
+            let is_parameter = matches!(component.variability, Variability::Parameter(_));
+            let is_constant = matches!(component.variability, Variability::Constant(_));
+            let is_input = matches!(component.causality, Causality::Input(_));
+            if is_parameter || is_constant || is_input {
+                continue;
+            }
+            let qualified = if prefix.is_empty() {
+                component.name.clone()
+            } else {
+                format!("{prefix}{}", component.name)
+            };
+            // Try resolution: in-doc first (cheapest), then the
+            // caller-supplied cross-doc resolver. Use the type name
+            // exactly as written so qualified `Modelica.Fluid.…` and
+            // short `FluidPort` both go through the right path.
+            let type_short = component
+                .type_name
+                .name
+                .last()
+                .map(|tok| tok.text.clone());
+            let type_qualified: String = component
+                .type_name
+                .name
+                .iter()
+                .map(|tok| tok.text.clone())
+                .collect::<Vec<_>>()
+                .join(".");
+            let in_doc = type_short
+                .as_deref()
+                .and_then(|n| find_class_by_short_name(ast, n))
+                .cloned();
+            let resolved = in_doc.or_else(|| resolve_class(&type_qualified));
+            match resolved {
+                Some(nested) => {
+                    if visited_at_prefix.insert(qualified.clone()) {
+                        work.push((nested, format!("{qualified}.")));
+                    }
+                }
+                None => {
+                    let start = component
+                        .modifications
+                        .get("start")
+                        .and_then(|e| resolve_with_params(e, parameters));
+                    out.push((qualified, start));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn walk_flat_vars(
+    class: &ClassDef,
+    ast: &StoredDefinition,
+    prefix: &str,
+    parameters: &HashMap<String, f64>,
+    out: &mut Vec<(String, Option<f64>)>,
+) {
+    for component in class.components.values() {
+        let is_parameter = matches!(component.variability, Variability::Parameter(_));
+        let is_constant = matches!(component.variability, Variability::Constant(_));
+        let is_input = matches!(component.causality, Causality::Input(_));
+        if is_parameter || is_constant || is_input {
+            continue;
+        }
+        let qualified = if prefix.is_empty() {
+            component.name.clone()
+        } else {
+            format!("{prefix}{}", component.name)
+        };
+        // Resolve declared type to a class in this same doc and
+        // recurse. Primitives (Real, Integer, …) and external
+        // library types fall through to a leaf.
+        let type_short = component
+            .type_name
+            .name
+            .last()
+            .map(|tok| tok.text.clone());
+        let resolved = type_short
+            .as_deref()
+            .and_then(|n| find_class_by_short_name(ast, n));
+        match resolved {
+            Some(nested) => {
+                walk_flat_vars(nested, ast, &format!("{qualified}."), parameters, out)
+            }
+            None => {
+                let start = component
+                    .modifications
+                    .get("start")
+                    .and_then(|e| resolve_with_params(e, parameters));
+                out.push((qualified, start));
+            }
+        }
+    }
+}
+
+/// Like [`extract_variable_names_from_ast`] but also tags each
+/// variable with the short name of the class it was declared in
+/// (`("Tank", "m")`). Lets the UI show users *where* each variable
+/// lives — pure annotation pass over the existing class walk, no
+/// type-resolution / flattening.
+pub fn extract_variable_names_with_class_from_ast(
+    ast: &StoredDefinition,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    collect_variable_names_with_class(&ast.classes, &mut out);
+    out
+}
+
+fn collect_variable_names_with_class(
+    classes: &indexmap::IndexMap<String, ClassDef>,
+    out: &mut Vec<(String, String)>,
+) {
+    for (class_name, class) in classes {
+        for component in class.components.values() {
+            let is_parameter = matches!(component.variability, Variability::Parameter(_));
+            let is_constant = matches!(component.variability, Variability::Constant(_));
+            let is_input = matches!(component.causality, Causality::Input(_));
+            if !is_parameter && !is_constant && !is_input {
+                out.push((class_name.clone(), component.name.clone()));
+            }
+        }
+        collect_variable_names_with_class(&class.classes, out);
+    }
+}
+
+/// Variable `start=` modifier values, resolved against `parameters` for
+/// the common `Real m(start = m_initial)` pattern. Modelica's MLS §3.6
+/// `start` attribute is what the simulator uses as the initial value
+/// for a continuous state — the same value that should drive the
+/// component's icon when the user is staring at a paused / pre-compile
+/// model. Without this, every variable starts at 0 and visualisations
+/// like the propellant tank show empty until the simulator runs.
+///
+/// Recurses into nested classes the same way the other extractors do.
+/// Returns numeric values when:
+/// - `start = 4000` (literal)
+/// - `start = m_initial` and `m_initial` is in `parameters`
+/// Symbolic refs that don't resolve are dropped (no fallback).
+pub fn extract_variable_starts_from_ast(
+    ast: &StoredDefinition,
+    parameters: &HashMap<String, f64>,
+) -> HashMap<String, f64> {
+    let mut starts = HashMap::new();
+    collect_variable_starts(&ast.classes, parameters, &mut starts);
+    starts
+}
+
+fn collect_variable_starts(
+    classes: &indexmap::IndexMap<String, ClassDef>,
+    parameters: &HashMap<String, f64>,
+    out: &mut HashMap<String, f64>,
+) {
+    for class in classes.values() {
+        for component in class.components.values() {
+            let is_parameter = matches!(component.variability, Variability::Parameter(_));
+            let is_constant = matches!(component.variability, Variability::Constant(_));
+            let is_input = matches!(component.causality, Causality::Input(_));
+            if is_parameter || is_constant || is_input {
+                continue;
+            }
+            if let Some(expr) = component.modifications.get("start") {
+                if let Some(v) = resolve_with_params(expr, parameters) {
+                    out.insert(component.name.clone(), v);
+                }
+            }
+        }
+        collect_variable_starts(&class.classes, parameters, out);
+    }
+}
+
+/// Numeric resolver for modifier expressions: literal first, then
+/// fall back to looking up the qualified component-reference path
+/// in `parameters`. Lets `start = m_initial` become 4000 when
+/// `parameter Real m_initial = 4000` is in scope.
+fn resolve_with_params(
+    expr: &Expression,
+    parameters: &HashMap<String, f64>,
+) -> Option<f64> {
+    if let Some(v) = numeric_of(expr) {
+        return Some(v);
+    }
+    if let Expression::ComponentReference(cr) = expr {
+        let key = format!("{cr}");
+        return parameters.get(&key).copied();
+    }
+    None
+}
+
 /// Parse a numeric literal expression (including a leading `-` unary
 /// minus — rumoca represents `-5` as `Unary(Minus, 5)`). Used for
 /// `min`/`max` modifier extraction where negative bounds are common.

@@ -24,6 +24,7 @@ pub fn prefill_models_from_ast(
     mut registry: ResMut<ModelicaDocumentRegistry>,
     mut cursor: ResMut<PrefillCursor>,
     mut q_models: Query<&mut ModelicaModel>,
+    engine: Option<Res<crate::engine_resource::ModelicaEngineHandle>>,
 ) {
     struct Plan {
         doc: DocumentId,
@@ -33,7 +34,11 @@ pub fn prefill_models_from_ast(
         parameter_bounds: HashMap<String, (Option<f64>, Option<f64>)>,
         inputs_with_defaults: HashMap<String, f64>,
         runtime_inputs: Vec<String>,
-        variable_names: Vec<String>,
+        // `(qualified_name, optional_start_value)` — `tank.m` etc.
+        // matching what the simulator publishes post-compile.
+        // Composite components (`tank: Tank`) are filtered out by
+        // the walker; only scalar leaves end up here.
+        flat_variables: Vec<(String, Option<f64>)>,
         descriptions: HashMap<String, String>,
     }
     let mut plans: Vec<Plan> = Vec::new();
@@ -47,15 +52,43 @@ pub fn prefill_models_from_ast(
         let Some(model_name) = ast_extract::extract_model_name_from_ast(ast) else {
             continue;
         };
+        let parameters = ast_extract::extract_parameters_from_ast(ast);
+        // Flatten through `tank: Tank → Real m(start = m_initial)`
+        // → `tank.m = 4000` so the canvas icons (which substitute
+        // `%tank.m`) and any plot binding find the right key
+        // pre-compile. Falls back to leaf names from the
+        // single-class extractor for any variable the flatten
+        // missed (root class's own components, or types not in
+        // this doc).
+        let root = model_name
+            .rsplit('.')
+            .next()
+            .unwrap_or(&model_name)
+            .to_string();
+        // Cross-doc resolver: any type the in-doc walker misses
+        // (e.g. `FluidPort` declared in a sibling open file or in
+        // MSL) goes through the workspace engine's `class_def`.
+        // Without this, connector subvariables like `valve.port_a.p`
+        // never appear pre-compile.
+        let flat_variables = if let Some(handle) = engine.as_ref() {
+            ast_extract::extract_flat_variables_with_resolver(
+                ast,
+                &root,
+                &parameters,
+                |type_qualified| handle.lock().class_def(type_qualified),
+            )
+        } else {
+            ast_extract::extract_flat_variables_from_ast(ast, &root, &parameters)
+        };
         plans.push(Plan {
             doc: doc_id,
             gen,
             model_name,
-            parameters: ast_extract::extract_parameters_from_ast(ast),
+            parameters,
             parameter_bounds: ast_extract::extract_parameter_bounds_from_ast(ast),
             inputs_with_defaults: ast_extract::extract_inputs_with_defaults_from_ast(ast),
             runtime_inputs: ast_extract::extract_input_names_from_ast(ast),
-            variable_names: ast_extract::extract_variable_names_from_ast(ast),
+            flat_variables,
             descriptions: ast_extract::extract_descriptions(document.source())
                 .into_iter()
                 .collect(),
@@ -82,8 +115,14 @@ pub fn prefill_models_from_ast(
                         model.inputs.entry(name.clone()).or_insert(0.0);
                     }
                     model.variables.clear();
-                    for name in &plan.variable_names {
-                        model.variables.insert(name.clone(), 0.0);
+                    // Only the flattened qualified leaves end up in
+                    // `variables`. Composite component instances
+                    // (e.g. `tank: Tank`, `engine: Engine`) are not
+                    // observable scalars — the walker recurses into
+                    // them to emit `tank.m`, `engine.thrust`, etc.,
+                    // matching what the simulator publishes.
+                    for (qname, start) in &plan.flat_variables {
+                        model.variables.insert(qname.clone(), start.unwrap_or(0.0));
                     }
                     model.descriptions = plan.descriptions;
                 }
@@ -96,11 +135,10 @@ pub fn prefill_models_from_ast(
             for name in &plan.runtime_inputs {
                 inputs.entry(name.clone()).or_insert(0.0);
             }
-            let variables: HashMap<String, f64> = plan
-                .variable_names
-                .iter()
-                .map(|n| (n.clone(), 0.0))
-                .collect();
+            let mut variables: HashMap<String, f64> = HashMap::new();
+            for (qname, start) in &plan.flat_variables {
+                variables.insert(qname.clone(), start.unwrap_or(0.0));
+            }
             let entity = commands
                 .spawn((
                     Name::new(plan.model_name.clone()),
