@@ -445,15 +445,83 @@ impl Panel for CodeEditorPanel {
         // a hash from the widget's location and we can't target it
         // from outside the closure.
         let text_edit_id = egui::Id::new("modelica_code_editor");
-        // Snapshot the cursor range BEFORE TextEdit runs. egui's
-        // TextEdit collapses the selection on any pointer click,
-        // including secondary (right) click — so without this, the
-        // context menu opens with no selection and Copy/Cut have
-        // nothing to act on. We restore the snapshot below if the
-        // user right-clicked.
+        // Snapshot the cursor range BEFORE TextEdit runs. We use it
+        // to derive `selection_chars` so the toolbar / keyboard /
+        // paste handlers know what range was selected at the start
+        // of this frame, even after TextEdit's own pointer logic
+        // mutates the cursor.
         let pre_cursor: Option<egui::text::CCursorRange> =
             egui::TextEdit::load_state(ui.ctx(), text_edit_id)
                 .and_then(|s| s.cursor.char_range());
+
+        // ── No right-click context menu ──
+        //
+        // We don't ship a right-click menu inside the editor. Two
+        // upstream egui issues make a usable one impossible without
+        // forking the crate:
+        //
+        //   1. `TextEdit::pointer_interaction` collapses the active
+        //      selection on every pointer press, including
+        //      secondary, and the fields needed to suppress that
+        //      (`PointerState.pointer_events` etc.) are
+        //      `pub(crate)`. See egui issue #5382 ("Context menu on
+        //      selected text") — open since Nov 2024 with no fix.
+        //
+        //   2. egui only paints the selection highlight while
+        //      TextEdit owns focus (`paint_text_selection` gate at
+        //      `text_edit/builder.rs:719`). Any popup steals focus
+        //      to handle keyboard nav, so even after restoring the
+        //      cursor range the highlight disappears.
+        //
+        // We tried snapshot/restore + force-focus + manual popup
+        // rendering across several iterations; every patch exposed
+        // the next layer of upstream behaviour. The toolbar below is
+        // the pragmatic alternative — visible affordance for Copy /
+        // Cut / Paste / Select all that doesn't fight egui. Keyboard
+        // shortcuts (Ctrl/Cmd+C/X/V) keep working independently via
+        // the wasm clipboard bridge + the keyboard handler further
+        // down.
+        let selection_chars: Option<(usize, usize)> = pre_cursor.and_then(|r| {
+            let a = r.primary.index;
+            let b = r.secondary.index;
+            let (s, e) = (a.min(b), a.max(b));
+            if e > s { Some((s, e)) } else { None }
+        });
+        let has_selection = selection_chars.is_some();
+
+        let mut tb_copy = false;
+        let mut tb_cut = false;
+        let mut tb_paste = false;
+        let mut tb_select_all = false;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if ui
+                .add_enabled(has_selection, egui::Button::new("Copy"))
+                .on_hover_text("Ctrl/Cmd+C")
+                .clicked()
+            {
+                tb_copy = true;
+            }
+            if ui
+                .add_enabled(has_selection && !is_ro, egui::Button::new("Cut"))
+                .on_hover_text("Ctrl/Cmd+X")
+                .clicked()
+            {
+                tb_cut = true;
+            }
+            if ui
+                .add_enabled(!is_ro, egui::Button::new("Paste"))
+                .on_hover_text("Ctrl/Cmd+V (no permission prompt) or this button (prompts once)")
+                .clicked()
+            {
+                tb_paste = true;
+            }
+            ui.separator();
+            if ui.button("Select all").on_hover_text("Ctrl/Cmd+A").clicked() {
+                tb_select_all = true;
+            }
+        });
+        ui.separator();
         // When word-wrap is off we need the TextEdit widget's rect to
         // be AT LEAST as wide as the longest line — otherwise egui's
         // TextEdit auto-scrolls horizontally *inside its own rect* to
@@ -540,82 +608,33 @@ impl Panel for CodeEditorPanel {
             })
             .inner;
 
-        // Restore the pre-click selection if the user just right-clicked
-        // (TextEdit collapses selection on any pointer press). Must
-        // happen before `context_menu` reads the cursor state.
-        if output.secondary_clicked() {
-            if let (Some(range), Some(mut state)) = (
-                pre_cursor,
-                egui::TextEdit::load_state(ui.ctx(), text_edit_id),
-            ) {
-                state.cursor.set_char_range(Some(range));
-                state.store(ui.ctx(), text_edit_id);
-            }
-        }
-
-        // Right-click context menu: Copy / Cut / Paste / Select all.
-        //
-        // We can't push `Event::Copy/Cut` and rely on TextEdit to act
-        // on them — the right-click moves focus away from the editor,
-        // so by the next frame TextEdit ignores the event. Instead we
-        // read the selection directly from `TextEditState`, mutate the
-        // buffer ourselves for Cut/Paste, and write the clipboard via
-        // `ctx.copy_text` (which routes through bevy_egui's clipboard
-        // integration on both native and wasm).
-        let selection_chars: Option<(usize, usize)> = pre_cursor.and_then(|r| {
-            let a = r.primary.index;
-            let b = r.secondary.index;
-            let (s, e) = (a.min(b), a.max(b));
-            if e > s { Some((s, e)) } else { None }
-        });
-        // Pre-extract the selected text up front (immutable read of
-        // `text`) so the menu closure doesn't need to borrow `text`.
+        // Pre-extract the selected text now that `text` is in scope
+        // — keyboard / toolbar handlers below need it for the
+        // clipboard write.
         let selected_text: Option<String> = selection_chars.map(|(s, e)| {
             text.chars().skip(s).take(e - s).collect::<String>()
         });
-        let has_selection = selection_chars.is_some();
+
+        // Translate toolbar button clicks into the same
+        // `copy_payload` / `cut_range` / `select_all_request` flags
+        // the keyboard handler uses, so all three input paths share
+        // one set of action processors below.
         let mut copy_payload: Option<String> = None;
         let mut cut_range: Option<(usize, usize)> = None;
         let mut select_all_request = false;
-
-        output.context_menu(|ui| {
-            if ui
-                .add_enabled(has_selection, egui::Button::new("Copy"))
-                .clicked()
-            {
-                copy_payload = selected_text.clone();
-                ui.close();
-            }
-            if ui
-                .add_enabled(has_selection && !is_ro, egui::Button::new("Cut"))
-                .clicked()
-            {
-                copy_payload = selected_text.clone();
-                cut_range = selection_chars;
-                ui.close();
-            }
-            // The menu has no real paste gesture, so we have to ask
-            // the browser for clipboard read permission via async
-            // `navigator.clipboard.readText()`. That triggers the
-            // "this site wants to read your clipboard" prompt — only
-            // for menu Paste, never for the Ctrl/Cmd+V keyboard path
-            // (which goes through the synchronous `paste` event in
-            // `wasm_clipboard.rs` and is silent). The resolved text
-            // lands in `pending_paste` and is applied next frame
-            // alongside any keyboard paste.
-            if ui
-                .add_enabled(!is_ro, egui::Button::new("Paste"))
-                .clicked()
-            {
-                crate::ui::wasm_clipboard::request_paste_from_clipboard();
-                ui.close();
-            }
-            ui.separator();
-            if ui.button("Select all").clicked() {
-                select_all_request = true;
-                ui.close();
-            }
-        });
+        if tb_copy && has_selection {
+            copy_payload = selected_text.clone();
+        }
+        if tb_cut && has_selection && !is_ro {
+            copy_payload = selected_text.clone();
+            cut_range = selection_chars;
+        }
+        if tb_paste && !is_ro {
+            crate::ui::wasm_clipboard::request_paste_from_clipboard();
+        }
+        if tb_select_all {
+            select_all_request = true;
+        }
 
         // Apply menu actions outside the menu closure — `text`,
         // `new_text`, and `buffer_changed` are exclusively borrowed
