@@ -1647,9 +1647,15 @@ fn op_to_patch(
             Ok((r, rp, ModelicaChange::ClassRemoved { qualified }))
         }
         ModelicaOp::AddShortClass { parent, name, kind, base, prefixes, modifications } => {
-            let (r, rp) = compute_add_short_class_patch(
-                source, ast, parsed, &parent, &name, kind, &base, &prefixes, &modifications,
-            )?;
+            // Same whole-document path as AddClass — both ops change
+            // the document's class set. AST-canonical (A.2 batch 3b).
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_document_patch(source, parsed, |sd| {
+                crate::ast_mut::add_short_class(
+                    sd, &parent, &name, kind, &base, &prefixes, &modifications,
+                )
+            })
+            .map_err(ast_mut_to_doc_error)?;
             let qualified = if parent.is_empty() {
                 name.clone()
             } else {
@@ -1688,7 +1694,15 @@ fn op_to_patch(
             Ok((r, rp, change))
         }
         ModelicaOp::AddEquation { class, eq } => {
-            let (r, rp) = compute_add_equation_patch(source, ast, parsed, &class, &eq)?;
+            // Generic equation append. AST-canonical (A.2 batch 3b).
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::add_equation(c, &eq),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::AddIconGraphic { class, graphic } => {
@@ -1700,9 +1714,17 @@ fn op_to_patch(
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::SetExperimentAnnotation { class, start_time, stop_time, tolerance, interval } => {
-            let (r, rp) = compute_set_experiment_patch(
-                source, ast, parsed, &class, start_time, stop_time, tolerance, interval,
-            )?;
+            // AST-canonical (A.2 batch 3b). Class-level `experiment(...)`
+            // is one flat entry in `ClassDef.annotation` — no nested
+            // graphics-array navigation required.
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::set_experiment(c, start_time, stop_time, tolerance, interval),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
     }

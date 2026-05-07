@@ -473,6 +473,82 @@ pub fn add_class(
     Ok(())
 }
 
+/// Add a short-class definition (`connector X = Y(...)`) inside
+/// `parent` (or at top level when `parent` is empty).
+///
+/// Mirrors `ModelicaOp::AddShortClass`. Same insert path as
+/// [`add_class`]; differs only in how the new ClassDef is built —
+/// `pretty::short_class_decl` emits the `kind Name = base(...)` form
+/// which the parser lifts into a `ClassDef` with a `class_type` of
+/// the short flavour.
+pub fn add_short_class(
+    sd: &mut StoredDefinition,
+    parent: &str,
+    name: &str,
+    kind: pretty::ClassKindSpec,
+    base: &str,
+    prefixes: &[String],
+    modifications: &[(String, String)],
+) -> Result<(), AstMutError> {
+    let stub_text = pretty::short_class_decl(name, kind, base, prefixes, modifications);
+    let parsed = parse_to_ast(&stub_text, "__lunco_fragment.mo")
+        .map_err(|_| AstMutError::ValueParseFailed { value: stub_text.clone() })?;
+    let new_class = parsed
+        .classes
+        .get(name)
+        .cloned()
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: stub_text.clone() })?;
+    if parent.is_empty() {
+        if sd.classes.contains_key(name) {
+            return Err(AstMutError::DuplicateClass {
+                parent: String::from("(top-level)"),
+                name: name.to_string(),
+            });
+        }
+        sd.classes.insert(name.to_string(), new_class);
+    } else {
+        let parent_class = lookup_class_mut(sd, parent)?;
+        if parent_class.classes.contains_key(name) {
+            return Err(AstMutError::DuplicateClass {
+                parent: parent.to_string(),
+                name: name.to_string(),
+            });
+        }
+        parent_class.classes.insert(name.to_string(), new_class);
+    }
+    Ok(())
+}
+
+/// Append a generic equation to a class.
+///
+/// Mirrors `ModelicaOp::AddEquation`. Renders the equation via
+/// `pretty::equation_decl`, wraps in a stub class equation section,
+/// parses, and pushes the lifted Equation onto the target's
+/// `equations` list. Unlike [`add_connection`] (which always emits
+/// `Equation::Connect`), this accepts any equation shape — `a = b`,
+/// `assert(...)`, `der(x) = …` — whatever `pretty::equation_decl`
+/// produces.
+pub fn add_equation(
+    class: &mut ClassDef,
+    eq: &pretty::EquationDecl,
+) -> Result<(), AstMutError> {
+    let body = pretty::equation_decl(eq);
+    let stub = format!("model __LunCoFragment\nequation\n{body}end __LunCoFragment;\n");
+    let parsed = parse_to_ast(&stub, "__lunco_fragment.mo")
+        .map_err(|_| AstMutError::ValueParseFailed { value: body.clone() })?;
+    let parsed_class = parsed
+        .classes
+        .get("__LunCoFragment")
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: body.clone() })?;
+    let new_eq = parsed_class
+        .equations
+        .first()
+        .cloned()
+        .ok_or(AstMutError::ValueParseFailed { value: body })?;
+    class.equations.push(new_eq);
+    Ok(())
+}
+
 /// Remove a class by qualified path. The last segment names the class
 /// itself; the prefix names its enclosing scope.
 ///
@@ -491,6 +567,62 @@ pub fn remove_class(sd: &mut StoredDefinition, qualified: &str) -> Result<(), As
         return Err(AstMutError::ClassNotFound(qualified.to_string()));
     }
     Ok(())
+}
+
+/// Set or replace the class-level `experiment(...)` annotation.
+///
+/// Mirrors `ModelicaOp::SetExperimentAnnotation`. The class
+/// annotation list (`ClassDef.annotation: Vec<Expression>`) holds
+/// flat top-level entries — `Diagram(...)`, `Icon(...)`,
+/// `experiment(...)`, vendor entries — and `experiment` always lives
+/// at this level (never nested inside `Diagram` or `Icon`). Find the
+/// existing entry; replace. If absent, append.
+pub fn set_experiment(
+    class: &mut ClassDef,
+    start_time: f64,
+    stop_time: f64,
+    tolerance: f64,
+    interval: f64,
+) -> Result<(), AstMutError> {
+    let new_expr = parse_experiment_expression(start_time, stop_time, tolerance, interval)?;
+    if let Some(slot) = class
+        .annotation
+        .iter_mut()
+        .find(|expr| is_annotation_entry_named(expr, "experiment"))
+    {
+        *slot = new_expr;
+    } else {
+        class.annotation.push(new_expr);
+    }
+    Ok(())
+}
+
+/// Build the `experiment(StartTime=…, StopTime=…, Tolerance=…,
+/// Interval=…)` Expression via the stub-class trick. Numbers are
+/// rendered through `pretty::experiment_inner`, which produces a
+/// canonical fragment that always parses cleanly — no user-supplied
+/// strings cross the boundary, so the parse can't fail except in the
+/// pathological case of a NaN/Infinity input (which `pretty/`
+/// already screens for upstream).
+fn parse_experiment_expression(
+    start_time: f64,
+    stop_time: f64,
+    tolerance: f64,
+    interval: f64,
+) -> Result<Expression, AstMutError> {
+    let inner = pretty::experiment_inner(start_time, stop_time, tolerance, interval);
+    let stub = format!("model __LunCoFragment\nannotation({inner});\nend __LunCoFragment;\n");
+    let parsed = parse_to_ast(&stub, "__lunco_fragment.mo").map_err(|_| {
+        AstMutError::ValueParseFailed { value: inner.clone() }
+    })?;
+    let class = parsed.classes.get("__LunCoFragment").ok_or_else(|| {
+        AstMutError::ValueParseFailed { value: inner.clone() }
+    })?;
+    class
+        .annotation
+        .first()
+        .cloned()
+        .ok_or(AstMutError::ValueParseFailed { value: inner })
 }
 
 /// Set or replace the `Placement(...)` annotation on a component.
