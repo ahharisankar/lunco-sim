@@ -195,6 +195,19 @@ web-sys = { version = "0.3", features = [
     "WorkerOptions",
     "DedicatedWorkerGlobalScope",
     "MessageEvent",
+    # Clipboard wiring for the wasm code editor.
+    # `Navigator` + `Clipboard` for the menu's async paste fallback;
+    # `ClipboardEvent` + `DataTransfer` for the synchronous paste-event
+    # interception (Ctrl/Cmd+V); `KeyboardEvent` +
+    # `AddEventListenerOptions` for the capture-phase keydown
+    # interception that lets the browser fire the native paste event
+    # at all.  See `ui/wasm_clipboard.rs`.
+    "Navigator",
+    "Clipboard",
+    "ClipboardEvent",
+    "DataTransfer",
+    "KeyboardEvent",
+    "AddEventListenerOptions",
 ] }
 js-sys = "0.3"
 console_error_panic_hook = "0.1"

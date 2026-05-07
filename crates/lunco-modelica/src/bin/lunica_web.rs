@@ -132,6 +132,11 @@ pub fn run() {
         // anything. No-op on native (the desktop binary doesn't
         // include this plugin).
         .add_plugins(lunco_modelica::ui::wasm_autosave::WasmAutosavePlugin)
+        // JS clipboard bridge — installs document-level capture-phase
+        // listeners for `copy`/`cut`/`paste` and pre-empts bevy_egui's
+        // broken async wasm clipboard pipeline. See
+        // `ui/wasm_clipboard.rs`.
+        .add_plugins(lunco_modelica::ui::wasm_clipboard::WasmClipboardPlugin)
         .insert_resource(BundledModelInfo {
             default_filename: default_filename.to_string(),
             default_source: default_source.to_string(),

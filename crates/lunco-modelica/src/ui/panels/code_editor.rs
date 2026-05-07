@@ -445,6 +445,15 @@ impl Panel for CodeEditorPanel {
         // a hash from the widget's location and we can't target it
         // from outside the closure.
         let text_edit_id = egui::Id::new("modelica_code_editor");
+        // Snapshot the cursor range BEFORE TextEdit runs. egui's
+        // TextEdit collapses the selection on any pointer click,
+        // including secondary (right) click — so without this, the
+        // context menu opens with no selection and Copy/Cut have
+        // nothing to act on. We restore the snapshot below if the
+        // user right-clicked.
+        let pre_cursor: Option<egui::text::CCursorRange> =
+            egui::TextEdit::load_state(ui.ctx(), text_edit_id)
+                .and_then(|s| s.cursor.char_range());
         // When word-wrap is off we need the TextEdit widget's rect to
         // be AT LEAST as wide as the longest line — otherwise egui's
         // TextEdit auto-scrolls horizontally *inside its own rect* to
@@ -530,6 +539,265 @@ impl Panel for CodeEditorPanel {
                     .inner
             })
             .inner;
+
+        // Restore the pre-click selection if the user just right-clicked
+        // (TextEdit collapses selection on any pointer press). Must
+        // happen before `context_menu` reads the cursor state.
+        if output.secondary_clicked() {
+            if let (Some(range), Some(mut state)) = (
+                pre_cursor,
+                egui::TextEdit::load_state(ui.ctx(), text_edit_id),
+            ) {
+                state.cursor.set_char_range(Some(range));
+                state.store(ui.ctx(), text_edit_id);
+            }
+        }
+
+        // Right-click context menu: Copy / Cut / Paste / Select all.
+        //
+        // We can't push `Event::Copy/Cut` and rely on TextEdit to act
+        // on them — the right-click moves focus away from the editor,
+        // so by the next frame TextEdit ignores the event. Instead we
+        // read the selection directly from `TextEditState`, mutate the
+        // buffer ourselves for Cut/Paste, and write the clipboard via
+        // `ctx.copy_text` (which routes through bevy_egui's clipboard
+        // integration on both native and wasm).
+        let selection_chars: Option<(usize, usize)> = pre_cursor.and_then(|r| {
+            let a = r.primary.index;
+            let b = r.secondary.index;
+            let (s, e) = (a.min(b), a.max(b));
+            if e > s { Some((s, e)) } else { None }
+        });
+        // Pre-extract the selected text up front (immutable read of
+        // `text`) so the menu closure doesn't need to borrow `text`.
+        let selected_text: Option<String> = selection_chars.map(|(s, e)| {
+            text.chars().skip(s).take(e - s).collect::<String>()
+        });
+        let has_selection = selection_chars.is_some();
+        let mut copy_payload: Option<String> = None;
+        let mut cut_range: Option<(usize, usize)> = None;
+        let mut select_all_request = false;
+
+        output.context_menu(|ui| {
+            if ui
+                .add_enabled(has_selection, egui::Button::new("Copy"))
+                .clicked()
+            {
+                copy_payload = selected_text.clone();
+                ui.close();
+            }
+            if ui
+                .add_enabled(has_selection && !is_ro, egui::Button::new("Cut"))
+                .clicked()
+            {
+                copy_payload = selected_text.clone();
+                cut_range = selection_chars;
+                ui.close();
+            }
+            // The menu has no real paste gesture, so we have to ask
+            // the browser for clipboard read permission via async
+            // `navigator.clipboard.readText()`. That triggers the
+            // "this site wants to read your clipboard" prompt — only
+            // for menu Paste, never for the Ctrl/Cmd+V keyboard path
+            // (which goes through the synchronous `paste` event in
+            // `wasm_clipboard.rs` and is silent). The resolved text
+            // lands in `pending_paste` and is applied next frame
+            // alongside any keyboard paste.
+            if ui
+                .add_enabled(!is_ro, egui::Button::new("Paste"))
+                .clicked()
+            {
+                crate::ui::wasm_clipboard::request_paste_from_clipboard();
+                ui.close();
+            }
+            ui.separator();
+            if ui.button("Select all").clicked() {
+                select_all_request = true;
+                ui.close();
+            }
+        });
+
+        // Apply menu actions outside the menu closure — `text`,
+        // `new_text`, and `buffer_changed` are exclusively borrowed
+        // here so we can mutate freely.
+        if let Some(payload) = copy_payload {
+            if !payload.is_empty() {
+                ui.ctx().copy_text(payload);
+            }
+        }
+        if let Some((cut_start, cut_end)) = cut_range {
+            let mut out = String::with_capacity(text.len());
+            for (i, c) in text.chars().enumerate() {
+                if i < cut_start || i >= cut_end {
+                    out.push(c);
+                }
+            }
+            text = out;
+            new_text = text.clone();
+            buffer_changed = true;
+            if let Some(mut state) =
+                egui::TextEdit::load_state(ui.ctx(), text_edit_id)
+            {
+                state.cursor.set_char_range(Some(
+                    egui::text::CCursorRange::one(egui::text::CCursor::new(cut_start)),
+                ));
+                state.store(ui.ctx(), text_edit_id);
+            }
+        }
+        if select_all_request {
+            if let Some(mut state) =
+                egui::TextEdit::load_state(ui.ctx(), text_edit_id)
+            {
+                let n = text.chars().count();
+                state.cursor.set_char_range(Some(
+                    egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(0),
+                        egui::text::CCursor::new(n),
+                    ),
+                ));
+                state.store(ui.ctx(), text_edit_id);
+            }
+        }
+
+        // ── Keyboard clipboard shortcuts ──
+        //
+        // On wasm, the browser's native `copy`/`cut`/`paste` JS
+        // events are suppressed by Bevy's
+        // `prevent_default_event_handling: true` window setting (see
+        // `bin/lunica_web.rs`). That means neither bevy_egui's
+        // built-in clipboard listeners nor any custom JS listener
+        // can ever fire for Ctrl/Cmd+C/X/V. Egui's keyboard input,
+        // however, *is* delivered correctly — so we detect the
+        // shortcut here and run the same code path the right-click
+        // menu's Copy/Cut already use (which we know works because
+        // the user confirmed menu Copy works).
+        //
+        // For paste we kick off an async
+        // `navigator.clipboard.readText()` and pick the resolved
+        // text up on the next visit via `take_pending_paste()`.
+        let (kbd_copy, kbd_cut) = ui.input(|i| {
+            let cmd = i.modifiers.command;
+            (
+                cmd && i.key_pressed(egui::Key::C),
+                cmd && i.key_pressed(egui::Key::X),
+            )
+        });
+        if kbd_copy && has_selection {
+            if let Some(s) = selected_text.as_ref() {
+                if !s.is_empty() {
+                    ui.ctx().copy_text(s.clone());
+                }
+            }
+        }
+        if kbd_cut && has_selection && !is_ro {
+            if let Some(s) = selected_text.as_ref() {
+                if !s.is_empty() {
+                    ui.ctx().copy_text(s.clone());
+                }
+            }
+            // Reuse the menu's `cut_range` so the splice happens in
+            // the cut-handler block below — no duplicate splice loop.
+            cut_range = selection_chars;
+        }
+        // Ctrl/Cmd+V is intentionally not handled here: the document
+        // capture-phase keydown listener in `wasm_clipboard.rs` lets
+        // the browser fire its native `paste` event, and the
+        // capture-phase `paste` listener queues `pending_paste`
+        // synchronously without prompting the user. Drained below.
+
+        // Re-run the cut splice from the menu block — `cut_range` may
+        // have just been populated by the keyboard handler above.
+        // (The earlier menu-action block ran before this point with
+        // `cut_range=None` for the keyboard path.) Idempotent if
+        // already applied.
+        if let Some((cut_start, cut_end)) = cut_range {
+            // Guard against double-apply: only splice if `text` still
+            // contains the original range. Cheap heuristic — compare
+            // the slice we'd remove against `selected_text`.
+            let still_present = selected_text.as_deref().map(|sel| {
+                let extracted: String =
+                    text.chars().skip(cut_start).take(cut_end - cut_start).collect();
+                extracted == sel
+            }).unwrap_or(false);
+            if still_present {
+                let mut out = String::with_capacity(text.len());
+                for (i, c) in text.chars().enumerate() {
+                    if i < cut_start || i >= cut_end {
+                        out.push(c);
+                    }
+                }
+                text = out;
+                new_text = text.clone();
+                buffer_changed = true;
+                if let Some(mut state) =
+                    egui::TextEdit::load_state(ui.ctx(), text_edit_id)
+                {
+                    state.cursor.set_char_range(Some(
+                        egui::text::CCursorRange::one(egui::text::CCursor::new(cut_start)),
+                    ));
+                    state.store(ui.ctx(), text_edit_id);
+                }
+            }
+        }
+
+        // Drain any paste text the async clipboard read resolved
+        // since the previous frame, and apply it at the cursor (or
+        // replace the selection).
+        if !is_ro {
+            if let Some(raw_paste) = crate::ui::wasm_clipboard::take_pending_paste() {
+                // Normalise line endings + strip a leading BOM. The
+                // OS clipboard frequently delivers CRLF (Windows) or
+                // CR-only (rare, but some terminals) sequences;
+                // rumoca's lexer expects LF and panics on a non-
+                // char-boundary slice when it tries to advance over
+                // a CR. The BOM strip handles UTF-8-with-BOM text
+                // pasted from Windows tools.
+                let paste_text = raw_paste
+                    .replace("\r\n", "\n")
+                    .replace('\r', "\n");
+                let paste_text = paste_text
+                    .strip_prefix('\u{FEFF}')
+                    .map(|s| s.to_string())
+                    .unwrap_or(paste_text);
+                let (start, end) = selection_chars.unwrap_or_else(|| {
+                    let cur = egui::TextEdit::load_state(ui.ctx(), text_edit_id)
+                        .and_then(|s| s.cursor.char_range())
+                        .map(|r| r.primary.index)
+                        .unwrap_or(text.chars().count());
+                    (cur, cur)
+                });
+                let total = text.chars().count();
+                let mut out =
+                    String::with_capacity(text.len() + paste_text.len());
+                let mut inserted = false;
+                for (i, c) in text.chars().enumerate() {
+                    if i == start {
+                        out.push_str(&paste_text);
+                        inserted = true;
+                    }
+                    if i < start || i >= end {
+                        out.push(c);
+                    }
+                }
+                if !inserted && start >= total {
+                    out.push_str(&paste_text);
+                }
+                text = out;
+                new_text = text.clone();
+                buffer_changed = true;
+                let new_caret = start + paste_text.chars().count();
+                if let Some(mut state) =
+                    egui::TextEdit::load_state(ui.ctx(), text_edit_id)
+                {
+                    state.cursor.set_char_range(Some(
+                        egui::text::CCursorRange::one(
+                            egui::text::CCursor::new(new_caret),
+                        ),
+                    ));
+                    state.store(ui.ctx(), text_edit_id);
+                }
+            }
+        }
 
         if output.changed() && !is_ro {
             new_text = text.clone();

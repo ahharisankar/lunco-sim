@@ -75,6 +75,7 @@ pub mod uri_handler;
 pub mod loaded_classes;
 pub mod text_node;
 pub mod wasm_autosave;
+pub mod wasm_clipboard;
 pub mod welcome_progress;
 /// Debounced AST reparse driver — see module docs.
 pub mod input_activity;
