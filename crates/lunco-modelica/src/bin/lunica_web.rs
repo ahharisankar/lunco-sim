@@ -72,9 +72,17 @@ pub fn run() {
     #[cfg(not(target_arch = "wasm32"))]
     let url_example: Option<String> = None;
 
-    let chosen = url_example
+    // Only auto-open a tab when the URL explicitly asks for one
+    // (`?example=…`). On a bare `/` we land on the Welcome screen and
+    // let `wasm_autosave`'s restore path open whatever the user had
+    // open last time — opening a hard-coded library example here was
+    // surprising (it appeared even when the user never asked for it
+    // and obscured restored work). The first bundled model is still
+    // the named fallback for *unrecognised* `?example=` values, but
+    // a missing query string now means "open nothing".
+    let chosen: Option<&lunco_modelica::models::BundledModel> = url_example
         .as_deref()
-        .and_then(|name| {
+        .map(|name| {
             let matches = |candidate: &str| {
                 let n_with_ext = if name.ends_with(".mo") {
                     name.to_string()
@@ -83,20 +91,19 @@ pub fn run() {
                 };
                 candidate == name || candidate == n_with_ext
             };
-            models.iter().find(|m| matches(m.filename))
-        })
-        .unwrap_or_else(|| {
-            if let Some(name) = url_example.as_deref() {
-                bevy::log::warn!(
-                    "[lunica_web] ?example={name:?} not found in bundled models — \
-                     falling back to {}",
-                    fallback.filename
-                );
-            }
-            fallback
+            models
+                .iter()
+                .find(|m| matches(m.filename))
+                .unwrap_or_else(|| {
+                    bevy::log::warn!(
+                        "[lunica_web] ?example={name:?} not found in bundled models — \
+                         falling back to {}",
+                        fallback.filename
+                    );
+                    fallback
+                })
         });
-    let default_filename = chosen.filename;
-    let default_source = chosen.source;
+    let _ = fallback;
 
     let mut app = App::new();
     app.insert_resource(Time::<Fixed>::from_hz(60.0));
@@ -137,12 +144,26 @@ pub fn run() {
         // broken async wasm clipboard pipeline. See
         // `ui/wasm_clipboard.rs`.
         .add_plugins(lunco_modelica::ui::wasm_clipboard::WasmClipboardPlugin)
-        .insert_resource(BundledModelInfo {
-            default_filename: default_filename.to_string(),
-            default_source: default_source.to_string(),
+        // Camera lives unconditionally — without it Bevy renders a
+        // black screen even when there's no model tab to open. The
+        // example-specific setup below only handles tab/document
+        // creation.
+        .add_systems(Startup, |mut commands: Commands| {
+            commands.spawn(Camera2d);
         })
-        .add_systems(Startup, setup_web_workbench)
         .add_systems(Update, hide_html_loader_once_painted);
+
+    // Only register the auto-open Startup system + its config resource
+    // when the URL asked for a specific example. Without it the user
+    // lands on Welcome and `wasm_autosave` is free to restore tabs
+    // from localStorage without an unwanted bundled tab competing.
+    if let Some(model) = chosen {
+        app.insert_resource(BundledModelInfo {
+            default_filename: model.filename.to_string(),
+            default_source: model.source.to_string(),
+        })
+        .add_systems(Startup, setup_web_workbench);
+    }
 
     // Off-thread Modelica worker. The result-side sender was registered by
     // `ModelicaPlugin::build` above; this call attaches a `web_sys::Worker`
@@ -186,7 +207,8 @@ fn setup_web_workbench(
     mut layout: ResMut<lunco_workbench::WorkbenchLayout>,
     model_info: Res<BundledModelInfo>,
 ) {
-    commands.spawn(Camera2d);
+    // Camera is spawned by an unconditional Startup system in `run()`
+    // so it exists even on a bare-URL boot. Don't double-spawn here.
 
     let model_path = PathBuf::from(&model_info.default_filename);
     let source = model_info.default_source.clone();

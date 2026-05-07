@@ -231,12 +231,35 @@ impl EdgeVisual for OrthogonalEdgeVisual {
         let physical_flow = if let Some(fv) = self.flow_vars.first() {
             let src_key = format!("{}.{}", self.source_path, fv.name);
             let tgt_key = format!("{}.{}", self.target_path, fv.name);
-            if let Some(&v_src) = node_state.values.get(&src_key) {
-                Some(-v_src)
+            let v_src = node_state.values.get(&src_key).copied();
+            let v_tgt = node_state.values.get(&tgt_key).copied();
+            // ── DIAG: log once per (source_path,target_path,fv) which
+            // keys hit/missed, and what near-miss keys exist in
+            // node_state. Helps diagnose why some edges animate only
+            // after a re-projection. Remove once root cause found.
+            diag_log_edge_lookup(
+                &self.source_path,
+                &self.target_path,
+                &fv.name,
+                v_src,
+                v_tgt,
+                &node_state,
+            );
+            if let Some(v) = v_src {
+                Some(-v)
             } else {
-                node_state.values.get(&tgt_key).copied()
+                v_tgt
             }
         } else {
+            // ── DIAG: log once per (source_path,target_path) that
+            // this edge has empty flow_vars (so the projection
+            // didn't resolve the connector's flow declarations).
+            diag_log_empty_flow_vars(
+                &self.source_path,
+                &self.target_path,
+                &self.connector_leaf,
+                &node_state,
+            );
             node_state
                 .values
                 .get(&self.source_path)
@@ -444,4 +467,108 @@ pub(super) fn edge_hover_text(
         }
     }
     out
+}
+
+// ── Diagnostics for the flow-animation lookup ──────────────────────
+//
+// One-shot per (source_path,target_path,key) so the log doesn't drown
+// the console at 60 fps. Drop once the root cause of "tank↔valve only
+// animates after I move a node" is identified.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DiagStatus {
+    BothMiss,
+    SrcHit,
+    TgtHit,
+    Both,
+}
+
+thread_local! {
+    /// Last logged status per edge lookup; we re-log only on state
+    /// transitions, so the console captures exactly when a key
+    /// becomes available (or disappears) instead of one snapshot at
+    /// startup.
+    static DIAG_LOOKUP_STATE: RefCell<HashMap<String, DiagStatus>> =
+        RefCell::new(HashMap::new());
+    /// Last logged total snapshot-key count per (source,target) edge
+    /// when flow_vars is empty — log when "near_keys" set
+    /// changes size (a proxy for the simulator publishing new
+    /// connector vars).
+    static DIAG_EMPTY_STATE: RefCell<HashMap<String, usize>> =
+        RefCell::new(HashMap::new());
+}
+
+fn diag_log_edge_lookup(
+    source_path: &str,
+    target_path: &str,
+    fv_name: &str,
+    v_src: Option<f64>,
+    v_tgt: Option<f64>,
+    state: &lunco_viz::kinds::canvas_plot_node::NodeStateSnapshot,
+) {
+    let status = match (v_src.is_some(), v_tgt.is_some()) {
+        (false, false) => DiagStatus::BothMiss,
+        (true, false) => DiagStatus::SrcHit,
+        (false, true) => DiagStatus::TgtHit,
+        (true, true) => DiagStatus::Both,
+    };
+    let key = format!("{source_path}|{target_path}|{fv_name}");
+    let changed = DIAG_LOOKUP_STATE.with(|s| {
+        let mut m = s.borrow_mut();
+        match m.get(&key) {
+            Some(prev) if *prev == status => false,
+            _ => {
+                m.insert(key.clone(), status);
+                true
+            }
+        }
+    });
+    if !changed {
+        return;
+    }
+    let near: Vec<String> = state
+        .values
+        .keys()
+        .filter(|k| k.starts_with(source_path) || k.starts_with(target_path))
+        .cloned()
+        .collect();
+    bevy::log::info!(
+        "[edge-diag] {source_path} -> {target_path} fv={fv_name} \
+         src={v_src:?} tgt={v_tgt:?} near_keys={near:?}"
+    );
+}
+
+fn diag_log_empty_flow_vars(
+    source_path: &str,
+    target_path: &str,
+    connector_type: &str,
+    state: &lunco_viz::kinds::canvas_plot_node::NodeStateSnapshot,
+) {
+    let near: Vec<String> = state
+        .values
+        .keys()
+        .filter(|k| k.starts_with(source_path) || k.starts_with(target_path))
+        .cloned()
+        .collect();
+    let key = format!("{source_path}|{target_path}");
+    let changed = DIAG_EMPTY_STATE.with(|s| {
+        let mut m = s.borrow_mut();
+        match m.get(&key) {
+            Some(prev) if *prev == near.len() => false,
+            _ => {
+                m.insert(key.clone(), near.len());
+                true
+            }
+        }
+    });
+    if !changed {
+        return;
+    }
+    bevy::log::warn!(
+        "[edge-diag] EMPTY flow_vars on edge {source_path} -> {target_path} \
+         connector_type={connector_type:?} near_keys={near:?}"
+    );
 }
