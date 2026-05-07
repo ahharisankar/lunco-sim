@@ -231,8 +231,18 @@ pub(super) fn render_msl_package_menu(
         {
             if let Some(class) = editing_class {
                 let instance_name = {
+                    // B.1: route through the per-render tab when one
+                    // is in scope. Outside render (no TabRenderContext)
+                    // falls back to the first-tab path — unchanged
+                    // behaviour for non-render callers.
+                    let tab = world
+                        .get_resource::<crate::ui::panels::model_view::TabRenderContext>()
+                        .and_then(|c| c.tab_id);
                     let state = world.resource::<CanvasDiagramState>();
-                    pick_add_instance_name(comp, &state.get(doc_id).canvas.scene)
+                    pick_add_instance_name(
+                        comp,
+                        &state.get_for_render(tab, doc_id).canvas.scene,
+                    )
                 };
                 // Optimistic scene synthesis (`synthesize_msl_node`) was
                 // removed in A.4. Now: emit the op, gen bumps in

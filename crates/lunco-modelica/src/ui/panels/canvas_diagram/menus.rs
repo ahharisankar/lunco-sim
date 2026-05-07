@@ -14,6 +14,17 @@ use crate::document::ModelicaOp;
 use super::ops::{component_headers, op_remove_component, op_remove_edge};
 use super::palette::{self, PaletteSettings};
 use super::{CanvasDiagramState, active_doc_from_world};
+use crate::ui::panels::model_view::TabRenderContext;
+
+/// Read the active tab id from `TabRenderContext`. `None` when called
+/// outside a panel render call (observers, off-render systems);
+/// callers fall back to first-tab semantics in that case via
+/// `CanvasDiagramState::get_for_render`.
+fn render_tab_id(world: &World) -> Option<crate::ui::panels::model_view::TabId> {
+    world
+        .get_resource::<TabRenderContext>()
+        .and_then(|c| c.tab_id)
+}
 
 pub(super) fn render_node_menu(
     ui: &mut egui::Ui,
@@ -27,9 +38,10 @@ pub(super) fn render_node_menu(
     // specific actions (Open class, Parameters, Duplicate).
     let node_kind: Option<String> = {
         let active_doc = active_doc_from_world(world);
+        let tab = render_tab_id(world);
         let state = world.resource::<CanvasDiagramState>();
         state
-            .get(active_doc)
+            .get_for_render(tab, active_doc)
             .canvas
             .scene
             .node(id)
@@ -55,8 +67,9 @@ pub(super) fn render_node_menu(
                 // bump `canvas_acked_gen` and the project gate skips
                 // the redundant reproject.
                 let active_doc = active_doc_from_world(world);
+                let tab = render_tab_id(world);
                 let mut state = world.resource_mut::<CanvasDiagramState>();
-                let docstate = state.get_mut(active_doc);
+                let docstate = state.get_mut_for_render(tab, active_doc);
                 docstate.canvas.scene.remove_node(id);
             }
         }
@@ -83,9 +96,10 @@ pub(super) fn render_plot_node_menu(
 
     let current: PlotNodeData = {
         let active_doc = active_doc_from_world(world);
+        let tab = render_tab_id(world);
         let state = world.resource::<CanvasDiagramState>();
         state
-            .get(active_doc)
+            .get_for_render(tab, active_doc)
             .canvas
             .scene
             .node(id)
@@ -153,8 +167,9 @@ pub(super) fn render_plot_node_menu(
     ui.separator();
     if ui.button("✂ Delete").clicked() {
         let active_doc = active_doc_from_world(world);
+        let tab = render_tab_id(world);
         let mut state = world.resource_mut::<CanvasDiagramState>();
-        let docstate = state.get_mut(active_doc);
+        let docstate = state.get_mut_for_render(tab, active_doc);
         docstate.canvas.scene.remove_node(id);
         ui.close();
     }
@@ -174,8 +189,9 @@ pub(super) fn rebind_plot_node(
     };
     let data: lunco_canvas::NodeData = std::sync::Arc::new(payload);
     let active_doc = active_doc_from_world(world);
+    let tab = render_tab_id(world);
     let mut state = world.resource_mut::<CanvasDiagramState>();
-    let docstate = state.get_mut(active_doc);
+    let docstate = state.get_mut_for_render(tab, active_doc);
     if let Some(node) = docstate.canvas.scene.node_mut(id) {
         node.data = data;
     }
@@ -195,8 +211,9 @@ pub(super) fn render_edge_menu(
             if let Some(op) = op_remove_edge(world, id, class) {
                 out.push(op);
                 let active_doc = active_doc_from_world(world);
+                let tab = render_tab_id(world);
                 let mut state = world.resource_mut::<CanvasDiagramState>();
-                let docstate = state.get_mut(active_doc);
+                let docstate = state.get_mut_for_render(tab, active_doc);
                 docstate.canvas.scene.remove_edge(id);
             }
         }
@@ -305,8 +322,9 @@ pub(super) fn render_empty_menu(
     ui.separator();
     if ui.button("⎚ Fit all (F)").clicked() {
         let active_doc = active_doc_from_world(world);
+        let tab = render_tab_id(world);
         let mut state = world.resource_mut::<CanvasDiagramState>();
-        let docstate = state.get_mut(active_doc);
+        let docstate = state.get_mut_for_render(tab, active_doc);
         if let Some(bounds) = docstate.canvas.scene.bounds() {
             let sr = lunco_canvas::Rect::from_min_max(
                 lunco_canvas::Pos::new(0.0, 0.0),
@@ -319,8 +337,9 @@ pub(super) fn render_empty_menu(
     }
     if ui.button("⟲ Reset zoom").clicked() {
         let active_doc = active_doc_from_world(world);
+        let tab = render_tab_id(world);
         let mut state = world.resource_mut::<CanvasDiagramState>();
-        let docstate = state.get_mut(active_doc);
+        let docstate = state.get_mut_for_render(tab, active_doc);
         let c = docstate.canvas.viewport.center;
         docstate.canvas.viewport.set_target(c, 1.0);
         ui.close();
@@ -340,8 +359,9 @@ pub(super) fn insert_plot_node(
     };
     let data: lunco_canvas::NodeData = std::sync::Arc::new(payload);
     let active_doc = active_doc_from_world(world);
+    let tab = render_tab_id(world);
     let mut state = world.resource_mut::<CanvasDiagramState>();
-    let docstate = state.get_mut(active_doc);
+    let docstate = state.get_mut_for_render(tab, active_doc);
     let scene = &mut docstate.canvas.scene;
     let id = scene.alloc_node_id();
     scene.insert_node(lunco_canvas::scene::Node {

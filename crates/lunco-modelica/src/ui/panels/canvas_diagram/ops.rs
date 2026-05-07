@@ -18,6 +18,17 @@ use super::loads::DrilledInClassNames;
 use super::port::{port_fallback_offset_for_size, port_kind_str, resolve_port_icons};
 use super::projection::{project_scene, projection_relevant_source_hash};
 use super::{CanvasDiagramState, IconNodeData, active_doc_from_world};
+use crate::ui::panels::model_view::TabRenderContext;
+
+/// Read the active tab id from `TabRenderContext`. `None` outside a
+/// panel render call (observers, off-render systems); call sites that
+/// pair this with `get_for_render` correctly fall back to first-tab
+/// semantics in that case.
+fn render_tab_id(world: &World) -> Option<crate::ui::panels::model_view::TabId> {
+    world
+        .get_resource::<TabRenderContext>()
+        .and_then(|c| c.tab_id)
+}
 
 /// Resolve `(document id, editing class name)` for the current tab.
 /// Used by the canvas + neighbours so they target the same class when
@@ -77,8 +88,9 @@ pub(super) fn build_ops_from_events(
 ) -> Vec<ModelicaOp> {
     use lunco_canvas::SceneEvent;
     let active_doc = active_doc_from_world(world);
+    let tab = render_tab_id(world);
     let state = world.resource::<CanvasDiagramState>();
-    let scene = &state.get(active_doc).canvas.scene;
+    let scene = &state.get_for_render(tab, active_doc).canvas.scene;
     let mut ops: Vec<ModelicaOp> = Vec::new();
 
     for ev in events {
@@ -283,8 +295,9 @@ pub(super) fn component_headers(
     id: lunco_canvas::NodeId,
 ) -> (String, String) {
     let active_doc = active_doc_from_world(world);
+    let tab = render_tab_id(world);
     let state = world.resource::<CanvasDiagramState>();
-    let Some(node) = state.get(active_doc).canvas.scene.node(id) else {
+    let Some(node) = state.get_for_render(tab, active_doc).canvas.scene.node(id) else {
         return (String::new(), String::new());
     };
     let instance = node.label.clone();
@@ -366,8 +379,13 @@ pub(super) fn op_remove_component(
     class: &str,
 ) -> Option<ModelicaOp> {
     let active_doc = active_doc_from_world(world);
+    let tab = render_tab_id(world);
     let state = world.resource::<CanvasDiagramState>();
-    op_remove_node_inner(&state.get(active_doc).canvas.scene, id, class)
+    op_remove_node_inner(
+        &state.get_for_render(tab, active_doc).canvas.scene,
+        id,
+        class,
+    )
 }
 
 pub(super) fn op_remove_edge(
@@ -376,8 +394,13 @@ pub(super) fn op_remove_edge(
     class: &str,
 ) -> Option<ModelicaOp> {
     let active_doc = active_doc_from_world(world);
+    let tab = render_tab_id(world);
     let state = world.resource::<CanvasDiagramState>();
-    op_remove_edge_inner(&state.get(active_doc).canvas.scene, id, class)
+    op_remove_edge_inner(
+        &state.get_for_render(tab, active_doc).canvas.scene,
+        id,
+        class,
+    )
 }
 
 pub(super) fn op_remove_node_inner(

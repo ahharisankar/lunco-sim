@@ -617,6 +617,41 @@ impl CanvasDiagramState {
         self.per_tab.entry(tab_id).or_default()
     }
 
+    /// Render-context lookup: route to the active tab when one is in
+    /// scope (during a panel render), fall back to first-tab
+    /// semantics otherwise (observers, off-render systems).
+    ///
+    /// This is the canonical lookup for code that runs inside the
+    /// canvas render path or any UI handler called from it
+    /// (right-click menus, palette drop, etc.). Outside render the
+    /// `TabRenderContext.tab_id` is `None` and we fall back to the
+    /// first-tab path — matches the legacy single-tab behaviour
+    /// per-doc, which is what observer-time code wants.
+    pub fn get_for_render(
+        &self,
+        render_tab_id: Option<CanvasKey>,
+        doc: Option<lunco_doc::DocumentId>,
+    ) -> &CanvasDocState {
+        match render_tab_id {
+            Some(t) => self.get_for_tab(t),
+            None => self.get(doc),
+        }
+    }
+
+    /// Mutable counterpart of [`get_for_render`]. When both
+    /// `render_tab_id` and `doc` are populated, allocates a per-tab
+    /// entry; otherwise routes through the legacy first-tab path.
+    pub fn get_mut_for_render(
+        &mut self,
+        render_tab_id: Option<CanvasKey>,
+        doc: Option<lunco_doc::DocumentId>,
+    ) -> &mut CanvasDocState {
+        match (render_tab_id, doc) {
+            (Some(t), Some(d)) => self.get_mut_for_tab(t, d),
+            _ => self.get_mut(doc),
+        }
+    }
+
     /// Migration shim — accepts the old `(doc, drilled)` key shape
     /// from call sites that haven't moved to TabId yet. Routes to
     /// the first tab matching `doc` (drilled ignored — same-doc
