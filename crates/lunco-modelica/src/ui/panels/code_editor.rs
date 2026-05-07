@@ -6,7 +6,7 @@ use lunco_workbench::{Panel, PanelId, PanelSlot};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::ast_extract::{extract_model_name, hash_content};
+use crate::ast_extract::hash_content;
 use crate::ui::{ModelicaDocumentRegistry, WorkbenchState};
 
 /// Per-tab editor buffer snapshot. Stashed in `EditorBufferState.per_doc`
@@ -892,7 +892,17 @@ impl Panel for CodeEditorPanel {
                 }
             }
             buf_state.line_starts = new_starts.into();
-            buf_state.detected_name = extract_model_name(&buf_state.text);
+            // NOTE: do NOT call `extract_model_name(&buf_state.text)`
+            // here. That function runs a full rumoca parse which
+            // takes seconds on a non-trivial source and visibly
+            // stalls the UI on every keystroke (see warning in
+            // `ast_extract.rs::extract_model_name` doc — and we
+            // hit a real freeze + occasional rumoca panic when this
+            // ran per-edit). `detected_name` is updated through the
+            // worker-parsed AST path on commit/flush; the live UI
+            // consumers (inspector, model_view, package_browser,
+            // canvas overlays) all read `WorkbenchState.open_model
+            // .detected_name`, which is refreshed off-thread.
             // Mark the buffer as dirty vs. the document. The flush
             // block below only commits once `now - pending_commit_at
             // >= EDIT_DEBOUNCE_SEC`, so a burst of typing resets this

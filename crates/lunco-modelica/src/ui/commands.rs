@@ -890,7 +890,14 @@ fn sync_editor_buffer_to_source(
     }
     editor.text = source.to_string();
     editor.line_starts = new_starts.into();
-    editor.detected_name = crate::ast_extract::extract_model_name(source);
+    // NOTE: do NOT call `extract_model_name(source)` here. It runs a
+    // full rumoca parse synchronously on the main thread (see
+    // `ast_extract::extract_model_name` doc) and stalls the UI on
+    // every undo / redo / restore. The worker reparses off-thread
+    // via the `DocumentChanged` pipeline that callers fire after
+    // mutating the document, and that path refreshes the AST cache
+    // that all UI consumers (`open_model.detected_name`, inspector,
+    // canvas overlays) actually read.
     editor.source_hash = hash_content(source);
     workbench.editor_buffer = source.to_string();
 }
@@ -2167,6 +2174,23 @@ fn rewrite_inject_in_one_pass(
     let end_end = spans.end_end.checked_sub(base)?;
     if !(name_end <= end_start && end_end <= src.len()) {
         return None;
+    }
+    // Guard: every index we'll slice with must land on a UTF-8 char
+    // boundary, otherwise `&src[a..b]` panics. Rumoca's spans have
+    // historically been byte-correct on the source it parsed, but a
+    // mismatch shows up the moment the caller's slice contains
+    // multi-byte chars (e.g. `─` `►` `│` from pasted comments) — we'd
+    // rather return None and let the caller keep the source unchanged
+    // than abort the wasm thread.
+    for &idx in &[name_start, name_end, end_start, end_end] {
+        if !src.is_char_boundary(idx) {
+            bevy::log::warn!(
+                "[rewrite_inject_in_one_pass] span index {idx} not on char \
+                 boundary in {}-byte source; skipping rewrite",
+                src.len()
+            );
+            return None;
+        }
     }
 
     // Class slice extracted by `full_span_with_leading_comments` does

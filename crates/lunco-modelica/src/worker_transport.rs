@@ -340,6 +340,48 @@ pub fn __lc_test_worker_ping(tag: &str) {
     post_to_worker(&WireMessage::Ping(tag.to_string()), "ping");
 }
 
+// ── Boot-race gate for parse requests ──
+//
+// Empirically the worker can be bootstrapped (the JS shim has loaded
+// and we can `postMessage` to it) seconds before its WASM module is
+// initialised AND seconds before the MSL bundle has landed. A parse
+// request that arrives during that window is delivered to the worker
+// in *some* order — sometimes ahead of the MSL install, sometimes
+// after — and either way we've seen the request silently dropped /
+// produce no `ParseDocumentDone` reply. The user-visible symptom is
+// "Loading resource…" forever for whichever doc was unlucky enough
+// to fire on the boot frame (most often the first restored autosave
+// doc).
+//
+// Fix: queue parses on the host side until `install_msl_in_worker`
+// has run. After that point the worker has its ready ack out *and*
+// has the MSL index, so parses can resolve imports against it. Drain
+// the queue right after we ship MSL so the gap is invisible to
+// callers.
+//
+// `wasm32-unknown-unknown` is single-threaded so a `RefCell` in a
+// `thread_local!` is enough — no `Mutex` needed.
+struct PendingParse {
+    doc_id: lunco_doc::DocumentId,
+    gen: u64,
+    uri: String,
+    source: String,
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static MSL_INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static PENDING_PARSES: std::cell::RefCell<Vec<PendingParse>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn msl_installed() -> bool { true }
+#[cfg(target_arch = "wasm32")]
+fn msl_installed() -> bool {
+    MSL_INSTALLED.with(|c| c.get())
+}
+
 /// Send a doc to the worker for off-thread parsing. Used by
 /// `engine_resource::drive_engine_sync` on wasm in place of the
 /// main-thread parse spawn. The result lands via the parse-done
@@ -347,6 +389,9 @@ pub fn __lc_test_worker_ping(tag: &str) {
 ///
 /// Returns `false` when the worker isn't installed (very early boot
 /// or worker init failed); callers fall back to local parsing.
+/// Returns `true` when the request has been posted *or queued*
+/// behind the MSL-install gate (see the boot-race note above) — in
+/// both cases the host should consider it accepted.
 pub fn dispatch_parse_to_worker(
     doc_id: lunco_doc::DocumentId,
     gen: u64,
@@ -356,11 +401,46 @@ pub fn dispatch_parse_to_worker(
     if WORKER.get().is_none() {
         return false;
     }
+    if !msl_installed() {
+        #[cfg(target_arch = "wasm32")]
+        PENDING_PARSES.with(|q| {
+            q.borrow_mut().push(PendingParse { doc_id, gen, uri, source });
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = (doc_id, gen, uri, source);
+        return true;
+    }
     post_to_worker(
         &WireMessage::ParseDocument { doc_id, gen, uri, source },
         "parse",
     );
     true
+}
+
+/// Drain any parse requests queued by `dispatch_parse_to_worker`
+/// while the MSL install was still pending. Called from
+/// `install_msl_in_worker` after MSL is shipped to the worker.
+#[cfg(target_arch = "wasm32")]
+fn flush_pending_parses() {
+    let drained: Vec<PendingParse> = PENDING_PARSES.with(|q| q.borrow_mut().drain(..).collect());
+    if drained.is_empty() {
+        return;
+    }
+    bevy::log::info!(
+        "[worker_transport] flushing {} parse request(s) queued during MSL install",
+        drained.len()
+    );
+    for p in drained {
+        post_to_worker(
+            &WireMessage::ParseDocument {
+                doc_id: p.doc_id,
+                gen: p.gen,
+                uri: p.uri,
+                source: p.source,
+            },
+            "parse(flushed)",
+        );
+    }
 }
 
 /// JS-callable bridge that synthesizes a `ModelicaCommand::Compile` and
@@ -432,5 +512,13 @@ pub fn install_msl_in_worker(
             parsed.len(),
             len
         );
+        // Open the parse-request gate now that the worker has its
+        // index. Any parse request that came in earlier this session
+        // was buffered in `PENDING_PARSES`; drain it.
+        #[cfg(target_arch = "wasm32")]
+        {
+            MSL_INSTALLED.with(|c| c.set(true));
+            flush_pending_parses();
+        }
     }
 }
