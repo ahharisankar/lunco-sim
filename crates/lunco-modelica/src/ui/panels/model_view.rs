@@ -83,6 +83,32 @@ pub struct ModelTabState {
 /// intent is readable.
 pub type TabId = u64;
 
+/// Set by [`ModelViewPanel::render`] for the duration of a body
+/// (canvas / code editor / icon / docs) render call so the body can
+/// scope its work to *this* tab without consulting any singleton.
+///
+/// Bodies prefer this resource over `WorkspaceResource.active_document`
+/// — that singleton tracks "which tab has focus" workspace-wide; on a
+/// split, both panes render but only one has focus, so reading the
+/// singleton means the un-focused split mirrors the focused one.
+///
+/// Cleared back to `None` after each body call so non-tab side-panel
+/// renders (Telemetry, Inspector, Graphs, …) keep their existing
+/// "follow the focused tab" semantics via `active_document`.
+#[derive(Resource, Default, Debug, Clone)]
+pub struct TabRenderContext {
+    pub tab_id: Option<TabId>,
+    pub doc: Option<DocumentId>,
+    pub drilled_class: Option<String>,
+}
+
+impl TabRenderContext {
+    /// `(doc, drilled_class)` if a tab body is currently rendering.
+    pub fn current(&self) -> Option<(DocumentId, Option<&str>)> {
+        self.doc.map(|d| (d, self.drilled_class.as_deref()))
+    }
+}
+
 /// Registry of open [`ModelViewPanel`] tabs.
 ///
 /// Keyed by [`TabId`] (allocated from `next_id`). Multiple tabs can
@@ -434,12 +460,28 @@ impl InstancePanel for ModelViewPanel {
             }
         }
 
+        // Publish this tab's identity to the body for the duration
+        // of the body render. Bodies that key per-tab state (canvas
+        // viewport / scene cache, editor buffer) read from this
+        // resource instead of `WorkspaceResource.active_document`,
+        // so two splits each see their own tab. Restored to the
+        // previous value after the body returns so re-entrant
+        // renders (shouldn't happen, but cheap to guard) don't
+        // strand stale state.
+        let prev_ctx = world.resource::<TabRenderContext>().clone();
+        {
+            let mut ctx = world.resource_mut::<TabRenderContext>();
+            ctx.tab_id = Some(tab_id);
+            ctx.doc = Some(doc);
+            ctx.drilled_class = drilled.clone();
+        }
         match new_view_mode {
             ModelViewMode::Text => self.code.render(ui, world),
             ModelViewMode::Canvas => self.canvas.render(ui, world),
             ModelViewMode::Icon => render_icon_view(ui, world),
             ModelViewMode::Docs => render_docs_view(ui, world),
         }
+        *world.resource_mut::<TabRenderContext>() = prev_ctx;
     }
 }
 

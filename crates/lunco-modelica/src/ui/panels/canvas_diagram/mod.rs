@@ -728,13 +728,46 @@ pub enum ContextMenuTarget {
 
 
 /// Shorthand used by free helpers that don't already have the
-/// active doc threaded through: resolve it from the Workspace session.
-/// Kept inline so callers outside the main render flow don't grow a
-/// parameter just to pass a one-line lookup.
+/// active doc threaded through.
+///
+/// Prefers the per-render-call [`TabRenderContext`](crate::ui::panels::model_view::TabRenderContext)
+/// so canvas bodies on a split see their own tab, then falls back
+/// to the workspace-wide focused tab. Code paths that aren't part
+/// of a tab body render (event observers, side-panel systems) hit
+/// the fallback.
 pub(super) fn active_doc_from_world(world: &World) -> Option<lunco_doc::DocumentId> {
+    if let Some((doc, _)) = world
+        .get_resource::<crate::ui::panels::model_view::TabRenderContext>()
+        .and_then(|c| c.current())
+    {
+        return Some(doc);
+    }
     world
         .resource::<lunco_workbench::WorkspaceResource>()
         .active_document
+}
+
+/// `(doc, drilled_class)` for the currently-rendering tab body.
+/// Falls back to `(active_document, DrilledInClassNames[doc])` when
+/// no tab body is rendering — preserves legacy semantics for
+/// observers / systems that fire outside a body render.
+pub(super) fn render_target(
+    world: &World,
+) -> Option<(lunco_doc::DocumentId, Option<String>)> {
+    if let Some(ctx) = world
+        .get_resource::<crate::ui::panels::model_view::TabRenderContext>()
+    {
+        if let Some(doc) = ctx.doc {
+            return Some((doc, ctx.drilled_class.clone()));
+        }
+    }
+    let doc = world
+        .resource::<lunco_workbench::WorkspaceResource>()
+        .active_document?;
+    let drilled = world
+        .get_resource::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
+        .and_then(|m| m.get(doc).map(str::to_string));
+    Some((doc, drilled))
 }
 
 /// Insert a plot scene node anchored at `click_world`. `entity_bits = 0`

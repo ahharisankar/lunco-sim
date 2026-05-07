@@ -28,7 +28,7 @@ use super::theme::{
 use super::{
     BackgroundDiagramHandle, CANVAS_DIAGRAM_PANEL_ID, CanvasDiagramState, CanvasDocState,
     CanvasSnapSettings, ContextMenuTarget, DiagramProjectionLimits, ICON_W, PendingContextMenu,
-    active_doc_from_world, build_registry, decorations, menus, overlays, palette,
+    active_doc_from_world, build_registry, decorations, menus, overlays, palette, render_target,
 };
 
 pub struct CanvasDiagramPanel;
@@ -61,12 +61,11 @@ impl Panel for CanvasDiagramPanel {
         // `last_seen_gen == 0` so the first render after tab open
         // always re-projects.
         let project_now = {
-            // Active doc from the Workspace session (source of truth);
-            // `WorkbenchState.open_model` is still read below for
-            // display-cache fields, but no longer for identity.
-            let Some(doc_id) = world
-                .resource::<lunco_workbench::WorkspaceResource>()
-                .active_document
+            // Resolve target tab: prefer the per-render
+            // [`TabRenderContext`] so a split sees its own tab; fall
+            // back to the workspace-wide active doc for non-tab
+            // render paths.
+            let Some(doc_id) = active_doc_from_world(world)
             else {
                 world
                     .resource_mut::<CanvasDiagramState>()
@@ -109,9 +108,17 @@ impl Panel for CanvasDiagramPanel {
                 gen != docstate.last_seen_gen && gen > docstate.canvas_acked_gen;
             // Drill-in target changed (e.g. user clicked a different
             // class in the Twin Browser for an already-open tab).
-            let live_target = world
-                .get_resource::<DrilledInClassNames>()
-                .and_then(|m| m.get(doc_id).map(str::to_string));
+            // Prefer the rendering tab's own `drilled_class` over
+            // the per-doc `DrilledInClassNames` map so split panes
+            // can hold different drill targets on the same doc.
+            let live_target = render_target(world)
+                .filter(|(d, _)| *d == doc_id)
+                .and_then(|(_, drilled)| drilled)
+                .or_else(|| {
+                    world
+                        .get_resource::<DrilledInClassNames>()
+                        .and_then(|m| m.get(doc_id).map(str::to_string))
+                });
             let target_changed = live_target != docstate.last_seen_target;
             // Hash-skip: when the gen bumped but the projection-
             // relevant source slice (whitespace-collapsed, comment-
@@ -241,9 +248,16 @@ impl Panel for CanvasDiagramPanel {
             // `msl://…` URI. `None` for Untitled / user-authored
             // docs — builder picks the first non-package class as
             // before.
-            let target_class_snapshot: Option<String> = world
-                .get_resource::<DrilledInClassNames>()
-                .and_then(|m| m.get(doc_id).map(str::to_string));
+            // Prefer the rendering tab's own scope so split panes
+            // with distinct drill targets project distinct scenes.
+            let target_class_snapshot: Option<String> = render_target(world)
+                .filter(|(d, _)| *d == doc_id)
+                .and_then(|(_, drilled)| drilled)
+                .or_else(|| {
+                    world
+                        .get_resource::<DrilledInClassNames>()
+                        .and_then(|m| m.get(doc_id).map(str::to_string))
+                });
             // Snapshot the auto-layout grid so the bg task can fall
             // back to configurable spacing for components without a
             // `Placement` annotation.
@@ -445,9 +459,10 @@ impl Panel for CanvasDiagramPanel {
         // cursor, and (on first projection for this tab) frame the
         // scene with a sensible initial zoom.
         {
-            let active_doc = world
-                .resource::<lunco_workbench::WorkspaceResource>()
-                .active_document;
+            // For task polling, the "active" doc is *this* tab's
+            // doc — split panes each poll their own task slot.
+            // active_doc_from_world prefers TabRenderContext.
+            let active_doc = active_doc_from_world(world);
             // Pre-fetch current gen from the registry before we
             // take the mutable borrow of CanvasDiagramState, so we
             // can use it inside the deadline-guard block below
