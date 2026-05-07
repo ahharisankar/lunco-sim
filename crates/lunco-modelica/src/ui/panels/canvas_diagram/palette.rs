@@ -15,7 +15,7 @@ use bevy_egui::egui;
 use crate::document::ModelicaOp;
 use crate::visual_diagram::MSLComponentDef;
 
-use super::ops::{op_add_component_with_name, pick_add_instance_name, synthesize_msl_node};
+use super::ops::{op_add_component_with_name, pick_add_instance_name};
 use super::CanvasDiagramState;
 
 /// One node in the MSL package hierarchy. `classes` are instantiable
@@ -234,21 +234,11 @@ pub(super) fn render_msl_package_menu(
                     let state = world.resource::<CanvasDiagramState>();
                     pick_add_instance_name(comp, &state.get(doc_id).canvas.scene)
                 };
-                // Optimistic synthesis: the canvas reflects the new
-                // node *before* the AST settles, so the user sees an
-                // instant response. `apply_ops` then bumps
-                // `canvas_acked_gen` to suppress the redundant
-                // reproject when the AST does land.
-                {
-                    let mut state = world.resource_mut::<CanvasDiagramState>();
-                    let docstate = state.get_mut(doc_id);
-                    synthesize_msl_node(
-                        &mut docstate.canvas.scene,
-                        comp,
-                        &instance_name,
-                        click_world,
-                    );
-                }
+                // Optimistic scene synthesis (`synthesize_msl_node`) was
+                // removed in A.4. Now: emit the op, gen bumps in
+                // `apply_patch`, the next frame's projection re-derives
+                // the scene from the new AST. Same-frame visual
+                // response since the projection system runs each tick.
                 out.push(op_add_component_with_name(comp, &instance_name, click_world, class));
             }
             ui.close();

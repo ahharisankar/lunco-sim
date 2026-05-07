@@ -31,58 +31,15 @@ use super::{
     active_doc_from_world, build_registry, decorations, menus, overlays, palette, render_target,
 };
 
-/// Replay a single [`SceneEvent`] from the editing tab onto a
-/// sibling tab's scene. Position / topology mutations carry over;
-/// per-tab events (selection, context menu, double-click) don't.
-///
-/// This is the per-event sync that makes split tabs feel live —
-/// no reprojection wait, no whole-scene clone. The editing tab
-/// applies its event via the canvas widget's own internal
-/// machinery (`canvas.ui`); we then mirror the *effect* here.
-fn apply_event_to_sibling_scene(
-    scene: &mut lunco_canvas::Scene,
-    event: &lunco_canvas::SceneEvent,
-) {
-    use lunco_canvas::SceneEvent;
-    match event {
-        SceneEvent::NodeMoved { id, new_min, .. } => {
-            if let Some(node) = scene.node_mut(*id) {
-                let size_x = node.rect.width();
-                let size_y = node.rect.height();
-                node.rect = lunco_canvas::Rect::from_min_size(
-                    *new_min, size_x, size_y,
-                );
-            }
-        }
-        SceneEvent::NodeResized { id, new_rect, .. } => {
-            if let Some(node) = scene.node_mut(*id) {
-                node.rect = *new_rect;
-            }
-        }
-        SceneEvent::NodeDeleted { id, orphaned_edges } => {
-            for eid in orphaned_edges {
-                let _ = scene.remove_edge(*eid);
-            }
-            let _ = scene.remove_node(*id);
-        }
-        SceneEvent::EdgeDeleted { id } => {
-            let _ = scene.remove_edge(*id);
-        }
-        // EdgeCreated needs the new EdgeId allocated by the editing
-        // tab's scene to be reused on siblings — otherwise the same
-        // logical connection would have different ids in different
-        // tabs and a later EdgeDeleted event wouldn't find a match.
-        // The event doesn't carry the new id today; siblings will
-        // pick it up via the next reprojection (gen-bump after
-        // apply_ops). Cheap correctness over wallclock instantness
-        // for this less-frequent gesture.
-        SceneEvent::EdgeCreated { .. } => {}
-        // Per-tab events — never replay onto siblings.
-        SceneEvent::SelectionChanged(_)
-        | SceneEvent::ContextMenuRequested { .. }
-        | SceneEvent::NodeDoubleClicked { .. } => {}
-    }
-}
+// Per-event sibling-scene replay (`apply_event_to_sibling_scene`)
+// removed in A.5. Sibling tabs viewing the same `(doc,
+// drilled_class)` now re-derive their scene from the gen-bumped AST
+// on the next render, via the projection cursor in `render_canvas`.
+// This is correct-by-construction: every mutation flows through
+// `host.apply` → `op_to_patch` → AST mutation + source rewrite →
+// `DocumentChanged` event → projection invalidates on next gen
+// observation. Per-event mirroring would now be a redundant write
+// path that could drift from the AST.
 
 pub struct CanvasDiagramPanel;
 
@@ -1160,46 +1117,13 @@ impl CanvasDiagramPanel {
         };
         mark("canvas.ui (scene render)", &mut phase_t, &mut phase_log);
 
-        // Operation replay across sibling tabs.
-        //
-        // When the user drags / connects / deletes in this tab, we
-        // reflect the same mutation onto every other tab viewing
-        // the same `(doc, drilled_class)` so they update *now* —
-        // before any source rewrite or reprojection. Cheap O(1)
-        // per event per sibling tab vs. O(scene-size) for a
-        // wholesale clone, and skips the off-thread reprojection
-        // round-trip entirely. Selection / viewport on siblings
-        // are intentionally untouched — those are per-tab.
-        if !events.is_empty() {
-            if let (Some(editing_tab), Some(doc_id)) = (render_tab_id, active_doc) {
-                let editing_drilled: Option<String> = world
-                    .resource::<crate::ui::panels::model_view::ModelTabs>()
-                    .get(editing_tab)
-                    .and_then(|s| s.drilled_class.clone());
-                let sibling_tabs: Vec<crate::ui::panels::model_view::TabId> = world
-                    .resource::<crate::ui::panels::model_view::ModelTabs>()
-                    .iter()
-                    .filter_map(|(tid, s)| {
-                        if tid == editing_tab
-                            || s.doc != doc_id
-                            || s.drilled_class.as_deref() != editing_drilled.as_deref()
-                        {
-                            return None;
-                        }
-                        Some(tid)
-                    })
-                    .collect();
-                if !sibling_tabs.is_empty() {
-                    let mut state = world.resource_mut::<CanvasDiagramState>();
-                    for tab_id in &sibling_tabs {
-                        let sibling = state.get_mut_for_tab(*tab_id, doc_id);
-                        for ev in &events {
-                            apply_event_to_sibling_scene(&mut sibling.canvas.scene, ev);
-                        }
-                    }
-                }
-            }
-        }
+        // Sibling-tab event replay was removed in A.5. After the
+        // AST-canonical migration each mutation flows
+        // canvas → host.apply → AST → source → DocumentChanged → next
+        // frame's projection picks up the new gen and re-derives the
+        // sibling scene. Letting projection be the single
+        // synchronization point eliminates the per-event drift
+        // (sibling and editing-tab scenes can no longer disagree).
 
         // Vello continues to render the diagram in the background
         // into a per-tab offscreen texture (see `vello_canvas.rs`).
@@ -1278,16 +1202,13 @@ impl CanvasDiagramPanel {
                 let drop_target = hover_pos.filter(|p| response.rect.contains(*p));
                 if let (Some(p), Some(doc_id)) = (drop_target, active_doc) {
                     if !tab_read_only {
-                        // Match the right-click "Add component" path
-                        // exactly: optimistic `synthesize_msl_node` for
-                        // instant visual response + `apply_ops_public`
-                        // to rewrite the source and bump
-                        // `canvas_acked_gen` so the eventual reproject
-                        // is suppressed (which is why the existing
-                        // scene survives — the API-observer path went
-                        // through `AddModelicaComponent`, which had no
-                        // such ack, so the canvas kept clearing itself
-                        // and stalled on the 2.5 s reparse debounce).
+                        // After A.4: drop emits one `AddComponent` op
+                        // through `apply_ops_public`. The next-frame
+                        // projection re-derives the scene from the
+                        // gen-bumped AST. The legacy optimistic
+                        // `synthesize_msl_node` path is gone; same-frame
+                        // visual response now comes from the projector
+                        // running unconditionally each tick.
                         let screen_rect_drop = lunco_canvas::Rect::from_min_max(
                             lunco_canvas::Pos::new(response.rect.min.x, response.rect.min.y),
                             lunco_canvas::Pos::new(response.rect.max.x, response.rect.max.y),
@@ -1327,20 +1248,6 @@ impl CanvasDiagramPanel {
                                 let state = world.resource::<CanvasDiagramState>();
                                 ops::pick_add_instance_name(&def, &match render_tab_id { Some(t) => state.get_for_tab(t), None => state.get(Some(doc_id)) }.canvas.scene)
                             };
-                            // 1. Optimistic synth — node appears immediately.
-                            {
-                                let mut state =
-                                    world.resource_mut::<CanvasDiagramState>();
-                                let docstate = match render_tab_id { Some(t) => state.get_mut_for_tab(t, doc_id), None => state.get_mut(Some(doc_id)) };
-                                ops::synthesize_msl_node(
-                                    &mut docstate.canvas.scene,
-                                    &def,
-                                    &instance_name,
-                                    click_world,
-                                );
-                            }
-                            // 2. Source rewrite + canvas_acked_gen bump
-                            //    (suppresses the redundant reproject).
                             let op = ops::op_add_component_with_name(
                                 &def,
                                 &instance_name,

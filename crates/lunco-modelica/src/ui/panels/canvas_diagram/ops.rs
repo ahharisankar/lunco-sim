@@ -349,101 +349,16 @@ pub(super) fn op_add_component_with_name(
     }
 }
 
-/// Optimistically synthesise a canvas Node for a freshly-added MSL
-/// component, mirroring the subset of [`project_scene`]'s logic that
-/// applies before the AST settles. Uses the identity icon transform
-/// and the fallback port layout — the next reproject (if any) will
-/// replace this with the canonical projection.
-///
-/// Returns the fresh `NodeId`; the caller pairs it with the matching
-/// `AddComponent` op so the optimistic scene + the source rewrite
-/// stay in lock-step.
-pub(super) fn synthesize_msl_node(
-    scene: &mut lunco_canvas::Scene,
-    comp: &MSLComponentDef,
-    instance_name: &str,
-    at_world: lunco_canvas::Pos,
-) -> lunco_canvas::NodeId {
-    use lunco_canvas::{Node as CanvasNode, Port as CanvasPort, PortId as CanvasPortId, Pos as CanvasPos, Rect as CanvasRect};
-
-    // Match `Placement::at` — 20×20 canvas units centred on the
-    // click. The source rewrite emits the same extent so the
-    // canonical reproject (when one happens) keeps the size stable.
-    // Using the full -100..100 default would render a node 10× too
-    // large compared with what the AST will produce.
-    let half = 10.0_f32;
-    let icon_w = half * 2.0;
-    let icon_h = half * 2.0;
-    let min_wx = at_world.x - half;
-    let min_wy = at_world.y - half;
-
-    let n_ports = comp.ports.len();
-    let ports: Vec<CanvasPort> = comp
-        .ports
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let (lx, ly) = if p.x == 0.0 && p.y == 0.0 {
-                port_fallback_offset_for_size(i, n_ports, icon_w, icon_h)
-            } else {
-                // Map port coords (-100..100, +Y up) into the
-                // 20×20 icon-local screen box (+Y down). Same scale
-                // factor 20/200 = 0.1 the projector uses for a
-                // Placement::at extent.
-                let scale = icon_w / 200.0;
-                ((p.x + 100.0) * scale, (100.0 - p.y) * scale)
-            };
-            CanvasPort {
-                id: CanvasPortId::new(p.name.clone()),
-                local_offset: CanvasPos::new(lx, ly),
-                kind: port_kind_str(p.kind).into(),
-            }
-        })
-        .collect();
-
-    let id = scene.alloc_node_id();
-    scene.insert_node(CanvasNode {
-        id,
-        rect: CanvasRect::from_min_size(CanvasPos::new(min_wx, min_wy), icon_w, icon_h),
-        kind: "modelica.icon".into(),
-        data: std::sync::Arc::new(IconNodeData {
-            qualified_type: comp.msl_path.clone(),
-            icon_only: crate::ui::loaded_classes::is_icon_only_class(&comp.msl_path),
-            expandable_connector: comp.is_expandable_connector,
-            icon_graphics: comp.icon_graphics.clone(),
-            diagram_graphics: if comp.class_kind == "connector" {
-                comp.diagram_graphics.clone()
-            } else {
-                None
-            },
-            rotation_deg: 0.0,
-            mirror_x: false,
-            mirror_y: false,
-            instance_name: instance_name.to_string(),
-            parameters: comp
-                .parameters
-                .iter()
-                .map(|p| (p.name.clone(), p.default.clone()))
-                .collect(),
-            port_connector_paths: comp
-                .ports
-                .iter()
-                .map(|p| (p.name.clone(), p.msl_path.clone(), p.size_x, p.size_y, p.rotation_deg))
-                .collect(),
-            port_connector_icons: resolve_port_icons(&comp.msl_path, &comp.ports),
-            is_conditional: false,
-        }),
-        ports,
-        label: instance_name.to_string(),
-        origin: Some(instance_name.to_string()),
-        resizable: false,
-        // Optimistic synth: skip the icon-bbox computation (cheap but
-        // not free); the next reproject from the source overwrites
-        // this node anyway with the bbox-aware version.
-        visual_rect: None,
-    });
-    id
-}
+// `synthesize_msl_node` — optimistic-scene helper — was deleted in
+// A.4. Used to insert a Node into the canvas scene the same frame the
+// op fired, ahead of the projection re-derivation. After A.2 the
+// AST-canonical apply path is fast (no debounced reparse during
+// apply) and the projection system runs every tick, so the next
+// frame's projection picks up the new gen and renders the same node
+// — no perceptible latency. Removing the optimistic path also kills
+// a small drift class: the optimistic Node and the projected Node
+// could disagree on port layout / icon rendering until the projector
+// caught up.
 
 pub(super) fn op_remove_component(
     world: &mut World,
