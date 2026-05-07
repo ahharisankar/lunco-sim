@@ -360,3 +360,4 @@ impl Panel for TelemetryPanel {
         // toggles only; graph-axis controls live on the graph itself.
     }
 }
+

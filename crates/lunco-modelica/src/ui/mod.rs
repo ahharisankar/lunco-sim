@@ -74,6 +74,7 @@ pub mod theme;
 pub mod uri_handler;
 pub mod loaded_classes;
 pub mod text_node;
+pub mod prefill;
 pub mod wasm_autosave;
 pub mod wasm_clipboard;
 pub mod welcome_progress;
@@ -612,6 +613,12 @@ impl Plugin for ModelicaUiPlugin {
             .add_systems(Update, panels::package_browser::handle_package_loading_tasks)
             .add_systems(Update, cleanup_removed_documents)
             .add_systems(Update, drain_document_changes)
+            .init_resource::<crate::ui::prefill::PrefillCursor>()
+            .add_systems(
+                Update,
+                crate::ui::prefill::prefill_models_from_ast
+                    .after(crate::engine_resource::drive_engine_sync),
+            )
             // Mirror the active document's volatile fields (source,
             // line_starts, detected_name) into `WorkbenchState.open_model`
             // every Update tick. Half-step Fix 3: until the 91 read
