@@ -1440,6 +1440,30 @@ fn class_kind_spec_to_index_kind(spec: pretty::ClassKindSpec) -> crate::index::C
 /// Translate a high-level [`ModelicaOp`] into the concrete text patch
 /// and the structured change it represents. Pure function — no
 /// document state mutated.
+/// Bail with the same parse-error message `resolve_class` produces, so
+/// AST-canonical ops in `op_to_patch` surface parse failures
+/// identically to the legacy `pretty/`-based helpers (which call
+/// `resolve_class` internally). Without this guard, `regenerate_class_patch`
+/// would happily run against a stale-but-parseable AST and produce a
+/// patch that erases the user's in-flight typing on the next reparse.
+fn ast_check_no_parse_error(ast: &AstCache) -> Result<(), DocumentError> {
+    if let Some(msg) = ast.first_error() {
+        return Err(DocumentError::ValidationFailed(format!(
+            "cannot apply AST op while source has a parse error: {}",
+            msg
+        )));
+    }
+    Ok(())
+}
+
+/// Translate a structural-mutation error into the `DocumentError`
+/// shape `op_to_patch` callers expect. `ValidationFailed` is the
+/// catch-all the legacy path uses for "couldn't find the target" /
+/// "couldn't construct the new value", so we reuse it here for parity.
+fn ast_mut_to_doc_error(e: crate::ast_mut::AstMutError) -> DocumentError {
+    DocumentError::ValidationFailed(e.to_string())
+}
+
 fn op_to_patch(
     source: &str,
     ast: &AstCache,
@@ -1483,7 +1507,21 @@ fn op_to_patch(
             Ok((r, rp, change))
         }
         ModelicaOp::SetPlacement { class, name, placement } => {
-            let (r, rp) = compute_set_placement_patch(source, ast, parsed, &class, &name, &placement)?;
+            // AST-canonical path (A.2 batch 1). Regenerates the whole
+            // class via `to_modelica()` after a structural mutation;
+            // legacy `compute_set_placement_patch` retained below for
+            // emergency revert until parity is confirmed in the wild.
+            // Surface AST-resolution errors as ValidationFailed —
+            // matches the legacy path's error type so consumers don't
+            // need to handle a new variant.
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::set_placement(c, &name, &placement),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             let change = ModelicaChange::PlacementChanged {
                 class,
                 component: name,
@@ -1492,7 +1530,14 @@ fn op_to_patch(
             Ok((r, rp, change))
         }
         ModelicaOp::SetParameter { class, component, param, value } => {
-            let (r, rp) = compute_set_parameter_patch(source, ast, parsed, &class, &component, &param, &value)?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::set_parameter(c, &component, &param, &value),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             let change = ModelicaChange::ParameterChanged {
                 class,
                 component,

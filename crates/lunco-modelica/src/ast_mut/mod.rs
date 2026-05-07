@@ -35,6 +35,7 @@
 //! `set_placement` lands next session: needs an annotation-tree edit,
 //! denser than `set_parameter`.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use rumoca_session::parsing::ast::{ClassDef, Expression, StoredDefinition, Token, TerminalType};
@@ -280,6 +281,183 @@ fn parse_value_fragment(value_text: &str) -> Result<Expression, AstMutError> {
         .as_ref()
         .cloned()
         .ok_or_else(|| AstMutError::ValueParseFailed { value: value_text.to_string() })
+}
+
+/// Run an AST mutation against a class and return a `(byte_range,
+/// replacement)` patch suitable for `Document::apply_patch`.
+///
+/// This is the seam where the AST-canonical migration lands. Today's
+/// `op_to_patch` builds patches via `pretty::*` text emitters and
+/// byte-range scans (`compute_set_placement_patch` etc.); after the
+/// migration each AST-shaped op routes here:
+///
+/// 1. Resolve `class` to a [`ClassDef`] inside `parsed`.
+/// 2. Clone it (we never mutate the input AST — the document's
+///    snapshot stays valid for parallel readers, and rollback on
+///    error is a no-op).
+/// 3. Run `mutate(&mut clone)`.
+/// 4. Detect the class's leading-whitespace indent from `source`.
+/// 5. Emit the mutated class via `clone.to_modelica(indent)`.
+/// 6. Return `(class.location range, regen_text)`.
+///
+/// The replaced span is the entire class. Undo grain is per-class
+/// rather than per-modification — coarser than the legacy `pretty/`
+/// path's surgical splices, but safe and trivial to verify against
+/// the round-trip suite. If finer grain matters in practice we'll
+/// diff `class.to_modelica()` before/after the mutation and splice
+/// only the changed region; that's a follow-on optimisation.
+///
+/// `parse_error` is converted into [`AstMutError::ClassNotFound`]
+/// when the class itself can't be resolved; mutation errors propagate
+/// as-is.
+pub fn regenerate_class_patch<F>(
+    source: &str,
+    parsed: &StoredDefinition,
+    class: &str,
+    mutate: F,
+) -> Result<(Range<usize>, String), AstMutError>
+where
+    F: FnOnce(&mut ClassDef) -> Result<(), AstMutError>,
+{
+    // Clone the whole StoredDefinition so we can take a `&mut`
+    // through `lookup_class_mut` without aliasing the caller's
+    // snapshot. Cheap on lunco-sized models; cost scales with class
+    // count, not modification depth.
+    let mut sd_clone = parsed.clone();
+    let class_def = lookup_class_mut(&mut sd_clone, class)?;
+    mutate(class_def)?;
+
+    // `class.location` in rumoca is class-name-to-`end-Name` — it
+    // does NOT cover the leading kind keyword (`model`, `package`, …)
+    // or any prefix modifiers (`partial`, `encapsulated`, …) that
+    // appear in source, and it stops *before* the trailing `;` of
+    // `end Name;`. `to_modelica` emits the full thing including
+    // prefixes and trailing `end Name;\n`. We must therefore widen
+    // both ends of the replaced span before splicing or we get
+    // `model model M …;;` (prefix + name kept, body replaced, `;`
+    // duplicated).
+    let raw_start = class_def.location.start as usize;
+    let raw_end = class_def.location.end as usize;
+    let start = rewind_to_class_header_start(source, raw_start);
+    let end = advance_past_trailing_semicolon(source, raw_end);
+
+    // Indent inference: walk back from the *header* start to the line
+    // start, capturing whitespace bytes only. Top-level classes
+    // return ""; nested classes return the parent's inner-indent.
+    let indent = leading_indent(source, start);
+    let mut regen = class_def.to_modelica(&indent);
+    // The ClassDef emitter starts with the indent prefix; the source
+    // span we replace begins at the header start (after the indent
+    // run on its line), so strip the indent from regen to keep the
+    // surrounding bytes in `source` byte-stable.
+    if regen.starts_with(&indent) {
+        regen.drain(..indent.len());
+    }
+    // `to_modelica` ends with `\n`. Match the source span: if our
+    // span ends at a `\n` in source, keep it; otherwise drop the
+    // trailing `\n` from regen so we don't introduce an extra blank
+    // line.
+    if !ends_with_newline(source, end) && regen.ends_with('\n') {
+        regen.pop();
+    }
+
+    Ok((start..end, regen))
+}
+
+/// Walk back from `name_start` (the byte offset of the class name in
+/// source) through any prefix-keyword run — `model`, `partial model`,
+/// `encapsulated partial model`, `replaceable function`, … — up to the
+/// first non-prefix character on the same logical line. Returns the
+/// byte offset where the class declaration's first prefix keyword
+/// begins.
+///
+/// Algorithm: skip whitespace (spaces/tabs only — newlines stop us),
+/// then skip an ASCII-alphabetic word, then loop. Stop when we hit a
+/// non-letter / non-space byte, a newline, or BOF. The position right
+/// after the last skipped character is the header start.
+fn rewind_to_class_header_start(source: &str, name_start: usize) -> usize {
+    let bytes = source.as_bytes();
+    if name_start > bytes.len() {
+        return name_start;
+    }
+    let mut i = name_start;
+    loop {
+        // Trailing whitespace before the name (or between prefix words).
+        while i > 0 {
+            match bytes[i - 1] {
+                b' ' | b'\t' => i -= 1,
+                _ => break,
+            }
+        }
+        // Word run (the keyword we're stepping over).
+        let word_end = i;
+        while i > 0 && bytes[i - 1].is_ascii_alphabetic() {
+            i -= 1;
+        }
+        // No word stepped → we hit a non-word byte or BOF; we're done.
+        if i == word_end {
+            break;
+        }
+    }
+    i
+}
+
+/// Advance past `end Name`'s trailing `;` (and an optional newline).
+/// The AST `location.end` lands right after the `Name` token of the
+/// `end Name` clause but before the semicolon. Matches the strategy
+/// in rumoca's `full_span_with_leading_comments`.
+fn advance_past_trailing_semicolon(source: &str, mut pos: usize) -> usize {
+    let bytes = source.as_bytes();
+    while pos < bytes.len() {
+        match bytes[pos] {
+            b' ' | b'\t' => pos += 1,
+            b';' => {
+                pos += 1;
+                // Optionally swallow a single trailing newline so
+                // regen's terminating `\n` lines up cleanly.
+                if pos < bytes.len() && bytes[pos] == b'\n' {
+                    pos += 1;
+                }
+                break;
+            }
+            _ => break,
+        }
+    }
+    pos
+}
+
+/// Return the run of space/tab bytes immediately preceding `byte_pos`
+/// up to (but not including) the previous newline. Used to recover the
+/// indent string under which a class definition was originally written
+/// so the regenerated class lines up with its source position.
+fn leading_indent(source: &str, byte_pos: usize) -> String {
+    if byte_pos > source.len() {
+        return String::new();
+    }
+    let bytes = source.as_bytes();
+    let mut start = byte_pos;
+    while start > 0 {
+        let c = bytes[start - 1];
+        if c == b' ' || c == b'\t' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    // `start..byte_pos` is the indent run. Validate that what's
+    // immediately before is a newline or BOF — otherwise the input
+    // wasn't at line-start and we conservatively return "".
+    if start == 0 || bytes[start - 1] == b'\n' {
+        std::str::from_utf8(&bytes[start..byte_pos])
+            .map(str::to_string)
+            .unwrap_or_default()
+    } else {
+        String::new()
+    }
+}
+
+fn ends_with_newline(source: &str, byte_end: usize) -> bool {
+    byte_end > 0 && source.as_bytes().get(byte_end - 1) == Some(&b'\n')
 }
 
 /// Construct a synthetic [`Token`] for an identifier with no source
