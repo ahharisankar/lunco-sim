@@ -65,6 +65,40 @@ pub enum AstMutError {
         /// The offending value text.
         value: String,
     },
+    /// `add_component` was called with a component name that already
+    /// exists. Adding a duplicate would silently shadow the existing
+    /// declaration in `components: IndexMap`, which is rarely the
+    /// caller's intent — surface explicitly so they can decide
+    /// (remove-then-add for type changes, `set_parameter` for
+    /// modification updates).
+    DuplicateComponent {
+        /// Class the component was being inserted into.
+        class: String,
+        /// Component name that already exists.
+        component: String,
+    },
+    /// `add_class` was called with a class name that already exists in
+    /// the target parent (or top level). Same rationale as
+    /// [`Self::DuplicateComponent`].
+    DuplicateClass {
+        /// Parent class qualified name, or `"(top-level)"` for the
+        /// `StoredDefinition.classes` root.
+        parent: String,
+        /// Class name that already exists.
+        name: String,
+    },
+    /// `remove_connection` did not find a matching `connect(from, to)`
+    /// equation. Direction-sensitive: the canvas emits canonical
+    /// direction, so this isn't expected to false-positive in
+    /// practice; if it does we'll widen to direction-insensitive match.
+    ConnectionNotFound {
+        /// Class whose equations were searched.
+        class: String,
+        /// `component.port` form of the missing source endpoint.
+        from: String,
+        /// `component.port` form of the missing target endpoint.
+        to: String,
+    },
 }
 
 impl std::fmt::Display for AstMutError {
@@ -77,6 +111,14 @@ impl std::fmt::Display for AstMutError {
             AstMutError::ValueParseFailed { value } => {
                 write!(f, "could not parse value `{value}` as a Modelica expression")
             }
+            AstMutError::DuplicateComponent { class, component } => write!(
+                f,
+                "component `{component}` already exists in class `{class}`"
+            ),
+            AstMutError::ConnectionNotFound { class, from, to } => write!(
+                f,
+                "connection `connect({from}, {to})` not found in class `{class}`"
+            ),
         }
     }
 }
@@ -168,6 +210,281 @@ pub fn set_parameter(
         _ => {
             comp.modifications.insert(param.to_string(), expr);
         }
+    }
+    Ok(())
+}
+
+/// Append a new component to a class.
+///
+/// Mirrors `ModelicaOp::AddComponent`. The new component is constructed
+/// by rendering `decl` into a stub-class source fragment via
+/// `pretty::component_decl` and parsing it back to AST — same trick as
+/// [`set_parameter`]'s `parse_value_fragment`. Errors out if a
+/// component with the same name already exists; replacing in place is
+/// a different operation (`SetParameter` for individual modifications,
+/// remove-then-add for type changes).
+pub fn add_component(
+    class: &mut ClassDef,
+    decl: &pretty::ComponentDecl,
+) -> Result<(), AstMutError> {
+    if class.components.contains_key(&decl.name) {
+        return Err(AstMutError::DuplicateComponent {
+            class: class.name.text.to_string(),
+            component: decl.name.clone(),
+        });
+    }
+    let new_component = parse_component_fragment(decl)?;
+    class.components.insert(decl.name.clone(), new_component);
+    Ok(())
+}
+
+/// Remove a component by name. Returns `ComponentNotFound` if absent —
+/// the caller decides whether stale ops on a removed component should
+/// be silent (idempotent) or surfaced.
+pub fn remove_component(class: &mut ClassDef, name: &str) -> Result<(), AstMutError> {
+    let class_name = class.name.text.to_string();
+    if class.components.shift_remove(name).is_none() {
+        return Err(AstMutError::ComponentNotFound {
+            class: class_name,
+            component: name.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Append a `connect(...)` equation to a class.
+///
+/// Mirrors `ModelicaOp::AddConnection`. Uses the same parse-fragment
+/// trick: render the `ConnectEquation` via `pretty::connect_equation`,
+/// wrap in a stub class equation section, parse, and lift the
+/// resulting `Equation::Connect` into the target's equations list.
+pub fn add_connection(
+    class: &mut ClassDef,
+    eq: &pretty::ConnectEquation,
+) -> Result<(), AstMutError> {
+    let new_eq = parse_connect_equation_fragment(eq)?;
+    class.equations.push(new_eq);
+    Ok(())
+}
+
+/// Remove a `connect(...)` equation matching `(from, to)` PortRefs.
+/// Returns `ConnectionNotFound` when no match exists. Direction is
+/// matched as written: `connect(a.p, b.q)` and `connect(b.q, a.p)` are
+/// distinct from this helper's perspective. (Modelica's connection
+/// semantics treat them as equivalent, but the canvas always emits a
+/// canonical direction so direction-sensitive matching is sufficient
+/// for canvas-driven edits and avoids false matches against unrelated
+/// connections.)
+pub fn remove_connection(
+    class: &mut ClassDef,
+    from: &pretty::PortRef,
+    to: &pretty::PortRef,
+) -> Result<(), AstMutError> {
+    let class_name = class.name.text.to_string();
+    let before = class.equations.len();
+    class.equations.retain(|eq| {
+        !matches!(
+            eq,
+            rumoca_session::parsing::ast::Equation::Connect { lhs, rhs, .. }
+                if matches_port_ref(lhs, from) && matches_port_ref(rhs, to)
+        )
+    });
+    if class.equations.len() == before {
+        return Err(AstMutError::ConnectionNotFound {
+            class: class_name,
+            from: format!("{}.{}", from.component, from.port),
+            to: format!("{}.{}", to.component, to.port),
+        });
+    }
+    Ok(())
+}
+
+/// Match a parsed `ComponentReference` against a `pretty::PortRef`.
+///
+/// Two shapes show up in practice:
+/// - `connect(a.p, b.q)` — PortRef has both `component` and `port`,
+///   reference is a two-segment `a.p`.
+/// - `connect(a, b)` — for top-level connector instances where the
+///   whole component IS a port. PortRef leaves `port` empty,
+///   reference is a single-segment `a`.
+///
+/// Anything else (deeper paths, subscripts) is rejected as
+/// canvas-impossible.
+fn matches_port_ref(
+    cref: &rumoca_session::parsing::ast::ComponentReference,
+    port: &pretty::PortRef,
+) -> bool {
+    if port.port.is_empty() {
+        cref.parts.len() == 1 && &*cref.parts[0].ident.text == port.component
+    } else {
+        cref.parts.len() == 2
+            && &*cref.parts[0].ident.text == port.component
+            && &*cref.parts[1].ident.text == port.port
+    }
+}
+
+/// Parse a `pretty::ComponentDecl` into a rumoca [`Component`] by
+/// wrapping it in a stub class. Returns the lifted Component ready to
+/// insert into a target ClassDef's `components` map.
+fn parse_component_fragment(
+    decl: &pretty::ComponentDecl,
+) -> Result<rumoca_session::parsing::ast::Component, AstMutError> {
+    let body = pretty::component_decl(decl);
+    let stub = format!("model __LunCoFragment\n{body}end __LunCoFragment;\n");
+    let parsed = parse_to_ast(&stub, "__lunco_fragment.mo").map_err(|_| {
+        AstMutError::ValueParseFailed { value: body.clone() }
+    })?;
+    let class = parsed.classes.get("__LunCoFragment").ok_or_else(|| {
+        AstMutError::ValueParseFailed { value: body.clone() }
+    })?;
+    class
+        .components
+        .get(&decl.name)
+        .cloned()
+        .ok_or(AstMutError::ValueParseFailed { value: body })
+}
+
+/// Parse a `pretty::ConnectEquation` into a rumoca `Equation::Connect`.
+///
+/// Built directly from the typed `PortRef` fields rather than going
+/// through `pretty::connect_equation`, which always emits
+/// `component.port` and produces an invalid `a.` fragment when `port`
+/// is empty (used for top-level connector instances). When `pretty/`
+/// is deleted in A.4 this becomes the only emitter for connect
+/// equations.
+fn parse_connect_equation_fragment(
+    eq: &pretty::ConnectEquation,
+) -> Result<rumoca_session::parsing::ast::Equation, AstMutError> {
+    let from_text = render_port_ref(&eq.from);
+    let to_text = render_port_ref(&eq.to);
+    let body = format!("  connect({from_text}, {to_text});\n");
+    let stub = format!("model __LunCoFragment\nequation\n{body}end __LunCoFragment;\n");
+    let parsed = parse_to_ast(&stub, "__lunco_fragment.mo").map_err(|_| {
+        AstMutError::ValueParseFailed { value: body.clone() }
+    })?;
+    let class = parsed.classes.get("__LunCoFragment").ok_or_else(|| {
+        AstMutError::ValueParseFailed { value: body.clone() }
+    })?;
+    class
+        .equations
+        .first()
+        .cloned()
+        .ok_or(AstMutError::ValueParseFailed { value: body })
+}
+
+/// Render a [`pretty::PortRef`] into its source form. Two-segment
+/// `component.port` when both fields are populated; just `component`
+/// when `port` is empty (top-level connector instance).
+fn render_port_ref(p: &pretty::PortRef) -> String {
+    if p.port.is_empty() {
+        p.component.clone()
+    } else {
+        format!("{}.{}", p.component, p.port)
+    }
+}
+
+/// Add a new variable declaration to a class.
+///
+/// Mirrors `ModelicaOp::AddVariable`. Variables and components share
+/// the same `ClassDef.components: IndexMap` storage in rumoca's AST —
+/// a "variable" is just a component with a non-empty
+/// causality/variability prefix run. Renders the declaration via
+/// `pretty::variable_decl` and lifts the parsed Component.
+pub fn add_variable(
+    class: &mut ClassDef,
+    decl: &pretty::VariableDecl,
+) -> Result<(), AstMutError> {
+    if class.components.contains_key(&decl.name) {
+        return Err(AstMutError::DuplicateComponent {
+            class: class.name.text.to_string(),
+            component: decl.name.clone(),
+        });
+    }
+    let body = pretty::variable_decl(decl);
+    let stub = format!("model __LunCoFragment\n{body}end __LunCoFragment;\n");
+    let parsed = parse_to_ast(&stub, "__lunco_fragment.mo")
+        .map_err(|_| AstMutError::ValueParseFailed { value: body.clone() })?;
+    let parsed_class = parsed
+        .classes
+        .get("__LunCoFragment")
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: body.clone() })?;
+    let new_component = parsed_class
+        .components
+        .get(&decl.name)
+        .cloned()
+        .ok_or(AstMutError::ValueParseFailed { value: body })?;
+    class.components.insert(decl.name.clone(), new_component);
+    Ok(())
+}
+
+/// Remove a variable by name. Same storage as components — alias of
+/// [`remove_component`] kept as its own entrypoint so `op_to_patch`
+/// arms read 1:1 against the `ModelicaOp` variant they handle.
+pub fn remove_variable(class: &mut ClassDef, name: &str) -> Result<(), AstMutError> {
+    remove_component(class, name)
+}
+
+/// Add a new (empty) class definition inside `parent`.
+///
+/// Mirrors `ModelicaOp::AddClass`. `parent` is the dotted-qualified
+/// path of the enclosing class — empty for top-level. Constructs an
+/// empty `<kind> Name [partial] "description"` stub via
+/// `pretty::class_block_empty`, parses, and inserts the parsed
+/// ClassDef into the target's `classes` IndexMap (or
+/// `StoredDefinition.classes` when `parent` is empty).
+pub fn add_class(
+    sd: &mut StoredDefinition,
+    parent: &str,
+    name: &str,
+    kind: pretty::ClassKindSpec,
+    description: &str,
+    partial: bool,
+) -> Result<(), AstMutError> {
+    let stub_text = pretty::class_block_empty(name, kind, description, partial);
+    let parsed = parse_to_ast(&stub_text, "__lunco_fragment.mo")
+        .map_err(|_| AstMutError::ValueParseFailed { value: stub_text.clone() })?;
+    let new_class = parsed
+        .classes
+        .get(name)
+        .cloned()
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: stub_text.clone() })?;
+    if parent.is_empty() {
+        if sd.classes.contains_key(name) {
+            return Err(AstMutError::DuplicateClass {
+                parent: String::from("(top-level)"),
+                name: name.to_string(),
+            });
+        }
+        sd.classes.insert(name.to_string(), new_class);
+    } else {
+        let parent_class = lookup_class_mut(sd, parent)?;
+        if parent_class.classes.contains_key(name) {
+            return Err(AstMutError::DuplicateClass {
+                parent: parent.to_string(),
+                name: name.to_string(),
+            });
+        }
+        parent_class.classes.insert(name.to_string(), new_class);
+    }
+    Ok(())
+}
+
+/// Remove a class by qualified path. The last segment names the class
+/// itself; the prefix names its enclosing scope.
+///
+/// Mirrors `ModelicaOp::RemoveClass`. Returns `ClassNotFound` when the
+/// path is empty, the parent doesn't exist, or the leaf is missing.
+pub fn remove_class(sd: &mut StoredDefinition, qualified: &str) -> Result<(), AstMutError> {
+    if qualified.is_empty() {
+        return Err(AstMutError::ClassNotFound(qualified.to_string()));
+    }
+    if let Some((parent, leaf)) = qualified.rsplit_once('.') {
+        let parent_class = lookup_class_mut(sd, parent)?;
+        if parent_class.classes.shift_remove(leaf).is_none() {
+            return Err(AstMutError::ClassNotFound(qualified.to_string()));
+        }
+    } else if sd.classes.shift_remove(qualified).is_none() {
+        return Err(AstMutError::ClassNotFound(qualified.to_string()));
     }
     Ok(())
 }

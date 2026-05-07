@@ -1480,29 +1480,61 @@ fn op_to_patch(
             Ok((range, replacement, ModelicaChange::TextReplaced))
         }
         ModelicaOp::AddComponent { class, decl } => {
-            let (r, rp) = compute_add_component_patch(source, ast, parsed, &class, &decl)?;
+            // AST-canonical path (A.2 batch 2). Legacy
+            // `compute_add_component_patch` retained below for revert
+            // until parity is confirmed. Same `(class_name)` capture
+            // pattern as batch 1 — `decl.name` consumed into the
+            // `change` payload so we clone here.
+            ast_check_no_parse_error(ast)?;
+            let added_name = decl.name.clone();
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::add_component(c, &decl),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             let change = ModelicaChange::ComponentAdded {
                 class,
-                name: decl.name,
+                name: added_name,
             };
             Ok((r, rp, change))
         }
         ModelicaOp::AddConnection { class, eq } => {
-            let (r, rp) = compute_add_connection_patch(source, ast, parsed, &class, &eq)?;
-            let change = ModelicaChange::ConnectionAdded {
-                class,
-                from: eq.from,
-                to: eq.to,
-            };
+            ast_check_no_parse_error(ast)?;
+            let from = eq.from.clone();
+            let to = eq.to.clone();
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::add_connection(c, &eq),
+            )
+            .map_err(ast_mut_to_doc_error)?;
+            let change = ModelicaChange::ConnectionAdded { class, from, to };
             Ok((r, rp, change))
         }
         ModelicaOp::RemoveComponent { class, name } => {
-            let (r, rp) = compute_remove_component_patch(source, ast, parsed, &class, &name)?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::remove_component(c, &name),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             let change = ModelicaChange::ComponentRemoved { class, name };
             Ok((r, rp, change))
         }
         ModelicaOp::RemoveConnection { class, from, to } => {
-            let (r, rp) = compute_remove_connection_patch(source, ast, parsed, &class, &from, &to)?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::remove_connection(c, &from, &to),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             let change = ModelicaChange::ConnectionRemoved { class, from, to };
             Ok((r, rp, change))
         }
