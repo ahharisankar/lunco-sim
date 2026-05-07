@@ -1579,44 +1579,83 @@ fn op_to_patch(
             Ok((r, rp, change))
         }
         ModelicaOp::AddPlotNode { class, plot } => {
-            let (r, rp) = compute_add_plot_node_patch(source, ast, parsed, &class, &plot)?;
-            // Plot edits don't move components or rewire connections;
-            // they only affect the diagram-decoration layer. The
-            // projection still re-reads the diagram annotation on
-            // every change, so `TextReplaced` is the cleanest signal:
-            // consumers that care rebuild from source.
+            // AST-canonical (A.2 batch 3b — graphics ops). Plot edits
+            // only touch the Diagram annotation tree; consumers
+            // observe `TextReplaced` and rebuild from source.
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::add_plot_node(c, &plot),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::RemovePlotNode { class, signal_path } => {
-            let (r, rp) = compute_remove_plot_node_patch(source, ast, parsed, &class, &signal_path)?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::remove_plot_node(c, &signal_path),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::SetPlotNodeExtent { class, signal_path, x1, y1, x2, y2 } => {
-            let (r, rp) = compute_set_plot_node_extent_patch(
-                source, ast, parsed, &class, &signal_path, x1, y1, x2, y2,
-            )?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::set_plot_node_extent(c, &signal_path, x1, y1, x2, y2),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::SetPlotNodeTitle { class, signal_path, title } => {
-            let (r, rp) = compute_set_plot_node_title_patch(
-                source, ast, parsed, &class, &signal_path, &title,
-            )?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::set_plot_node_title(c, &signal_path, &title),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::SetDiagramTextExtent { class, index, x1, y1, x2, y2 } => {
-            let (r, rp) = compute_set_diagram_text_extent_patch(
-                source, ast, parsed, &class, index, x1, y1, x2, y2,
-            )?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::set_diagram_text_extent(c, index, x1, y1, x2, y2),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::SetDiagramTextString { class, index, text } => {
-            let (r, rp) = compute_set_diagram_text_string_patch(
-                source, ast, parsed, &class, index, &text,
-            )?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::set_diagram_text_string(c, index, &text),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::RemoveDiagramText { class, index } => {
-            let (r, rp) = compute_remove_diagram_text_patch(source, ast, parsed, &class, index)?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::remove_diagram_text(c, index),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::AddClass { parent, name, kind, description, partial } => {
@@ -1706,11 +1745,27 @@ fn op_to_patch(
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::AddIconGraphic { class, graphic } => {
-            let (r, rp) = compute_add_named_graphic_patch(source, ast, parsed, &class, "Icon", &graphic)?;
+            ast_check_no_parse_error(ast)?;
+            let graphic_text = crate::pretty::graphic_inner(&graphic);
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::add_named_graphic(c, "Icon", &graphic_text),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::AddDiagramGraphic { class, graphic } => {
-            let (r, rp) = compute_add_named_graphic_patch(source, ast, parsed, &class, "Diagram", &graphic)?;
+            ast_check_no_parse_error(ast)?;
+            let graphic_text = crate::pretty::graphic_inner(&graphic);
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::add_named_graphic(c, "Diagram", &graphic_text),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::SetExperimentAnnotation { class, start_time, stop_time, tolerance, interval } => {

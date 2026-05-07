@@ -77,6 +77,22 @@ pub enum AstMutError {
         /// Component name that already exists.
         component: String,
     },
+    /// No `__LunCo_PlotNode(signal=…)` matched in the class's
+    /// `Diagram(graphics)` array.
+    PlotNodeNotFound {
+        /// Class whose Diagram annotation was searched.
+        class: String,
+        /// Signal path that was not found.
+        signal: String,
+    },
+    /// `set_diagram_text_*` / `remove_diagram_text` was given an index
+    /// past the end of the Text-only sequence in `Diagram(graphics)`.
+    DiagramTextIndexOutOfRange {
+        /// Class whose Diagram annotation was searched.
+        class: String,
+        /// Index requested by the caller.
+        index: usize,
+    },
     /// `add_class` was called with a class name that already exists in
     /// the target parent (or top level). Same rationale as
     /// [`Self::DuplicateComponent`].
@@ -118,6 +134,14 @@ impl std::fmt::Display for AstMutError {
             AstMutError::DuplicateClass { parent, name } => write!(
                 f,
                 "class `{name}` already exists under `{parent}`"
+            ),
+            AstMutError::PlotNodeNotFound { class, signal } => write!(
+                f,
+                "no __LunCo_PlotNode with signal `{signal}` in class `{class}`"
+            ),
+            AstMutError::DiagramTextIndexOutOfRange { class, index } => write!(
+                f,
+                "Diagram text index {index} out of range in class `{class}`"
             ),
             AstMutError::ConnectionNotFound { class, from, to } => write!(
                 f,
@@ -567,6 +591,600 @@ pub fn remove_class(sd: &mut StoredDefinition, qualified: &str) -> Result<(), As
         return Err(AstMutError::ClassNotFound(qualified.to_string()));
     }
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Annotation graphics-tree helpers (A.2 batch 3b — graphics ops)
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Plot / Diagram-text / Icon-graphic ops navigate the class annotation
+// tree:
+//
+//   class.annotation: Vec<Expression>
+//     └── Diagram(graphics={...})           ← Expression::ClassModification
+//          └── graphics                     ← Expression::Modification with
+//               └── Array { elements }           value = Expression::Array
+//                    ├── __LunCo_PlotNode(signal=..., extent=..., title=...)
+//                    ├── Text(extent=..., textString=...)
+//                    └── Line(...)/Rectangle(...)/...
+//
+// `Icon` mirrors `Diagram`. The shared work is "find or create a named
+// section, find or create its `graphics` array, return `&mut Vec<Expression>`."
+// Per-op work then does push / retain / find-and-update on that array.
+
+/// Get a mutable reference to the `graphics={...}` array inside the
+/// class's `Diagram` or `Icon` annotation section, creating the
+/// section and the `graphics={}` array if either is missing.
+///
+/// `section_name` is `"Diagram"` or `"Icon"`. Other names are accepted
+/// — the helper doesn't gatekeep — but the only useful targets in
+/// practice are those two.
+fn graphics_array_mut<'a>(
+    class: &'a mut ClassDef,
+    section_name: &str,
+) -> &'a mut Vec<Expression> {
+    // Step 1: locate or create the `<section>(...)` ClassModification.
+    let section_idx = class
+        .annotation
+        .iter()
+        .position(|e| is_annotation_entry_named(e, section_name));
+    let section_idx = match section_idx {
+        Some(i) => i,
+        None => {
+            // Insert an empty section: `<Section>()`.
+            class.annotation.push(Expression::ClassModification {
+                target: rumoca_session::parsing::ast::ComponentReference {
+                    local: false,
+                    parts: vec![rumoca_session::parsing::ast::ComponentRefPart {
+                        ident: synth_token(section_name.to_string()),
+                        subs: None,
+                    }],
+                    def_id: None,
+                },
+                modifications: Vec::new(),
+            });
+            class.annotation.len() - 1
+        }
+    };
+    let mods = match &mut class.annotation[section_idx] {
+        Expression::ClassModification { modifications, .. } => modifications,
+        // Unreachable: we just selected by predicate / inserted as
+        // ClassModification. Asserting via `unreachable!` keeps the
+        // type system honest without an `Option` we'd never observe.
+        _ => unreachable!("section was a ClassModification on insert/find"),
+    };
+
+    // Step 2: locate or create the `graphics = {...}` Modification.
+    let graphics_idx = mods.iter().position(|m| {
+        matches!(
+            m,
+            Expression::Modification { target, .. }
+                if target.parts.len() == 1
+                    && &*target.parts[0].ident.text == "graphics"
+        )
+    });
+    let graphics_idx = match graphics_idx {
+        Some(i) => i,
+        None => {
+            mods.push(Expression::Modification {
+                target: rumoca_session::parsing::ast::ComponentReference {
+                    local: false,
+                    parts: vec![rumoca_session::parsing::ast::ComponentRefPart {
+                        ident: synth_token("graphics".to_string()),
+                        subs: None,
+                    }],
+                    def_id: None,
+                },
+                value: Arc::new(Expression::Array {
+                    elements: Vec::new(),
+                    is_matrix: false,
+                }),
+            });
+            mods.len() - 1
+        }
+    };
+    let graphics_value = match &mut mods[graphics_idx] {
+        Expression::Modification { value, .. } => Arc::make_mut(value),
+        _ => unreachable!("graphics modification just inserted/found above"),
+    };
+    match graphics_value {
+        Expression::Array { elements, .. } => elements,
+        // The graphics modification may have been parsed with a
+        // non-array value in pathological inputs (`graphics = 1`); in
+        // that case overwrite with an empty array. Keeps callers from
+        // having to handle a third branch.
+        other => {
+            *other = Expression::Array {
+                elements: Vec::new(),
+                is_matrix: false,
+            };
+            match other {
+                Expression::Array { elements, .. } => elements,
+                _ => unreachable!("just assigned an Array variant"),
+            }
+        }
+    }
+}
+
+/// Append a graphic to `class.annotation.<section>(graphics)`.
+///
+/// `graphic_text` is the rendered fragment (`Rectangle(...)`,
+/// `Line(...)`, etc.) — built by the caller via the matching
+/// `pretty::*` helper. Lifted via `parse_graphics_entry` so the
+/// inserted Expression takes the `FunctionCall` shape the parser
+/// uses for inside-array context.
+fn append_graphic_to_section(
+    class: &mut ClassDef,
+    section_name: &str,
+    graphic_text: &str,
+) -> Result<(), AstMutError> {
+    let entry = parse_graphics_entry(graphic_text)?;
+    let arr = graphics_array_mut(class, section_name);
+    arr.push(entry);
+    Ok(())
+}
+
+/// Parse a single named-annotation fragment (`Foo(x = 1)`) by wrapping
+/// it in a stub class annotation and lifting `class.annotation[0]`.
+/// Returns an `Expression::ClassModification`.
+#[allow(dead_code)]
+fn parse_named_annotation_fragment(text: &str) -> Result<Expression, AstMutError> {
+    let stub = format!(
+        "model __LunCoFragment\nannotation({text});\nend __LunCoFragment;\n"
+    );
+    let parsed = parse_to_ast(&stub, "__lunco_fragment.mo")
+        .map_err(|_| AstMutError::ValueParseFailed { value: text.to_string() })?;
+    let class = parsed
+        .classes
+        .get("__LunCoFragment")
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })?;
+    class
+        .annotation
+        .first()
+        .cloned()
+        .ok_or(AstMutError::ValueParseFailed { value: text.to_string() })
+}
+
+/// Parse a fragment destined for a graphics array (`{Foo(...), Bar(...)}`)
+/// by wrapping it inside a `Diagram(graphics={text})` annotation and
+/// lifting the array's first element. Returns an
+/// `Expression::FunctionCall` — the variant the parser uses for
+/// inside-array entries (vs `ClassModification` at top level).
+fn parse_graphics_entry(text: &str) -> Result<Expression, AstMutError> {
+    let stub = format!(
+        "model __LunCoFragment\nannotation(Diagram(graphics={{{text}}}));\nend __LunCoFragment;\n"
+    );
+    let parsed = parse_to_ast(&stub, "__lunco_fragment.mo")
+        .map_err(|_| AstMutError::ValueParseFailed { value: text.to_string() })?;
+    let class = parsed
+        .classes
+        .get("__LunCoFragment")
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })?;
+    let diagram = class
+        .annotation
+        .first()
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })?;
+    let Expression::ClassModification { modifications, .. } = diagram else {
+        return Err(AstMutError::ValueParseFailed { value: text.to_string() });
+    };
+    let graphics_mod = modifications
+        .iter()
+        .find_map(|m| match m {
+            Expression::Modification { target, value }
+                if target.parts.len() == 1
+                    && &*target.parts[0].ident.text == "graphics" =>
+            {
+                Some(value)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })?;
+    let Expression::Array { elements, .. } = graphics_mod.as_ref() else {
+        return Err(AstMutError::ValueParseFailed { value: text.to_string() });
+    };
+    elements
+        .first()
+        .cloned()
+        .ok_or(AstMutError::ValueParseFailed { value: text.to_string() })
+}
+
+/// True when `expr` is a graphics-array entry whose head identifier
+/// matches `name`. Handles both shapes the parser produces depending
+/// on context: `FunctionCall { comp }` (inside an array) and
+/// `ClassModification { target }` (top-level).
+fn is_graphic_entry_named(expr: &Expression, name: &str) -> bool {
+    match expr {
+        Expression::FunctionCall { comp, .. } => {
+            comp.parts.len() == 1 && &*comp.parts[0].ident.text == name
+        }
+        Expression::ClassModification { target, .. } => {
+            target.parts.len() == 1 && &*target.parts[0].ident.text == name
+        }
+        _ => false,
+    }
+}
+
+/// Look up a named argument / modification by key inside a
+/// graphics-array entry. Returns the value Expression. Handles both
+/// `FunctionCall { args: NamedArgument }` and
+/// `ClassModification { modifications: Modification }` shapes.
+fn graphic_entry_arg<'a>(expr: &'a Expression, key: &str) -> Option<&'a Expression> {
+    match expr {
+        Expression::FunctionCall { args, .. } => {
+            for a in args {
+                if let Expression::NamedArgument { name, value } = a {
+                    if &*name.text == key {
+                        return Some(value.as_ref());
+                    }
+                }
+            }
+            None
+        }
+        Expression::ClassModification { modifications, .. } => {
+            for m in modifications {
+                if let Expression::Modification { target, value } = m {
+                    if target.parts.len() == 1
+                        && &*target.parts[0].ident.text == key
+                    {
+                        return Some(value.as_ref());
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Add a `__LunCo_PlotNode(...)` entry to the class's `Diagram(graphics)`
+/// array. Idempotency: if a plot node with the same `signal=` already
+/// exists, it is replaced (not duplicated).
+pub fn add_plot_node(
+    class: &mut ClassDef,
+    plot: &pretty::LunCoPlotNodeSpec,
+) -> Result<(), AstMutError> {
+    let new_entry = parse_graphics_entry(&pretty::lunco_plot_node_inner(plot))?;
+    let arr = graphics_array_mut(class, "Diagram");
+    let signal = plot.signal.clone();
+    if let Some(slot) = arr
+        .iter_mut()
+        .find(|e| plot_node_signal_matches(e, &signal))
+    {
+        *slot = new_entry;
+    } else {
+        arr.push(new_entry);
+    }
+    Ok(())
+}
+
+/// Remove the `__LunCo_PlotNode(...)` entry whose `signal=` matches.
+pub fn remove_plot_node(class: &mut ClassDef, signal_path: &str) -> Result<(), AstMutError> {
+    let class_name = class.name.text.to_string();
+    let arr = graphics_array_mut(class, "Diagram");
+    let before = arr.len();
+    arr.retain(|e| !plot_node_signal_matches(e, signal_path));
+    if arr.len() == before {
+        return Err(AstMutError::PlotNodeNotFound {
+            class: class_name,
+            signal: signal_path.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Update the `extent={{x1,y1},{x2,y2}}` of a plot node by signal.
+pub fn set_plot_node_extent(
+    class: &mut ClassDef,
+    signal_path: &str,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+) -> Result<(), AstMutError> {
+    update_plot_node_by_signal(class, signal_path, |spec| {
+        spec.x1 = x1;
+        spec.y1 = y1;
+        spec.x2 = x2;
+        spec.y2 = y2;
+    })
+}
+
+/// Update the `title=` of a plot node by signal. Empty string removes
+/// the title from the rendered form (per `lunco_plot_node_inner`).
+pub fn set_plot_node_title(
+    class: &mut ClassDef,
+    signal_path: &str,
+    title: &str,
+) -> Result<(), AstMutError> {
+    update_plot_node_by_signal(class, signal_path, |spec| {
+        spec.title = title.to_string();
+    })
+}
+
+/// Helper: read the existing `__LunCo_PlotNode` matching `signal_path`
+/// back into a `LunCoPlotNodeSpec`, run `update`, and re-emit. The
+/// re-emit-via-pretty path keeps the on-disk shape canonical without
+/// us having to navigate `Modification` trees field-by-field. Matches
+/// today's `compute_set_plot_node_*_patch` semantics.
+fn update_plot_node_by_signal<F>(
+    class: &mut ClassDef,
+    signal_path: &str,
+    update: F,
+) -> Result<(), AstMutError>
+where
+    F: FnOnce(&mut pretty::LunCoPlotNodeSpec),
+{
+    let class_name = class.name.text.to_string();
+    let arr = graphics_array_mut(class, "Diagram");
+    let entry = arr
+        .iter_mut()
+        .find(|e| plot_node_signal_matches(e, signal_path))
+        .ok_or(AstMutError::PlotNodeNotFound {
+            class: class_name,
+            signal: signal_path.to_string(),
+        })?;
+    let mut spec = read_plot_node_spec(entry)?;
+    update(&mut spec);
+    *entry = parse_graphics_entry(&pretty::lunco_plot_node_inner(&spec))?;
+    Ok(())
+}
+
+/// Predicate: is `expr` a `__LunCo_PlotNode(...)` whose `signal=`
+/// modification matches `target_signal`? Handles both the
+/// `FunctionCall { args: NamedArgument }` shape used inside graphics
+/// arrays and the `ClassModification { modifications: Modification }`
+/// shape used at top level — the parser picks based on context.
+fn plot_node_signal_matches(expr: &Expression, target_signal: &str) -> bool {
+    if !is_graphic_entry_named(expr, "__LunCo_PlotNode") {
+        return false;
+    }
+    matches!(
+        graphic_entry_arg(expr, "signal"),
+        Some(v) if string_literal_value(v) == Some(target_signal.to_string())
+    )
+}
+
+/// Pull the signal/extent/title/etc. fields out of a parsed
+/// `__LunCo_PlotNode(...)` Expression back into a `LunCoPlotNodeSpec`.
+/// Default values for any field the Expression doesn't carry — the
+/// canvas's emit path always writes signal+extent+title, so missing
+/// fields only surface for hand-edited annotations.
+fn read_plot_node_spec(
+    expr: &Expression,
+) -> Result<pretty::LunCoPlotNodeSpec, AstMutError> {
+    let mut spec = pretty::LunCoPlotNodeSpec {
+        x1: 0.0,
+        y1: 0.0,
+        x2: 0.0,
+        y2: 0.0,
+        signal: String::new(),
+        title: String::new(),
+    };
+    if let Some(v) = graphic_entry_arg(expr, "signal") {
+        if let Some(s) = string_literal_value(v) {
+            spec.signal = s;
+        }
+    }
+    if let Some(v) = graphic_entry_arg(expr, "title") {
+        if let Some(s) = string_literal_value(v) {
+            spec.title = s;
+        }
+    }
+    if let Some(v) = graphic_entry_arg(expr, "extent") {
+        // `extent = {{x1,y1},{x2,y2}}` → outer Array of two inner
+        // Arrays of two numbers each. Malformed inputs fall through
+        // and leave the spec at default — the canvas overwrites on
+        // its next gesture anyway.
+        if let Expression::Array { elements: outer, .. } = v {
+            if outer.len() == 2 {
+                if let (Some((x1, y1)), Some((x2, y2))) =
+                    (point_pair(&outer[0]), point_pair(&outer[1]))
+                {
+                    spec.x1 = x1;
+                    spec.y1 = y1;
+                    spec.x2 = x2;
+                    spec.y2 = y2;
+                }
+            }
+        }
+    }
+    Ok(spec)
+}
+
+fn point_pair(e: &Expression) -> Option<(f32, f32)> {
+    if let Expression::Array { elements, .. } = e {
+        if elements.len() == 2 {
+            let x = number_literal_value(&elements[0])?;
+            let y = number_literal_value(&elements[1])?;
+            return Some((x as f32, y as f32));
+        }
+    }
+    None
+}
+
+fn number_literal_value(e: &Expression) -> Option<f64> {
+    match e {
+        Expression::Terminal { token, .. } => token.text.parse::<f64>().ok(),
+        Expression::Unary { op, rhs }
+            if matches!(op, rumoca_session::parsing::ast::OpUnary::Minus(_)) =>
+        {
+            number_literal_value(rhs).map(|v| -v)
+        }
+        _ => None,
+    }
+}
+
+fn string_literal_value(e: &Expression) -> Option<String> {
+    let Expression::Terminal { terminal_type, token } = e else { return None };
+    if !matches!(terminal_type, TerminalType::String) {
+        return None;
+    }
+    // The lexer keeps quotes on string literals — strip them here so
+    // the comparison with our `target_signal` works on the inner
+    // text only.
+    let raw: &str = &token.text;
+    let trimmed = raw.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(raw);
+    Some(
+        trimmed
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\"),
+    )
+}
+
+/// Set or replace the `extent` of the i-th `Text(...)` entry in
+/// `Diagram(graphics)`. Index counts Text entries only, in source
+/// order — matches `ModelicaOp::SetDiagramTextExtent` and the legacy
+/// `compute_set_diagram_text_extent_patch`.
+pub fn set_diagram_text_extent(
+    class: &mut ClassDef,
+    index: usize,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+) -> Result<(), AstMutError> {
+    update_diagram_text_at(class, index, |spec| {
+        spec.x1 = x1;
+        spec.y1 = y1;
+        spec.x2 = x2;
+        spec.y2 = y2;
+    })
+}
+
+/// Set or replace the `textString=` of the i-th `Text(...)` entry.
+pub fn set_diagram_text_string(
+    class: &mut ClassDef,
+    index: usize,
+    text: &str,
+) -> Result<(), AstMutError> {
+    update_diagram_text_at(class, index, |spec| {
+        spec.text = text.to_string();
+    })
+}
+
+/// Remove the i-th `Text(...)` entry from `Diagram(graphics)`.
+pub fn remove_diagram_text(class: &mut ClassDef, index: usize) -> Result<(), AstMutError> {
+    let class_name = class.name.text.to_string();
+    let arr = graphics_array_mut(class, "Diagram");
+    let mut text_seen = 0usize;
+    let mut target_idx = None;
+    for (i, e) in arr.iter().enumerate() {
+        if is_graphic_entry_named(e, "Text") {
+            if text_seen == index {
+                target_idx = Some(i);
+                break;
+            }
+            text_seen += 1;
+        }
+    }
+    let i = target_idx.ok_or(AstMutError::DiagramTextIndexOutOfRange {
+        class: class_name,
+        index,
+    })?;
+    arr.remove(i);
+    Ok(())
+}
+
+/// Read i-th Text entry into a `pretty::GraphicSpec::Text` (defaulting
+/// missing fields), call `update`, re-emit, replace.
+fn update_diagram_text_at<F>(
+    class: &mut ClassDef,
+    index: usize,
+    update: F,
+) -> Result<(), AstMutError>
+where
+    F: FnOnce(&mut TextSpec),
+{
+    let class_name = class.name.text.to_string();
+    let arr = graphics_array_mut(class, "Diagram");
+    let mut text_seen = 0usize;
+    let mut target_idx = None;
+    for (i, e) in arr.iter().enumerate() {
+        if is_graphic_entry_named(e, "Text") {
+            if text_seen == index {
+                target_idx = Some(i);
+                break;
+            }
+            text_seen += 1;
+        }
+    }
+    let i = target_idx.ok_or(AstMutError::DiagramTextIndexOutOfRange {
+        class: class_name,
+        index,
+    })?;
+    let mut spec = read_text_spec(&arr[i])?;
+    update(&mut spec);
+    arr[i] = parse_graphics_entry(&render_text_spec(&spec))?;
+    Ok(())
+}
+
+/// A trimmed `Text(...)` graphic — only the fields any of the three
+/// canvas-driven Text ops ever read or write. Avoids round-tripping
+/// the full `GraphicSpec::Text` (which has color / font fields the
+/// canvas ops don't touch).
+struct TextSpec {
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    text: String,
+}
+
+fn read_text_spec(expr: &Expression) -> Result<TextSpec, AstMutError> {
+    let mut spec = TextSpec {
+        x1: 0.0,
+        y1: 0.0,
+        x2: 0.0,
+        y2: 0.0,
+        text: String::new(),
+    };
+    if let Some(v) = graphic_entry_arg(expr, "extent") {
+        if let Expression::Array { elements: outer, .. } = v {
+            if outer.len() == 2 {
+                if let (Some((x1, y1)), Some((x2, y2))) =
+                    (point_pair(&outer[0]), point_pair(&outer[1]))
+                {
+                    spec.x1 = x1;
+                    spec.y1 = y1;
+                    spec.x2 = x2;
+                    spec.y2 = y2;
+                }
+            }
+        }
+    }
+    if let Some(v) = graphic_entry_arg(expr, "textString") {
+        if let Some(s) = string_literal_value(v) {
+            spec.text = s;
+        }
+    }
+    Ok(spec)
+}
+
+fn render_text_spec(spec: &TextSpec) -> String {
+    // Canonical form: `Text(extent={{x1,y1},{x2,y2}}, textString="...")`.
+    // Keeps the emit path narrow — color/font preservation lives in
+    // the legacy `compute_set_diagram_text_*_patch` helpers, which
+    // re-render the full GraphicSpec including the original colors.
+    // After A.4 we replace those by extending TextSpec to carry every
+    // field; for canvas-driven flows the trimmed form is sufficient.
+    let escaped = spec.text.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        "Text(extent={{{{{},{}}},{{{},{}}}}}, textString=\"{}\")",
+        spec.x1, spec.y1, spec.x2, spec.y2, escaped
+    )
+}
+
+/// Append a graphic to `Icon(graphics)` or `Diagram(graphics)`.
+///
+/// `graphic_text` is built by the caller — typically via
+/// `pretty::graphic_inner` — so this helper stays oblivious to the
+/// `GraphicSpec` payload shape.
+pub fn add_named_graphic(
+    class: &mut ClassDef,
+    section_name: &str,
+    graphic_text: &str,
+) -> Result<(), AstMutError> {
+    append_graphic_to_section(class, section_name, graphic_text)
 }
 
 /// Set or replace the class-level `experiment(...)` annotation.
