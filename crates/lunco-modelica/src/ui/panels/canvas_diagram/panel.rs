@@ -31,6 +31,59 @@ use super::{
     active_doc_from_world, build_registry, decorations, menus, overlays, palette, render_target,
 };
 
+/// Replay a single [`SceneEvent`] from the editing tab onto a
+/// sibling tab's scene. Position / topology mutations carry over;
+/// per-tab events (selection, context menu, double-click) don't.
+///
+/// This is the per-event sync that makes split tabs feel live —
+/// no reprojection wait, no whole-scene clone. The editing tab
+/// applies its event via the canvas widget's own internal
+/// machinery (`canvas.ui`); we then mirror the *effect* here.
+fn apply_event_to_sibling_scene(
+    scene: &mut lunco_canvas::Scene,
+    event: &lunco_canvas::SceneEvent,
+) {
+    use lunco_canvas::SceneEvent;
+    match event {
+        SceneEvent::NodeMoved { id, new_min, .. } => {
+            if let Some(node) = scene.node_mut(*id) {
+                let size_x = node.rect.width();
+                let size_y = node.rect.height();
+                node.rect = lunco_canvas::Rect::from_min_size(
+                    *new_min, size_x, size_y,
+                );
+            }
+        }
+        SceneEvent::NodeResized { id, new_rect, .. } => {
+            if let Some(node) = scene.node_mut(*id) {
+                node.rect = *new_rect;
+            }
+        }
+        SceneEvent::NodeDeleted { id, orphaned_edges } => {
+            for eid in orphaned_edges {
+                let _ = scene.remove_edge(*eid);
+            }
+            let _ = scene.remove_node(*id);
+        }
+        SceneEvent::EdgeDeleted { id } => {
+            let _ = scene.remove_edge(*id);
+        }
+        // EdgeCreated needs the new EdgeId allocated by the editing
+        // tab's scene to be reused on siblings — otherwise the same
+        // logical connection would have different ids in different
+        // tabs and a later EdgeDeleted event wouldn't find a match.
+        // The event doesn't carry the new id today; siblings will
+        // pick it up via the next reprojection (gen-bump after
+        // apply_ops). Cheap correctness over wallclock instantness
+        // for this less-frequent gesture.
+        SceneEvent::EdgeCreated { .. } => {}
+        // Per-tab events — never replay onto siblings.
+        SceneEvent::SelectionChanged(_)
+        | SceneEvent::ContextMenuRequested { .. }
+        | SceneEvent::NodeDoubleClicked { .. } => {}
+    }
+}
+
 pub struct CanvasDiagramPanel;
 
 impl Panel for CanvasDiagramPanel {
@@ -56,14 +109,17 @@ impl Panel for CanvasDiagramPanel {
             world.insert_resource(CanvasDiagramState::default());
         }
 
-        // Snapshot the rendering tab's drill scope once so every
-        // CanvasDiagramState lookup below keys the per-tab entry,
-        // not the doc-level entry. Two splits of the same doc with
-        // different drill targets each get an independent scene /
-        // viewport / projection cursor.
+        // Snapshot the rendering tab's identity so every
+        // CanvasDiagramState lookup below keys *this* tab's entry.
+        // Each tab gets its own viewport / selection / scene —
+        // splits of the same model can pan, zoom, and select
+        // independently.
         let render_drilled: Option<String> =
             render_target(world).and_then(|(_, drilled)| drilled);
         let render_drilled_ref: Option<&str> = render_drilled.as_deref();
+        let render_tab_id: Option<crate::ui::panels::model_view::TabId> = world
+            .resource::<crate::ui::panels::model_view::TabRenderContext>()
+            .tab_id;
 
         // Decide whether to rebuild the scene. Per-doc state means
         // "bound_doc" is implicit in the map key — a fresh entry has
@@ -103,8 +159,8 @@ impl Panel for CanvasDiagramPanel {
             //      first-render is the right fix.
             //   2. **Doc mutated** — generation bumped past
             //      `last_seen_gen`. Standard edit-reproject path.
-            let docstate = state.get_for(Some(doc_id), render_drilled_ref);
-            let first_render = !state.has_entry_for(doc_id, render_drilled_ref);
+            let docstate = match render_tab_id { Some(t) => state.get_for_tab(t), None => state.get(Some(doc_id)) };
+            let first_render = !match render_tab_id { Some(t) => state.has_entry_for_tab(t), None => state.has_entry(doc_id) };
             // `gen_advanced` is the source-of-truth-changed signal,
             // but a canvas-originated edit (drag, menu Add) has
             // already mutated the scene and bumped
@@ -173,7 +229,7 @@ impl Panel for CanvasDiagramPanel {
                         drop(state);
                         let mut state =
                             world.resource_mut::<CanvasDiagramState>();
-                        let docstate = state.get_mut_for(Some(doc_id), render_drilled_ref);
+                        let docstate = match render_tab_id { Some(t) => state.get_mut_for_tab(t, doc_id), None => state.get_mut(Some(doc_id)) };
                         docstate.last_seen_gen = gen;
                         bevy::log::debug!(
                             "[CanvasDiagram] skipping reproject for gen={gen} (source-hash unchanged)"
@@ -275,7 +331,7 @@ impl Panel for CanvasDiagramPanel {
                 .cloned()
                 .unwrap_or_default();
             let mut state = world.resource_mut::<CanvasDiagramState>();
-            let docstate = state.get_mut_for(Some(doc_id), render_drilled_ref);
+            let docstate = match render_tab_id { Some(t) => state.get_mut_for_tab(t, doc_id), None => state.get_mut(Some(doc_id)) };
             // If the user just changed drill-in target (clicked a
             // different class in the Twin Browser), the new scene's
             // bounds usually have nothing to do with the old one —
@@ -483,7 +539,7 @@ impl Panel for CanvasDiagramPanel {
                     .map(|h| h.document().generation())
             });
             let mut state = world.resource_mut::<CanvasDiagramState>();
-            let docstate = state.get_mut_for(active_doc, render_drilled_ref);
+            let docstate = match (render_tab_id, active_doc) { (Some(t), Some(d)) => state.get_mut_for_tab(t, d), _ => state.get_mut(active_doc) };
             let is_initial_projection = docstate.last_seen_gen == 0;
 
             // Deadline guard. If the task has been running past its
@@ -843,13 +899,14 @@ pub(super) static LAST_APPLY_AT: std::sync::Mutex<Option<web_time::Instant>> =
 
 impl CanvasDiagramPanel {
     fn render_canvas(&self, ui: &mut egui::Ui, world: &mut World) {
-        // Same per-render-call drill scope snapshot as the parent
-        // `render` method — needed because `render_canvas` itself
-        // does many `state.get_*` lookups and must hit *this* tab's
-        // entry, not the doc's no-drill entry.
+        // Same per-render-call drill scope + tab id snapshot as the
+        // parent `render` method.
         let render_drilled: Option<String> =
             render_target(world).and_then(|(_, drilled)| drilled);
         let render_drilled_ref: Option<&str> = render_drilled.as_deref();
+        let render_tab_id: Option<crate::ui::panels::model_view::TabId> = world
+            .resource::<crate::ui::panels::model_view::TabRenderContext>()
+            .tab_id;
         // Per-phase timing harness — gated on `RENDER_CANVAS_TRACE`
         // env var so the SLOW-frame log can pinpoint the heavy phase
         // without flooding normal runs. Set the var to anything
@@ -978,7 +1035,7 @@ impl CanvasDiagramPanel {
         if let (Some(d), Some(sim)) = (doc_id, canvas_sim) {
             let new_bits = sim.to_bits();
             let mut state = world.resource_mut::<CanvasDiagramState>();
-            let docstate = state.get_mut_for(Some(d), render_drilled_ref);
+            let docstate = match render_tab_id { Some(t) => state.get_mut_for_tab(t, d), None => state.get_mut(Some(d)) };
             let plot_ids: Vec<lunco_canvas::NodeId> = docstate
                 .canvas
                 .scene
@@ -1096,12 +1153,53 @@ impl CanvasDiagramPanel {
 
         let (response, events) = {
             let mut state = world.resource_mut::<CanvasDiagramState>();
-            let docstate = state.get_mut_for(active_doc, render_drilled_ref);
+            let docstate = match (render_tab_id, active_doc) { (Some(t), Some(d)) => state.get_mut_for_tab(t, d), _ => state.get_mut(active_doc) };
             docstate.canvas.read_only = tab_read_only;
             docstate.canvas.snap = snap_settings;
             docstate.canvas.ui(ui)
         };
         mark("canvas.ui (scene render)", &mut phase_t, &mut phase_log);
+
+        // Operation replay across sibling tabs.
+        //
+        // When the user drags / connects / deletes in this tab, we
+        // reflect the same mutation onto every other tab viewing
+        // the same `(doc, drilled_class)` so they update *now* —
+        // before any source rewrite or reprojection. Cheap O(1)
+        // per event per sibling tab vs. O(scene-size) for a
+        // wholesale clone, and skips the off-thread reprojection
+        // round-trip entirely. Selection / viewport on siblings
+        // are intentionally untouched — those are per-tab.
+        if !events.is_empty() {
+            if let (Some(editing_tab), Some(doc_id)) = (render_tab_id, active_doc) {
+                let editing_drilled: Option<String> = world
+                    .resource::<crate::ui::panels::model_view::ModelTabs>()
+                    .get(editing_tab)
+                    .and_then(|s| s.drilled_class.clone());
+                let sibling_tabs: Vec<crate::ui::panels::model_view::TabId> = world
+                    .resource::<crate::ui::panels::model_view::ModelTabs>()
+                    .iter()
+                    .filter_map(|(tid, s)| {
+                        if tid == editing_tab
+                            || s.doc != doc_id
+                            || s.drilled_class.as_deref() != editing_drilled.as_deref()
+                        {
+                            return None;
+                        }
+                        Some(tid)
+                    })
+                    .collect();
+                if !sibling_tabs.is_empty() {
+                    let mut state = world.resource_mut::<CanvasDiagramState>();
+                    for tab_id in &sibling_tabs {
+                        let sibling = state.get_mut_for_tab(*tab_id, doc_id);
+                        for ev in &events {
+                            apply_event_to_sibling_scene(&mut sibling.canvas.scene, ev);
+                        }
+                    }
+                }
+            }
+        }
 
         // Vello continues to render the diagram in the background
         // into a per-tab offscreen texture (see `vello_canvas.rs`).
@@ -1227,13 +1325,13 @@ impl CanvasDiagramPanel {
                         } else {
                             let instance_name = {
                                 let state = world.resource::<CanvasDiagramState>();
-                                ops::pick_add_instance_name(&def, &state.get_for(Some(doc_id), render_drilled_ref).canvas.scene)
+                                ops::pick_add_instance_name(&def, &match render_tab_id { Some(t) => state.get_for_tab(t), None => state.get(Some(doc_id)) }.canvas.scene)
                             };
                             // 1. Optimistic synth — node appears immediately.
                             {
                                 let mut state =
                                     world.resource_mut::<CanvasDiagramState>();
-                                let docstate = state.get_mut_for(Some(doc_id), render_drilled_ref);
+                                let docstate = match render_tab_id { Some(t) => state.get_mut_for_tab(t, doc_id), None => state.get_mut(Some(doc_id)) };
                                 ops::synthesize_msl_node(
                                     &mut docstate.canvas.scene,
                                     &def,
@@ -1299,7 +1397,7 @@ impl CanvasDiagramPanel {
         // the flag so the math runs against the real screen size.
         {
             let mut state = world.resource_mut::<CanvasDiagramState>();
-            let docstate = state.get_mut_for(active_doc, render_drilled_ref);
+            let docstate = match (render_tab_id, active_doc) { (Some(t), Some(d)) => state.get_mut_for_tab(t, d), _ => state.get_mut(active_doc) };
             if docstate.pending_fit {
                 docstate.pending_fit = false;
                 if let Some(bounds) = docstate.canvas.scene.bounds() {
@@ -1324,7 +1422,7 @@ impl CanvasDiagramPanel {
             let state = world.resource::<CanvasDiagramState>();
             let loads = world.resource::<DrillInLoads>();
             let dup_loads = world.resource::<DuplicateLoads>();
-            let docstate = state.get_for(active_doc, render_drilled_ref);
+            let docstate = match render_tab_id { Some(t) => state.get_for_tab(t), None => state.get(active_doc) };
             // Unify drill-in + duplicate into a single loading
             // overlay — both are "document is being built off-thread,
             // canvas will populate when the bg task lands."
@@ -1502,7 +1600,7 @@ impl CanvasDiagramPanel {
                     // reflects the right-click (before any menu-entry
                     // click overwrites it).
                     let state = world.resource::<CanvasDiagramState>();
-                    let docstate = state.get_for(active_doc, render_drilled_ref);
+                    let docstate = match render_tab_id { Some(t) => state.get_for_tab(t), None => state.get(active_doc) };
                     let world_pos = docstate.canvas.viewport.screen_to_world(
                         lunco_canvas::Pos::new(p.x, p.y),
                         screen_rect,

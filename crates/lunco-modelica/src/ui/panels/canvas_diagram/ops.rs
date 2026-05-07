@@ -862,16 +862,39 @@ pub(super) fn apply_ops(
         // Canvas-originated edits have *already* mutated the scene
         // before reaching apply_ops (drag moved the node; menu Add
         // synthesised a node prior to dispatch). Acknowledging the
-        // new generation here tells the project gate "the scene
-        // already reflects this state — don't re-project". The
-        // hash bump keeps the cheap-skip path in `project_now`
-        // consistent for any later foreign edit comparison.
+        // new generation tells the project gate "the scene already
+        // reflects this state — don't re-project" — but **only for
+        // the tab the user actually edited**. Other tabs viewing
+        // the same doc (splits) have stale scenes and *do* need to
+        // reproject; leaving their `last_seen_gen` untouched lets
+        // the gen-advance check fire on their next render.
         let new_hash = projection_relevant_source_hash(&src);
+        let editing_tab = world
+            .resource::<crate::ui::panels::model_view::TabRenderContext>()
+            .tab_id;
+        // Ack the gen on the editing tab so its render loop won't
+        // re-project (it already shows the new state). Sibling tabs
+        // viewing the same `(doc, drilled)` are kept in sync via
+        // [`apply_event_to_sibling_scene`] — replayed by the canvas
+        // panel right after `canvas.ui()` returns events. Mutations
+        // that don't have a SceneEvent equivalent (menu add /
+        // remove, palette drop) fall through to gen-advance on the
+        // sibling's next render, which reprojects from the
+        // freshly-rewritten source.
         if let Some(mut state) = world.get_resource_mut::<CanvasDiagramState>() {
-            let docstate = state.get_mut(Some(doc_id));
-            docstate.canvas_acked_gen = new_gen;
-            docstate.last_seen_gen = new_gen;
-            docstate.last_seen_source_hash = new_hash;
+            if let Some(tab_id) = editing_tab {
+                let docstate = state.get_mut_for_tab(tab_id, doc_id);
+                docstate.canvas_acked_gen = new_gen;
+                docstate.last_seen_gen = new_gen;
+                docstate.last_seen_source_hash = new_hash;
+            } else {
+                // Non-render-context dispatch (API, observer);
+                // legacy single-tab path.
+                let docstate = state.get_mut(Some(doc_id));
+                docstate.canvas_acked_gen = new_gen;
+                docstate.last_seen_gen = new_gen;
+                docstate.last_seen_source_hash = new_hash;
+            }
         }
     }
 

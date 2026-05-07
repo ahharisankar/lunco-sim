@@ -176,6 +176,7 @@ pub fn run() {
     // If this fails (worker bundle missing, COOP/COEP misconfigured, etc.)
     // we log + continue: the inline worker remains as a fallback so the
     // page still loads, just with the old UI-blocking compile path.
+    #[cfg(target_arch = "wasm32")]
     if let Err(e) = lunco_modelica::worker_transport::install_worker("./worker/worker_bootstrap.js") {
         bevy::log::error!(
             "[lunica_web] failed to start off-thread worker; falling back to inline: {e:?}"

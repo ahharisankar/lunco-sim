@@ -550,6 +550,16 @@ fn drain_pending_tab_closes(
             // each individual close.
             commands.trigger(lunco_workbench::CloseTab { kind, instance });
             model_tabs.close_tab(instance);
+            // Per-tab canvas state (viewport, selection, scene)
+            // dies with the tab. Doc-wide cleanup happens later in
+            // `on_document_closed_cleanup` if this was the last tab.
+            commands.queue(move |world: &mut World| {
+                if let Some(mut state) = world
+                    .get_resource_mut::<crate::ui::panels::canvas_diagram::CanvasDiagramState>()
+                {
+                    state.drop_tab(instance);
+                }
+            });
             if model_tabs.count_for_doc(doc) == 0 {
                 commands.trigger(CloseDocument { doc });
             }
