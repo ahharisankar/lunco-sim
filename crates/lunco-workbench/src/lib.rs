@@ -1373,7 +1373,11 @@ fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut 
                 layout.settings_menu = callbacks;
             });
             ui.menu_button("Help", |ui| {
-                ui.label("LunCoSim workbench v0.2 (egui_dock)");
+                ui.label(format!(
+                    "LunCoSim workbench v{} ({})",
+                    env!("CARGO_PKG_VERSION"),
+                    env!("LUNCO_GIT_HASH"),
+                ));
             });
 
             // Pause/Resume simulation. Toggles `Time<Virtual>` so both
