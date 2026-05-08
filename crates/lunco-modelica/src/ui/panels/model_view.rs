@@ -280,6 +280,41 @@ impl ModelTabs {
         self.tabs.remove(&tab_id)
     }
 
+    /// Close every tab whose `drilled_class` is `qualified` or a
+    /// descendant of it (e.g. `Foo.Bar.Baz` is a descendant of
+    /// `Foo.Bar`). Scoped to `doc` so removing `Foo.Bar` in
+    /// document A does not close a tab drilled into `Foo.Bar` in
+    /// document B.
+    ///
+    /// Implements **cross-truth rule R4** (see
+    /// `docs/architecture/B0_CROSS_TRUTH_POLICY.md`): when a class
+    /// is deleted the AST-canonical view dangles, so the matching
+    /// tab must close. Caller responsibility: wire from the
+    /// `RemoveClass` observer (or `ModelicaChange::ClassRemoved`
+    /// dispatch) and clean up companion per-tab state for each
+    /// returned id (canvas, editor buffer).
+    pub fn close_drilled_into(&mut self, doc: DocumentId, qualified: &str) -> Vec<TabId> {
+        if qualified.is_empty() {
+            return Vec::new();
+        }
+        let prefix = format!("{qualified}.");
+        let to_close: Vec<TabId> = self
+            .tabs
+            .iter()
+            .filter_map(|(id, s)| {
+                if s.doc != doc {
+                    return None;
+                }
+                let drilled = s.drilled_class.as_deref()?;
+                (drilled == qualified || drilled.starts_with(&prefix)).then_some(*id)
+            })
+            .collect();
+        for id in &to_close {
+            self.tabs.remove(id);
+        }
+        to_close
+    }
+
     /// Drop *every* tab pointing at `doc`. Used when a document is
     /// fully closed (registry removal); all of its views must go
     /// with it.
