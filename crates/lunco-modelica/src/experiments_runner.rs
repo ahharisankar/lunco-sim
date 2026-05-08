@@ -1,0 +1,612 @@
+//! Experiment runner — modelica/rumoca binding for the
+//! [`lunco_experiments::ExperimentRunner`] trait.
+//!
+//! See `docs/architecture/25-experiments.md` for the design.
+//!
+//! ## v1 limitations
+//!
+//! - Overrides go through source-string mutation (rumoca has no public
+//!   `compile_with_modifications` yet). Only top-level literal
+//!   `parameter` declarations are supported. See
+//!   [`apply_overrides_to_source`].
+//! - Reflatten on every override change. Cache keyed by
+//!   (source_hash, override_set) is a future optimization. See TODO.
+//! - One in-flight Fast Run per runner instance. Native enforcement
+//!   matches wasm worker serialization.
+//!
+//! ## TODO(rumoca)
+//! Replace string injection with `rumoca-session::compile_with_modifications`
+//! once upstream exposes `ClassModification` on the public API.
+//! See `rumoca-ir-ast::visitor`.
+//!
+//! ## TODO(perf)
+//! Override changes currently force rumoca reflatten. Measure flatten
+//! time on representative models; if >100ms, add (source_hash,
+//! override_set) -> Dae LRU cache here. Long-term: upstream a
+//! `SimStepper::set_parameter()` to rumoca to skip reflatten.
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use crossbeam_channel::{Sender, unbounded};
+use lunco_experiments::{
+    Experiment, ExperimentId, ExperimentRunner, ModelRef, ParamPath, ParamValue,
+    RunBounds, RunHandle, RunMeta, RunResult, RunUpdate,
+};
+
+/// Bound to the model source kept by the runner. The runner doesn't
+/// own the live document state — `lunco-modelica` injects the current
+/// source via [`ModelicaRunner::set_model_source`] before requesting
+/// a run. ModelRef strings are the model's qualified name.
+#[derive(Clone, Debug)]
+pub struct ModelSource {
+    pub model_name: String,
+    pub source: String,
+    pub filename: String,
+    pub extras: Vec<(String, String)>,
+}
+
+/// Defaults from a previous compile's `experiment(...)` annotation.
+/// Plumbed in from `CompilationResult.experiment_*` after the model
+/// compiles successfully. UI uses these to prefill the Fast Run
+/// bounds inline display.
+#[derive(Clone, Debug, Default)]
+pub struct ModelDefaults {
+    pub t_start: Option<f64>,
+    pub t_end: Option<f64>,
+    pub tolerance: Option<f64>,
+    pub interval: Option<f64>,
+    pub solver: Option<String>,
+}
+
+/// Native + wasm-shared runner state. Stores the latest model source +
+/// annotation defaults the UI provides, so `run_fast` can recompile
+/// without round-tripping through the editor.
+#[derive(Default)]
+struct RunnerState {
+    sources: BTreeMap<ModelRef, ModelSource>,
+    defaults: BTreeMap<ModelRef, ModelDefaults>,
+    /// Currently-executing run id. Some(id) means a Fast Run is in
+    /// flight; subsequent run_fast calls fail-fast in v1 (no internal
+    /// queue — caller-side queueing handled by the panel).
+    busy_with: Option<ExperimentId>,
+}
+
+/// Runner state shared between the trait wrapper and the worker
+/// thread. The cancel flag is per-run, swapped on each `run_fast`.
+pub struct ModelicaRunner {
+    state: Arc<Mutex<RunnerState>>,
+    /// Cancel flag for the *currently in-flight* run, if any.
+    cancel_flag: Arc<Mutex<Option<(ExperimentId, Arc<AtomicBool>)>>>,
+}
+
+impl Default for ModelicaRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ModelicaRunner {
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(RunnerState::default())),
+            cancel_flag: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Register or update the source for a model so subsequent
+    /// `run_fast` calls have something to compile. Called by the build
+    /// UI on every compile-relevant edit.
+    pub fn set_model_source(&self, model_ref: ModelRef, source: ModelSource) {
+        if let Ok(mut s) = self.state.lock() {
+            s.sources.insert(model_ref, source);
+        }
+    }
+
+    /// Stash annotation defaults from a successful compile so
+    /// [`ExperimentRunner::default_bounds`] can return them.
+    pub fn set_model_defaults(&self, model_ref: ModelRef, defaults: ModelDefaults) {
+        if let Ok(mut s) = self.state.lock() {
+            s.defaults.insert(model_ref, defaults);
+        }
+    }
+
+    /// `true` when a Fast Run is currently in flight. UI uses this to
+    /// disable the Fast button.
+    pub fn is_busy(&self) -> bool {
+        self.state.lock().map(|s| s.busy_with.is_some()).unwrap_or(false)
+    }
+}
+
+impl ExperimentRunner for ModelicaRunner {
+    fn run_fast(&self, exp: &Experiment) -> RunHandle {
+        let (tx, rx) = unbounded();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let run_id = exp.id;
+
+        // Mark busy. If something else is in flight, immediately fail
+        // this run with a clear message rather than queue silently —
+        // the panel knows to surface "busy" before calling.
+        let already_busy = {
+            let mut s = self.state.lock().unwrap();
+            if s.busy_with.is_some() {
+                true
+            } else {
+                s.busy_with = Some(run_id);
+                false
+            }
+        };
+        if already_busy {
+            let _ = tx.send(RunUpdate::Failed {
+                error: "another Fast Run is already in flight".to_string(),
+                partial: None,
+            });
+            return RunHandle {
+                run_id,
+                progress_rx: rx,
+                cancel: Box::new(|| {}),
+            };
+        }
+
+        // Install cancel hook for this run.
+        {
+            let mut slot = self.cancel_flag.lock().unwrap();
+            *slot = Some((run_id, cancel.clone()));
+        }
+
+        // Snapshot inputs for the worker thread.
+        let model_ref = exp.model_ref.clone();
+        let overrides = exp.overrides.clone();
+        let bounds = exp.bounds.clone();
+        let state = self.state.clone();
+        let busy_clear = self.state.clone();
+
+        // wasm: dispatch to the Web Worker via worker_transport.
+        // Native: spawn a std::thread and run inline.
+        #[cfg(target_arch = "wasm32")]
+        {
+            // Resolve source on the main thread (worker has no
+            // editor-state access).
+            let source_snapshot = state
+                .lock()
+                .ok()
+                .and_then(|s| s.sources.get(&model_ref).cloned());
+            let cancel_for_handle = run_id;
+            let cancel_hook = Box::new(move || {
+                crate::worker_transport::dispatch_cancel_run(cancel_for_handle);
+            });
+            match source_snapshot {
+                Some(src) => {
+                    // Forward updates from the dispatch tx (registered with
+                    // worker_transport) into our local tx + clear busy on
+                    // terminal.
+                    let (forward_tx, forward_rx) = unbounded::<RunUpdate>();
+                    crate::worker_transport::register_run_sender(run_id, forward_tx);
+                    // Pump in a background task — wasm is single-threaded
+                    // but the receiver is drained via spawn_local-friendly
+                    // poll. v1: use a Bevy system to forward updates.
+                    // Here we let the panel's drain_run_updates system
+                    // consume the rx instead of bouncing through tx —
+                    // expose the rx via a side channel:
+                    spawn_forwarder(run_id, forward_rx, tx, busy_clear);
+                    let dispatched = crate::worker_transport::dispatch_run_fast(
+                        run_id,
+                        src.model_name,
+                        src.source,
+                        src.filename,
+                        src.extras,
+                        overrides,
+                        bounds,
+                    );
+                    if !dispatched {
+                        // Fall back: no worker — fail the run.
+                        if let Ok(mut s) = state.lock() {
+                            s.busy_with = None;
+                        }
+                    }
+                }
+                None => {
+                    let _ = tx.send(RunUpdate::Failed {
+                        error: format!("no source registered for model {}", model_ref.0),
+                        partial: None,
+                    });
+                    if let Ok(mut s) = state.lock() {
+                        s.busy_with = None;
+                    }
+                }
+            }
+            return RunHandle {
+                run_id,
+                progress_rx: rx,
+                cancel: cancel_hook,
+            };
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let cancel_for_handle = cancel.clone();
+            let cancel_hook = Box::new(move || {
+                cancel_for_handle.store(true, Ordering::SeqCst);
+            });
+            let _ = run_id;
+            std::thread::spawn(move || {
+                run_inner(state, model_ref, overrides, bounds, cancel, tx);
+                if let Ok(mut s) = busy_clear.lock() {
+                    s.busy_with = None;
+                }
+            });
+            RunHandle {
+                run_id,
+                progress_rx: rx,
+                cancel: cancel_hook,
+            }
+        }
+    }
+
+    fn default_bounds(&self, model: &ModelRef) -> Option<RunBounds> {
+        let s = self.state.lock().ok()?;
+        let d = s.defaults.get(model)?;
+        Some(RunBounds {
+            t_start: d.t_start.unwrap_or(0.0),
+            t_end: d.t_end.unwrap_or(1.0),
+            dt: d.interval,
+            tolerance: d.tolerance,
+            solver: d.solver.clone(),
+        })
+    }
+}
+
+/// wasm-only forwarder: the worker_transport demux pushes updates into
+/// `forward_rx`; we relay them to the runner's `tx` (which the
+/// `RunHandle` consumer drains) and clear the runner-side busy flag
+/// on terminal updates. v1: polled by a Bevy system on Update tick.
+#[cfg(target_arch = "wasm32")]
+fn spawn_forwarder(
+    run_id: ExperimentId,
+    forward_rx: crossbeam_channel::Receiver<RunUpdate>,
+    tx: crossbeam_channel::Sender<RunUpdate>,
+    state: Arc<Mutex<RunnerState>>,
+) {
+    let mut slot = wasm_forwarders().lock().unwrap();
+    slot.push(WasmForwarder { run_id, forward_rx, tx, state });
+}
+
+#[cfg(target_arch = "wasm32")]
+struct WasmForwarder {
+    run_id: ExperimentId,
+    forward_rx: crossbeam_channel::Receiver<RunUpdate>,
+    tx: crossbeam_channel::Sender<RunUpdate>,
+    state: Arc<Mutex<RunnerState>>,
+}
+
+#[cfg(target_arch = "wasm32")]
+static WASM_FORWARDERS: std::sync::OnceLock<Mutex<Vec<WasmForwarder>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(target_arch = "wasm32")]
+fn wasm_forwarders() -> &'static Mutex<Vec<WasmForwarder>> {
+    WASM_FORWARDERS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Pump pending wasm forwarders. Call from a Bevy `Update` system on
+/// wasm. Drains all queued updates; clears the runner's busy flag and
+/// removes the forwarder when a terminal update arrives.
+#[cfg(target_arch = "wasm32")]
+pub fn pump_wasm_forwarders() {
+    let mut slot = wasm_forwarders().lock().unwrap();
+    let mut keep = Vec::with_capacity(slot.len());
+    for fwd in slot.drain(..) {
+        let mut terminal = false;
+        while let Ok(update) = fwd.forward_rx.try_recv() {
+            let is_term = matches!(
+                update,
+                RunUpdate::Completed(_) | RunUpdate::Failed { .. } | RunUpdate::Cancelled
+            );
+            let _ = fwd.tx.send(update);
+            if is_term {
+                terminal = true;
+            }
+        }
+        if terminal {
+            if let Ok(mut s) = fwd.state.lock() {
+                if s.busy_with == Some(fwd.run_id) {
+                    s.busy_with = None;
+                }
+            }
+        } else {
+            keep.push(fwd);
+        }
+    }
+    *slot = keep;
+}
+
+/// Body of the run thread. Compiles, runs the simulation, posts
+/// updates. All errors funnel into `RunUpdate::Failed`. Cancellation
+/// observed between steps via the shared `AtomicBool`.
+fn run_inner(
+    state: Arc<Mutex<RunnerState>>,
+    model_ref: ModelRef,
+    overrides: BTreeMap<ParamPath, ParamValue>,
+    bounds: RunBounds,
+    cancel: Arc<AtomicBool>,
+    tx: Sender<RunUpdate>,
+) {
+    let t_wall = web_time::Instant::now();
+
+    // Resolve model source.
+    let source = match state.lock() {
+        Ok(s) => match s.sources.get(&model_ref) {
+            Some(src) => src.clone(),
+            None => {
+                let _ = tx.send(RunUpdate::Failed {
+                    error: format!("no source registered for model {}", model_ref.0),
+                    partial: None,
+                });
+                return;
+            }
+        },
+        Err(_) => {
+            let _ = tx.send(RunUpdate::Failed {
+                error: "runner state poisoned".to_string(),
+                partial: None,
+            });
+            return;
+        }
+    };
+
+    // Apply overrides via string injection.
+    let injected = match apply_overrides_to_source(&source.source, &overrides) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = tx.send(RunUpdate::Failed {
+                error: format!("override application failed: {e}"),
+                partial: None,
+            });
+            return;
+        }
+    };
+
+    if cancel.load(Ordering::SeqCst) {
+        let _ = tx.send(RunUpdate::Cancelled);
+        return;
+    }
+
+    // Compile.
+    let mut compiler = crate::ModelicaCompiler::new();
+    let compile_result =
+        compiler.compile_str_multi(&source.model_name, &injected, &source.filename, &source.extras);
+    let dae_result = match compile_result {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = tx.send(RunUpdate::Failed {
+                error: format!("compile failed: {e}"),
+                partial: None,
+            });
+            return;
+        }
+    };
+
+    if cancel.load(Ordering::SeqCst) {
+        let _ = tx.send(RunUpdate::Cancelled);
+        return;
+    }
+
+    // Build sim options from bounds.
+    let opts = rumoca_sim::SimOptions {
+        t_start: bounds.t_start,
+        t_end: bounds.t_end,
+        rtol: bounds.tolerance.unwrap_or(1e-6),
+        atol: bounds.tolerance.unwrap_or(1e-6),
+        dt: bounds.dt,
+        scalarize: true,
+        max_wall_seconds: None,
+        solver_mode: rumoca_sim::SimSolverMode::Auto,
+    };
+
+    // Run batch simulation. Today this is a one-shot call; we have no
+    // intra-run progress hook from rumoca-sim. Post a final
+    // RunUpdate::Completed once it returns. Progress events from
+    // inside the solver come in Step 4 (worker) where the stepper
+    // path lets us check cancel and emit progress between steps.
+    //
+    // TODO(progress): swap to PreparedSimulation + a step loop here
+    // for native too, so cancel is responsive and progress fires.
+    // v1 ships with batch-only on native.
+    let sim_result = rumoca_sim::simulate_dae(&dae_result.dae, &opts);
+
+    if cancel.load(Ordering::SeqCst) {
+        let _ = tx.send(RunUpdate::Cancelled);
+        return;
+    }
+
+    match sim_result {
+        Ok(r) => {
+            let result = sim_result_to_run_result(r, t_wall.elapsed().as_millis() as u64);
+            let _ = tx.send(RunUpdate::Completed(result));
+        }
+        Err(e) => {
+            let _ = tx.send(RunUpdate::Failed {
+                error: format!("simulate failed: {e:?}"),
+                partial: None,
+            });
+        }
+    }
+}
+
+fn sim_result_to_run_result(r: rumoca_sim::SimResult, wall_time_ms: u64) -> RunResult {
+    let mut series: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    // SimResult.data is Vec<Vec<f64>> with one inner vec per variable.
+    // Pair up with names; defensively skip mismatched lengths.
+    for (i, name) in r.names.iter().enumerate() {
+        if let Some(col) = r.data.get(i) {
+            series.insert(name.clone(), col.clone());
+        }
+    }
+    let sample_count = r.times.len();
+    RunResult {
+        times: r.times,
+        series,
+        meta: RunMeta {
+            wall_time_ms,
+            sample_count,
+            notes: None,
+        },
+    }
+}
+
+/// Mutate `source` so each top-level literal `parameter` declaration
+/// listed in `overrides` carries the new value.
+///
+/// v1 implementation: simple regex-based replacement of
+/// `parameter <Type> <name> = <literal>`. Limitations:
+///
+/// - Only matches top-level literal RHS (numbers, true/false,
+///   quoted strings). Expression-bound or inherited params are
+///   silently skipped — caller filters those out at UI time so the
+///   user sees them greyed.
+/// - Requires the param declaration to be in the supplied source
+///   (won't traverse imports). Same limitation as the UI editor.
+///
+/// Returns `Err` if a requested override name isn't found in the
+/// source — surfaces as a Failed run with a clear message instead of
+/// running with stale params silently.
+pub fn apply_overrides_to_source(
+    source: &str,
+    overrides: &BTreeMap<ParamPath, ParamValue>,
+) -> Result<String, String> {
+    if overrides.is_empty() {
+        return Ok(source.to_string());
+    }
+    let mut out = source.to_string();
+    for (path, value) in overrides {
+        // We look for `parameter <whitespace and type stuff> <name> = <literal>`.
+        // The path may be dotted (component.subcomponent.param); v1 only
+        // supports the trailing identifier in the model's own source.
+        // Inherited params raise an error per spec.
+        let leaf = path.0.rsplit('.').next().unwrap_or(&path.0);
+        let new_literal = format_literal(value);
+        let replaced = replace_param_literal(&out, leaf, &new_literal)?;
+        out = replaced;
+    }
+    Ok(out)
+}
+
+fn format_literal(v: &ParamValue) -> String {
+    match v {
+        ParamValue::Real(x) => {
+            // Keep "5.0" not "5" so the parser still sees Real.
+            if x.fract() == 0.0 && x.is_finite() {
+                format!("{x:.1}")
+            } else {
+                format!("{x}")
+            }
+        }
+        ParamValue::Int(x) => format!("{x}"),
+        ParamValue::Bool(b) => if *b { "true".into() } else { "false".into() },
+        ParamValue::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        ParamValue::Enum(s) => s.clone(),
+        ParamValue::RealArray(xs) => {
+            let inner: Vec<String> = xs.iter().map(|x| format!("{x}")).collect();
+            format!("{{{}}}", inner.join(", "))
+        }
+    }
+}
+
+/// Find `parameter ... <name> = <literal>;` and substitute the literal.
+///
+/// We can't use a full Modelica parser here without re-flattening,
+/// which defeats the point. The regex tolerates whitespace and
+/// modifiers (`final`, `each`, attribute clauses) and stops at the
+/// first `=` followed by a literal up to `;` or `,`.
+fn replace_param_literal(
+    source: &str,
+    name: &str,
+    new_literal: &str,
+) -> Result<String, String> {
+    // Build a regex that matches:
+    //   parameter [final] [each] <type-and-modifiers> <name> [(...)] = <literal>
+    // and captures the literal so we can replace just that span.
+    //
+    // The literal capture is anything up to the next comma or
+    // semicolon at the same nesting level. To keep this simple in v1
+    // we scan manually rather than relying on regex backrefs.
+    let escaped = regex::escape(name);
+    let re = regex::Regex::new(&format!(
+        r"(?m)\bparameter\b[^;]*?\b{}\b[^=;]*=\s*",
+        escaped
+    ))
+    .map_err(|e| format!("override regex build failed: {e}"))?;
+    let mat = match re.find(source) {
+        Some(m) => m,
+        None => {
+            return Err(format!(
+                "parameter '{name}' not found at the top level of the model source — \
+                 inherited / expression-bound params are not supported in v1"
+            ));
+        }
+    };
+    let head_end = mat.end(); // position right after `=` whitespace
+    // Find end of literal: nearest top-level `;` or `,`. v1 doesn't
+    // support nested arrays/records in overrides, so a naive scan is
+    // fine.
+    let tail = &source[head_end..];
+    let mut depth: i32 = 0;
+    let mut end_off = tail.len();
+    for (i, ch) in tail.char_indices() {
+        match ch {
+            '{' | '(' | '[' => depth += 1,
+            '}' | ')' | ']' => depth -= 1,
+            ';' | ',' if depth == 0 => {
+                end_off = i;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let mut out = String::with_capacity(source.len() + new_literal.len());
+    out.push_str(&source[..head_end]);
+    out.push_str(new_literal);
+    out.push_str(&source[head_end + end_off..]);
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn override_real_literal() {
+        let src = "model M\n  parameter Real m = 1.5;\nequation\nend M;\n";
+        let mut ov: BTreeMap<ParamPath, ParamValue> = BTreeMap::new();
+        ov.insert(ParamPath("m".into()), ParamValue::Real(2.5));
+        let out = apply_overrides_to_source(src, &ov).unwrap();
+        assert!(out.contains("parameter Real m = 2.5"));
+        assert!(!out.contains("1.5"));
+    }
+
+    #[test]
+    fn override_with_modifier() {
+        let src = "model M\n  parameter Real g(unit=\"m/s2\") = 9.81;\nend M;\n";
+        let mut ov: BTreeMap<ParamPath, ParamValue> = BTreeMap::new();
+        ov.insert(ParamPath("g".into()), ParamValue::Real(3.71));
+        let out = apply_overrides_to_source(src, &ov).unwrap();
+        assert!(out.contains("3.71"));
+        assert!(out.contains("unit=\"m/s2\""));
+    }
+
+    #[test]
+    fn missing_param_errors() {
+        let src = "model M\n  Real x;\nend M;\n";
+        let mut ov: BTreeMap<ParamPath, ParamValue> = BTreeMap::new();
+        ov.insert(ParamPath("nope".into()), ParamValue::Real(1.0));
+        assert!(apply_overrides_to_source(src, &ov).is_err());
+    }
+
+    #[test]
+    fn integer_and_bool_format() {
+        assert_eq!(format_literal(&ParamValue::Int(7)), "7");
+        assert_eq!(format_literal(&ParamValue::Bool(true)), "true");
+        assert_eq!(format_literal(&ParamValue::Real(3.0)), "3.0");
+    }
+}

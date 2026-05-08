@@ -525,6 +525,13 @@ pub mod models;
 pub mod msl_remote;
 pub mod sim_stream;
 pub mod worker;
+pub mod experiments_runner;
+
+/// Bevy resource wrapping the singleton [`experiments_runner::ModelicaRunner`].
+/// Stored as `Arc` so UI panels can clone the handle and call
+/// `run_fast` from event handlers without holding a `ResMut` borrow.
+#[derive(Resource, Clone)]
+pub struct ModelicaRunnerResource(pub std::sync::Arc<experiments_runner::ModelicaRunner>);
 /// Wasm-only Web Worker transport — relays `ModelicaCommand` /
 /// `ModelicaResult` between the main wasm instance and the off-thread
 /// worker bundle so the UI never blocks on rumoca compile / step.
@@ -722,6 +729,14 @@ fn build_modelica_core(app: &mut App) {
     app.init_resource::<ui::WorkbenchState>();
     app.init_resource::<SimStreamRegistry>();
 
+    // Experiments / Fast Run: backend-agnostic registry + this crate's
+    // ModelicaRunner binding. UI for the Run buttons and Experiments
+    // panel is layered in `ui::experiments_panel` (Step 5+).
+    app.add_plugins(lunco_experiments::ExperimentsPlugin);
+    app.insert_resource(ModelicaRunnerResource(
+        std::sync::Arc::new(experiments_runner::ModelicaRunner::new()),
+    ));
+
     app.configure_sets(
         FixedUpdate,
         (ModelicaSet::HandleResponses, ModelicaSet::SpawnRequests).chain(),
@@ -758,6 +773,12 @@ fn build_modelica_core(app: &mut App) {
         app.add_systems(Update, worker_transport::pump_commands_to_worker);
         app.add_systems(Update, worker::inline_worker_process);
         app.add_systems(Update, ui::update_file_load_result);
+        // Drain Web-Worker RunUpdate streams into the runner's
+        // RunHandle receivers and clear the runner's busy flag on
+        // terminal updates. Cheap when no run is in flight.
+        app.add_systems(Update, |_world: &mut World| {
+            experiments_runner::pump_wasm_forwarders();
+        });
     }
 }
 

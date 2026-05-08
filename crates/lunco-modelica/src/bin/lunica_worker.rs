@@ -139,6 +139,197 @@ fn post_log(scope: &DedicatedWorkerGlobalScope, line: impl Into<String>) {
     post_wire(scope, &WireResult::Log(line.into()));
 }
 
+fn post_run_update(
+    scope: &DedicatedWorkerGlobalScope,
+    run_id: lunco_experiments::ExperimentId,
+    update: lunco_experiments::RunUpdate,
+) {
+    post_wire(scope, &WireResult::RunUpdate { run_id, update });
+}
+
+// Cancellation flag set per in-flight run. Worker is single-threaded
+// (separate wasm instance, but no preemption inside it) so a plain
+// thread_local is enough — the message loop checks the flag between
+// solver phases.
+thread_local! {
+    static CANCEL_RUN_ID: RefCell<Option<lunco_experiments::ExperimentId>> = RefCell::new(None);
+}
+
+fn cancel_run_in_worker(run_id: lunco_experiments::ExperimentId) {
+    CANCEL_RUN_ID.with(|c| *c.borrow_mut() = Some(run_id));
+}
+
+fn is_cancelled(run_id: lunco_experiments::ExperimentId) -> bool {
+    CANCEL_RUN_ID.with(|c| c.borrow().map(|x| x == run_id).unwrap_or(false))
+}
+
+fn clear_cancel() {
+    CANCEL_RUN_ID.with(|c| *c.borrow_mut() = None);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_fast_in_worker(
+    scope: &DedicatedWorkerGlobalScope,
+    run_id: lunco_experiments::ExperimentId,
+    model_name: &str,
+    source: &str,
+    filename: &str,
+    extras: &[(String, String)],
+    overrides: &std::collections::BTreeMap<lunco_experiments::ParamPath, lunco_experiments::ParamValue>,
+    bounds: &lunco_experiments::RunBounds,
+) {
+    use lunco_modelica::experiments_runner::apply_overrides_to_source;
+    let started = web_time::Instant::now();
+    post_log(scope, format!("run_fast: start run={run_id:?} model={model_name}"));
+
+    let injected = match apply_overrides_to_source(source, overrides) {
+        Ok(s) => s,
+        Err(e) => {
+            post_run_update(
+                scope,
+                run_id,
+                lunco_experiments::RunUpdate::Failed {
+                    error: format!("override failed: {e}"),
+                    partial: None,
+                },
+            );
+            return;
+        }
+    };
+
+    if is_cancelled(run_id) {
+        clear_cancel();
+        post_run_update(scope, run_id, lunco_experiments::RunUpdate::Cancelled);
+        return;
+    }
+
+    // Compile via the worker's persistent ModelicaCompiler. Reuses
+    // the compile cache the worker already maintains for normal
+    // Compile commands.
+    let compile = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        STATE.with(|s| {
+            let mut state = s.try_borrow_mut().expect("worker state borrow");
+            state
+                .compiler()
+                .compile_str_multi(model_name, &injected, filename, extras)
+        })
+    }));
+    let dae = match compile {
+        Ok(Ok(d)) => d,
+        Ok(Err(e)) => {
+            post_run_update(
+                scope,
+                run_id,
+                lunco_experiments::RunUpdate::Failed {
+                    error: format!("compile: {e}"),
+                    partial: None,
+                },
+            );
+            return;
+        }
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<&'static str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(|s| s.as_str()))
+                .unwrap_or("(unknown panic)");
+            post_run_update(
+                scope,
+                run_id,
+                lunco_experiments::RunUpdate::Failed {
+                    error: format!("compile panic: {msg}"),
+                    partial: None,
+                },
+            );
+            return;
+        }
+    };
+
+    if is_cancelled(run_id) {
+        clear_cancel();
+        post_run_update(scope, run_id, lunco_experiments::RunUpdate::Cancelled);
+        return;
+    }
+
+    let opts = rumoca_sim::SimOptions {
+        t_start: bounds.t_start,
+        t_end: bounds.t_end,
+        rtol: bounds.tolerance.unwrap_or(1e-6),
+        atol: bounds.tolerance.unwrap_or(1e-6),
+        dt: bounds.dt,
+        scalarize: true,
+        max_wall_seconds: None,
+        solver_mode: rumoca_sim::SimSolverMode::Auto,
+    };
+
+    // Batch simulate. v1: no intra-step progress on wasm either —
+    // diffsol's batch path doesn't expose a hook. TODO(progress):
+    // switch to `build_simulation` + step loop with progress + cancel
+    // poll between steps.
+    let sim = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rumoca_sim::simulate_dae(&dae.dae, &opts)
+    }));
+    if is_cancelled(run_id) {
+        clear_cancel();
+        post_run_update(scope, run_id, lunco_experiments::RunUpdate::Cancelled);
+        return;
+    }
+    match sim {
+        Ok(Ok(r)) => {
+            let result = sim_to_run_result(r, started.elapsed().as_millis() as u64);
+            post_run_update(scope, run_id, lunco_experiments::RunUpdate::Completed(result));
+            post_log(
+                scope,
+                format!("run_fast: done in {:.2}s", started.elapsed().as_secs_f64()),
+            );
+        }
+        Ok(Err(e)) => {
+            post_run_update(
+                scope,
+                run_id,
+                lunco_experiments::RunUpdate::Failed {
+                    error: format!("simulate: {e:?}"),
+                    partial: None,
+                },
+            );
+        }
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<&'static str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(|s| s.as_str()))
+                .unwrap_or("(unknown panic)");
+            post_run_update(
+                scope,
+                run_id,
+                lunco_experiments::RunUpdate::Failed {
+                    error: format!("simulate panic: {msg}"),
+                    partial: None,
+                },
+            );
+        }
+    }
+}
+
+fn sim_to_run_result(r: rumoca_sim::SimResult, wall_time_ms: u64) -> lunco_experiments::RunResult {
+    let mut series: std::collections::BTreeMap<String, Vec<f64>> = std::collections::BTreeMap::new();
+    for (i, name) in r.names.iter().enumerate() {
+        if let Some(col) = r.data.get(i) {
+            series.insert(name.clone(), col.clone());
+        }
+    }
+    let sample_count = r.times.len();
+    lunco_experiments::RunResult {
+        times: r.times,
+        series,
+        meta: lunco_experiments::RunMeta {
+            wall_time_ms,
+            sample_count,
+            notes: None,
+        },
+    }
+}
+
 #[wasm_bindgen(start)]
 pub fn run() -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
@@ -274,6 +465,31 @@ pub fn run() -> Result<(), JsValue> {
                             .unwrap_or(0)
                     ),
                 );
+            }
+            WireMessage::RunFast {
+                run_id,
+                model_name,
+                source,
+                filename,
+                extras,
+                overrides,
+                bounds,
+            } => {
+                let scope = scope_for_cb.clone();
+                run_fast_in_worker(
+                    &scope,
+                    run_id,
+                    &model_name,
+                    &source,
+                    &filename,
+                    &extras,
+                    &overrides,
+                    &bounds,
+                );
+            }
+            WireMessage::CancelRun { run_id } => {
+                cancel_run_in_worker(run_id);
+                post_log(&scope_for_cb, format!("cancel requested for run {run_id:?}"));
             }
             WireMessage::ParseDocument { doc_id, gen, uri, source } => {
                 let started = web_time::Instant::now();

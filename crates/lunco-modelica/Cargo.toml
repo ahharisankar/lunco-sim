@@ -124,6 +124,7 @@ usvg = { version = "0.45", default-features = false, features = ["text"] }
 # sibling worktree so we can iterate without pushing. Flip back to
 # `git = ..., branch = "wasm-asset-loader"` after the branch is pushed.
 rumoca-sim = { path = "../../../rumoca/crates/rumoca-sim" }
+lunco-experiments = { path = "../lunco-experiments" }
 rumoca-session = { path = "../../../rumoca/crates/rumoca-session" }
 rumoca-phase-parse = { path = "../../../rumoca/crates/rumoca-phase-parse" }
 # Modelica formatter — surfaced as a "Format" toolbar button +

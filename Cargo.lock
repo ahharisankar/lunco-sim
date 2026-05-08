@@ -6215,6 +6215,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lunco-experiments"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "crossbeam-channel",
+ "serde",
+ "uuid",
+]
+
+[[package]]
 name = "lunco-fsw"
 version = "0.6.0-dev"
 dependencies = [
@@ -6287,6 +6297,7 @@ dependencies = [
  "lunco-core",
  "lunco-doc",
  "lunco-doc-bevy",
+ "lunco-experiments",
  "lunco-settings",
  "lunco-storage",
  "lunco-theme",

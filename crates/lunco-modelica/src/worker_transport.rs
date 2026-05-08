@@ -93,6 +93,26 @@ pub enum WireMessage {
         uri: String,
         source: String,
     },
+    /// Fast Run request: compile (with overrides) + simulate end-to-end.
+    /// Worker posts back a `WireResult::RunUpdate` stream tagged with
+    /// `run_id`. See `experiments_runner` and
+    /// `docs/architecture/25-experiments.md`.
+    RunFast {
+        run_id: lunco_experiments::ExperimentId,
+        model_name: String,
+        source: String,
+        filename: String,
+        extras: Vec<(String, String)>,
+        overrides: std::collections::BTreeMap<
+            lunco_experiments::ParamPath,
+            lunco_experiments::ParamValue,
+        >,
+        bounds: lunco_experiments::RunBounds,
+    },
+    /// Best-effort cancel of an in-flight Fast Run. Worker observes
+    /// the flag between solver steps. v1: cancel granularity is
+    /// "between steps in the worker's run loop".
+    CancelRun { run_id: lunco_experiments::ExperimentId },
 }
 
 /// Wire-format envelope from worker → main. Same multiplexing principle as
@@ -127,6 +147,13 @@ pub enum WireResult {
         gen: u64,
         ast: rumoca_session::parsing::StoredDefinition,
         errors: Vec<String>,
+    },
+    /// Lifecycle update for a Fast Run started via
+    /// `WireMessage::RunFast`. The `run_id` lets the main thread
+    /// demux to the right `RunHandle` receiver.
+    RunUpdate {
+        run_id: lunco_experiments::ExperimentId,
+        update: lunco_experiments::RunUpdate,
     },
 }
 
@@ -174,6 +201,67 @@ pub struct ParseDoneEnvelope {
 }
 static PARSE_DONE_TX: OnceLock<crossbeam_channel::Sender<ParseDoneEnvelope>> = OnceLock::new();
 static PARSE_DONE_RX: OnceLock<crossbeam_channel::Receiver<ParseDoneEnvelope>> = OnceLock::new();
+
+/// Per-run sender table for RunUpdate demux.
+///
+/// `WireResult::RunUpdate { run_id, update }` arrives at the JS
+/// `onmessage` boundary; we look up the sender registered when
+/// `dispatch_run_fast` was called and forward the update so the
+/// `RunHandle.progress_rx` consumer (the experiments runner)
+/// receives it transparently.
+static RUN_SENDERS: OnceLock<
+    std::sync::Mutex<
+        std::collections::HashMap<
+            lunco_experiments::ExperimentId,
+            crossbeam_channel::Sender<lunco_experiments::RunUpdate>,
+        >,
+    >,
+> = OnceLock::new();
+
+fn run_senders()
+    -> &'static std::sync::Mutex<
+        std::collections::HashMap<
+            lunco_experiments::ExperimentId,
+            crossbeam_channel::Sender<lunco_experiments::RunUpdate>,
+        >,
+    >
+{
+    RUN_SENDERS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Register a sender for a Fast Run. Called by `ModelicaRunner`
+/// before posting `WireMessage::RunFast` so the result demux can
+/// route updates to the matching `RunHandle.progress_rx`.
+pub fn register_run_sender(
+    run_id: lunco_experiments::ExperimentId,
+    tx: crossbeam_channel::Sender<lunco_experiments::RunUpdate>,
+) {
+    if let Ok(mut map) = run_senders().lock() {
+        map.insert(run_id, tx);
+    }
+}
+
+fn forward_run_update(run_id: lunco_experiments::ExperimentId, update: lunco_experiments::RunUpdate) {
+    let tx = match run_senders().lock().ok().and_then(|m| m.get(&run_id).cloned()) {
+        Some(tx) => tx,
+        None => {
+            bevy::log::warn!("[worker_transport] RunUpdate for unknown run_id");
+            return;
+        }
+    };
+    let terminal = matches!(
+        update,
+        lunco_experiments::RunUpdate::Completed(_)
+            | lunco_experiments::RunUpdate::Failed { .. }
+            | lunco_experiments::RunUpdate::Cancelled
+    );
+    let _ = tx.send(update);
+    if terminal {
+        if let Ok(mut map) = run_senders().lock() {
+            map.remove(&run_id);
+        }
+    }
+}
 
 fn ensure_parse_done_channel() -> &'static crossbeam_channel::Sender<ParseDoneEnvelope> {
     PARSE_DONE_TX.get_or_init(|| {
@@ -257,6 +345,9 @@ pub fn install_worker(worker_url: &str) -> Result<(), JsValue> {
                 let tx = ensure_parse_done_channel();
                 let _ = tx.send(ParseDoneEnvelope { doc_id, gen, ast, errors });
             }
+            Ok(WireResult::RunUpdate { run_id, update }) => {
+                forward_run_update(run_id, update);
+            }
             Ok(WireResult::Log(line)) => {
                 // Surface worker-side diagnostics in the main page's
                 // Console panel — the worker has its own console context
@@ -296,6 +387,15 @@ pub fn pump_commands_to_worker(channels: Res<ModelicaChannels>) {
     };
 
     while let Ok(cmd) = channels.rx_cmd.try_recv() {
+        // Boot-race gate: Compile / UpdateParameters need the worker's
+        // MSL index to be populated, otherwise rumoca emits silent
+        // "unresolved reference Modelica.*" failures. Queue them until
+        // install_msl_in_worker drains the queue. Other commands
+        // (Step/Reset/Despawn) pass through unchanged.
+        if command_needs_msl(&cmd) && !msl_installed() {
+            PENDING_COMMANDS.with(|q| q.borrow_mut().push(cmd));
+            continue;
+        }
         let envelope = WireMessage::Command(cmd);
         let bytes = match bincode::serialize(&envelope) {
             Ok(b) => b,
@@ -309,6 +409,113 @@ pub fn pump_commands_to_worker(channels: Res<ModelicaChannels>) {
         if let Err(e) = worker.post_message(&array) {
             bevy::log::error!("[worker_transport] post_message failed: {e:?}");
         }
+    }
+}
+
+/// Post a Fast Run request to the worker. Gated behind MSL install
+/// just like compiles — without MSL the worker's compile would emit
+/// silent "unresolved Modelica.*" failures.
+pub fn dispatch_run_fast(
+    run_id: lunco_experiments::ExperimentId,
+    model_name: String,
+    source: String,
+    filename: String,
+    extras: Vec<(String, String)>,
+    overrides: std::collections::BTreeMap<
+        lunco_experiments::ParamPath,
+        lunco_experiments::ParamValue,
+    >,
+    bounds: lunco_experiments::RunBounds,
+) -> bool {
+    if WORKER.get().is_none() {
+        return false;
+    }
+    let msg = WireMessage::RunFast {
+        run_id,
+        model_name,
+        source,
+        filename,
+        extras,
+        overrides,
+        bounds,
+    };
+    if !msl_installed() {
+        // Queue: convert the WireMessage back to bytes and stash. We
+        // can't reuse PENDING_COMMANDS (different envelope shape), so
+        // route through a dedicated queue.
+        PENDING_RUN_FAST.with(|q| q.borrow_mut().push(msg));
+        return true;
+    }
+    post_to_worker(&msg, "run_fast");
+    true
+}
+
+/// Cancel an in-flight Fast Run. Best-effort; latency depends on the
+/// worker's poll cadence.
+pub fn dispatch_cancel_run(run_id: lunco_experiments::ExperimentId) {
+    if WORKER.get().is_none() {
+        return;
+    }
+    post_to_worker(&WireMessage::CancelRun { run_id }, "cancel_run");
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static PENDING_RUN_FAST: std::cell::RefCell<Vec<WireMessage>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(target_arch = "wasm32")]
+fn flush_pending_run_fast() {
+    let drained: Vec<WireMessage> = PENDING_RUN_FAST.with(|q| q.borrow_mut().drain(..).collect());
+    if drained.is_empty() {
+        return;
+    }
+    bevy::log::info!(
+        "[worker_transport] flushing {} RunFast request(s) queued during MSL install",
+        drained.len()
+    );
+    for msg in drained {
+        post_to_worker(&msg, "run_fast(flushed)");
+    }
+}
+
+/// Drain any compile-path commands queued by `pump_commands_to_worker`
+/// while the MSL install was still pending. Called from
+/// `install_msl_in_worker` after MSL is shipped to the worker.
+#[cfg(target_arch = "wasm32")]
+fn flush_pending_commands() {
+    let drained: Vec<ModelicaCommand> =
+        PENDING_COMMANDS.with(|q| q.borrow_mut().drain(..).collect());
+    if drained.is_empty() {
+        return;
+    }
+    bevy::log::info!(
+        "[worker_transport] flushing {} compile-path command(s) queued during MSL install",
+        drained.len()
+    );
+    for cmd in drained {
+        let envelope = WireMessage::Command(cmd);
+        let bytes = match bincode::serialize(&envelope) {
+            Ok(b) => b,
+            Err(e) => {
+                bevy::log::error!("[worker_transport] flushed encode failed: {e}");
+                continue;
+            }
+        };
+        post_to_worker_bytes(&bytes, "command(flushed)");
+    }
+}
+
+fn post_to_worker_bytes(bytes: &[u8], label: &str) {
+    let Some(WorkerHandle(worker)) = WORKER.get() else {
+        bevy::log::warn!("[worker_transport] {label}: worker not installed");
+        return;
+    };
+    let array = Uint8Array::new_with_length(bytes.len() as u32);
+    array.copy_from(bytes);
+    if let Err(e) = worker.post_message(&array) {
+        bevy::log::error!("[worker_transport] {label}: post_message failed: {e:?}");
     }
 }
 
@@ -373,6 +580,21 @@ thread_local! {
     static MSL_INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static PENDING_PARSES: std::cell::RefCell<Vec<PendingParse>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    // Commands that need MSL resolved (Compile, UpdateParameters, future RunFast)
+    // queued until install_msl_in_worker drains them. Step/Reset/Despawn pass
+    // through unconditionally — they don't recompile.
+    static PENDING_COMMANDS: std::cell::RefCell<Vec<ModelicaCommand>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Commands that depend on a populated MSL index in the worker (compile-path
+/// commands). Sent before MSL install lands → silent "unresolved Modelica.*"
+/// failures. Gate them; drain on `install_msl_in_worker`.
+fn command_needs_msl(cmd: &ModelicaCommand) -> bool {
+    matches!(
+        cmd,
+        ModelicaCommand::Compile { .. } | ModelicaCommand::UpdateParameters { .. }
+    )
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -519,6 +741,8 @@ pub fn install_msl_in_worker(
         {
             MSL_INSTALLED.with(|c| c.set(true));
             flush_pending_parses();
+            flush_pending_commands();
+            flush_pending_run_fast();
         }
     }
 }

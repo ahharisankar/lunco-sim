@@ -725,6 +725,15 @@ pub struct InlineWorkerInner {
     compiler: Option<ModelicaCompiler>,
 }
 
+#[cfg(target_arch = "wasm32")]
+impl InlineWorkerInner {
+    /// Lazily-built shared compiler. Same instance the regular
+    /// Compile path uses, so RunFast hits the same warm caches.
+    pub fn compiler(&mut self) -> &mut ModelicaCompiler {
+        self.compiler.get_or_insert_with(ModelicaCompiler::new)
+    }
+}
+
 /// Thread-safe wrapper for wasm32 inline worker state.
 ///
 /// SAFETY: wasm32-unknown-unknown has no threads, so Send/Sync are vacuously true.
