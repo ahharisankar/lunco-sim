@@ -253,25 +253,11 @@ fn mirror_open_model_on_doc_changed(
     workspace: Res<lunco_workbench::WorkspaceResource>,
     mut state: ResMut<crate::ui::state::WorkbenchState>,
 ) {
-    let doc = trigger.event().doc;
-    // Only mirror when the active doc changed — `open_model` tracks
-    // the foreground doc only. A background-doc edit (rare today, but
-    // possible via API) shouldn't displace what the user is editing.
-    if workspace.active_document != Some(doc) {
-        return;
-    }
-    let Some(host) = registry.host(doc) else { return };
-    let Some(open) = state.open_model.as_mut() else { return };
-    let src = host.document().source();
-    let mut line_starts = vec![0usize];
-    for (i, b) in src.as_bytes().iter().enumerate() {
-        if *b == b'\n' {
-            line_starts.push(i + 1);
-        }
-    }
-    open.source = std::sync::Arc::from(src);
-    open.line_starts = line_starts.into();
-    open.cached_galley = None;
+    // B.3 phase 6: source / line_starts mirror retired — readers
+    // now go through the registry directly. Observer kept as a
+    // no-op for scheduler ordering until the OpenModel struct is
+    // deleted entirely.
+    let _ = (trigger, registry, state, workspace);
 }
 
 fn sync_workspace_on_doc_opened(

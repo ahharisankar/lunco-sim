@@ -31,27 +31,17 @@ use crate::document::{ModelicaDocument, ModelicaOp};
 // Model File Tracking
 // ---------------------------------------------------------------------------
 
-/// Which model is currently open in the editor.
-#[derive(Debug, Clone, Default)]
-pub struct OpenModel {
-    /// Modelica package path (e.g., "Modelica.Electrical.Analog.Basic.Resistor")
-    /// or file path for user models (e.g., "Battery.mo").
-    pub model_path: String,
-    /// Display name shown in breadcrumb (e.g., "Resistor" or "Battery").
-    pub display_name: String,
-    /// Source code text.
-    pub source: Arc<str>,
-    /// Byte offsets of the start of each line (prevents O(N) string allocations).
-    pub line_starts: Arc<[usize]>,
-    /// Memoized model name from AST.
-    pub detected_name: Option<String>,
-    /// Pre-computed text layout for high-performance rendering.
-    pub cached_galley: Option<Arc<bevy_egui::egui::Galley>>,
-    /// Whether this model is read-only.
-    pub read_only: bool,
-    /// Which library this model came from.
-    pub library: ModelLibrary,
-}
+// `OpenModel` retired in B.3 phase 6 (2026-05-08). The cache held
+// fields all derivable from the document host:
+//   - `source` / `line_starts` → `host.document().source()` + Index.
+//   - `display_name` → `host.document().origin().display_name()`.
+//   - `read_only` → `host.document().is_read_only()`.
+//   - `detected_name` → `extract_model_name_from_ast(host.document().strict_ast()?)`.
+//   - `library` → derive from `host.document().origin()`.
+//   - `cached_galley` → moved to `EditorBufferState`.
+//   - `model_path` → derive from origin (file path / mem://name / msl://qualified).
+// Helpers in this module: `detected_name_for`, `read_only_for`,
+// `display_name_for`.
 
 /// Which library a model belongs to.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -146,8 +136,10 @@ pub struct WorkbenchState {
     /// `TabMetas`-keyed-by-`DocumentId` lookup. The 91 existing read
     /// callsites make that a deliberate refactor; the mirror system
     /// is the half-step that buys correctness now.
-    pub open_model: Option<OpenModel>,
-    /// Flag to signal the diagram panel should rebuild from open_model source.
+    // B.3 phase 6 (2026-05-08): `open_model` field retired.
+    // All readers migrated to derive from
+    // `ModelicaDocumentRegistry::host(doc).document()` directly.
+    /// Flag to signal the diagram panel should rebuild from registry source.
     pub diagram_dirty: bool,
     // B.3 phase 5: `is_loading` retired. Per-doc loading derives from
     // `PackageTreeCache::is_loading(doc)`,
@@ -670,7 +662,6 @@ impl Default for WorkbenchState {
         Self {
             editor_buffer: String::new(),
             selected_entity: None,
-            open_model: None,
             diagram_dirty: false,
         }
     }
@@ -713,53 +704,16 @@ impl Default for WorkbenchState {
 /// still mid-flight and will install a fresh `OpenModel` when its
 /// bg task completes. Re-deriving here would race with that path.
 pub fn mirror_active_open_model(
-    workspace: Option<Res<lunco_workbench::WorkspaceResource>>,
-    registry: Res<ModelicaDocumentRegistry>,
-    mut state: ResMut<WorkbenchState>,
+    _workspace: Option<Res<lunco_workbench::WorkspaceResource>>,
+    _registry: Res<ModelicaDocumentRegistry>,
+    _state: ResMut<WorkbenchState>,
 ) {
-    let Some(active) = workspace.as_deref().and_then(|ws| ws.active_document) else {
-        return;
-    };
-    let Some(host) = registry.host(active) else {
-        return;
-    };
-    // Skip when the file-load path hasn't installed the snapshot for
-    // this doc yet — `open_model.model_path` is the implicit identity
-    // tag the rest of the codebase uses, and overwriting fields when
-    // it doesn't match `active` would race with the in-flight load.
-    let snap_path: String = match state.open_model.as_ref() {
-        Some(m) => m.model_path.clone(),
-        None => return,
-    };
-    let doc = host.document();
-    let live_source: &str = doc.source();
-    let live_origin_path = doc.origin().display_name(); // best-effort identity proxy
-    // If the snapshot's `model_path` is empty (initial default) or
-    // doesn't reasonably point at this doc, leave it alone — the
-    // file-load path will populate it.
-    let _ = live_origin_path;
-    if snap_path.is_empty() {
-        return;
-    }
-    // Volatile-field refresh. Cheap when in sync (string compare +
-    // early return); recomputes line_starts only when source diverges.
-    let m = state.open_model.as_mut().expect("checked above");
-    if m.source.as_ref() == live_source {
-        return;
-    }
-    let new_source: Arc<str> = Arc::from(live_source);
-    let mut starts: Vec<usize> = vec![0];
-    for (i, b) in new_source.as_bytes().iter().enumerate() {
-        if *b == b'\n' {
-            starts.push(i + 1);
-        }
-    }
-    m.source = new_source;
-    m.line_starts = Arc::from(starts);
-    // `detected_name` is memoised from source; invalidate so the next
-    // reader recomputes against the fresh bytes. Cheap rebuild on
-    // demand beats fighting state.rs over what counts as "fresh".
-    m.detected_name = None;
+    // B.3 phase 6 (2026-05-08): retired. The `open_model` cache it
+    // mirrored is gone; readers go directly through
+    // `ModelicaDocumentRegistry::host(doc).document()`. Stub kept
+    // as a no-op so the plugin's `add_systems` chain doesn't have
+    // to drop the registration in the same change — tidy up in a
+    // follow-up.
 }
 
 #[cfg(test)]

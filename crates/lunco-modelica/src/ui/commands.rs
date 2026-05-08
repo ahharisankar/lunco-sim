@@ -737,10 +737,8 @@ fn on_document_closed_cleanup(
     // both the Workspace pointer and the UI cache in lockstep.
     if workspace.active_document == Some(doc) {
         workspace.active_document = None;
-        workbench.open_model = None;
+        // B.3 phase 6: `open_model` cache retired.
         workbench.editor_buffer.clear();
-        // B.3 phase 4: per-doc error already removed by
-        // `compile_states.remove(doc)` above.
     }
 }
 
@@ -1511,17 +1509,9 @@ fn on_create_new_scratch_model(
             doc: doc_id,
         });
 
+    // B.3 phase 6: `open_model` cache write retired.
+    let _ = (mem_id, name);
     let source_arc: std::sync::Arc<str> = source.into();
-    workbench.open_model = Some(crate::ui::OpenModel {
-        model_path: mem_id,
-        display_name: name.clone(),
-        source: source_arc.clone(),
-        line_starts: vec![0].into(),
-        detected_name: Some(name),
-        cached_galley: None,
-        read_only: false,
-        library: crate::ui::state::ModelLibrary::InMemory,
-    });
     workbench.editor_buffer = source_arc.to_string();
     workbench.diagram_dirty = true;
 
@@ -2836,6 +2826,7 @@ fn update_status_bar(
     workspace: Option<Res<lunco_workbench::WorkspaceResource>>,
     compile_states: Res<crate::ui::CompileStates>,
     layout: Option<ResMut<lunco_workbench::WorkbenchLayout>>,
+    registry: Res<crate::ui::state::ModelicaDocumentRegistry>,
 ) {
     let Some(mut layout) = layout else { return };
     // Re-render only when something a status reader cares about
@@ -2849,22 +2840,20 @@ fn update_status_bar(
         return;
     }
     let active_doc = workspace.as_ref().and_then(|w| w.active_document);
-    // B.3 phase 6 partial: cache still populated by
-    // `mirror_open_model_on_doc_changed`, so this reader uses it
-    // until the cache is fully retired. Migration TODO: pass
-    // `Res<ModelicaDocumentRegistry>` into this system to derive
-    // detected_name + display_name directly.
-    let model_name = workbench
-        .open_model
-        .as_ref()
-        .and_then(|m| m.detected_name.clone())
-        .or_else(|| {
-            workbench
-                .open_model
-                .as_ref()
-                .map(|m| m.model_path.clone())
+    // B.3 phase 6: derive from registry directly.
+    let model_name = active_doc
+        .and_then(|d| {
+            use lunco_doc::Document as _;
+            registry.host(d).and_then(|h| {
+                let document = h.document();
+                document
+                    .strict_ast()
+                    .and_then(|ast| crate::ast_extract::extract_model_name_from_ast(&ast))
+                    .or_else(|| Some(document.origin().display_name().to_string()))
+            })
         })
         .unwrap_or_else(|| "(untitled)".to_string());
+    let _ = workbench;
 
     let text = match active_doc {
         None => "ready".to_string(),

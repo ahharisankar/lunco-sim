@@ -787,19 +787,9 @@ pub(super) fn apply_ops(
             )
         });
     if let Some((src, new_gen)) = fresh {
-        if let Some(mut ws) = world.get_resource_mut::<WorkbenchState>() {
-            if let Some(open) = ws.open_model.as_mut() {
-                let mut line_starts = vec![0usize];
-                for (i, b) in src.as_bytes().iter().enumerate() {
-                    if *b == b'\n' {
-                        line_starts.push(i + 1);
-                    }
-                }
-                open.source = std::sync::Arc::from(src.as_str());
-                open.line_starts = line_starts.into();
-                open.cached_galley = None;
-            }
-        }
+        // B.3 phase 6: in-place open_model.source mirror retired —
+        // readers go through the registry directly. `src` is still
+        // used for the projection-relevant hash below.
         // Canvas-originated edits have *already* mutated the scene
         // before reaching apply_ops (drag moved the node; menu Add
         // synthesised a node prior to dispatch). Acknowledging the

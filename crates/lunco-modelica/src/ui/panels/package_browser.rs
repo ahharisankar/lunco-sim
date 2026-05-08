@@ -9,7 +9,7 @@ use bevy_egui::egui;
 use lunco_workbench::{Panel, PanelId, PanelSlot};
 
 use crate::models::bundled_models;
-use crate::ui::state::{ModelicaDocumentRegistry, ModelLibrary, OpenModel, WorkbenchState};
+use crate::ui::state::{ModelicaDocumentRegistry, ModelLibrary, WorkbenchState};
 
 use bevy::tasks::{AsyncComputeTaskPool, Task};
 use futures_lite::future;
@@ -970,17 +970,9 @@ pub fn handle_package_loading_tasks(
             }
         }
 
-        workbench.open_model = Some(OpenModel {
-            model_path: result.id,
-            display_name: result.name,
-            source: result.source,
-            line_starts: result.line_starts,
-            detected_name: result.detected_name,
-            cached_galley,
-            read_only: result.library != ModelLibrary::InMemory
-                && result.library != ModelLibrary::User,
-            library: result.library,
-        });
+        // B.3 phase 6: `open_model` cache write retired. Source +
+        // metadata derive from the registry directly.
+        let _ = (result.source, result.line_starts, result.detected_name, cached_galley);
         workbench.diagram_dirty = true;
         // B.3 phase 5: `is_loading` retired; per-doc derivation
         // comes from `PackageTreeCache::is_loading(doc)`,
@@ -1018,11 +1010,11 @@ impl Panel for PackageBrowserPanel {
         });
 
 
-        // Fetch needed state from World before borrowing tree_cache mutably
-        let active_path_str = {
-            let state = world.resource::<WorkbenchState>();
-            state.open_model.as_ref().map(|m| m.model_path.clone())
-        };
+        // B.3 phase 6: derive active path from registry display_name.
+        let active_path_str = world
+            .get_resource::<lunco_workbench::WorkspaceResource>()
+            .and_then(|ws| ws.active_document)
+            .and_then(|d| crate::ui::state::display_name_for(world, d));
         let active_path = active_path_str.as_deref();
         let muted = world
             .get_resource::<lunco_theme::Theme>()
@@ -1673,15 +1665,13 @@ fn commit_current_model_edits(world: &mut World) {
     // active model's path each time the editor mirrors the source;
     // if it matches `state.open_model.model_path` we know the buffer
     // genuinely belongs to this doc.
-    let active_path = {
-        let state = world.resource::<WorkbenchState>();
-        state.open_model.as_ref().map(|m| m.model_path.clone())
-    };
-    let (buffer_path, buffer_text) = world
+    // B.3 phase 6: use typed `bound_doc` identity instead of the
+    // legacy origin-prefixed `model_path` string comparison.
+    let (buffer_bound, buffer_text) = world
         .get_resource::<crate::ui::panels::code_editor::EditorBufferState>()
-        .map(|b| (b.model_path.clone(), b.text.clone()))
+        .map(|b| (b.bound_doc, b.text.clone()))
         .unwrap_or_default();
-    if active_path.as_deref() != Some(buffer_path.as_str()) {
+    if buffer_bound != Some(doc_id) {
         // Buffer hasn't been mirrored to the active doc yet — skip;
         // its contents belong to whichever tab the user just left.
         return;
@@ -2324,21 +2314,12 @@ pub(crate) fn open_model(
             }
         }
 
+        // B.3 phase 6: `open_model` cache write retired.
+        let _ = (name, mem_name_str, library);
         if let Some(mut state) = world.get_resource_mut::<WorkbenchState>() {
             let source_arc: std::sync::Arc<str> = source.into();
-            state.open_model = Some(OpenModel {
-                model_path: id.clone(),
-                display_name: name,
-                source: source_arc.clone(),
-                line_starts: line_starts.into(),
-                detected_name: Some(mem_name_str),
-                cached_galley: None,
-                read_only: false,
-                library,
-            });
             state.editor_buffer = source_arc.to_string();
             state.diagram_dirty = true;
-            // B.3 phase 5: `is_loading` retired.
         }
         // Sync into the Workspace session. Only when we actually have
         // a doc id — a missing id here means we didn't allocate (first
@@ -2689,9 +2670,11 @@ pub(crate) fn open_model(
 /// `"bundled_root"` for bundled examples. Unknown ids are silently
 /// no-op (caller's collapsing header just shows blank).
 pub(crate) fn render_root_subtree(world: &mut World, ui: &mut egui::Ui, root_id: &str) {
+    // B.3 phase 6: derive active path from registry display_name.
     let active_path = world
-        .get_resource::<WorkbenchState>()
-        .and_then(|s| s.open_model.as_ref().map(|m| m.model_path.clone()));
+        .get_resource::<lunco_workbench::WorkspaceResource>()
+        .and_then(|ws| ws.active_document)
+        .and_then(|d| crate::ui::state::display_name_for(world, d));
     let active_path_ref = active_path.as_deref();
     // Active drill-in target for the foreground tab — `RocketStage`
     // when the user has clicked into the inner class of a bundled

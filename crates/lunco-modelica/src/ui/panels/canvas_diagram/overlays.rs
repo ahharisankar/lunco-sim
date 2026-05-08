@@ -187,17 +187,23 @@ pub(super) fn render_empty_diagram_overlay(
     canvas_rect: egui::Rect,
     world: &mut World,
 ) {
-    let Some(open) = world.resource::<WorkbenchState>().open_model.clone() else {
-        return;
-    };
+    // B.3 phase 6: derive from registry.
+    let active = world
+        .get_resource::<lunco_workbench::WorkspaceResource>()
+        .and_then(|ws| ws.active_document);
+    let Some(doc) = active else { return };
+    let registry = world.resource::<crate::ui::state::ModelicaDocumentRegistry>();
+    let Some(host) = registry.host(doc) else { return };
+    let document = host.document();
     let theme = world
         .get_resource::<lunco_theme::Theme>()
         .cloned()
         .unwrap_or_else(lunco_theme::Theme::dark);
-    let source = open.source.clone();
-    let class_name = open
-        .detected_name
-        .clone()
+    let source: std::sync::Arc<str> =
+        std::sync::Arc::from(document.source().to_string());
+    let class_name = document
+        .strict_ast()
+        .and_then(|ast| crate::ast_extract::extract_model_name_from_ast(&ast))
         .unwrap_or_else(|| "(unnamed)".into());
 
     // Read counts from the per-doc Index. Falls back to all-zeros

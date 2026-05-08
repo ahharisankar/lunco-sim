@@ -1036,12 +1036,15 @@ pub(crate) fn sync_active_tab_to_doc(
 
     // B.3 phase 6: use the snapshot's `path_str` directly instead
     // of round-tripping through `WorkbenchState.open_model`.
+    // `bound_doc` carries the typed doc identity used by
+    // package_browser's stale-buffer check.
     {
         let mut buf = world.resource_mut::<EditorBufferState>();
         buf.text = source;
         buf.line_starts = line_starts.into();
         buf.detected_name = detected_name;
         buf.model_path = path_str.clone();
+        buf.bound_doc = Some(doc);
     }
 
     // The canvas viewer reprojects from the document AST every frame

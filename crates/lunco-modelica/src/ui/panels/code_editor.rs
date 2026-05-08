@@ -36,6 +36,11 @@ pub struct EditorBufferState {
     pub source_hash: u64,
     /// The model_path of the current open_model when buffer was last synced.
     pub model_path: String,
+    /// Typed doc identity for the current buffer contents.
+    /// B.3 phase 6 replacement for the `active_path == buffer.model_path`
+    /// stale-buffer check — comparing `Option<DocumentId>` is cheaper
+    /// and doesn't require deriving an origin-prefixed path string.
+    pub bound_doc: Option<lunco_doc::DocumentId>,
     /// The actual text content (persistent across frames for selection).
     pub text: String,
     /// Byte offsets of the start of each line.
@@ -113,6 +118,7 @@ impl Default for EditorBufferState {
         Self {
             source_hash: 0,
             model_path: String::new(),
+            bound_doc: None,
             text: String::new(),
             line_starts: vec![0].into(),
             detected_name: None,
@@ -215,6 +221,7 @@ fn sync_buffer_from_open_model(world: &mut World, path: &str) {
     buf_state.text = source;
     buf_state.line_starts = line_starts;
     buf_state.model_path = path.to_string();
+    buf_state.bound_doc = Some(doc);
     buf_state.source_hash = hash_content(&buf_state.text);
     buf_state.detected_name = detected_name;
     buf_state.cached_galley = None;
