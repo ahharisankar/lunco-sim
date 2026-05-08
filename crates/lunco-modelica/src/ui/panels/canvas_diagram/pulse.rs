@@ -248,39 +248,60 @@ pub fn drive_pending_api_connections(
         if now.duration_since(entry.queued_at) > FOCUS_TIMEOUT {
             continue;
         }
-        let docstate = state.get(Some(entry.doc));
-        // Match by node `origin` (component name) + port id (port
-        // name). The canvas projection puts the port's name in
-        // `Port.id`'s string form via the SmolStr; matching by id
-        // works because the projector keys ports by simple name.
-        let hit = docstate.canvas.scene.edges().find(|(_, e)| {
-            let from_node = docstate.canvas.scene.node(e.from.node);
-            let to_node = docstate.canvas.scene.node(e.to.node);
-            let from_match = from_node
-                .map(|n| {
-                    n.origin.as_deref() == Some(entry.from_component.as_str())
-                        && n.ports
-                            .iter()
-                            .any(|p| p.id == e.from.port && p.id.as_str() == entry.from_port.as_str())
-                })
-                .unwrap_or(false);
-            let to_match = to_node
-                .map(|n| {
-                    n.origin.as_deref() == Some(entry.to_component.as_str())
-                        && n.ports
-                            .iter()
-                            .any(|p| p.id == e.to.port && p.id.as_str() == entry.to_port.as_str())
-                })
-                .unwrap_or(false);
-            from_match && to_match
-        });
-        match hit {
-            Some((edge_id, _)) => {
-                let edge_id = *edge_id;
-                let anim_ms = entry.animation_ms;
-                let docstate_mut = state.get_mut(Some(entry.doc));
+        let anim_ms = entry.animation_ms;
+        // Fan out to *every* tab viewing this doc, not just the
+        // first. Edge ids are scene-local — each tab projects its own
+        // scene with its own ids — so we re-find the edge per tab
+        // using the same component+port predicate and push a pulse
+        // into each tab that contains a match. Fixes the valve-glow
+        // regression where split-view tabs only saw pulses on the
+        // first tab.
+        let mut any_pulsed = false;
+        for (_, d, ds) in state.iter_mut() {
+            if d != entry.doc {
+                continue;
+            }
+            // Match by node `origin` (component name) + port id
+            // (port name). The canvas projection puts the port's
+            // name in `Port.id`'s string form via SmolStr; matching
+            // by id works because the projector keys ports by
+            // simple name.
+            let hit_id = {
+                let scene = &ds.canvas.scene;
+                scene
+                    .edges()
+                    .find(|(_, e)| {
+                        let from_node = scene.node(e.from.node);
+                        let to_node = scene.node(e.to.node);
+                        let from_match = from_node
+                            .map(|n| {
+                                n.origin.as_deref()
+                                    == Some(entry.from_component.as_str())
+                                    && n.ports.iter().any(|p| {
+                                        p.id == e.from.port
+                                            && p.id.as_str()
+                                                == entry.from_port.as_str()
+                                    })
+                            })
+                            .unwrap_or(false);
+                        let to_match = to_node
+                            .map(|n| {
+                                n.origin.as_deref()
+                                    == Some(entry.to_component.as_str())
+                                    && n.ports.iter().any(|p| {
+                                        p.id == e.to.port
+                                            && p.id.as_str()
+                                                == entry.to_port.as_str()
+                                    })
+                            })
+                            .unwrap_or(false);
+                        from_match && to_match
+                    })
+                    .map(|(eid, _)| *eid)
+            };
+            if let Some(edge_id) = hit_id {
                 if anim_ms > 0 {
-                    if let Ok(mut guard) = docstate_mut.edge_pulse_handle.write() {
+                    if let Ok(mut guard) = ds.edge_pulse_handle.write() {
                         guard.push(PulseEntry {
                             id: edge_id,
                             started: web_time::Instant::now(),
@@ -288,8 +309,11 @@ pub fn drive_pending_api_connections(
                         });
                     }
                 }
+                any_pulsed = true;
             }
-            None => still_pending.push(entry),
+        }
+        if !any_pulsed {
+            still_pending.push(entry);
         }
     }
     queue.0 = still_pending;
@@ -483,31 +507,33 @@ pub fn drive_pending_api_focus(
 
     // (2) Try-match pass — non-draining. Anything unmatched and within
     // FOCUS_TIMEOUT forces us to wait one more frame.
-    // Match payload now carries per-entry `animation_ms` so the
-    // pulse layer entry can use the API caller's override (or 0 to
-    // skip the glow entirely).
+    //
+    // We capture entry *names* per-doc rather than pre-resolving
+    // `NodeId`s — node ids are scene-local, so a node id from the
+    // first tab won't match the same logical node in a sibling
+    // tab's scene. The fan-out below re-finds the node per tab.
     let mut matched: std::collections::HashMap<
         lunco_doc::DocumentId,
-        Vec<(lunco_canvas::NodeId, lunco_canvas::Pos, lunco_canvas::Rect, u32)>,
+        Vec<(String /* name */, u32 /* animation_ms */)>,
     > = std::collections::HashMap::new();
     let mut any_still_unmatched_within_timeout = false;
     for entry in queue.0.iter() {
+        // Use first-tab projection to test "does this name resolve
+        // *somewhere* yet?". The actual per-tab node id is
+        // re-resolved in the fan-out.
         let docstate = state.get(Some(entry.doc));
-        let hit = docstate
+        let resolved = docstate
             .canvas
             .scene
             .nodes()
-            .find(|(_, n)| n.origin.as_deref() == Some(entry.name.as_str()))
-            .map(|(id, node)| (*id, node.rect.center(), node.rect, entry.animation_ms));
-        match hit {
-            Some(payload) => {
-                matched.entry(entry.doc).or_default().push(payload);
-            }
-            None => {
-                if now.duration_since(entry.queued_at) <= FOCUS_TIMEOUT {
-                    any_still_unmatched_within_timeout = true;
-                }
-            }
+            .any(|(_, n)| n.origin.as_deref() == Some(entry.name.as_str()));
+        if resolved {
+            matched
+                .entry(entry.doc)
+                .or_default()
+                .push((entry.name.clone(), entry.animation_ms));
+        } else if now.duration_since(entry.queued_at) <= FOCUS_TIMEOUT {
+            any_still_unmatched_within_timeout = true;
         }
     }
     if any_still_unmatched_within_timeout {
@@ -521,20 +547,27 @@ pub fn drive_pending_api_focus(
     }
 
     let now_pulse = web_time::Instant::now();
-    for (doc, entries) in matched {
-        let docstate = state.get_mut(Some(doc));
+    // Fan out across every tab viewing each doc. Each tab gets its
+    // own pulse entries (resolved by `entry.name` against the tab's
+    // scene) and its own `pending_fit` flag — fitting in tab A must
+    // not move tab B's camera. Fixes the focus regression where
+    // split-view tabs only animated the first tab.
+    for (_, d, ds) in state.iter_mut() {
+        let Some(entries) = matched.get(&d) else { continue };
 
-        // Always pulse — that's the "what changed" signal. Stagger
-        // the start time across entries so a batch reveals
-        // one-by-one rather than all flaring at once. Reads as a
-        // brief "delay between adds" without delaying the source
-        // mutation. Entry order matches the order the API caller
-        // queued them.
-        if let Ok(mut guard) = docstate.pulse_handle.write() {
-            for (i, (node_id, _, _, anim_ms)) in entries.iter().enumerate() {
+        if let Ok(mut guard) = ds.pulse_handle.write() {
+            for (i, (name, anim_ms)) in entries.iter().enumerate() {
                 if *anim_ms == 0 {
                     continue;
                 }
+                let Some((node_id, _)) = ds
+                    .canvas
+                    .scene
+                    .nodes()
+                    .find(|(_, n)| n.origin.as_deref() == Some(name.as_str()))
+                else {
+                    continue;
+                };
                 let stagger = std::time::Duration::from_millis(
                     PULSE_STAGGER_MS * i as u64,
                 );
@@ -548,21 +581,11 @@ pub fn drive_pending_api_focus(
 
         // Camera move: defer to the canvas render's `pending_fit`
         // branch. That branch runs INSIDE the panel render where the
-        // actual `response.rect` is in scope, so the fit math uses the
-        // real widget size — not the 1280×800 approximation we'd have
-        // to guess at here. It calls `viewport.set_target`, which
-        // animates via the viewport's built-in exponential ease.
-        //
-        // Why we don't keyframe-cinematic this any more: hardcoding
-        // a fake screen rect produced wrong final zoom (the rocket
-        // build session showed this — components ended at 37%
-        // clipping the labels). The render path's actual-rect fit is
-        // the reliable framing.
-        //
-        // Pulse + edge flash + viewport's smooth ease together carry
-        // the visual cadence; the bespoke `plan_camera_move` keyframes
-        // are kept in the file for future use (cinematic tours of
-        // existing content, etc.) but bypassed for API add-flow.
-        docstate.pending_fit = true;
+        // actual `response.rect` is in scope, so the fit math uses
+        // the real widget size — not the 1280×800 approximation
+        // we'd have to guess at here. It calls
+        // `viewport.set_target`, which animates via the viewport's
+        // built-in exponential ease.
+        ds.pending_fit = true;
     }
 }

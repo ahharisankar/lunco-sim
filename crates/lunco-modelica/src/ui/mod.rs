@@ -191,6 +191,63 @@ fn invalidate_port_icon_cache_on_doc_changed(
     crate::ui::panels::canvas_diagram::invalidate_port_icon_cache();
 }
 
+/// Per-doc generation watermark for the
+/// [`close_drilled_tabs_on_class_removed`] observer. Tracks the last
+/// `ModelicaDocument::generation` we processed so each
+/// `DocumentChanged` fire only walks new entries in the change ring
+/// buffer. Falls back to a re-anchor when the retention window has
+/// rolled over (`changes_since` returns `None`).
+#[derive(Resource, Default)]
+struct ClassRemovedWatermark(std::collections::HashMap<lunco_doc::DocumentId, u64>);
+
+/// Cross-truth rule R4 (see `docs/architecture/B0_CROSS_TRUTH_POLICY.md`):
+/// when a `RemoveClass` op lands, every tab drilled into the
+/// removed class — or a descendant of it — closes. Without this
+/// observer the dangling tab falls through to first-tab behaviour
+/// and renders a blank or unrelated-class canvas.
+///
+/// Reads new entries from `ModelicaDocument::changes_since` between
+/// observer fires; the per-doc watermark resource keeps it O(new
+/// changes) rather than O(history).
+fn close_drilled_tabs_on_class_removed(
+    trigger: On<lunco_doc_bevy::DocumentChanged>,
+    registry: Res<crate::ui::state::ModelicaDocumentRegistry>,
+    mut tabs: ResMut<crate::ui::panels::model_view::ModelTabs>,
+    mut watermark: ResMut<ClassRemovedWatermark>,
+) {
+    use lunco_doc::Document as _;
+    let doc = trigger.event().doc;
+    let Some(host) = registry.host(doc) else { return };
+    let document = host.document();
+    let last_seen = watermark.0.get(&doc).copied().unwrap_or(0);
+    // `changes_since` returns None when the retention ring rolled
+    // past `last_seen`. Re-anchor and bail; drilled tabs that lost
+    // their class survive (corner case — accepted, the alternative
+    // is closing every drilled tab on rollover, which is worse).
+    let Some(changes) = document.changes_since(last_seen) else {
+        watermark.0.insert(doc, document.generation());
+        return;
+    };
+    let mut highest_gen = last_seen;
+    let mut to_close: Vec<String> = Vec::new();
+    for (gen, change) in changes {
+        highest_gen = highest_gen.max(*gen);
+        if let crate::document::ModelicaChange::ClassRemoved { qualified } = change {
+            to_close.push(qualified.clone());
+        }
+    }
+    for qualified in to_close {
+        let closed = tabs.close_drilled_into(doc, &qualified);
+        if !closed.is_empty() {
+            bevy::log::info!(
+                "[R4] RemoveClass({qualified}) closed {} drilled tab(s)",
+                closed.len()
+            );
+        }
+    }
+    watermark.0.insert(doc, highest_gen);
+}
+
 fn mirror_open_model_on_doc_changed(
     trigger: On<lunco_doc_bevy::DocumentChanged>,
     registry: Res<ModelicaDocumentRegistry>,
@@ -648,6 +705,11 @@ impl Plugin for ModelicaUiPlugin {
             // on next paint via rumoca's content-hash cache —
             // unchanged classes return the same icon instantly.
             .add_observer(invalidate_port_icon_cache_on_doc_changed)
+            // Cross-truth rule R4: close tabs drilled into a removed
+            // class. Watermark resource keeps the observer O(new
+            // changes) per fire.
+            .init_resource::<ClassRemovedWatermark>()
+            .add_observer(close_drilled_tabs_on_class_removed)
             .add_systems(Update, derive_doc_title)
             // Twin-panel: keep the loaded-classes list in sync with
             // the document registry. One `WorkspaceClass` per

@@ -1440,6 +1440,30 @@ fn class_kind_spec_to_index_kind(spec: pretty::ClassKindSpec) -> crate::index::C
 /// Translate a high-level [`ModelicaOp`] into the concrete text patch
 /// and the structured change it represents. Pure function — no
 /// document state mutated.
+/// Bail with the same parse-error message `resolve_class` produces, so
+/// AST-canonical ops in `op_to_patch` surface parse failures
+/// identically to the legacy `pretty/`-based helpers (which call
+/// `resolve_class` internally). Without this guard, `regenerate_class_patch`
+/// would happily run against a stale-but-parseable AST and produce a
+/// patch that erases the user's in-flight typing on the next reparse.
+fn ast_check_no_parse_error(ast: &AstCache) -> Result<(), DocumentError> {
+    if let Some(msg) = ast.first_error() {
+        return Err(DocumentError::ValidationFailed(format!(
+            "cannot apply AST op while source has a parse error: {}",
+            msg
+        )));
+    }
+    Ok(())
+}
+
+/// Translate a structural-mutation error into the `DocumentError`
+/// shape `op_to_patch` callers expect. `ValidationFailed` is the
+/// catch-all the legacy path uses for "couldn't find the target" /
+/// "couldn't construct the new value", so we reuse it here for parity.
+fn ast_mut_to_doc_error(e: crate::ast_mut::AstMutError) -> DocumentError {
+    DocumentError::ValidationFailed(e.to_string())
+}
+
 fn op_to_patch(
     source: &str,
     ast: &AstCache,
@@ -1456,34 +1480,80 @@ fn op_to_patch(
             Ok((range, replacement, ModelicaChange::TextReplaced))
         }
         ModelicaOp::AddComponent { class, decl } => {
-            let (r, rp) = compute_add_component_patch(source, ast, parsed, &class, &decl)?;
+            // AST-canonical path (A.2 batch 2). Legacy
+            // `compute_add_component_patch` retained below for revert
+            // until parity is confirmed. Same `(class_name)` capture
+            // pattern as batch 1 — `decl.name` consumed into the
+            // `change` payload so we clone here.
+            ast_check_no_parse_error(ast)?;
+            let added_name = decl.name.clone();
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::add_component(c, &decl),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             let change = ModelicaChange::ComponentAdded {
                 class,
-                name: decl.name,
+                name: added_name,
             };
             Ok((r, rp, change))
         }
         ModelicaOp::AddConnection { class, eq } => {
-            let (r, rp) = compute_add_connection_patch(source, ast, parsed, &class, &eq)?;
-            let change = ModelicaChange::ConnectionAdded {
-                class,
-                from: eq.from,
-                to: eq.to,
-            };
+            ast_check_no_parse_error(ast)?;
+            let from = eq.from.clone();
+            let to = eq.to.clone();
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::add_connection(c, &eq),
+            )
+            .map_err(ast_mut_to_doc_error)?;
+            let change = ModelicaChange::ConnectionAdded { class, from, to };
             Ok((r, rp, change))
         }
         ModelicaOp::RemoveComponent { class, name } => {
-            let (r, rp) = compute_remove_component_patch(source, ast, parsed, &class, &name)?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::remove_component(c, &name),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             let change = ModelicaChange::ComponentRemoved { class, name };
             Ok((r, rp, change))
         }
         ModelicaOp::RemoveConnection { class, from, to } => {
-            let (r, rp) = compute_remove_connection_patch(source, ast, parsed, &class, &from, &to)?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::remove_connection(c, &from, &to),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             let change = ModelicaChange::ConnectionRemoved { class, from, to };
             Ok((r, rp, change))
         }
         ModelicaOp::SetPlacement { class, name, placement } => {
-            let (r, rp) = compute_set_placement_patch(source, ast, parsed, &class, &name, &placement)?;
+            // AST-canonical path (A.2 batch 1). Regenerates the whole
+            // class via `to_modelica()` after a structural mutation;
+            // legacy `compute_set_placement_patch` retained below for
+            // emergency revert until parity is confirmed in the wild.
+            // Surface AST-resolution errors as ValidationFailed —
+            // matches the legacy path's error type so consumers don't
+            // need to handle a new variant.
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::set_placement(c, &name, &placement),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             let change = ModelicaChange::PlacementChanged {
                 class,
                 component: name,
@@ -1492,7 +1562,14 @@ fn op_to_patch(
             Ok((r, rp, change))
         }
         ModelicaOp::SetParameter { class, component, param, value } => {
-            let (r, rp) = compute_set_parameter_patch(source, ast, parsed, &class, &component, &param, &value)?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::set_parameter(c, &component, &param, &value),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             let change = ModelicaChange::ParameterChanged {
                 class,
                 component,
@@ -1502,48 +1579,97 @@ fn op_to_patch(
             Ok((r, rp, change))
         }
         ModelicaOp::AddPlotNode { class, plot } => {
-            let (r, rp) = compute_add_plot_node_patch(source, ast, parsed, &class, &plot)?;
-            // Plot edits don't move components or rewire connections;
-            // they only affect the diagram-decoration layer. The
-            // projection still re-reads the diagram annotation on
-            // every change, so `TextReplaced` is the cleanest signal:
-            // consumers that care rebuild from source.
+            // AST-canonical (A.2 batch 3b — graphics ops). Plot edits
+            // only touch the Diagram annotation tree; consumers
+            // observe `TextReplaced` and rebuild from source.
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::add_plot_node(c, &plot),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::RemovePlotNode { class, signal_path } => {
-            let (r, rp) = compute_remove_plot_node_patch(source, ast, parsed, &class, &signal_path)?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::remove_plot_node(c, &signal_path),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::SetPlotNodeExtent { class, signal_path, x1, y1, x2, y2 } => {
-            let (r, rp) = compute_set_plot_node_extent_patch(
-                source, ast, parsed, &class, &signal_path, x1, y1, x2, y2,
-            )?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::set_plot_node_extent(c, &signal_path, x1, y1, x2, y2),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::SetPlotNodeTitle { class, signal_path, title } => {
-            let (r, rp) = compute_set_plot_node_title_patch(
-                source, ast, parsed, &class, &signal_path, &title,
-            )?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::set_plot_node_title(c, &signal_path, &title),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::SetDiagramTextExtent { class, index, x1, y1, x2, y2 } => {
-            let (r, rp) = compute_set_diagram_text_extent_patch(
-                source, ast, parsed, &class, index, x1, y1, x2, y2,
-            )?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::set_diagram_text_extent(c, index, x1, y1, x2, y2),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::SetDiagramTextString { class, index, text } => {
-            let (r, rp) = compute_set_diagram_text_string_patch(
-                source, ast, parsed, &class, index, &text,
-            )?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::set_diagram_text_string(c, index, &text),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::RemoveDiagramText { class, index } => {
-            let (r, rp) = compute_remove_diagram_text_patch(source, ast, parsed, &class, index)?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::remove_diagram_text(c, index),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::AddClass { parent, name, kind, description, partial } => {
-            let (r, rp) = compute_add_class_patch(source, ast, parsed, &parent, &name, kind, &description, partial)?;
+            // AST-canonical (A.2 batch 3). AddClass / RemoveClass
+            // change the document's class set, not a single class
+            // span — use the whole-document patch helper. The
+            // formatter is idempotent (verified by `ast_roundtrip`),
+            // so unchanged classes round-trip byte-stably; only the
+            // newly-added or removed class block actually shifts.
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_document_patch(source, parsed, |sd| {
+                crate::ast_mut::add_class(sd, &parent, &name, kind, &description, partial)
+            })
+            .map_err(ast_mut_to_doc_error)?;
             let qualified = if parent.is_empty() {
                 name.clone()
             } else {
@@ -1552,13 +1678,23 @@ fn op_to_patch(
             Ok((r, rp, ModelicaChange::ClassAdded { qualified, kind }))
         }
         ModelicaOp::RemoveClass { qualified } => {
-            let (r, rp) = compute_remove_class_patch(source, ast, parsed, &qualified)?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_document_patch(source, parsed, |sd| {
+                crate::ast_mut::remove_class(sd, &qualified)
+            })
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::ClassRemoved { qualified }))
         }
         ModelicaOp::AddShortClass { parent, name, kind, base, prefixes, modifications } => {
-            let (r, rp) = compute_add_short_class_patch(
-                source, ast, parsed, &parent, &name, kind, &base, &prefixes, &modifications,
-            )?;
+            // Same whole-document path as AddClass — both ops change
+            // the document's class set. AST-canonical (A.2 batch 3b).
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_document_patch(source, parsed, |sd| {
+                crate::ast_mut::add_short_class(
+                    sd, &parent, &name, kind, &base, &prefixes, &modifications,
+                )
+            })
+            .map_err(ast_mut_to_doc_error)?;
             let qualified = if parent.is_empty() {
                 name.clone()
             } else {
@@ -1567,1846 +1703,107 @@ fn op_to_patch(
             Ok((r, rp, ModelicaChange::ClassAdded { qualified, kind }))
         }
         ModelicaOp::AddVariable { class, decl } => {
-            let (r, rp) = compute_add_variable_patch(source, ast, parsed, &class, &decl)?;
-            // Variables and typed components share the AST `components`
-            // table — emit the same `ComponentAdded` event so panel-side
-            // observers and the per-doc Index don't have to special-case
-            // variables vs. typed components.
+            // Variables and typed components share `components: IndexMap`
+            // in the AST. Same regenerate-class path as AddComponent.
+            ast_check_no_parse_error(ast)?;
+            let added_name = decl.name.clone();
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::add_variable(c, &decl),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             let change = ModelicaChange::ComponentAdded {
                 class,
-                name: decl.name.clone(),
+                name: added_name,
             };
             Ok((r, rp, change))
         }
         ModelicaOp::RemoveVariable { class, name } => {
-            // Variables and components share the same AST table — reuse
-            // both the source patch helper and the `ComponentRemoved`
-            // event so consumers see one signal for both decl kinds.
-            let (r, rp) = compute_remove_component_patch(source, ast, parsed, &class, &name)?;
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::remove_variable(c, &name),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             let change = ModelicaChange::ComponentRemoved { class, name };
             Ok((r, rp, change))
         }
         ModelicaOp::AddEquation { class, eq } => {
-            let (r, rp) = compute_add_equation_patch(source, ast, parsed, &class, &eq)?;
+            // Generic equation append. AST-canonical (A.2 batch 3b).
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::add_equation(c, &eq),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::AddIconGraphic { class, graphic } => {
-            let (r, rp) = compute_add_named_graphic_patch(source, ast, parsed, &class, "Icon", &graphic)?;
+            ast_check_no_parse_error(ast)?;
+            let graphic_text = crate::pretty::graphic_inner(&graphic);
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::add_named_graphic(c, "Icon", &graphic_text),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::AddDiagramGraphic { class, graphic } => {
-            let (r, rp) = compute_add_named_graphic_patch(source, ast, parsed, &class, "Diagram", &graphic)?;
+            ast_check_no_parse_error(ast)?;
+            let graphic_text = crate::pretty::graphic_inner(&graphic);
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::add_named_graphic(c, "Diagram", &graphic_text),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
         ModelicaOp::SetExperimentAnnotation { class, start_time, stop_time, tolerance, interval } => {
-            let (r, rp) = compute_set_experiment_patch(
-                source, ast, parsed, &class, start_time, stop_time, tolerance, interval,
-            )?;
+            // AST-canonical (A.2 batch 3b). Class-level `experiment(...)`
+            // is one flat entry in `ClassDef.annotation` — no nested
+            // graphics-array navigation required.
+            ast_check_no_parse_error(ast)?;
+            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::set_experiment(c, start_time, stop_time, tolerance, interval),
+            )
+            .map_err(ast_mut_to_doc_error)?;
             Ok((r, rp, ModelicaChange::TextReplaced))
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// AST-level op helpers
-// ---------------------------------------------------------------------------
+// (deleted in A.4) Legacy `compute_*_patch` text-splice helpers used to live
+// here — ~1800 lines that turned each AST-shaped op into a `(byte_range,
+// replacement)` patch by hand-walking the source via `find_annotation_span`,
+// `find_placement_span`, `find_named_call_span`, `find_statement_terminator`,
+// and `modify_mod_list`. After A.2 every op routes through
+// `crate::ast_mut::regenerate_class_patch` / `regenerate_document_patch`,
+// so the splice helpers are unreferenced. Removed for two reasons:
 //
-// These functions turn a high-level AST-level op request into a concrete
-// `(range, replacement)` text patch, using the cached AST's token spans
-// to locate insertion points. They never mutate the document directly —
-// apply() delegates to `EditText`, which gives us uniform undo behavior
-// and keeps all source mutation on one code path.
+// 1. Eliminates the UTF-8 byte-boundary risk class — the helpers
+//    indexed `&str` by raw byte offsets and panicked when a
+//    multi-byte char straddled an insertion point.
+// 2. Eliminates a parallel mutation surface the chokepoint discipline
+//    in AGENTS.md §4.1 had to keep policed.
 //
-// Class resolution accepts qualified dotted paths (e.g. `Pkg.Inner` or
-// `Modelica.Electrical.Analog.Basic.Resistor`) and walks the nested
-// `ClassDef.classes` index one segment at a time.
-
-/// Resolve a class by qualified name. Accepts:
-///
-/// - Single-segment names for top-level classes: `"Circuit"`.
-/// - Dotted qualified names that drill into nested classes:
-///   `"Pkg.Inner"`, `"Modelica.Electrical.Analog.Basic.Resistor"`.
-///
-/// Each segment must match a class in the previous segment's
-/// `classes` index (top-level for the first segment). Returns a
-/// [`DocumentError::ValidationFailed`] with the first missing segment
-/// named when resolution fails, and an error when the AST is currently
-/// a parse failure.
-fn resolve_class<'a>(
-    ast: &AstCache,
-    parsed: &'a StoredDefinition,
-    class: &str,
-) -> Result<&'a rumoca_session::parsing::ast::ClassDef, DocumentError> {
-    if let Some(msg) = ast.first_error() {
-        return Err(DocumentError::ValidationFailed(format!(
-            "cannot apply AST op while source has a parse error: {}",
-            msg
-        )));
-    }
-    let stored = parsed;
-    if class.is_empty() {
-        return Err(DocumentError::ValidationFailed(
-            "class path is empty".into(),
-        ));
-    }
-    let mut segments = class.split('.');
-    let first = segments.next().expect("split always yields at least one item");
-    let mut current = stored.classes.get(first).ok_or_else(|| {
-        DocumentError::ValidationFailed(format!(
-            "class `{}` not found in document",
-            first,
-        ))
-    })?;
-    let mut walked = first.to_string();
-    for segment in segments {
-        walked.push('.');
-        walked.push_str(segment);
-        current = current.classes.get(segment).ok_or_else(|| {
-            DocumentError::ValidationFailed(format!(
-                "class `{}` not found (resolving `{}`)",
-                walked, class,
-            ))
-        })?;
-    }
-    Ok(current)
-}
-
-/// Return the byte offset of the start of the line containing `byte_pos`.
-/// Used to splice whole lines instead of mid-line inserts — keeps the
-/// resulting source readable and the patch ranges easy to reason about.
-fn line_start_byte(source: &str, byte_pos: usize) -> usize {
-    source[..byte_pos.min(source.len())]
-        .rfind('\n')
-        .map(|i| i + 1)
-        .unwrap_or(0)
-}
-
-/// Compute the text patch for `AddComponent`.
-///
-/// Insertion point (first match wins):
-///   1. start of the line containing `equation` / `initial equation` /
-///      `algorithm` / `initial algorithm` keyword, whichever appears first;
-///   2. start of the line containing the `end ClassName;` clause.
-///
-/// Returns the patch as `(empty_range_at_insertion_point, rendered_decl)`.
-fn compute_add_component_patch(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    class: &str,
-    decl: &ComponentDecl,
-) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, parsed, class)?;
-    // Defensive: refuse to inject a component declaration into a
-    // `package` class. Modelica forbids package-level component
-    // declarations (per spec: a package may only contain classes,
-    // constants, and operator overloads), so a naive splice produces
-    // a parse error that bricks the file for every subsequent
-    // AST-based op. The right-click menu and palette already pass
-    // the *inner* class name in the post-spec-035 path, but this
-    // belt-and-braces check stops the same crash if a future caller
-    // forgets — `op_to_patch` is the last gate before the source
-    // mutates.
-    if matches!(
-        class_def.class_type,
-        rumoca_session::parsing::ast::ClassType::Package
-    ) {
-        return Err(DocumentError::ValidationFailed(format!(
-            "cannot add component `{}` directly into package `{}`. \
-             Add it into one of the package's classes instead.",
-            decl.name, class
-        )));
-    }
-    let insertion_byte = class_section_insertion_point(class_def).ok_or_else(|| {
-        DocumentError::ValidationFailed(format!(
-            "could not locate insertion point in class `{}`",
-            class
-        ))
-    })?;
-    let line_start = line_start_byte(source, insertion_byte);
-    Ok((line_start..line_start, pretty::component_decl(decl)))
-}
-
-/// Compute the text patch for `AddConnection`.
-///
-/// If the class has an `equation` section, insert the connect equation at
-/// the start of the `end` line (appending to the section). If not, insert
-/// `equation\n<connect>\n` at the `end` line so a fresh section is created.
-fn compute_add_connection_patch(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    class: &str,
-    eq: &ConnectEquation,
-) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, parsed, class)?;
-
-    let end_name_byte = class_def
-        .end_name_token
-        .as_ref()
-        .map(|t| t.location.start as usize)
-        .ok_or_else(|| {
-            DocumentError::ValidationFailed(format!(
-                "class `{}` has no `end` clause location",
-                class
-            ))
-        })?;
-    let end_line_start = line_start_byte(source, end_name_byte);
-
-    let connect_line = pretty::connect_equation(eq);
-    let replacement = if class_def.equation_keyword.is_some() {
-        connect_line
-    } else {
-        format!("equation\n{}", connect_line)
-    };
-
-    Ok((end_line_start..end_line_start, replacement))
-}
-
-/// Locate the best byte position to insert a new component declaration
-/// into a class — just before the first body-section keyword, or if none
-/// exists, just before the class's `end` clause.
-fn class_section_insertion_point(
-    class_def: &rumoca_session::parsing::ast::ClassDef,
-) -> Option<usize> {
-    let keyword_positions = [
-        class_def.equation_keyword.as_ref(),
-        class_def.initial_equation_keyword.as_ref(),
-        class_def.algorithm_keyword.as_ref(),
-        class_def.initial_algorithm_keyword.as_ref(),
-    ];
-    let earliest_keyword = keyword_positions
-        .into_iter()
-        .flatten()
-        .map(|t| t.location.start as usize)
-        .min();
-    if let Some(pos) = earliest_keyword {
-        return Some(pos);
-    }
-    class_def
-        .end_name_token
-        .as_ref()
-        .map(|t| t.location.start as usize)
-}
-
-/// Extend a declaration/equation span to swallow leading indentation
-/// and a trailing newline, so removal leaves a clean source buffer
-/// without a dangling blank line.
-fn extend_span_to_whole_lines(source: &str, raw: Range<usize>) -> Range<usize> {
-    let line_start = source[..raw.start].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    // Extend backward only past whitespace on the same line.
-    let preceding = &source[line_start..raw.start];
-    let start = if preceding.chars().all(|c| c == ' ' || c == '\t') {
-        line_start
-    } else {
-        raw.start
-    };
-    // Extend forward to and past the following newline if any.
-    let end = source[raw.end..]
-        .find('\n')
-        .map(|i| raw.end + i + 1)
-        .unwrap_or(source.len());
-    start..end
-}
-
-/// Locate the byte position of the semicolon that ends a declaration /
-/// equation whose first token starts at `from_byte`. Respects nested
-/// parentheses and braces so a `;` inside `annotation(...)` doesn't
-/// fool us.
-fn find_statement_terminator(source: &str, from_byte: usize) -> Option<usize> {
-    let bytes = source.as_bytes();
-    let mut depth: i32 = 0;
-    let mut i = from_byte;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'(' | b'{' | b'[' => depth += 1,
-            b')' | b'}' | b']' => depth -= 1,
-            b';' if depth <= 0 => return Some(i),
-            _ => {}
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Compute the text patch for `RemoveComponent`.
-fn compute_remove_component_patch(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    class: &str,
-    name: &str,
-) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, parsed, class)?;
-    let component = class_def.components.get(name).ok_or_else(|| {
-        DocumentError::ValidationFailed(format!(
-            "component `{}` not found in class `{}`",
-            name, class
-        ))
-    })?;
-    let raw_start = component.location.start as usize;
-    // Component.location.end sometimes stops before the semicolon
-    // depending on rumoca's recording — be conservative and extend
-    // via terminator scan.
-    let term = find_statement_terminator(source, component.name_token.location.start as usize)
-        .ok_or_else(|| {
-            DocumentError::ValidationFailed(format!(
-                "could not find `;` terminating component `{}`",
-                name
-            ))
-        })?;
-    let span = extend_span_to_whole_lines(source, raw_start..(term + 1));
-    Ok((span, String::new()))
-}
-
-/// Match a `ComponentReference` against a `PortRef` (expected form
-/// `component.port`). Returns true when the dotted AST path equals the
-/// two-part PortRef pair, in that order.
-fn cref_matches_port(
-    cref: &rumoca_session::parsing::ast::ComponentReference,
-    port: &pretty::PortRef,
-) -> bool {
-    use rumoca_session::parsing::ast::ComponentRefPart;
-    let parts: Vec<&ComponentRefPart> = cref.parts.iter().collect();
-    if parts.len() != 2 {
-        return false;
-    }
-    parts[0].ident.text.as_ref() == port.component
-        && parts[1].ident.text.as_ref() == port.port
-}
-
-/// Compute the text patch for `RemoveConnection`.
-fn compute_remove_connection_patch(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    class: &str,
-    from: &pretty::PortRef,
-    to: &pretty::PortRef,
-) -> Result<(Range<usize>, String), DocumentError> {
-    use rumoca_session::parsing::ast::Equation;
-    let class_def = resolve_class(ast, parsed, class)?;
-    let eq = class_def
-        .equations
-        .iter()
-        .find(|e| match e {
-            Equation::Connect { lhs, rhs, .. } => {
-                (cref_matches_port(lhs, from) && cref_matches_port(rhs, to))
-                    || (cref_matches_port(lhs, to) && cref_matches_port(rhs, from))
-            }
-            _ => false,
-        })
-        .ok_or_else(|| {
-            DocumentError::ValidationFailed(format!(
-                "connect({}.{}, {}.{}) not found in class `{}`",
-                from.component, from.port, to.component, to.port, class
-            ))
-        })?;
-    let start_loc = eq.get_location().ok_or_else(|| {
-        DocumentError::Internal("matched connect equation has no location".into())
-    })?;
-    let raw_start = start_loc.start as usize;
-    // Scan backward to the `connect` keyword if it precedes the first
-    // component-ref token (it always does for a well-formed connect
-    // equation, but ComponentReference.get_location reports the lhs
-    // cref's first token).
-    let connect_start = source[..raw_start]
-        .rfind("connect")
-        .filter(|&i| source[i..].starts_with("connect") && i + 7 <= raw_start)
-        .unwrap_or(raw_start);
-    let term = find_statement_terminator(source, raw_start).ok_or_else(|| {
-        DocumentError::ValidationFailed("could not find `;` terminating connect equation".into())
-    })?;
-    let span = extend_span_to_whole_lines(source, connect_start..(term + 1));
-    Ok((span, String::new()))
-}
-
-/// Locate a top-level `annotation(` substring inside `[start, end)`,
-/// respecting nesting (i.e. must not be inside another parenthesized
-/// expression). Returns the byte range covering the whole
-/// `annotation(...)` including the outer parens.
-fn find_annotation_span(source: &str, span: Range<usize>) -> Option<Range<usize>> {
-    let slice = source.get(span.clone())?;
-    // Walk the slice tracking paren depth; look for `annotation(` at
-    // depth 0.
-    let bytes = slice.as_bytes();
-    let mut depth: i32 = 0;
-    let mut i: usize = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if c == b'(' || c == b'{' || c == b'[' {
-            depth += 1;
-            i += 1;
-            continue;
-        }
-        if c == b')' || c == b'}' || c == b']' {
-            depth -= 1;
-            i += 1;
-            continue;
-        }
-        if depth == 0 && bytes[i..].starts_with(b"annotation") {
-            // Check that the preceding char is not an ident char so we
-            // don't match `myannotation(`.
-            let prev_ok = i == 0
-                || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
-            if prev_ok {
-                // Skip the keyword and locate the `(`.
-                let mut j = i + "annotation".len();
-                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if j < bytes.len() && bytes[j] == b'(' {
-                    // Find matching `)`.
-                    let mut d = 0;
-                    let mut k = j;
-                    while k < bytes.len() {
-                        match bytes[k] {
-                            b'(' | b'{' | b'[' => d += 1,
-                            b')' | b'}' | b']' => {
-                                d -= 1;
-                                if d == 0 {
-                                    return Some((span.start + i)..(span.start + k + 1));
-                                }
-                            }
-                            _ => {}
-                        }
-                        k += 1;
-                    }
-                    return None;
-                }
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Find the span of the first `Placement(...)` call inside a byte
-/// range, matched at top level (paren depth 0 within the range).
-fn find_placement_span(source: &str, span: Range<usize>) -> Option<Range<usize>> {
-    let slice = source.get(span.clone())?;
-    let bytes = slice.as_bytes();
-    let mut i: usize = 0;
-    while i < bytes.len() {
-        if bytes[i..].starts_with(b"Placement") {
-            let prev_ok = i == 0
-                || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
-            if prev_ok {
-                let mut j = i + "Placement".len();
-                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if j < bytes.len() && bytes[j] == b'(' {
-                    let mut d = 0;
-                    let mut k = j;
-                    while k < bytes.len() {
-                        match bytes[k] {
-                            b'(' | b'{' | b'[' => d += 1,
-                            b')' | b'}' | b']' => {
-                                d -= 1;
-                                if d == 0 {
-                                    return Some((span.start + i)..(span.start + k + 1));
-                                }
-                            }
-                            _ => {}
-                        }
-                        k += 1;
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Compute the text patch for `SetPlacement`.
-///
-/// Strategy:
-///   1. If the component's decl has an `annotation(...)` block and that
-///      block contains `Placement(...)`, replace the `Placement` call
-///      in place — other annotations (Dialog, Documentation) untouched.
-///   2. If the decl has an `annotation(...)` block without `Placement`,
-///      prepend `Placement(...), ` inside it.
-///   3. If there is no annotation at all, insert
-///      ` annotation(Placement(...))` just before the decl's `;`.
-fn compute_set_placement_patch(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    class: &str,
-    name: &str,
-    placement: &pretty::Placement,
-) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, parsed, class)?;
-    let component = class_def.components.get(name).ok_or_else(|| {
-        DocumentError::ValidationFailed(format!(
-            "component `{}` not found in class `{}`",
-            name, class
-        ))
-    })?;
-    let decl_start = component.location.start as usize;
-    let term = find_statement_terminator(source, component.name_token.location.start as usize)
-        .ok_or_else(|| {
-            DocumentError::ValidationFailed("component decl has no terminating `;`".into())
-        })?;
-    let decl_span = decl_start..term;
-    let new_placement = pretty::placement_inner(placement);
-
-    if let Some(ann_span) = find_annotation_span(source, decl_span.clone()) {
-        // ann_span covers `annotation(...)` including outer parens.
-        // The interior span is (ann_span.start + "annotation(".len() ..
-        // ann_span.end - 1).
-        let prefix_len = "annotation(".len();
-        let inner_start = ann_span.start + prefix_len;
-        let inner_end = ann_span.end - 1;
-        if let Some(p_span) = find_placement_span(source, inner_start..inner_end) {
-            return Ok((p_span, new_placement));
-        } else {
-            // Insert Placement fragment at the start of the annotation
-            // contents, followed by `, ` to keep the remaining entries
-            // well-formed.
-            let insert_at = inner_start;
-            return Ok((
-                insert_at..insert_at,
-                format!("{}, ", new_placement),
-            ));
-        }
-    }
-    // No annotation at all — insert one just before the `;`.
-    Ok((
-        term..term,
-        format!(" annotation({})", new_placement),
-    ))
-}
-
-/// Compute the text patch for `SetParameter`.
-///
-/// Locates the component's modifications list (the `(...)` immediately
-/// after the instance name). If absent, inserts a fresh
-/// `(param=value)`. If present and the param exists, replaces its
-/// value. If present and the param is missing, appends `, param=value`.
-fn compute_set_parameter_patch(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    class: &str,
-    component: &str,
-    param: &str,
-    value: &str,
-) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, parsed, class)?;
-    let comp = class_def.components.get(component).ok_or_else(|| {
-        DocumentError::ValidationFailed(format!(
-            "component `{}` not found in class `{}`",
-            component, class
-        ))
-    })?;
-    let name_end = comp.name_token.location.end as usize;
-    let term = find_statement_terminator(source, name_end).ok_or_else(|| {
-        DocumentError::ValidationFailed("component decl has no terminating `;`".into())
-    })?;
-    // Scan from just after the name token to the terminator looking
-    // for `(` before any alphanumeric token (which would indicate an
-    // annotation / binding, not modifications).
-    let bytes = source.as_bytes();
-    let mut i = name_end;
-    while i < term {
-        match bytes[i] {
-            b' ' | b'\t' | b'\r' | b'\n' => {
-                i += 1;
-            }
-            b'(' => {
-                // Found modifications list. Locate its matching `)`.
-                let mut d = 0;
-                let mut k = i;
-                let close = loop {
-                    match bytes[k] {
-                        b'(' | b'{' | b'[' => d += 1,
-                        b')' | b'}' | b']' => {
-                            d -= 1;
-                            if d == 0 {
-                                break Some(k);
-                            }
-                        }
-                        _ => {}
-                    }
-                    k += 1;
-                    if k >= term {
-                        break None;
-                    }
-                };
-                let close = close.ok_or_else(|| {
-                    DocumentError::ValidationFailed(
-                        "unterminated `(` in component modifications".into(),
-                    )
-                })?;
-                return Ok(modify_mod_list(source, (i + 1)..close, param, value));
-            }
-            _ => {
-                // No modifications list — insert one right after the name.
-                let rendered = format!("({}={})", param, value);
-                return Ok((name_end..name_end, rendered));
-            }
-        }
-    }
-    // Reached terminator without encountering a `(` — insert fresh list.
-    let rendered = format!("({}={})", param, value);
-    Ok((name_end..name_end, rendered))
-}
-
-// ---------------------------------------------------------------------------
-// `__LunCo_PlotNode` vendor annotation helpers
-// ---------------------------------------------------------------------------
-//
-// All four `*PlotNode` ops navigate the same structure:
-//
-//   class Foo
-//     ...
-//     annotation(Diagram(graphics={
-//       __LunCo_PlotNode(extent=..., signal="...", title="..."),
-//       ...
-//     }));
-//   end Foo;
-//
-// The helpers below locate each layer (class body → `annotation(...)`
-// → `Diagram(...)` → `graphics={...}` → individual entries) using the
-// same paren-depth walks the SetPlacement path uses, so the ops compose
-// without re-parsing.
-
-/// Find the first `Diagram(...)` call inside any class-level
-/// `annotation(...)` block. Walks every `annotation(...)` at depth 0
-/// of the class body and returns the first one whose inner contains
-/// `Diagram(...)`. Returns `(annotation_span, diagram_outer_span,
-/// diagram_inner_span)` so callers can edit the graphics array
-/// (innermost), grow the Diagram args (middle), or replace the whole
-/// annotation (outer).
-fn find_class_diagram(
-    source: &str,
-    body: Range<usize>,
-) -> Option<(Range<usize>, Range<usize>, Range<usize>)> {
-    let mut cursor = body.start;
-    while cursor < body.end {
-        let ann = find_annotation_span(source, cursor..body.end)?;
-        let ann_inner_start = ann.start + "annotation(".len();
-        let ann_inner_end = ann.end - 1;
-        if let Some(d_span) =
-            find_named_call_span(source, ann_inner_start..ann_inner_end, "Diagram")
-        {
-            let d_inner_start = d_span.start + "Diagram(".len();
-            let d_inner_end = d_span.end - 1;
-            return Some((ann.clone(), d_span, d_inner_start..d_inner_end));
-        }
-        cursor = ann.end;
-    }
-    None
-}
-
-/// Top-level scan for `<name>(...)` inside `span`. Generalises
-/// `find_placement_span`. Matches identifiers that don't continue an
-/// adjacent ident (so `__LunCo_PlotNode` is matched but not just
-/// `LunCo_PlotNode` in the middle of one).
-fn find_named_call_span(source: &str, span: Range<usize>, name: &str) -> Option<Range<usize>> {
-    let slice = source.get(span.clone())?;
-    let bytes = slice.as_bytes();
-    let needle = name.as_bytes();
-    let mut depth: i32 = 0;
-    let mut in_str = false;
-    let mut i: usize = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if in_str {
-            if c == b'\\' && i + 1 < bytes.len() {
-                i += 2;
-                continue;
-            }
-            if c == b'"' {
-                in_str = false;
-            }
-            i += 1;
-            continue;
-        }
-        match c {
-            b'"' => {
-                in_str = true;
-                i += 1;
-                continue;
-            }
-            b'(' | b'{' | b'[' => {
-                depth += 1;
-                i += 1;
-                continue;
-            }
-            b')' | b'}' | b']' => {
-                depth -= 1;
-                i += 1;
-                continue;
-            }
-            _ => {}
-        }
-        if depth == 0
-            && i + needle.len() <= bytes.len()
-            && &bytes[i..i + needle.len()] == needle
-        {
-            let prev_ok = i == 0
-                || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
-            let after = i + needle.len();
-            let next_ok = after >= bytes.len()
-                || !(bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_');
-            if prev_ok && next_ok {
-                let mut j = after;
-                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if j < bytes.len() && bytes[j] == b'(' {
-                    let mut d = 0;
-                    let mut k = j;
-                    while k < bytes.len() {
-                        match bytes[k] {
-                            b'(' | b'{' | b'[' => d += 1,
-                            b')' | b'}' | b']' => {
-                                d -= 1;
-                                if d == 0 {
-                                    return Some((span.start + i)..(span.start + k + 1));
-                                }
-                            }
-                            _ => {}
-                        }
-                        k += 1;
-                    }
-                    return None;
-                }
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Inside a `Diagram(...)` inner span, find `graphics = {...}` and
-/// return the span of the array contents *excluding* the enclosing
-/// `{}`. Returns `None` if `graphics=` is missing or its RHS isn't an
-/// array literal.
-fn find_diagram_graphics_inner(
-    source: &str,
-    diagram_inner: Range<usize>,
-) -> Option<Range<usize>> {
-    let slice = source.get(diagram_inner.clone())?;
-    let bytes = slice.as_bytes();
-    let needle = b"graphics";
-    let mut depth: i32 = 0;
-    let mut i: usize = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        match c {
-            b'(' | b'{' | b'[' => {
-                depth += 1;
-                i += 1;
-                continue;
-            }
-            b')' | b'}' | b']' => {
-                depth -= 1;
-                i += 1;
-                continue;
-            }
-            _ => {}
-        }
-        if depth == 0
-            && i + needle.len() <= bytes.len()
-            && &bytes[i..i + needle.len()] == needle
-        {
-            let prev_ok = i == 0
-                || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
-            let after = i + needle.len();
-            let next_ok = after >= bytes.len()
-                || !(bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_');
-            if prev_ok && next_ok {
-                // Skip ws + `=` + ws.
-                let mut j = after;
-                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if j < bytes.len() && bytes[j] == b'=' {
-                    j += 1;
-                    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                        j += 1;
-                    }
-                    if j < bytes.len() && bytes[j] == b'{' {
-                        // Find matching `}`.
-                        let mut d = 0;
-                        let mut k = j;
-                        while k < bytes.len() {
-                            match bytes[k] {
-                                b'(' | b'{' | b'[' => d += 1,
-                                b')' | b'}' | b']' => {
-                                    d -= 1;
-                                    if d == 0 {
-                                        // Inner span excludes the
-                                        // enclosing braces — the
-                                        // splice point for new
-                                        // entries goes between the
-                                        // braces, after a comma if
-                                        // the array is non-empty.
-                                        return Some(
-                                            (diagram_inner.start + j + 1)
-                                                ..(diagram_inner.start + k),
-                                        );
-                                    }
-                                }
-                                _ => {}
-                            }
-                            k += 1;
-                        }
-                        return None;
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Locate every `__LunCo_PlotNode(...)` entry inside a `graphics={...}`
-/// inner span, paired with the `signal=` value extracted from each
-/// entry. Returned spans cover the entire call including the trailing
-/// `)`. Used by Remove / SetExtent / SetTitle to find the entry by
-/// signal path.
-fn list_lunco_plot_entries(
-    source: &str,
-    graphics_inner: Range<usize>,
-) -> Vec<(Range<usize>, String)> {
-    let mut out = Vec::new();
-    let mut cursor = graphics_inner.start;
-    while cursor < graphics_inner.end {
-        let Some(call) =
-            find_named_call_span(source, cursor..graphics_inner.end, "__LunCo_PlotNode")
-        else {
-            break;
-        };
-        let inner_start = call.start + "__LunCo_PlotNode(".len();
-        let inner_end = call.end - 1;
-        let signal = parse_signal_arg(source, inner_start..inner_end).unwrap_or_default();
-        out.push((call.clone(), signal));
-        cursor = call.end;
-    }
-    out
-}
-
-/// Extract the value of the `signal=` argument from a `__LunCo_PlotNode`
-/// call's inner span. Tolerant of argument order — scans top-level
-/// for the `signal` identifier followed by `=` and a string literal.
-fn parse_signal_arg(source: &str, inner: Range<usize>) -> Option<String> {
-    let slice = source.get(inner.clone())?;
-    let bytes = slice.as_bytes();
-    let needle = b"signal";
-    let mut depth: i32 = 0;
-    let mut i: usize = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        match c {
-            b'(' | b'{' | b'[' => {
-                depth += 1;
-                i += 1;
-                continue;
-            }
-            b')' | b'}' | b']' => {
-                depth -= 1;
-                i += 1;
-                continue;
-            }
-            _ => {}
-        }
-        if depth == 0
-            && i + needle.len() <= bytes.len()
-            && &bytes[i..i + needle.len()] == needle
-        {
-            let prev_ok = i == 0
-                || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
-            let after = i + needle.len();
-            let next_ok = after >= bytes.len()
-                || !(bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_');
-            if prev_ok && next_ok {
-                let mut j = after;
-                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if j < bytes.len() && bytes[j] == b'=' {
-                    j += 1;
-                    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                        j += 1;
-                    }
-                    if j < bytes.len() && bytes[j] == b'"' {
-                        // Read until the closing quote, honoring
-                        // simple `\"` escapes.
-                        let mut k = j + 1;
-                        let mut buf = String::new();
-                        while k < bytes.len() {
-                            let b = bytes[k];
-                            if b == b'\\' && k + 1 < bytes.len() {
-                                let e = bytes[k + 1];
-                                buf.push(match e {
-                                    b'"' => '"',
-                                    b'\\' => '\\',
-                                    other => other as char,
-                                });
-                                k += 2;
-                                continue;
-                            }
-                            if b == b'"' {
-                                return Some(buf);
-                            }
-                            buf.push(b as char);
-                            k += 1;
-                        }
-                        return None;
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Append (or update) a `__LunCo_PlotNode(...)` entry in the class's
-/// `Diagram(graphics)` array.
-///
-/// Strategy:
-///   - If a `Diagram(graphics={...})` annotation exists and already
-///     contains an entry for `plot.signal`, replace the entire entry
-///     in place. Otherwise append after the last entry (or as the
-///     sole entry if the array is empty).
-///   - If a class-level annotation exists but has no `Diagram(...)`,
-///     prepend `Diagram(graphics={NEW_ENTRY})` into it.
-///   - If no class-level annotation exists, insert a fresh
-///     `annotation(Diagram(graphics={NEW_ENTRY}))` just before the
-///     class's terminating `end <Name>;`.
-fn compute_add_plot_node_patch(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    class: &str,
-    plot: &pretty::LunCoPlotNodeSpec,
-) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, parsed, class)?;
-    let body = (class_def.location.start as usize)..(class_def.location.end as usize);
-    let new_entry = pretty::lunco_plot_node_inner(plot);
-
-    if let Some((_ann, _diagram_outer, diagram_inner)) = find_class_diagram(source, body.clone()) {
-        // Diagram(...) exists. Look for graphics={...}.
-        if let Some(graphics_inner) =
-            find_diagram_graphics_inner(source, diagram_inner.clone())
-        {
-            let entries = list_lunco_plot_entries(source, graphics_inner.clone());
-            if let Some((entry_span, _)) =
-                entries.iter().find(|(_, s)| s == &plot.signal)
-            {
-                // Update existing — full replace of the entry.
-                return Ok((entry_span.clone(), new_entry));
-            }
-            // Append to end of graphics array.
-            let trimmed_end = trim_trailing_ws_back(source, graphics_inner.clone());
-            let prefix = if entries.is_empty() {
-                "".to_string()
-            } else {
-                ",\n        ".to_string()
-            };
-            let leading = if entries.is_empty() {
-                "\n        "
-            } else {
-                ""
-            };
-            let trailing = "\n      ";
-            return Ok((
-                trimmed_end..graphics_inner.end,
-                format!("{prefix}{leading}{new_entry}{trailing}"),
-            ));
-        }
-        // Diagram() with no graphics= argument. Prepend graphics={…} as
-        // the first arg.
-        let insert = if source[diagram_inner.clone()].trim().is_empty() {
-            format!("graphics={{\n        {new_entry}\n      }}")
-        } else {
-            format!("graphics={{\n        {new_entry}\n      }}, ")
-        };
-        return Ok((diagram_inner.start..diagram_inner.start, insert));
-    }
-
-    // No Diagram annotation. Look for an existing class-level
-    // annotation to extend; otherwise create a fresh one before
-    // `end <Name>;`.
-    if let Some(ann) = find_annotation_span(source, body.clone()) {
-        let inner_start = ann.start + "annotation(".len();
-        let payload = format!(
-            "Diagram(graphics={{\n        {new_entry}\n      }})"
-        );
-        let insert = if source[inner_start..ann.end - 1].trim().is_empty() {
-            payload
-        } else {
-            format!("{}, ", payload)
-        };
-        return Ok((inner_start..inner_start, insert));
-    }
-
-    // No annotation at all. Insert just before the class's
-    // terminating `end <Name>;`. AST `class_def.location.end` lands
-    // before that token, so we splice in place.
-    let insert_at = class_def.location.end as usize;
-    let payload = format!(
-        "  annotation(Diagram(graphics={{\n        {new_entry}\n      }}));\n  "
-    );
-    Ok((insert_at..insert_at, payload))
-}
-
-/// Remove the first `__LunCo_PlotNode(...)` entry whose `signal=`
-/// matches `signal_path`. Trims a leading or trailing comma so the
-/// graphics array stays well-formed.
-fn compute_remove_plot_node_patch(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    class: &str,
-    signal_path: &str,
-) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, parsed, class)?;
-    let body = (class_def.location.start as usize)..(class_def.location.end as usize);
-    let (_ann, _diagram_outer, diagram_inner) =
-        find_class_diagram(source, body).ok_or_else(|| {
-            DocumentError::ValidationFailed(
-                "no Diagram(graphics) annotation on class".into(),
-            )
-        })?;
-    let graphics_inner =
-        find_diagram_graphics_inner(source, diagram_inner).ok_or_else(|| {
-            DocumentError::ValidationFailed("Diagram(...) has no graphics=".into())
-        })?;
-    let entries = list_lunco_plot_entries(source, graphics_inner.clone());
-    let target = entries
-        .iter()
-        .find(|(_, s)| s == signal_path)
-        .ok_or_else(|| {
-            DocumentError::ValidationFailed(format!(
-                "no plot node with signal `{signal_path}`"
-            ))
-        })?
-        .0
-        .clone();
-    // Extend the removal span to swallow the comma/whitespace
-    // that separates this entry from its neighbour. Prefer the
-    // trailing comma (entries earlier in the array) so the array
-    // tail stays well-formed; fall back to the leading comma when
-    // the entry is last.
-    let bytes = source.as_bytes();
-    let mut end = target.end;
-    let mut k = end;
-    while k < graphics_inner.end && (bytes[k].is_ascii_whitespace() || bytes[k] == b',') {
-        if bytes[k] == b',' {
-            k += 1;
-            while k < graphics_inner.end && bytes[k].is_ascii_whitespace() {
-                k += 1;
-            }
-            end = k;
-            break;
-        }
-        k += 1;
-    }
-    if end == target.end {
-        // No trailing comma — strip a leading one instead so a
-        // residual `, ` doesn't pollute the array.
-        let mut s = target.start;
-        while s > graphics_inner.start
-            && (bytes[s - 1].is_ascii_whitespace() || bytes[s - 1] == b',')
-        {
-            s -= 1;
-        }
-        return Ok((s..end, String::new()));
-    }
-    Ok((target.start..end, String::new()))
-}
-
-/// Replace the `extent={{…}}` argument of the `__LunCo_PlotNode` entry
-/// matching `signal_path`. Same span-locate logic as `Remove`; this
-/// op only ever rewrites within an existing entry, so failure is a
-/// hard error rather than a fall-through to "create".
-fn compute_set_plot_node_extent_patch(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    class: &str,
-    signal_path: &str,
-    x1: f32,
-    y1: f32,
-    x2: f32,
-    y2: f32,
-) -> Result<(Range<usize>, String), DocumentError> {
-    let entry = locate_plot_entry(source, ast, parsed, class, signal_path)?;
-    let inner_start = entry.start + "__LunCo_PlotNode(".len();
-    let inner_end = entry.end - 1;
-    // Locate the existing `extent` arg span (named-arg form). If
-    // missing — unusual; the read-side parser requires it — emit a
-    // validation error rather than silently inserting.
-    let extent_value = find_named_arg_value_span(source, inner_start..inner_end, "extent")
-        .ok_or_else(|| {
-            DocumentError::ValidationFailed(
-                "plot node has no `extent=` argument".into(),
-            )
-        })?;
-    let new_extent = format!("{{{},{}}},{{{},{}}}", fmt(x1), fmt(y1), fmt(x2), fmt(y2));
-    let new_extent = format!("{{{}}}", new_extent);
-    Ok((extent_value, new_extent))
-}
-
-/// Replace (or insert) the `title=` argument on the matching plot
-/// entry. Empty title removes the field entirely.
-fn compute_set_plot_node_title_patch(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    class: &str,
-    signal_path: &str,
-    title: &str,
-) -> Result<(Range<usize>, String), DocumentError> {
-    let entry = locate_plot_entry(source, ast, parsed, class, signal_path)?;
-    let inner_start = entry.start + "__LunCo_PlotNode(".len();
-    let inner_end = entry.end - 1;
-    let escaped = title.replace('\\', "\\\\").replace('"', "\\\"");
-    let existing = find_named_arg_value_span(source, inner_start..inner_end, "title");
-    match (existing, title.is_empty()) {
-        (Some(span), true) => {
-            // Remove the entire `, title="…"` (or `title="…", `)
-            // fragment, eating one separating comma either side.
-            let bytes = source.as_bytes();
-            let mut start = span.start;
-            // Walk back to the `title` keyword start.
-            while start > inner_start
-                && (bytes[start - 1].is_ascii_whitespace()
-                    || bytes[start - 1] == b'=')
-            {
-                start -= 1;
-            }
-            let kw = b"title";
-            if start >= kw.len() && &bytes[start - kw.len()..start] == kw {
-                start -= kw.len();
-            }
-            // Eat one preceding comma (if any) so we don't leave
-            // `, , next` in the args list.
-            let mut s = start;
-            while s > inner_start
-                && (bytes[s - 1].is_ascii_whitespace() || bytes[s - 1] == b',')
-            {
-                s -= 1;
-            }
-            Ok((s..span.end, String::new()))
-        }
-        (Some(span), false) => Ok((span, format!("\"{escaped}\""))),
-        (None, true) => {
-            // Already absent — emit a no-op edit so the op stays
-            // idempotent rather than erroring.
-            Ok((inner_end..inner_end, String::new()))
-        }
-        (None, false) => {
-            // Append `, title="…"` just before the closing `)`.
-            Ok((inner_end..inner_end, format!(", title=\"{escaped}\"")))
-        }
-    }
-}
-
-/// Find the span of a single plot entry by signal path.
-fn locate_plot_entry(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    class: &str,
-    signal_path: &str,
-) -> Result<Range<usize>, DocumentError> {
-    let class_def = resolve_class(ast, parsed, class)?;
-    let body = (class_def.location.start as usize)..(class_def.location.end as usize);
-    let (_a, _d, diagram_inner) =
-        find_class_diagram(source, body).ok_or_else(|| {
-            DocumentError::ValidationFailed(
-                "no Diagram(graphics) annotation on class".into(),
-            )
-        })?;
-    let graphics_inner =
-        find_diagram_graphics_inner(source, diagram_inner).ok_or_else(|| {
-            DocumentError::ValidationFailed("Diagram(...) has no graphics=".into())
-        })?;
-    list_lunco_plot_entries(source, graphics_inner)
-        .into_iter()
-        .find_map(|(span, s)| (s == signal_path).then_some(span))
-        .ok_or_else(|| {
-            DocumentError::ValidationFailed(format!(
-                "no plot node with signal `{signal_path}`"
-            ))
-        })
-}
-
-/// Locate the value-side span of a named argument inside a call's
-/// inner span. Returns the byte range covering the argument's value
-/// expression, suitable for `EditText` replacement. Skips over
-/// nested parens / braces / brackets and string literals.
-fn find_named_arg_value_span(
-    source: &str,
-    inner: Range<usize>,
-    name: &str,
-) -> Option<Range<usize>> {
-    let slice = source.get(inner.clone())?;
-    let bytes = slice.as_bytes();
-    let needle = name.as_bytes();
-    let mut depth: i32 = 0;
-    let mut in_str = false;
-    let mut i: usize = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if in_str {
-            if c == b'\\' && i + 1 < bytes.len() {
-                i += 2;
-                continue;
-            }
-            if c == b'"' {
-                in_str = false;
-            }
-            i += 1;
-            continue;
-        }
-        match c {
-            b'"' => {
-                in_str = true;
-                i += 1;
-                continue;
-            }
-            b'(' | b'{' | b'[' => {
-                depth += 1;
-                i += 1;
-                continue;
-            }
-            b')' | b'}' | b']' => {
-                depth -= 1;
-                i += 1;
-                continue;
-            }
-            _ => {}
-        }
-        if depth == 0
-            && i + needle.len() <= bytes.len()
-            && &bytes[i..i + needle.len()] == needle
-        {
-            let prev_ok = i == 0
-                || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
-            let after = i + needle.len();
-            let next_ok = after >= bytes.len()
-                || !(bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_');
-            if prev_ok && next_ok {
-                let mut j = after;
-                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if j < bytes.len() && bytes[j] == b'=' {
-                    j += 1;
-                    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                        j += 1;
-                    }
-                    // Walk forward at depth 0 of the call until the
-                    // next top-level comma or end of inner.
-                    let value_start = j;
-                    let mut d = 0;
-                    let mut in_s = false;
-                    while j < bytes.len() {
-                        let b = bytes[j];
-                        if in_s {
-                            if b == b'\\' && j + 1 < bytes.len() {
-                                j += 2;
-                                continue;
-                            }
-                            if b == b'"' {
-                                in_s = false;
-                            }
-                            j += 1;
-                            continue;
-                        }
-                        match b {
-                            b'"' => in_s = true,
-                            b'(' | b'{' | b'[' => d += 1,
-                            b')' | b'}' | b']' => d -= 1,
-                            b',' if d == 0 => break,
-                            _ => {}
-                        }
-                        j += 1;
-                    }
-                    // Trim trailing whitespace from the value span.
-                    let mut end = j;
-                    while end > value_start
-                        && bytes[end - 1].is_ascii_whitespace()
-                    {
-                        end -= 1;
-                    }
-                    return Some((inner.start + value_start)..(inner.start + end));
-                }
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Trim trailing whitespace at the end of `span`, returning the
-/// adjusted end position (the splice insertion point that places new
-/// content cleanly without doubling spaces).
-fn trim_trailing_ws_back(source: &str, span: Range<usize>) -> usize {
-    let bytes = source.as_bytes();
-    let mut end = span.end;
-    while end > span.start && bytes[end - 1].is_ascii_whitespace() {
-        end -= 1;
-    }
-    end
-}
-
-/// Locate the byte span of the i-th `Text(...)` call inside the
-/// class's `Diagram(graphics)` array. Text-only counter — items of
-/// other kinds (Rectangle, Line, etc.) don't increment `index`.
-fn locate_diagram_text_entry(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    class: &str,
-    target_index: usize,
-) -> Result<Range<usize>, DocumentError> {
-    let class_def = resolve_class(ast, parsed, class)?;
-    let body = (class_def.location.start as usize)..(class_def.location.end as usize);
-    let (_a, _d, diagram_inner) =
-        find_class_diagram(source, body).ok_or_else(|| {
-            DocumentError::ValidationFailed(
-                "no Diagram(graphics) annotation on class".into(),
-            )
-        })?;
-    let graphics_inner =
-        find_diagram_graphics_inner(source, diagram_inner).ok_or_else(|| {
-            DocumentError::ValidationFailed("Diagram(...) has no graphics=".into())
-        })?;
-    let mut cursor = graphics_inner.start;
-    let mut text_idx: usize = 0;
-    while cursor < graphics_inner.end {
-        let Some(call) = find_named_call_span(source, cursor..graphics_inner.end, "Text")
-        else {
-            break;
-        };
-        if text_idx == target_index {
-            return Ok(call);
-        }
-        text_idx += 1;
-        cursor = call.end;
-    }
-    Err(DocumentError::ValidationFailed(format!(
-        "no Text entry at index {target_index} in Diagram(graphics)"
-    )))
-}
-
-fn compute_set_diagram_text_extent_patch(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    class: &str,
-    index: usize,
-    x1: f32,
-    y1: f32,
-    x2: f32,
-    y2: f32,
-) -> Result<(Range<usize>, String), DocumentError> {
-    let entry = locate_diagram_text_entry(source, ast, parsed, class, index)?;
-    let inner_start = entry.start + "Text(".len();
-    let inner_end = entry.end - 1;
-    let extent_value = find_named_arg_value_span(source, inner_start..inner_end, "extent")
-        .ok_or_else(|| {
-            DocumentError::ValidationFailed("Text has no `extent=` argument".into())
-        })?;
-    let new_extent = format!(
-        "{{{{{},{}}},{{{},{}}}}}",
-        fmt(x1),
-        fmt(y1),
-        fmt(x2),
-        fmt(y2)
-    );
-    Ok((extent_value, new_extent))
-}
-
-fn compute_set_diagram_text_string_patch(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    class: &str,
-    index: usize,
-    text: &str,
-) -> Result<(Range<usize>, String), DocumentError> {
-    let entry = locate_diagram_text_entry(source, ast, parsed, class, index)?;
-    let inner_start = entry.start + "Text(".len();
-    let inner_end = entry.end - 1;
-    let value = find_named_arg_value_span(source, inner_start..inner_end, "textString")
-        .ok_or_else(|| {
-            DocumentError::ValidationFailed("Text has no `textString=` argument".into())
-        })?;
-    let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
-    Ok((value, format!("\"{escaped}\"")))
-}
-
-fn compute_remove_diagram_text_patch(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    class: &str,
-    index: usize,
-) -> Result<(Range<usize>, String), DocumentError> {
-    let entry = locate_diagram_text_entry(source, ast, parsed, class, index)?;
-    let class_def = resolve_class(ast, parsed, class)?;
-    let body = (class_def.location.start as usize)..(class_def.location.end as usize);
-    let (_a, _d, diagram_inner) =
-        find_class_diagram(source, body).ok_or_else(|| {
-            DocumentError::ValidationFailed(
-                "no Diagram(graphics) annotation on class".into(),
-            )
-        })?;
-    let graphics_inner =
-        find_diagram_graphics_inner(source, diagram_inner).ok_or_else(|| {
-            DocumentError::ValidationFailed("Diagram(...) has no graphics=".into())
-        })?;
-    // Same trailing-comma-then-leading-comma trim the plot node
-    // remove uses: keep the array well-formed regardless of
-    // whether the entry was first / middle / last.
-    let bytes = source.as_bytes();
-    let mut end = entry.end;
-    let mut k = end;
-    while k < graphics_inner.end && (bytes[k].is_ascii_whitespace() || bytes[k] == b',') {
-        if bytes[k] == b',' {
-            k += 1;
-            while k < graphics_inner.end && bytes[k].is_ascii_whitespace() {
-                k += 1;
-            }
-            end = k;
-            break;
-        }
-        k += 1;
-    }
-    if end == entry.end {
-        let mut s = entry.start;
-        while s > graphics_inner.start
-            && (bytes[s - 1].is_ascii_whitespace() || bytes[s - 1] == b',')
-        {
-            s -= 1;
-        }
-        return Ok((s..end, String::new()));
-    }
-    Ok((entry.start..end, String::new()))
-}
-
-/// Render a coordinate as it appears in `extent={{…}}`. Integers
-/// emit without a trailing `.0` so common diagram positions stay
-/// short and stable across round-trips.
-fn fmt(v: f32) -> String {
-    if v.fract() == 0.0 && v.abs() < 1e10 {
-        format!("{}", v as i64)
-    } else {
-        format!("{}", v)
-    }
-}
-
-/// Helper: emit the patch that either updates or appends `param=value`
-/// within the top-level modification list occupying `inner_span`
-/// (exclusive of the outer parens).
-fn modify_mod_list(
-    source: &str,
-    inner_span: Range<usize>,
-    param: &str,
-    value: &str,
-) -> (Range<usize>, String) {
-    let bytes = source.as_bytes();
-    // Walk the list at depth 0, splitting entries by `,`. For each
-    // entry, check if it starts (after whitespace) with `param` and is
-    // followed by `=` or `(` (modification or nested modification).
-    let start = inner_span.start;
-    let end = inner_span.end;
-    let mut entry_start = start;
-    let mut d = 0;
-    let mut i = start;
-    while i < end {
-        let c = bytes[i];
-        match c {
-            b'(' | b'{' | b'[' => d += 1,
-            b')' | b'}' | b']' => d -= 1,
-            b',' if d == 0 => {
-                if let Some(patch) = match_entry(source, entry_start..i, param, value) {
-                    return patch;
-                }
-                entry_start = i + 1;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    // Final entry.
-    if let Some(patch) = match_entry(source, entry_start..end, param, value) {
-        return patch;
-    }
-    // Not found — append.
-    let trimmed_end = {
-        let mut e = end;
-        while e > start
-            && (source.as_bytes()[e - 1] == b' '
-                || source.as_bytes()[e - 1] == b'\t'
-                || source.as_bytes()[e - 1] == b'\n'
-                || source.as_bytes()[e - 1] == b'\r')
-        {
-            e -= 1;
-        }
-        e
-    };
-    let insertion = if trimmed_end == start {
-        format!("{}={}", param, value)
-    } else {
-        format!(", {}={}", param, value)
-    };
-    (trimmed_end..trimmed_end, insertion)
-}
-
-/// If `entry` (a slice of the modifications list) names `param`, return
-/// the patch to replace its right-hand value with `value`. Otherwise
-/// return `None`.
-fn match_entry(
-    source: &str,
-    entry: Range<usize>,
-    param: &str,
-    value: &str,
-) -> Option<(Range<usize>, String)> {
-    let slice = source.get(entry.clone())?;
-    // Skip leading whitespace.
-    let pre_ws = slice.chars().take_while(|c| c.is_whitespace()).count();
-    let name_start = entry.start + pre_ws;
-    let remainder = source.get(name_start..entry.end)?;
-    if !remainder.starts_with(param) {
-        return None;
-    }
-    // Ensure the next char is an identifier boundary.
-    let after_idx = name_start + param.len();
-    let after_char = source.as_bytes().get(after_idx).copied();
-    if matches!(after_char, Some(b'=') | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r')) {
-        // Find the `=` and replace everything after it (trimmed) up to
-        // entry end.
-        let eq_pos = source.get(after_idx..entry.end)?.find('=')?;
-        let value_start = after_idx + eq_pos + 1;
-        // Strip trailing whitespace from entry end for a clean replace.
-        let mut value_end = entry.end;
-        while value_end > value_start {
-            let b = source.as_bytes()[value_end - 1];
-            if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' {
-                value_end -= 1;
-            } else {
-                break;
-            }
-        }
-        let replacement = format!("{}{}", if source.as_bytes()[value_start] == b' ' { "" } else { " " }, value);
-        return Some((value_start..value_end, replacement));
-    }
-    None
-}
-
-// ---------------------------------------------------------------------------
-// Layer 2 writers — class / variable / equation / graphic / experiment
-// ---------------------------------------------------------------------------
-
-/// Insert an empty class block inside `parent` (or top level if empty).
-fn compute_add_class_patch(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    parent: &str,
-    name: &str,
-    kind: pretty::ClassKindSpec,
-    description: &str,
-    partial: bool,
-) -> Result<(Range<usize>, String), DocumentError> {
-    if name.is_empty() {
-        return Err(DocumentError::ValidationFailed("class name is empty".into()));
-    }
-    let block = pretty::class_block_empty(name, kind, description, partial);
-    if parent.is_empty() {
-        // Top-level: append at end of file with a leading blank line if needed.
-        let prefix = if source.is_empty() || source.ends_with("\n\n") {
-            String::new()
-        } else if source.ends_with('\n') {
-            "\n".to_string()
-        } else {
-            "\n\n".to_string()
-        };
-        let pos = source.len();
-        return Ok((pos..pos, format!("{prefix}{block}")));
-    }
-    let parent_def = resolve_class(ast, parsed, parent)?;
-    let end_byte = parent_def
-        .end_name_token
-        .as_ref()
-        .map(|t| t.location.start as usize)
-        .ok_or_else(|| {
-            DocumentError::ValidationFailed(format!(
-                "parent class `{}` has no `end` clause location",
-                parent
-            ))
-        })?;
-    let line_start = line_start_byte(source, end_byte);
-    // Indent the block's own first line and `end`-line with the parent's
-    // body indent (one `options().indent` level).
-    let body_indent = pretty::options().indent;
-    let indented: String = block
-        .lines()
-        .enumerate()
-        .map(|(i, l)| {
-            if l.is_empty() && i + 1 == block.lines().count() {
-                String::new()
-            } else {
-                format!("{}{}\n", body_indent, l)
-            }
-        })
-        .collect();
-    Ok((line_start..line_start, indented))
-}
-
-/// Remove a class by qualified name. Span = first token of the class
-/// header through the trailing `;` of `end <Name>;`, line-extended.
-fn compute_remove_class_patch(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    qualified: &str,
-) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, parsed, qualified)?;
-    let raw_start = class_def.location.start as usize;
-    // class_def.location.end stops before `end`; advance to past the
-    // terminating `;` of `end <Name>;`.
-    let end_token_start = class_def
-        .end_name_token
-        .as_ref()
-        .map(|t| t.location.start as usize)
-        .unwrap_or(class_def.location.end as usize);
-    let term = find_statement_terminator(source, end_token_start)
-        .ok_or_else(|| {
-            DocumentError::ValidationFailed(format!(
-                "could not find `;` terminating class `{qualified}`"
-            ))
-        })?;
-    let span = extend_span_to_whole_lines(source, raw_start..(term + 1));
-    Ok((span, String::new()))
-}
-
-/// Insert a short-class definition inside `parent` (or top level).
-fn compute_add_short_class_patch(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    parent: &str,
-    name: &str,
-    kind: pretty::ClassKindSpec,
-    base: &str,
-    prefixes: &[String],
-    modifications: &[(String, String)],
-) -> Result<(Range<usize>, String), DocumentError> {
-    if name.is_empty() || base.is_empty() {
-        return Err(DocumentError::ValidationFailed(
-            "short class name or base is empty".into(),
-        ));
-    }
-    let line = pretty::short_class_decl(name, kind, base, prefixes, modifications);
-    if parent.is_empty() {
-        let prefix = if source.is_empty() || source.ends_with('\n') {
-            String::new()
-        } else {
-            "\n".to_string()
-        };
-        let pos = source.len();
-        // Strip the `options().indent` prefix so top-level lines aren't
-        // body-indented.
-        let body_indent = pretty::options().indent;
-        let unindented = line.strip_prefix(&body_indent).unwrap_or(&line).to_string();
-        return Ok((pos..pos, format!("{prefix}{unindented}")));
-    }
-    let parent_def = resolve_class(ast, parsed, parent)?;
-    let end_byte = parent_def
-        .end_name_token
-        .as_ref()
-        .map(|t| t.location.start as usize)
-        .ok_or_else(|| {
-            DocumentError::ValidationFailed(format!(
-                "parent class `{}` has no `end` clause location",
-                parent
-            ))
-        })?;
-    let line_start = line_start_byte(source, end_byte);
-    Ok((line_start..line_start, line))
-}
-
-/// Insert a variable declaration into a class body, just before the
-/// equation/algorithm section or `end <Name>`.
-fn compute_add_variable_patch(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    class: &str,
-    decl: &pretty::VariableDecl,
-) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, parsed, class)?;
-    let insertion_byte = class_section_insertion_point(class_def).ok_or_else(|| {
-        DocumentError::ValidationFailed(format!(
-            "could not locate insertion point in class `{class}`"
-        ))
-    })?;
-    let line_start = line_start_byte(source, insertion_byte);
-    Ok((line_start..line_start, pretty::variable_decl(decl)))
-}
-
-/// Append an equation to a class equation section, creating one if needed.
-fn compute_add_equation_patch(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    class: &str,
-    eq: &pretty::EquationDecl,
-) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, parsed, class)?;
-    let end_name_byte = class_def
-        .end_name_token
-        .as_ref()
-        .map(|t| t.location.start as usize)
-        .ok_or_else(|| {
-            DocumentError::ValidationFailed(format!(
-                "class `{class}` has no `end` clause location"
-            ))
-        })?;
-    let end_line_start = line_start_byte(source, end_name_byte);
-    let eq_line = pretty::equation_decl(eq);
-    let replacement = if class_def.equation_keyword.is_some() {
-        eq_line
-    } else {
-        format!("equation\n{}", eq_line)
-    };
-    Ok((end_line_start..end_line_start, replacement))
-}
-
-/// Append a graphic to `Icon(graphics={...})` or `Diagram(graphics={...})`,
-/// creating the wrapper if needed. Mirrors `compute_add_plot_node_patch`'s
-/// shape for Diagram, generalised to accept the layer name.
-fn compute_add_named_graphic_patch(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    class: &str,
-    layer: &str,
-    graphic: &pretty::GraphicSpec,
-) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, parsed, class)?;
-    let body = (class_def.location.start as usize)..(class_def.location.end as usize);
-    let new_entry = pretty::graphic_inner(graphic);
-
-    if let Some(layer_inner) = find_class_named_graphics_layer(source, body.clone(), layer) {
-        if let Some(graphics_inner) = find_diagram_graphics_inner(source, layer_inner.clone()) {
-            // graphics={...} exists — append.
-            let array_text = &source[graphics_inner.clone()];
-            let prefix = if array_text.trim().is_empty() { "" } else { ",\n        " };
-            let leading = if array_text.trim().is_empty() { "\n        " } else { "" };
-            let trailing = "\n      ";
-            let trimmed_end = trim_trailing_ws_back(source, graphics_inner.clone());
-            return Ok((
-                trimmed_end..graphics_inner.end,
-                format!("{prefix}{leading}{new_entry}{trailing}"),
-            ));
-        }
-        // <Layer>() with no graphics= argument — prepend.
-        let insert = if source[layer_inner.clone()].trim().is_empty() {
-            format!("graphics={{\n        {new_entry}\n      }}")
-        } else {
-            format!("graphics={{\n        {new_entry}\n      }}, ")
-        };
-        return Ok((layer_inner.start..layer_inner.start, insert));
-    }
-    // No <Layer>(...) yet. Look for an existing class-level annotation
-    // to extend.
-    if let Some(ann) = find_annotation_span(source, body.clone()) {
-        let inner_start = ann.start + "annotation(".len();
-        let payload = format!(
-            "{layer}(graphics={{\n        {new_entry}\n      }})"
-        );
-        let insert = if source[inner_start..ann.end - 1].trim().is_empty() {
-            payload
-        } else {
-            format!("{}, ", payload)
-        };
-        return Ok((inner_start..inner_start, insert));
-    }
-    // No annotation at all — insert one before `end <Name>;`.
-    let insert_at = class_def.location.end as usize;
-    let payload = format!(
-        "  annotation({layer}(graphics={{\n        {new_entry}\n      }}));\n  "
-    );
-    Ok((insert_at..insert_at, payload))
-}
-
-/// Locate `<layer>(...)` (Icon or Diagram) inside any class-level
-/// annotation. Returns the byte span between the parens, *excluding*
-/// the parens themselves. Counterpart to `find_class_diagram` that's
-/// generalised over the layer keyword.
-fn find_class_named_graphics_layer(
-    source: &str,
-    body: Range<usize>,
-    layer: &str,
-) -> Option<Range<usize>> {
-    let mut cursor = body.start;
-    while cursor < body.end {
-        let ann = find_annotation_span(source, cursor..body.end)?;
-        let ann_inner_start = ann.start + "annotation(".len();
-        let ann_inner_end = ann.end - 1;
-        if let Some(span) = find_named_call_span(source, ann_inner_start..ann_inner_end, layer) {
-            let inner_start = span.start + layer.len() + 1; // `<layer>(`
-            let inner_end = span.end - 1;                   // before `)`
-            return Some(inner_start..inner_end);
-        }
-        cursor = ann.end;
-    }
-    None
-}
-
-/// Set or insert the `experiment(...)` annotation on a class.
-fn compute_set_experiment_patch(
-    source: &str,
-    ast: &AstCache,
-    parsed: &rumoca_session::parsing::ast::StoredDefinition,
-    class: &str,
-    start_time: f64,
-    stop_time: f64,
-    tolerance: f64,
-    interval: f64,
-) -> Result<(Range<usize>, String), DocumentError> {
-    let class_def = resolve_class(ast, parsed, class)?;
-    let body = (class_def.location.start as usize)..(class_def.location.end as usize);
-    let new_inner = pretty::experiment_inner(start_time, stop_time, tolerance, interval);
-
-    if let Some(ann) = find_annotation_span(source, body.clone()) {
-        let ann_inner_start = ann.start + "annotation(".len();
-        let ann_inner_end = ann.end - 1;
-        if let Some(span) = find_named_call_span(source, ann_inner_start..ann_inner_end, "experiment") {
-            // Replace whole experiment(...) call.
-            return Ok((span, new_inner));
-        }
-        // Prepend the experiment(...) entry to the existing annotation.
-        let insert = if source[ann_inner_start..ann_inner_end].trim().is_empty() {
-            new_inner
-        } else {
-            format!("{new_inner}, ")
-        };
-        return Ok((ann_inner_start..ann_inner_start, insert));
-    }
-    // No annotation — create one before `end <Name>;`.
-    let insert_at = class_def.location.end as usize;
-    Ok((
-        insert_at..insert_at,
-        format!("  annotation({new_inner});\n  "),
-    ))
-}
+// The companion class-duplication path (`rewrite_inject_in_one_pass`
+// in `ui/commands.rs`) is independent — it duplicates a class via
+// byte-splice into a new file, never touching the AST-mutation
+// chokepoint — and stays for now.
 
 #[cfg(test)]
 mod tests {

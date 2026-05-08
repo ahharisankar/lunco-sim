@@ -550,6 +550,16 @@ fn drain_pending_tab_closes(
             // each individual close.
             commands.trigger(lunco_workbench::CloseTab { kind, instance });
             model_tabs.close_tab(instance);
+            // Per-tab canvas state (viewport, selection, scene)
+            // dies with the tab. Doc-wide cleanup happens later in
+            // `on_document_closed_cleanup` if this was the last tab.
+            commands.queue(move |world: &mut World| {
+                if let Some(mut state) = world
+                    .get_resource_mut::<crate::ui::panels::canvas_diagram::CanvasDiagramState>()
+                {
+                    state.drop_tab(instance);
+                }
+            });
             if model_tabs.count_for_doc(doc) == 0 {
                 commands.trigger(CloseDocument { doc });
             }
@@ -1507,7 +1517,7 @@ fn on_create_new_scratch_model(
     // "active-document" pointer.
     workspace.active_document = Some(doc_id);
 
-    let tab_id = model_tabs.ensure(doc_id);
+    let tab_id = model_tabs.ensure_for(doc_id, None);
     commands.trigger(lunco_workbench::OpenTab {
         kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
         instance: tab_id,
@@ -1628,7 +1638,7 @@ fn on_duplicate_model_from_read_only(
             id: mem_id,
             doc: doc_id,
         });
-    let tab_id = model_tabs.ensure(doc_id);
+    let tab_id = model_tabs.ensure_for(doc_id, None);
     // Duplicated copies land in Canvas view — the whole point of
     // "make a playable copy of an MSL example" is to see the
     // diagram. Text view for editing is one toolbar click away.
@@ -1787,7 +1797,7 @@ fn spawn_duplicate_class_task(world: &mut World, qualified: String, name_hint: S
     let tab_id = {
         let mut model_tabs = world
             .resource_mut::<crate::ui::panels::model_view::ModelTabs>();
-        let tab_id = model_tabs.ensure(doc_id);
+        let tab_id = model_tabs.ensure_for(doc_id, None);
         if let Some(tab) = model_tabs.get_mut(tab_id) {
             tab.view_mode = crate::ui::panels::model_view::ModelViewMode::Canvas;
         }
@@ -2368,7 +2378,7 @@ fn on_focus_document_by_name(
         };
         let tab_id = world
             .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
-            .ensure(doc);
+            .ensure_for(doc, None);
         world.commands().trigger(lunco_workbench::OpenTab {
             kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
             instance: tab_id,
@@ -3456,7 +3466,7 @@ fn on_open_file(trigger: On<OpenFile>, mut commands: Commands) {
         );
         // Land in Canvas view so the user sees the diagram.
         let mut tabs = world.resource_mut::<crate::ui::panels::model_view::ModelTabs>();
-        let tab_id = tabs.ensure(doc_id);
+        let tab_id = tabs.ensure_for(doc_id, None);
         if let Some(tab) = tabs.get_mut(tab_id) {
             tab.view_mode = crate::ui::panels::model_view::ModelViewMode::Canvas;
         }
@@ -3494,7 +3504,7 @@ fn open_bundled_in_world(world: &mut World, filename: &str) {
         lunco_doc::DocumentOrigin::untitled(display_name.clone()),
     );
     let mut tabs = world.resource_mut::<crate::ui::panels::model_view::ModelTabs>();
-    let tab_id = tabs.ensure(doc_id);
+    let tab_id = tabs.ensure_for(doc_id, None);
     if let Some(tab) = tabs.get_mut(tab_id) {
         tab.view_mode = crate::ui::panels::model_view::ModelViewMode::Canvas;
     }
@@ -3528,7 +3538,7 @@ fn focus_in_memory_doc(world: &mut World, name: &str) {
     // Re-fire OpenTab — workbench treats this as "focus existing".
     let tab_id = world
         .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
-        .ensure(doc_id);
+        .ensure_for(doc_id, None);
     world.commands().trigger(lunco_workbench::OpenTab {
         kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
         instance: tab_id,

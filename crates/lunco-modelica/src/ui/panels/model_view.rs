@@ -143,6 +143,27 @@ impl ModelTabs {
         self.next_id
     }
 
+    // ── Tab lifecycle decision tree ───────────────────────────────
+    //
+    // Three entry points, three intents. Pick the one that matches
+    // the gesture; never invent a fourth.
+    //
+    // - `ensure_preview_for(doc, drilled)` — **browser single-click**.
+    //   Reuses the global preview slot if an existing preview is
+    //   showing a different `(doc, drilled)`. Pinned by user edit or
+    //   by an explicit pin gesture (right-click → Pin). VS Code's
+    //   single-click semantic.
+    //
+    // - `ensure_for(doc, drilled)` — **deliberate open** (drill-in
+    //   from canvas, double-click in browser, New File, Open File).
+    //   Produces a *pinned* tab matching `(doc, drilled)`. Reuses an
+    //   existing tab with the same key when one is open.
+    //
+    // - `open_new(doc, drilled)` — **split / open in new view**.
+    //   Always allocates a fresh `TabId`; ignores existing tabs on
+    //   the same `(doc, drilled)`. Two tabs viewing the same class
+    //   each carry their own viewport, selection, and scene state.
+
     /// Find an existing tab matching `(doc, drilled_class)` or
     /// allocate a fresh one. The newly-created tab is **pinned** by
     /// default — this entry point is for deliberate opens (drill-in,
@@ -251,16 +272,47 @@ impl ModelTabs {
         }
     }
 
-    /// Back-compat shim: ensure a no-drilled-class tab for `doc`.
-    /// Equivalent to `ensure_for(doc, None)`. Existing call sites
-    /// that opened "the tab for this doc" continue to work.
-    pub fn ensure(&mut self, doc: DocumentId) -> TabId {
-        self.ensure_for(doc, None)
-    }
+    // `ensure(doc)` migration shim deleted in B.4. All callers now
+    // use `ensure_for(doc, None)` directly.
 
     /// Close the specific tab. Returns the tab state if it existed.
     pub fn close_tab(&mut self, tab_id: TabId) -> Option<ModelTabState> {
         self.tabs.remove(&tab_id)
+    }
+
+    /// Close every tab whose `drilled_class` is `qualified` or a
+    /// descendant of it (e.g. `Foo.Bar.Baz` is a descendant of
+    /// `Foo.Bar`). Scoped to `doc` so removing `Foo.Bar` in
+    /// document A does not close a tab drilled into `Foo.Bar` in
+    /// document B.
+    ///
+    /// Implements **cross-truth rule R4** (see
+    /// `docs/architecture/B0_CROSS_TRUTH_POLICY.md`): when a class
+    /// is deleted the AST-canonical view dangles, so the matching
+    /// tab must close. Caller responsibility: wire from the
+    /// `RemoveClass` observer (or `ModelicaChange::ClassRemoved`
+    /// dispatch) and clean up companion per-tab state for each
+    /// returned id (canvas, editor buffer).
+    pub fn close_drilled_into(&mut self, doc: DocumentId, qualified: &str) -> Vec<TabId> {
+        if qualified.is_empty() {
+            return Vec::new();
+        }
+        let prefix = format!("{qualified}.");
+        let to_close: Vec<TabId> = self
+            .tabs
+            .iter()
+            .filter_map(|(id, s)| {
+                if s.doc != doc {
+                    return None;
+                }
+                let drilled = s.drilled_class.as_deref()?;
+                (drilled == qualified || drilled.starts_with(&prefix)).then_some(*id)
+            })
+            .collect();
+        for id in &to_close {
+            self.tabs.remove(id);
+        }
+        to_close
     }
 
     /// Drop *every* tab pointing at `doc`. Used when a document is

@@ -40,6 +40,19 @@ pub struct WasmAutosavePlugin;
 
 impl Plugin for WasmAutosavePlugin {
     fn build(&self, app: &mut App) {
+        // R1 gesture flag — registered cross-platform so non-wasm
+        // builds can also gate future native autosave on it without
+        // a separate resource. Default `false` so behaviour is
+        // unchanged until setters wire in.
+        app.init_resource::<IsGestureActive>()
+            // Mirror the editor's debounced-commit window into the
+            // `text` source. Single-driver system: caller-side
+            // setters in panel renders only handle their own field
+            // (canvas in canvas_diagram::panel; modal — TODO), and
+            // the text field is decoupled from the editor's render
+            // path because `pending_commit_at` is just a timestamp
+            // we can observe headlessly.
+            .add_systems(bevy::prelude::Update, drive_text_gesture_flag);
         #[cfg(target_arch = "wasm32")]
         {
             app.add_systems(bevy::prelude::Startup, restore_from_localstorage)
@@ -47,6 +60,21 @@ impl Plugin for WasmAutosavePlugin {
                 .add_observer(forget_on_closed);
         }
         let _ = app;
+    }
+}
+
+/// Mirror `EditorBufferState.pending_commit_at.is_some()` into
+/// [`IsGestureActive::text`] every frame. Active while the editor
+/// has uncommitted bytes; clears on the debounce flush (which sets
+/// `pending_commit_at = None`). Cheap — two resource reads + one
+/// write.
+fn drive_text_gesture_flag(
+    buf: bevy::prelude::Res<crate::ui::panels::code_editor::EditorBufferState>,
+    mut gesture: bevy::prelude::ResMut<IsGestureActive>,
+) {
+    let active = buf.pending_commit_at.is_some();
+    if gesture.text != active {
+        gesture.text = active;
     }
 }
 
@@ -123,20 +151,68 @@ fn restore_from_localstorage(world: &mut World) {
     }
 }
 
+/// Cross-truth rule R1 (see `docs/architecture/B0_CROSS_TRUTH_POLICY.md`):
+/// "active gesture wins until idle". When any field is `true`,
+/// `autosave_on_changed` bails — autosave fires again on the next
+/// `DocumentChanged` after every source clears.
+///
+/// Per-source fields (rather than one global bool) because three
+/// sources can be active simultaneously and a single bool would
+/// race: e.g. canvas drag setting `false` on release while a modal
+/// is still open. Each field has exactly one writer; readers OR
+/// them via [`IsGestureActive::any`].
+///
+/// Default is "all clear" — autosave runs as before until setters
+/// wire in. Setters land incrementally:
+/// - `canvas`: written from `canvas_diagram/panel.rs` per frame
+///   from `response.is_pointer_button_down_on()`. **Wired in B.0.R1.**
+/// - `text`: written by the code editor while
+///   `EditorBufferState.pending_commit_at` is `Some(_)`. **TODO.**
+/// - `modal`: written by Open/Save As/prompt dialogs while open.
+///   **TODO.**
+#[derive(bevy::prelude::Resource, Default, Debug, Clone, Copy)]
+pub struct IsGestureActive {
+    pub canvas: bool,
+    pub text: bool,
+    pub modal: bool,
+}
+
+impl IsGestureActive {
+    /// True when any source is in flight.
+    pub fn any(&self) -> bool {
+        self.canvas || self.text || self.modal
+    }
+}
+
+/// Pure gate logic — extracted so it's testable on native without
+/// the wasm-only `local_storage()` path. Returns `true` when the
+/// observer should write to localStorage for `(active, untitled)`.
+pub fn should_autosave(active: bool, is_untitled: bool) -> bool {
+    // Two filters, both required:
+    //   1. Untitled docs only — File-backed docs have a real save
+    //      path, library/MSL/bundled docs are read-only.
+    //   2. No active gesture — autosave snapshotting a half-drag
+    //      writes "one component in two places" to disk.
+    is_untitled && !active
+}
+
 /// Persist the document's current source to `localStorage` after
 /// every change. Filters to Untitled docs only — File-backed docs
 /// have a real save path; library/MSL/bundled docs are read-only.
+/// Bails when an `IsGestureActive` resource indicates the user is
+/// mid-gesture (R1).
 #[cfg(target_arch = "wasm32")]
 fn autosave_on_changed(
     trigger: bevy::prelude::On<lunco_doc_bevy::DocumentChanged>,
     registry: bevy::prelude::Res<crate::ui::state::ModelicaDocumentRegistry>,
+    gesture: bevy::prelude::Res<IsGestureActive>,
 ) {
     let Some(storage) = local_storage() else { return };
     let doc = trigger.event().doc;
     let Some(host) = registry.host(doc) else { return };
     let document = host.document();
     let origin = document.origin();
-    if !origin.is_untitled() {
+    if !should_autosave(gesture.any(), origin.is_untitled()) {
         return;
     }
     let key = storage_key(&origin.display_name());

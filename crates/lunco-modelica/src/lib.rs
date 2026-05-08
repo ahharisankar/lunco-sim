@@ -49,6 +49,14 @@ use self::ast_extract::strip_input_defaults;
 /// parameters, inputs, and other symbols.
 pub mod ast_extract;
 
+/// Structural AST mutation helpers. Each helper takes `&mut ClassDef` and
+/// performs an in-place change matching one `ModelicaOp` variant. Source
+/// regeneration via `to_modelica()` is a separate concern handled by
+/// `op_to_patch`. See `docs/architecture/A1_RUMOCA_MUTATOR_AUDIT.md` for
+/// the migration plan and `tests/ast_mut_set_parameter.rs` for the TDD
+/// contract.
+pub mod ast_mut;
+
 /// `ModelicaDocument` — the Document System representation of a `.mo` file.
 ///
 /// Introduced dormant (no panels use it yet). See the module-level docstring

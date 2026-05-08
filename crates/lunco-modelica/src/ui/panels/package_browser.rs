@@ -986,7 +986,7 @@ pub fn handle_package_loading_tasks(
         workspace.active_document = Some(doc_id);
 
         // Open (or focus) the multi-instance tab for this document.
-        let tab_id = model_tabs.ensure(doc_id);
+        let tab_id = model_tabs.ensure_for(doc_id, None);
         layout.open_instance(
             crate::ui::panels::model_view::MODEL_VIEW_KIND,
             tab_id,
@@ -1288,9 +1288,6 @@ impl Panel for PackageBrowserPanel {
                     queue_drill_in_if_inline(world, &id, &lib);
                     open_model(world, id, name, lib, pinned);
                 }
-                PackageAction::Instantiate { msl_path, display_name } => {
-                    instantiate_on_active_canvas(world, &msl_path, &display_name);
-                }
                 PackageAction::DragStart { msl_path } => stash_drag_payload(world, &msl_path),
             }
         }
@@ -1315,14 +1312,9 @@ enum PackageAction {
     /// click opens pinned (a permanent tab that won't be replaced
     /// by the next browser click).
     Open(String, String, ModelLibrary, bool),
-    /// Instantiate a class on the currently active canvas tab.
-    /// Routes through the same `AddModelicaComponent` Reflect event
-    /// the palette uses, so origin-level read-only rejection applies
-    /// uniformly. Currently unreachable from the tree (drag-and-drop
-    /// is the canonical instantiate gesture); kept for use by the
-    /// right-click context menu and for future palette wiring.
-    #[allow(dead_code)]
-    Instantiate { msl_path: String, display_name: String },
+    // `Instantiate` variant deleted in B.4. Drag-and-drop is the
+    // canonical instantiate gesture; if a future right-click "Add to
+    // canvas" path needs it back, restore it from history.
     /// User started dragging a class row — stash a
     /// [`ComponentDragPayload`] (same resource the palette uses) so
     /// the canvas's drop handler picks it up on pointer release.
@@ -2176,100 +2168,10 @@ fn first_quoted(s: &str) -> Option<String> {
 }
 
 
-/// Add an instance of an MSL class as a sub-component of the
-/// currently-active canvas tab. Mirrors what the Component Palette
-/// click does, so the read-only / class-resolution / placement logic
-/// stays in one place (the [`crate::api_edits::AddModelicaComponent`]
-/// observer + `apply_ops`).
-fn instantiate_on_active_canvas(
-    world: &mut World,
-    msl_path: &str,
-    display_name: &str,
-) {
-    // Resolve target doc.
-    let active_doc = world
-        .get_resource::<lunco_workbench::WorkspaceResource>()
-        .and_then(|ws| ws.active_document);
-    let Some(doc_id) = active_doc else {
-        bevy::log::info!(
-            "[PackageBrowser] double-click on `{}` ignored — no active document",
-            msl_path
-        );
-        return;
-    };
-    // Class to add into = drilled-in pin if any, else first non-package.
-    let drilled_in = world
-        .get_resource::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
-        .and_then(|m| m.get(doc_id).map(str::to_string));
-    let class = drilled_in
-        .or_else(|| {
-            // Read first non-package class from the per-doc Index;
-            // sees optimistic patches and avoids walking the AST.
-            let registry = world.resource::<crate::ui::state::ModelicaDocumentRegistry>();
-            let host = registry.host(doc_id)?;
-            host.document()
-                .index()
-                .classes
-                .values()
-                .find(|c| !matches!(c.kind, crate::index::ClassKind::Package))
-                .map(|c| c.name.clone())
-        })
-        .unwrap_or_default();
-    if class.is_empty() {
-        bevy::log::info!(
-            "[PackageBrowser] double-click on `{}` ignored — no target class",
-            msl_path
-        );
-        return;
-    }
-    // Synthesise an instance name from the short tail. Lower-case
-    // first char + a small numeric suffix to avoid collisions on
-    // repeat double-clicks. The user can rename via the inspector.
-    let short = msl_path.rsplit('.').next().unwrap_or(msl_path);
-    let mut base = String::new();
-    for (i, ch) in short.chars().enumerate() {
-        if i == 0 {
-            base.push(ch.to_ascii_lowercase());
-        } else if ch.is_ascii_alphanumeric() || ch == '_' {
-            base.push(ch);
-        }
-    }
-    if base.is_empty() {
-        base.push_str("inst");
-    }
-    let name = format!(
-        "{base}{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u32 % 10_000)
-            .unwrap_or(0)
-    );
-    bevy::log::info!(
-        "[PackageBrowser] double-click → AddModelicaComponent(`{display_name}` as `{name}` in `{class}`)"
-    );
-
-    #[cfg(feature = "lunco-api")]
-    world
-        .commands()
-        .trigger(crate::api_edits::AddModelicaComponent {
-            doc: doc_id,
-            class,
-            type_name: msl_path.to_string(),
-            name,
-            x: 0.0,
-            y: 0.0,
-            width: 20.0,
-            height: 20.0,
-            animation_ms: 0,
-        });
-    #[cfg(not(feature = "lunco-api"))]
-    {
-        let _ = (display_name, name, class);
-        bevy::log::warn!(
-            "[PackageBrowser] double-click instantiate requires the `lunco-api` feature"
-        );
-    }
-}
+// `instantiate_on_active_canvas` was the body of the deleted
+// `PackageAction::Instantiate` variant (B.4). Drag-and-drop in
+// `canvas_diagram/panel.rs` is now the only path to add an MSL
+// component to the active canvas.
 
 /// Resolve an `msl_path:` id (e.g. `Blocks.ImpureRandom`) to the
 /// actual MSL bundle key (e.g. `Modelica/Blocks/package.mo`). Walks
@@ -2454,7 +2356,7 @@ pub(crate) fn open_model(
         if let Some(doc) = doc_id {
             let tab_id = world
                 .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
-                .ensure(doc);
+                .ensure_for(doc, None);
             world.commands().trigger(lunco_workbench::OpenTab {
                 kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
                 instance: tab_id,
@@ -2900,10 +2802,6 @@ pub(crate) fn render_root_subtree(world: &mut World, ui: &mut egui::Ui, root_id:
                 queue_drill_in_if_inline(world, &id, &lib);
                 open_model(world, id, name, lib, pinned);
             }
-            PackageAction::Instantiate {
-                msl_path,
-                display_name,
-            } => instantiate_on_active_canvas(world, &msl_path, &display_name),
             PackageAction::DragStart { msl_path } => stash_drag_payload(world, &msl_path),
         }
     }

@@ -18,6 +18,17 @@ use super::loads::DrilledInClassNames;
 use super::port::{port_fallback_offset_for_size, port_kind_str, resolve_port_icons};
 use super::projection::{project_scene, projection_relevant_source_hash};
 use super::{CanvasDiagramState, IconNodeData, active_doc_from_world};
+use crate::ui::panels::model_view::TabRenderContext;
+
+/// Read the active tab id from `TabRenderContext`. `None` outside a
+/// panel render call (observers, off-render systems); call sites that
+/// pair this with `get_for_render` correctly fall back to first-tab
+/// semantics in that case.
+fn render_tab_id(world: &World) -> Option<crate::ui::panels::model_view::TabId> {
+    world
+        .get_resource::<TabRenderContext>()
+        .and_then(|c| c.tab_id)
+}
 
 /// Resolve `(document id, editing class name)` for the current tab.
 /// Used by the canvas + neighbours so they target the same class when
@@ -77,8 +88,9 @@ pub(super) fn build_ops_from_events(
 ) -> Vec<ModelicaOp> {
     use lunco_canvas::SceneEvent;
     let active_doc = active_doc_from_world(world);
+    let tab = render_tab_id(world);
     let state = world.resource::<CanvasDiagramState>();
-    let scene = &state.get(active_doc).canvas.scene;
+    let scene = &state.get_for_render(tab, active_doc).canvas.scene;
     let mut ops: Vec<ModelicaOp> = Vec::new();
 
     for ev in events {
@@ -283,8 +295,9 @@ pub(super) fn component_headers(
     id: lunco_canvas::NodeId,
 ) -> (String, String) {
     let active_doc = active_doc_from_world(world);
+    let tab = render_tab_id(world);
     let state = world.resource::<CanvasDiagramState>();
-    let Some(node) = state.get(active_doc).canvas.scene.node(id) else {
+    let Some(node) = state.get_for_render(tab, active_doc).canvas.scene.node(id) else {
         return (String::new(), String::new());
     };
     let instance = node.label.clone();
@@ -349,101 +362,16 @@ pub(super) fn op_add_component_with_name(
     }
 }
 
-/// Optimistically synthesise a canvas Node for a freshly-added MSL
-/// component, mirroring the subset of [`project_scene`]'s logic that
-/// applies before the AST settles. Uses the identity icon transform
-/// and the fallback port layout — the next reproject (if any) will
-/// replace this with the canonical projection.
-///
-/// Returns the fresh `NodeId`; the caller pairs it with the matching
-/// `AddComponent` op so the optimistic scene + the source rewrite
-/// stay in lock-step.
-pub(super) fn synthesize_msl_node(
-    scene: &mut lunco_canvas::Scene,
-    comp: &MSLComponentDef,
-    instance_name: &str,
-    at_world: lunco_canvas::Pos,
-) -> lunco_canvas::NodeId {
-    use lunco_canvas::{Node as CanvasNode, Port as CanvasPort, PortId as CanvasPortId, Pos as CanvasPos, Rect as CanvasRect};
-
-    // Match `Placement::at` — 20×20 canvas units centred on the
-    // click. The source rewrite emits the same extent so the
-    // canonical reproject (when one happens) keeps the size stable.
-    // Using the full -100..100 default would render a node 10× too
-    // large compared with what the AST will produce.
-    let half = 10.0_f32;
-    let icon_w = half * 2.0;
-    let icon_h = half * 2.0;
-    let min_wx = at_world.x - half;
-    let min_wy = at_world.y - half;
-
-    let n_ports = comp.ports.len();
-    let ports: Vec<CanvasPort> = comp
-        .ports
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let (lx, ly) = if p.x == 0.0 && p.y == 0.0 {
-                port_fallback_offset_for_size(i, n_ports, icon_w, icon_h)
-            } else {
-                // Map port coords (-100..100, +Y up) into the
-                // 20×20 icon-local screen box (+Y down). Same scale
-                // factor 20/200 = 0.1 the projector uses for a
-                // Placement::at extent.
-                let scale = icon_w / 200.0;
-                ((p.x + 100.0) * scale, (100.0 - p.y) * scale)
-            };
-            CanvasPort {
-                id: CanvasPortId::new(p.name.clone()),
-                local_offset: CanvasPos::new(lx, ly),
-                kind: port_kind_str(p.kind).into(),
-            }
-        })
-        .collect();
-
-    let id = scene.alloc_node_id();
-    scene.insert_node(CanvasNode {
-        id,
-        rect: CanvasRect::from_min_size(CanvasPos::new(min_wx, min_wy), icon_w, icon_h),
-        kind: "modelica.icon".into(),
-        data: std::sync::Arc::new(IconNodeData {
-            qualified_type: comp.msl_path.clone(),
-            icon_only: crate::ui::loaded_classes::is_icon_only_class(&comp.msl_path),
-            expandable_connector: comp.is_expandable_connector,
-            icon_graphics: comp.icon_graphics.clone(),
-            diagram_graphics: if comp.class_kind == "connector" {
-                comp.diagram_graphics.clone()
-            } else {
-                None
-            },
-            rotation_deg: 0.0,
-            mirror_x: false,
-            mirror_y: false,
-            instance_name: instance_name.to_string(),
-            parameters: comp
-                .parameters
-                .iter()
-                .map(|p| (p.name.clone(), p.default.clone()))
-                .collect(),
-            port_connector_paths: comp
-                .ports
-                .iter()
-                .map(|p| (p.name.clone(), p.msl_path.clone(), p.size_x, p.size_y, p.rotation_deg))
-                .collect(),
-            port_connector_icons: resolve_port_icons(&comp.msl_path, &comp.ports),
-            is_conditional: false,
-        }),
-        ports,
-        label: instance_name.to_string(),
-        origin: Some(instance_name.to_string()),
-        resizable: false,
-        // Optimistic synth: skip the icon-bbox computation (cheap but
-        // not free); the next reproject from the source overwrites
-        // this node anyway with the bbox-aware version.
-        visual_rect: None,
-    });
-    id
-}
+// `synthesize_msl_node` — optimistic-scene helper — was deleted in
+// A.4. Used to insert a Node into the canvas scene the same frame the
+// op fired, ahead of the projection re-derivation. After A.2 the
+// AST-canonical apply path is fast (no debounced reparse during
+// apply) and the projection system runs every tick, so the next
+// frame's projection picks up the new gen and renders the same node
+// — no perceptible latency. Removing the optimistic path also kills
+// a small drift class: the optimistic Node and the projected Node
+// could disagree on port layout / icon rendering until the projector
+// caught up.
 
 pub(super) fn op_remove_component(
     world: &mut World,
@@ -451,8 +379,13 @@ pub(super) fn op_remove_component(
     class: &str,
 ) -> Option<ModelicaOp> {
     let active_doc = active_doc_from_world(world);
+    let tab = render_tab_id(world);
     let state = world.resource::<CanvasDiagramState>();
-    op_remove_node_inner(&state.get(active_doc).canvas.scene, id, class)
+    op_remove_node_inner(
+        &state.get_for_render(tab, active_doc).canvas.scene,
+        id,
+        class,
+    )
 }
 
 pub(super) fn op_remove_edge(
@@ -461,8 +394,13 @@ pub(super) fn op_remove_edge(
     class: &str,
 ) -> Option<ModelicaOp> {
     let active_doc = active_doc_from_world(world);
+    let tab = render_tab_id(world);
     let state = world.resource::<CanvasDiagramState>();
-    op_remove_edge_inner(&state.get(active_doc).canvas.scene, id, class)
+    op_remove_edge_inner(
+        &state.get_for_render(tab, active_doc).canvas.scene,
+        id,
+        class,
+    )
 }
 
 pub(super) fn op_remove_node_inner(
@@ -862,16 +800,39 @@ pub(super) fn apply_ops(
         // Canvas-originated edits have *already* mutated the scene
         // before reaching apply_ops (drag moved the node; menu Add
         // synthesised a node prior to dispatch). Acknowledging the
-        // new generation here tells the project gate "the scene
-        // already reflects this state — don't re-project". The
-        // hash bump keeps the cheap-skip path in `project_now`
-        // consistent for any later foreign edit comparison.
+        // new generation tells the project gate "the scene already
+        // reflects this state — don't re-project" — but **only for
+        // the tab the user actually edited**. Other tabs viewing
+        // the same doc (splits) have stale scenes and *do* need to
+        // reproject; leaving their `last_seen_gen` untouched lets
+        // the gen-advance check fire on their next render.
         let new_hash = projection_relevant_source_hash(&src);
+        let editing_tab = world
+            .resource::<crate::ui::panels::model_view::TabRenderContext>()
+            .tab_id;
+        // Ack the gen on the editing tab so its render loop won't
+        // re-project (it already shows the new state). Sibling tabs
+        // viewing the same `(doc, drilled)` are kept in sync via
+        // [`apply_event_to_sibling_scene`] — replayed by the canvas
+        // panel right after `canvas.ui()` returns events. Mutations
+        // that don't have a SceneEvent equivalent (menu add /
+        // remove, palette drop) fall through to gen-advance on the
+        // sibling's next render, which reprojects from the
+        // freshly-rewritten source.
         if let Some(mut state) = world.get_resource_mut::<CanvasDiagramState>() {
-            let docstate = state.get_mut(Some(doc_id));
-            docstate.canvas_acked_gen = new_gen;
-            docstate.last_seen_gen = new_gen;
-            docstate.last_seen_source_hash = new_hash;
+            if let Some(tab_id) = editing_tab {
+                let docstate = state.get_mut_for_tab(tab_id, doc_id);
+                docstate.canvas_acked_gen = new_gen;
+                docstate.last_seen_gen = new_gen;
+                docstate.last_seen_source_hash = new_hash;
+            } else {
+                // Non-render-context dispatch (API, observer);
+                // legacy single-tab path.
+                let docstate = state.get_mut(Some(doc_id));
+                docstate.canvas_acked_gen = new_gen;
+                docstate.last_seen_gen = new_gen;
+                docstate.last_seen_source_hash = new_hash;
+            }
         }
     }
 

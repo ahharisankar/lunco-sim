@@ -176,6 +176,7 @@ pub fn run() {
     // If this fails (worker bundle missing, COOP/COEP misconfigured, etc.)
     // we log + continue: the inline worker remains as a fallback so the
     // page still loads, just with the old UI-blocking compile path.
+    #[cfg(target_arch = "wasm32")]
     if let Err(e) = lunco_modelica::worker_transport::install_worker("./worker/worker_bootstrap.js") {
         bevy::log::error!(
             "[lunica_web] failed to start off-thread worker; falling back to inline: {e:?}"
@@ -249,7 +250,7 @@ fn setup_web_workbench(
 
     // Open the model tab so the user lands on the actual model view
     // instead of the Welcome placeholder.
-    let tab_id = model_tabs.ensure(doc_id);
+    let tab_id = model_tabs.ensure_for(doc_id, None);
     layout.open_instance(
         lunco_modelica::ui::panels::model_view::MODEL_VIEW_KIND,
         tab_id,
