@@ -29,6 +29,21 @@ pub struct TabBuffer {
     pub pending_commit_at: Option<f64>,
 }
 
+/// One-shot edit verbs forwarded from the global Edit menu. The
+/// menu callback (registered in `ui/mod.rs::register_edit_menu`)
+/// flips the matching field; the code-editor render reads and
+/// clears it on the next frame, OR-merging into the same
+/// `tb_copy/tb_cut/tb_paste/tb_select_all` flags the in-panel
+/// toolbar uses. Keeps all clipboard/selection logic in one place
+/// while letting the menu drive it.
+#[derive(Resource, Default)]
+pub struct CodeEditorMenuRequest {
+    pub copy: bool,
+    pub cut: bool,
+    pub paste: bool,
+    pub select_all: bool,
+}
+
 /// Tracks which model the editor buffer belongs to, to detect model switches.
 #[derive(Resource)]
 pub struct EditorBufferState {
@@ -596,6 +611,17 @@ impl Panel for CodeEditorPanel {
                 tb_select_all = true;
             }
         });
+        // Merge any one-shot request from the global Edit menu so the
+        // menu and the toolbar share the exact same downstream code
+        // path. Resource is initialised lazily — first menu click
+        // creates it, which is fine because we only consume here.
+        if let Some(mut req) = world.get_resource_mut::<CodeEditorMenuRequest>() {
+            tb_copy |= req.copy;
+            tb_cut |= req.cut;
+            tb_paste |= req.paste;
+            tb_select_all |= req.select_all;
+            *req = CodeEditorMenuRequest::default();
+        }
         ui.separator();
         // When word-wrap is off we need the TextEdit widget's rect to
         // be AT LEAST as wide as the longest line — otherwise egui's

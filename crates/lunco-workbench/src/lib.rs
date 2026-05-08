@@ -256,6 +256,15 @@ pub struct WorkbenchLayout {
     pub(crate) settings_menu:
         Vec<Box<dyn Fn(&mut bevy_egui::egui::Ui, &mut World) + Send + Sync>>,
 
+    /// App-wide Edit menu contributions. Same pattern as
+    /// [`settings_menu`](Self::settings_menu) — domain plugins push a
+    /// closure via [`WorkbenchLayout::register_edit_menu`] at Startup so
+    /// the global Edit menu can host domain-specific verbs (e.g. the
+    /// code editor's Cut/Copy/Paste) without each plugin scattering its
+    /// own toolbar.
+    pub(crate) edit_menu:
+        Vec<Box<dyn Fn(&mut bevy_egui::egui::Ui, &mut World) + Send + Sync>>,
+
     /// The live dock tree — what egui_dock actually renders. Stores
     /// [`TabId`]s so both singleton panels and multi-instance tabs
     /// coexist in the same tree.
@@ -308,6 +317,7 @@ impl Default for WorkbenchLayout {
             bottom: Vec::new(),
             status: None,
             settings_menu: Vec::new(),
+            edit_menu: Vec::new(),
             dock: DockState::new(Vec::new()),
         }
     }
@@ -484,6 +494,15 @@ impl WorkbenchLayout {
         F: Fn(&mut bevy_egui::egui::Ui, &mut World) + Send + Sync + 'static,
     {
         self.settings_menu.push(Box::new(callback));
+    }
+
+    /// Register a closure that contributes entries to the global Edit
+    /// menu. Mirrors [`register_settings`](Self::register_settings).
+    pub fn register_edit_menu<F>(&mut self, callback: F)
+    where
+        F: Fn(&mut bevy_egui::egui::Ui, &mut World) + Send + Sync + 'static,
+    {
+        self.edit_menu.push(Box::new(callback));
     }
 
     pub fn register_perspective<W: Perspective + 'static>(&mut self, perspective: W) {
@@ -1208,7 +1227,40 @@ fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut 
                 }
             });
             ui.menu_button("Edit", |ui| {
-                ui.label("(Edit menu — todo)");
+                let has_active = world
+                    .resource::<WorkspaceResource>()
+                    .active_document
+                    .is_some();
+                if ui
+                    .add_enabled(has_active, egui::Button::new("Undo\tCtrl+Z"))
+                    .clicked()
+                {
+                    world.trigger(lunco_doc_bevy::EditorIntent::Undo);
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(
+                        has_active,
+                        egui::Button::new("Redo\tCtrl+Shift+Z"),
+                    )
+                    .clicked()
+                {
+                    world.trigger(lunco_doc_bevy::EditorIntent::Redo);
+                    ui.close();
+                }
+
+                // Domain plugins (e.g. the Modelica code editor)
+                // contribute Cut/Copy/Paste/Select-All here via
+                // `register_edit_menu`. Same extraction pattern as the
+                // Settings menu so callbacks can take `&mut World`.
+                let callbacks = std::mem::take(&mut layout.edit_menu);
+                if !callbacks.is_empty() {
+                    ui.separator();
+                    for cb in &callbacks {
+                        cb(ui, world);
+                    }
+                }
+                layout.edit_menu = callbacks;
             });
             ui.menu_button("View", |ui| {
                 if ui.button("Toggle Activity Bar").clicked() {
@@ -1321,7 +1373,11 @@ fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut 
                 layout.settings_menu = callbacks;
             });
             ui.menu_button("Help", |ui| {
-                ui.label("LunCoSim workbench v0.2 (egui_dock)");
+                ui.label(format!(
+                    "LunCoSim workbench v{} ({})",
+                    env!("CARGO_PKG_VERSION"),
+                    env!("LUNCO_GIT_HASH"),
+                ));
             });
 
             // Pause/Resume simulation. Toggles `Time<Virtual>` so both
@@ -1345,8 +1401,9 @@ fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Window controls — far right on Linux/Windows where
                 // the OS chrome is gone. macOS keeps the native traffic
-                // lights, so we don't draw our own.
-                #[cfg(not(target_os = "macos"))]
+                // lights, so we don't draw our own. On wasm the browser
+                // tab owns the chrome, so min/max/close don't apply.
+                #[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
                 {
                     let is_max = world
                         .get_resource::<window_command::WindowMaximized>()

@@ -69,6 +69,13 @@ pub struct ScanResult {
 
 pub struct FileLoadResult {
     pub id: String,
+    /// Stable dedup key — canonical filesystem path string for disk-
+    /// backed loads, raw `id` for in-memory schemes (`bundled://`).
+    /// Indexes [`PackageTreeCache::loading_ids`] and
+    /// [`crate::ui::browser_dispatch::PendingDrillIns`] so that
+    /// re-clicks on a different MSL class that resolves to the same
+    /// `.mo` file dedup against the in-flight load.
+    pub dedup_key: String,
     pub name: String,
     pub library: ModelLibrary,
     pub source: std::sync::Arc<str>,
@@ -942,10 +949,12 @@ pub fn handle_package_loading_tasks(
     }
 
     for result in finished_files {
-        // Drop the dedup guard: subsequent clicks on the same row
+        // Drop the dedup guard: subsequent clicks on the same file
         // now go through the registry-lookup branch and re-focus
-        // the existing tab instead of spawning another parse.
-        cache.loading_ids.remove(&result.id);
+        // the existing tab instead of spawning another parse. Keyed
+        // by canonical path (`dedup_key`, from main) so sibling-class
+        // clicks share the slot.
+        cache.loading_ids.remove(&result.dedup_key);
         // Layout-job shaping deleted with the `OpenModel.cached_galley`
         // field (B.3 phase 6). The editor's TextEdit re-shapes per
         // frame anyway; the bg-precomputed galley was only ever
@@ -2352,13 +2361,13 @@ pub(crate) fn open_model(
 
     // Background load for all other types (Disk or Bundled).
     //
-    // Dedup: if a tab is already open for this id (registered
-    // doc whose origin path matches `id`) — focus it. If a load
-    // for this id is already in flight (user double-clicked while
-    // the bg parse is running), focus the placeholder tab we
-    // opened on the first click. Without these the second click
-    // reserves a new DocumentId, spawns a second parse, and the
-    // user ends up with a duplicate tab once both land.
+    // Dedup keys on the raw `id` so each MSL inner-class click gets
+    // its own tab — `UsersGuide.Connectors` and `UsersGuide.Conventions`
+    // open as two tabs even though both live in `Modelica/UsersGuide.mo`.
+    // Sharing the underlying parse across those clicks is Phase-2 work
+    // (source-root model + per-(doc, qualified) tab key); for now each
+    // click reserves its own DocumentId.
+    let dedup_key = id.clone();
     // For `msl_path:Foo.Bar` ids, pre-resolve to the actual MSL file
     // path on the main thread (HashMap lookups, microseconds) so the
     // doc's `DocumentOrigin::File.path` carries a real bundle key
@@ -2412,18 +2421,22 @@ pub(crate) fn open_model(
             kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
             instance: tab_id,
         });
+        // B.3 phase 5: `state.is_loading` retired; per-doc loading
+        // derives from `PackageTreeCache::is_loading(doc)` etc.
         return;
     }
     if let Some(&doc) = world
         .resource::<PackageTreeCache>()
         .loading_ids
-        .get(&id)
+        .get(&dedup_key)
     {
         let tab_id = acquire_tab(world, doc);
         world.commands().trigger(lunco_workbench::OpenTab {
             kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
             instance: tab_id,
         });
+        // B.3 phase 5: `state.is_loading` retired; per-doc loading
+        // derives from `PackageTreeCache::is_loading(doc)` etc.
         return;
     }
     // Reserve a `DocumentId` up front so the bg task can build a
@@ -2436,7 +2449,7 @@ pub(crate) fn open_model(
     world
         .resource_mut::<PackageTreeCache>()
         .loading_ids
-        .insert(id.clone(), reserved_doc_id);
+        .insert(dedup_key.clone(), reserved_doc_id);
     // Open the tab immediately so the user gets visible feedback
     // even though the parse is still running off-thread. The model
     // view paints a "Loading…" overlay while the registry has no
@@ -2453,6 +2466,7 @@ pub(crate) fn open_model(
     };
     let pool = AsyncComputeTaskPool::get();
     let id_clone = id.clone();
+    let dedup_key_clone = dedup_key.clone();
     let name_clone = name.clone();
     let name_result = name.clone();
     let lib_clone = library.clone();
@@ -2629,6 +2643,7 @@ pub(crate) fn open_model(
 
         FileLoadResult {
             id: id_clone,
+            dedup_key: dedup_key_clone,
             name: name_result,
             library: lib_clone,
             source: source_text.into(),

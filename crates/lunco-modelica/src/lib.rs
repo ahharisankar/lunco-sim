@@ -810,15 +810,13 @@ fn frame_time_probe_end(mut probe: ResMut<FrameTimeProbe>) {
         .last_edit
         .map(|t| t.elapsed().as_secs_f64() < 5.0)
         .unwrap_or(false);
-    // Default off — the probe's purpose is diagnosing UI hitches, but
-    // egui idles at ~30 fps (33 ms/frame) which fires the >30 ms
-    // threshold on every frame and floods the console. Enable with
-    // `LUNCO_FRAME_PROBE=1` (any non-empty value) when investigating
-    // a specific freeze. Hard hitches (>250 ms) always log so genuine
-    // stalls aren't silently swallowed.
+    // Default fully off. egui idles at ~30 fps and even a long
+    // compile / parse can run for seconds, so any unconditional
+    // "hard hitch" threshold floods the console during normal use.
+    // Enable explicitly with `LUNCO_FRAME_PROBE=1` (any non-empty
+    // value) when investigating a specific freeze.
     let probe_enabled = std::env::var_os("LUNCO_FRAME_PROBE").is_some();
-    let hard_hitch = dt_ms > 250.0;
-    if hard_hitch || (probe_enabled && (dt_ms > 30.0 || in_window)) {
+    if probe_enabled && (dt_ms > 30.0 || in_window) {
         bevy::log::info!(
             "[FrameTimeProbe] total={dt_ms:.0}ms pre={:.0} update={:.0} post={:.0} last={last_ms:.0}{}",
             probe.pre_update_ms,
@@ -865,10 +863,7 @@ pub use ast_extract::{
     extract_parameters_from_ast,
     extract_inputs_with_defaults,
     extract_inputs_with_defaults_from_ast,
-    substitute_params_in_source,
     hash_content,
-    extract_from_source,
-    ModelicaSymbols,
 };
 // `strip_input_defaults` is already imported via `use self::ast_extract::strip_input_defaults`
 // above and is available publicly through the `pub mod ast_extract` declaration.
@@ -931,27 +926,30 @@ mod observables_smoke {
     }
 
     /// Verifies that `"..."` description strings (MLS §A.2.5) survive
-    /// the AST-based extraction pipeline and reach the worker's
-    /// description map. If this regresses, Telemetry tooltips go dark.
+    /// into the per-doc [`crate::index::ModelicaIndex`] — that's what
+    /// panels read for hover tooltips. If this regresses, Telemetry
+    /// tooltips go dark.
     #[test]
     fn rocket_engine_descriptions_populate() {
         let raw = include_str!("../../../assets/models/RocketEngine.mo");
-        let (src, _) = ast_extract::strip_input_defaults(raw);
-        let descs: std::collections::HashMap<String, String> =
-            collect_variable_descriptions(&src).into_iter().collect();
+        let ast = rumoca_phase_parse::parse_to_ast(raw, "RocketEngine.mo")
+            .expect("parses");
+        let mut index = crate::index::ModelicaIndex::new();
+        index.rebuild_from_ast(&ast, raw);
         for (var, needle) in [
             ("m_dot_max", "mass flow"),
             ("throttle",  "Throttle"),
             ("m_prop",    "Propellant"),
             ("thrust",    "Thrust"),
         ] {
-            let desc = descs.get(var)
-                .unwrap_or_else(|| panic!(
-                    "no description for '{var}'; got {:?}",
-                    descs.keys().collect::<Vec<_>>()
-                ));
-            assert!(desc.contains(needle),
-                "'{var}' description should contain '{needle}', got: {desc:?}");
+            let entry = index
+                .find_component_by_leaf(var)
+                .unwrap_or_else(|| panic!("no component '{var}' in index"));
+            assert!(
+                entry.description.contains(needle),
+                "'{var}' description should contain '{needle}', got: {:?}",
+                entry.description
+            );
         }
     }
 

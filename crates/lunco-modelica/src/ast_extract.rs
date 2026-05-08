@@ -159,95 +159,6 @@ fn find_first_non_package_qualified(
         .map(|n| if parent.is_empty() { n.to_string() } else { format!("{parent}.{n}") })
 }
 
-/// Extract the Modelica description string (`"..."` after a
-/// declaration, per MLS §A.2.5) for every component across all classes
-/// in the source. Returns a `name → description` map.
-///
-/// Rumoca's compiled DAE drops component descriptions during
-/// compile → DAE lowering (as of rumoca `main` at the time of writing),
-/// so we can't read them from `Dae.states[name].description`. The
-/// AST-level `Component.description: Vec<Token>` still has them,
-/// which is what we walk here.
-///
-/// Used by the worker to feed hover tooltips in the Telemetry panel,
-/// the Diagram icon block, and anywhere else a variable name appears
-/// that benefits from inline docs.
-pub fn extract_descriptions(source: &str) -> HashMap<String, String> {
-    let ast = match parse(source) {
-        Some(a) => a,
-        None => return HashMap::new(),
-    };
-    let mut out: HashMap<String, String> = HashMap::new();
-    collect_descriptions_from_classes(&ast.classes, &mut out);
-    out
-}
-
-/// AST-based variant — see `extract_parameters_from_ast`.
-pub fn extract_descriptions_from_ast(
-    ast: &StoredDefinition,
-) -> HashMap<String, String> {
-    let mut out: HashMap<String, String> = HashMap::new();
-    collect_descriptions_from_classes(&ast.classes, &mut out);
-    out
-}
-
-fn collect_descriptions_from_classes(
-    classes: &indexmap::IndexMap<String, ClassDef>,
-    out: &mut HashMap<String, String>,
-) {
-    for class in classes.values() {
-        for component in class.components.values() {
-            if component.description.is_empty() {
-                continue;
-            }
-            // Rumoca's AST stores the already-unquoted string-literal
-            // text in each Token. Concatenate (Modelica allows
-            // adjacent-string concatenation `"a" " b"` → `a b`) and
-            // trim. We still keep a quote-strip fallback in case a
-            // future rumoca revision includes the quotes verbatim.
-            let joined: String = component
-                .description
-                .iter()
-                .map(|t| t.text.as_ref())
-                .collect::<Vec<_>>()
-                .join(" ");
-            let cleaned = if joined.contains('"') {
-                dequote_description(&joined)
-            } else {
-                joined.trim().to_string()
-            };
-            if !cleaned.is_empty() {
-                out.insert(component.name.clone(), cleaned);
-            }
-        }
-        collect_descriptions_from_classes(&class.classes, out);
-    }
-}
-
-/// Strip bounding `"..."` wrappers from a concatenation of description
-/// tokens, e.g. `"a" " b"` → `a b`. Used as a fallback when a rumoca
-/// revision surfaces raw quoted text in the description tokens; the
-/// current revision pre-unquotes each literal.
-fn dequote_description(raw: &str) -> String {
-    let mut out = String::new();
-    let mut in_str = false;
-    let mut escape = false;
-    for ch in raw.chars() {
-        if escape {
-            out.push(ch);
-            escape = false;
-            continue;
-        }
-        match ch {
-            '\\' if in_str => escape = true,
-            '"' => in_str = !in_str,
-            c if in_str => out.push(c),
-            _ => {}
-        }
-    }
-    out.trim().to_string()
-}
-
 /// Extract parameter values from Modelica source code.
 ///
 /// Finds all components with `parameter` variability across all classes and
@@ -325,21 +236,6 @@ pub fn extract_variable_names(source: &str) -> Vec<String> {
     names
 }
 
-/// AST-based variant — see `extract_parameters_from_ast`.
-pub fn extract_variable_names_from_ast(ast: &StoredDefinition) -> Vec<String> {
-    let mut names = Vec::new();
-    collect_variable_names_from_classes(&ast.classes, &mut names);
-    names
-}
-
-
-/// AST-based variant — see `extract_parameters_from_ast`.
-pub fn extract_input_names_from_ast(ast: &StoredDefinition) -> Vec<String> {
-    let mut inputs = Vec::new();
-    collect_input_names_from_classes(&ast.classes, &mut inputs);
-    inputs
-}
-
 /// Strip default values from `input` declarations in source code.
 ///
 /// Rumoca compiles `input Real g = 9.81` as a constant (not a runtime slot).
@@ -405,146 +301,9 @@ fn collect_input_binding_ranges(
     }
 }
 
-/// Substitute parameter values into Modelica source code.
-///
-/// Replaces `parameter <type> <name> = <value>` declarations with the
-/// given numeric values, enabling recompilation with different
-/// parameter values. Walks the parsed AST to find each parameter
-/// component matching `parameters`'s keys and splices its
-/// `= <expr>` range with `= <new_value>` (via
-/// [`rumoca_session::parsing::ast::Component::binding_range_with_equals`]).
-///
-/// TODO(rumoca-runtime-override): even AST-driven, this is a
-/// workaround for rumoca not accepting parameter overrides at
-/// simulation time. The cleanest fix exposes
-/// `Session::set_runtime_overrides(HashMap<SymbolPath, Value>)` — at
-/// which point this function disappears entirely. See
-/// REFACTOR_PLAN.md upstream ask #7.
-pub fn substitute_params_in_source(source: &str, parameters: &HashMap<String, f64>) -> String {
-    if parameters.is_empty() {
-        return source.to_string();
-    }
-    let Some(ast) = parse(source) else {
-        return source.to_string();
-    };
-    // Collect (range, new-value) pairs, then splice in reverse order
-    // so earlier offsets stay valid.
-    let mut edits: Vec<(usize, usize, String)> = Vec::new();
-    collect_param_substitution_edits(&ast.classes, source, parameters, &mut edits);
-    edits.sort_by_key(|(start, _, _)| *start);
-    let mut modified = source.to_string();
-    for (start, end, replacement) in edits.into_iter().rev() {
-        if end <= modified.len() && start <= end {
-            modified.replace_range(start..end, &replacement);
-        }
-    }
-    modified
-}
-
-fn collect_param_substitution_edits(
-    classes: &indexmap::IndexMap<String, ClassDef>,
-    source: &str,
-    parameters: &HashMap<String, f64>,
-    out: &mut Vec<(usize, usize, String)>,
-) {
-    for class in classes.values() {
-        for component in class.components.values() {
-            if !matches!(component.variability, Variability::Parameter(_)) {
-                continue;
-            }
-            let Some(new_value) = parameters.get(&component.name) else {
-                continue;
-            };
-            let Some((start, end)) = component.binding_range_with_equals(source) else {
-                continue;
-            };
-            // Replace the whole `= <old>` range with `= <new>` —
-            // single space matches the formatter convention.
-            out.push((start, end, format!(" = {}", new_value)));
-        }
-        collect_param_substitution_edits(&class.classes, source, parameters, out);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Combined extraction (single-pass, future-facing)
-// ---------------------------------------------------------------------------
-
-/// Extract all symbols from Modelica source in a single parse pass.
-///
-/// This is the preferred API for new code. It avoids re-parsing the source
-/// multiple times (unlike calling each `extract_*` function separately).
-pub fn extract_from_source(source: &str) -> ModelicaSymbols {
-    let mut result = ModelicaSymbols::default();
-    let ast = match parse(source) {
-        Some(a) => a,
-        None => return result,
-    };
-
-    extract_from_ast(&ast, &mut result);
-    result
-}
-
-/// All extractable symbols from a Modelica source file.
-#[derive(Debug, Default, Clone)]
-pub struct ModelicaSymbols {
-    /// Top-level class name (first non-package class found).
-    pub model_name: Option<String>,
-    /// Parameters with numeric binding values.
-    pub parameters: HashMap<String, f64>,
-    /// Input names without defaults (true runtime-settable slots).
-    pub input_names: Vec<String>,
-    /// Input names with defaults (require recompile to change).
-    pub inputs_with_defaults: HashMap<String, f64>,
-}
-
-/// Extract all symbols from a parsed AST into the given result struct.
-///
-/// Use this when you already have a `StoredDefinition` (e.g., from a cached
-/// parse) and want to avoid re-parsing.
-pub fn extract_from_ast(ast: &StoredDefinition, result: &mut ModelicaSymbols) {
-    // Model name: first non-package class
-    for (name, class) in &ast.classes {
-        if class.class_type != ClassType::Package {
-            result.model_name = Some(name.as_str().to_string());
-            break;
-        }
-    }
-
-    // Walk all classes
-    for class in ast.classes.values() {
-        walk_class(class, result);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Internal AST walkers
 // ---------------------------------------------------------------------------
-
-fn walk_class(class: &ClassDef, result: &mut ModelicaSymbols) {
-    for component in class.components.values() {
-        // Parameters
-        if matches!(component.variability, Variability::Parameter(_)) {
-            if let Some(value) = extract_numeric_binding(&component.binding) {
-                result.parameters.insert(component.name.clone(), value);
-            }
-        }
-
-        // Inputs
-        if matches!(component.causality, Causality::Input(_)) {
-            if let Some(value) = extract_numeric_binding(&component.binding) {
-                result.inputs_with_defaults.insert(component.name.clone(), value);
-            } else {
-                result.input_names.push(component.name.clone());
-            }
-        }
-    }
-
-    // Recurse into nested classes
-    for nested in class.classes.values() {
-        walk_class(nested, result);
-    }
-}
 
 fn collect_parameters_from_classes(
     classes: &indexmap::IndexMap<String, ClassDef>,
@@ -595,22 +354,6 @@ fn collect_variable_names_from_classes(
     }
 }
 
-fn collect_input_names_from_classes(
-    classes: &indexmap::IndexMap<String, ClassDef>,
-    inputs: &mut Vec<String>,
-) {
-    for class in classes.values() {
-        for component in class.components.values() {
-            if matches!(component.causality, Causality::Input(_)) {
-                if extract_numeric_binding(&component.binding).is_none() {
-                    inputs.push(component.name.clone());
-                }
-            }
-        }
-        collect_input_names_from_classes(&class.classes, inputs);
-    }
-}
-
 /// Try to extract a numeric `f64` value from a binding expression.
 ///
 /// Handles `Expression::Terminal` with Real, Integer, or unsigned numeric types.
@@ -619,6 +362,20 @@ fn extract_numeric_binding(expr: &Option<Expression>) -> Option<f64> {
     let expr = expr.as_ref()?;
     numeric_of(expr)
 }
+
+/// Walk the component tree of a chosen root class (depth-first
+/// through nested instance components) and emit instance-qualified
+/// variable names — `tank.m`, `engine.thrust`, … — matching what the
+/// simulator publishes once compiled. Pre-compile, this lets the
+/// Variables list show "where" each value lives instead of a flat
+/// list of leaf identifiers that collide across components.
+///
+/// Stops recursing when a component's declared type isn't an AST
+/// class in this `StoredDefinition` (i.e. resolves to an MSL or
+/// user library that we'd need rumoca's resolver to walk). Those
+/// components are emitted as leaves under their qualified path —
+/// good enough for the common authored-domain models where Tank /
+/// Engine / Valve sit in the same file as RocketStage.
 
 /// Parse a numeric literal expression (including a leading `-` unary
 /// minus — rumoca represents `-5` as `Unary(Minus, 5)`). Used for
@@ -636,52 +393,6 @@ fn numeric_of(expr: &Expression) -> Option<f64> {
             numeric_of(rhs).map(|v| -v)
         }
         _ => None,
-    }
-}
-
-/// Parameter bounds (min, max) pulled from `parameter Real x(min=…,
-/// max=…)` modifiers. Either end is `None` if not declared. Used by
-/// the Telemetry panel to clamp DragValues to the authored operating
-/// envelope — MLS §4.8 says the UI SHOULD respect these bounds.
-pub fn extract_parameter_bounds_from_ast(
-    ast: &StoredDefinition,
-) -> HashMap<String, (Option<f64>, Option<f64>)> {
-    let mut bounds = HashMap::new();
-    collect_parameter_bounds_from_classes(&ast.classes, &mut bounds);
-    bounds
-}
-
-fn collect_parameter_bounds_from_classes(
-    classes: &indexmap::IndexMap<String, ClassDef>,
-    out: &mut HashMap<String, (Option<f64>, Option<f64>)>,
-) {
-    // Extract bounds from EVERY component that declares `min`/`max`
-    // modifications, regardless of variability or causality.
-    //
-    // The previous implementation gated on
-    //   `Variability::Parameter(_) || Causality::Input(_)`
-    // — which silently dropped a very common case: inputs typed via
-    // a connector class, e.g. `Modelica.Blocks.Interfaces.RealInput`.
-    // The `input` keyword lives inside the connector definition
-    // (`connector RealInput = input Real`), so the AST shows the
-    // component's own causality as `Empty` and the gate rejected it.
-    // Result: `RealInput x(min=0, max=1)` had its bounds invisible
-    // to Telemetry and the UI clamping silently no-op'd.
-    //
-    // Filtering is done on the lookup side instead: Telemetry only
-    // queries this map for displayed parameter / input rows, so
-    // bounds attached to algebraics or outputs (rare but legal —
-    // they document runtime envelopes for assert checks) cause no
-    // visible UI behaviour.
-    for class in classes.values() {
-        for component in class.components.values() {
-            let min = component.modifications.get("min").and_then(numeric_of);
-            let max = component.modifications.get("max").and_then(numeric_of);
-            if min.is_some() || max.is_some() {
-                out.insert(component.name.clone(), (min, max));
-            }
-        }
-        collect_parameter_bounds_from_classes(&class.classes, out);
     }
 }
 
@@ -849,19 +560,6 @@ fn expression_to_string(expr: &Expression) -> String {
     }
 }
 
-/// Pull the `unit="..."` modification for a component, if any. Returns
-/// the inner string with quotes stripped.
-pub fn unit_of_component(comp: &rumoca_session::parsing::ast::Component) -> Option<String> {
-    comp.modifications
-        .get("unit")
-        .and_then(|expr| match expr {
-            Expression::Terminal { terminal_type: TerminalType::String, token } => {
-                Some(token.text.trim_matches('"').to_string())
-            }
-            _ => None,
-        })
-}
-
 /// Extract every input-typed component for a class with rich metadata
 /// (name, type, unit, default if any, description). Companion to the
 /// existing `extract_input_names_from_ast` which only returns names.
@@ -929,6 +627,19 @@ fn is_output_connector_type(type_name: &str) -> bool {
         short,
         "RealOutput" | "IntegerOutput" | "BooleanOutput" | "StringOutput"
     ) || short.ends_with("Output")
+}
+
+/// Pull the `unit="..."` modification for a component, if any. Returns
+/// the inner string with quotes stripped.
+fn unit_of_component(comp: &rumoca_session::parsing::ast::Component) -> Option<String> {
+    comp.modifications
+        .get("unit")
+        .and_then(|expr| match expr {
+            Expression::Terminal { terminal_type: TerminalType::String, token } => {
+                Some(token.text.trim_matches('"').to_string())
+            }
+            _ => None,
+        })
 }
 
 fn typed_components_filtered<F>(class: &ClassDef, want: F) -> Vec<TypedComponent>
@@ -1087,37 +798,6 @@ end Test;
         assert!(params.is_empty());
     }
 
-    // --- extract_input_names ---
-
-    #[test]
-    fn test_extract_input_names_no_defaults() {
-        let source = r#"
-model Test
-  input Real u;
-  output Real y;
-equation
-  y = u;
-end Test;
-"#;
-        let inputs = extract_input_names(source);
-        assert_eq!(inputs, vec!["u"]);
-    }
-
-    #[test]
-    fn test_extract_input_names_excludes_with_defaults() {
-        let source = r#"
-model Test
-  input Real u = 1.0;
-  output Real y;
-equation
-  y = u;
-end Test;
-"#;
-        let inputs = extract_input_names(source);
-        // Should NOT include `u` because it has a default
-        assert!(inputs.is_empty());
-    }
-
     // --- extract_inputs_with_defaults ---
 
     #[test]
@@ -1197,117 +877,6 @@ end Balloon;
         ];
         expected.sort();
         assert_eq!(names, expected, "expected all 7 continuous variables to be extracted");
-    }
-
-    // --- extract_from_source (single-pass) ---
-
-    #[test]
-    fn test_extract_from_source_rc_circuit() {
-        let source = r#"
-model RC_Circuit
-  parameter Real R = 100.0;
-  parameter Real C = 1e-3;
-  input Real V = 5.0;
-  output Real Vc;
-  Real i;
-equation
-  V = R * i + Vc;
-  C * der(Vc) = i;
-end RC_Circuit;
-"#;
-        let symbols = extract_from_source(source);
-        assert_eq!(symbols.model_name, Some("RC_Circuit".to_string()));
-        assert_eq!(symbols.parameters.len(), 2);
-        assert_eq!(symbols.parameters.get("R"), Some(&100.0));
-        assert_eq!(symbols.parameters.get("C"), Some(&0.001));
-        assert_eq!(symbols.inputs_with_defaults.get("V"), Some(&5.0));
-        assert!(symbols.input_names.is_empty()); // all inputs have defaults
-    }
-
-    #[test]
-    fn test_extract_from_source_with_runtime_input() {
-        let source = r#"
-model Test
-  parameter Real k = 2.0;
-  input Real u;
-  output Real y;
-equation
-  y = k * u;
-end Test;
-"#;
-        let symbols = extract_from_source(source);
-        assert_eq!(symbols.model_name, Some("Test".to_string()));
-        assert_eq!(symbols.parameters.get("k"), Some(&2.0));
-        assert_eq!(symbols.input_names, vec!["u"]);
-        assert!(symbols.inputs_with_defaults.is_empty());
-    }
-
-    // --- substitute_params_in_source (AST-driven via Component::binding_range_with_equals) ---
-
-    #[test]
-    fn test_substitute_params_in_source() {
-        let source = r#"
-model Test
-  parameter Real k = 1.0;
-  parameter Real tau = 0.5;
-end Test;
-"#;
-        let mut params = HashMap::new();
-        params.insert("k".to_string(), 10.0);
-        params.insert("tau".to_string(), 2.0);
-        let modified = substitute_params_in_source(source, &params);
-        assert!(modified.contains("parameter Real k = 10"));
-        assert!(modified.contains("parameter Real tau = 2"));
-    }
-
-    #[test]
-    fn test_extract_bundled_spring_mass() {
-        let source = include_str!("../../../assets/models/SpringMass.mo");
-        let symbols = extract_from_source(source);
-        assert_eq!(symbols.model_name, Some("SpringMass".to_string()));
-        assert_eq!(symbols.parameters.len(), 3);
-        assert_eq!(symbols.parameters.get("m"), Some(&1.0));
-        assert_eq!(symbols.parameters.get("k"), Some(&10.0));
-        assert_eq!(symbols.parameters.get("d"), Some(&0.5));
-        assert!(symbols.input_names.is_empty());
-        assert!(symbols.inputs_with_defaults.is_empty());
-    }
-
-    #[test]
-    fn test_extract_bundled_battery() {
-        let source = include_str!("../../../assets/models/Battery.mo");
-        let symbols = extract_from_source(source);
-        assert_eq!(symbols.model_name, Some("Battery".to_string()));
-        assert_eq!(symbols.parameters.len(), 4);
-        assert_eq!(symbols.parameters.get("capacity"), Some(&1.0));
-        assert_eq!(symbols.parameters.get("voltage_nom"), Some(&12.0));
-        assert_eq!(symbols.parameters.get("R_internal"), Some(&0.01));
-        assert_eq!(symbols.parameters.get("T_filter"), Some(&0.1));
-        // current_in has no default → runtime-settable slot
-        assert_eq!(symbols.input_names, vec!["current_in"]);
-        assert!(symbols.inputs_with_defaults.is_empty());
-    }
-
-    #[test]
-    fn test_extract_bundled_rc_circuit() {
-        let source = include_str!("../../../assets/models/RC_Circuit.mo");
-        let symbols = extract_from_source(source);
-        assert_eq!(symbols.model_name, Some("RC_Circuit".to_string()));
-        // RC_Circuit is now a proper schematic with three tunable
-        // parameters (V_source, R, C) feeding component modifications.
-        assert_eq!(symbols.parameters.len(), 3);
-        assert!(symbols.parameters.contains_key("R"));
-        assert!(symbols.parameters.contains_key("C"));
-        assert!(symbols.parameters.contains_key("V_source"));
-    }
-
-    #[test]
-    fn test_extract_bundled_bouncy_ball() {
-        let source = include_str!("../../../assets/models/BouncyBall.mo");
-        let symbols = extract_from_source(source);
-        assert_eq!(symbols.model_name, Some("BouncyBall".to_string()));
-        // BouncyBall has parameter Real g = 9.81
-        assert_eq!(symbols.parameters.get("g"), Some(&9.81));
     }
 
     // --- hash_content (unchanged, still needed) ---

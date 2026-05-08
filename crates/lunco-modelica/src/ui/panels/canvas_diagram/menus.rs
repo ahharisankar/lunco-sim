@@ -87,6 +87,32 @@ pub(super) fn render_node_menu(
     }
 }
 
+/// Collect plottable scalar signals — every signal in the registry
+/// that the owning `ModelicaModel` does not classify as a parameter
+/// or input. Both maps are populated at compile time by walking the
+/// document's [`crate::index::ModelicaIndex`] (variability /
+/// causality on each `ComponentEntry`), so this is a free lookup —
+/// no DAE introspection or runtime variance heuristic required.
+fn collect_varying_signals(
+    world: &mut World,
+) -> Vec<(bevy::prelude::Entity, String)> {
+    let signals: Vec<(bevy::prelude::Entity, String)> = world
+        .get_resource::<lunco_viz::SignalRegistry>()
+        .map(|r| r.iter_scalar().map(|(s, _)| (s.entity, s.path.clone())).collect())
+        .unwrap_or_default();
+    let mut v: Vec<_> = signals
+        .into_iter()
+        .filter(|(entity, path)| {
+            world
+                .get::<crate::ModelicaModel>(*entity)
+                .map(|m| !m.parameters.contains_key(path) && !m.inputs.contains_key(path))
+                .unwrap_or(true)
+        })
+        .collect();
+    v.sort_by(|a, b| a.1.cmp(&b.1));
+    v
+}
+
 pub(super) fn render_plot_node_menu(
     ui: &mut egui::Ui,
     world: &mut World,
@@ -123,17 +149,7 @@ pub(super) fn render_plot_node_menu(
     }
     ui.separator();
 
-    let sigs: Vec<(bevy::prelude::Entity, String)> = world
-        .get_resource::<lunco_viz::SignalRegistry>()
-        .map(|r| {
-            let mut v: Vec<_> = r
-                .iter_scalar()
-                .map(|(s, _)| (s.entity, s.path.clone()))
-                .collect();
-            v.sort_by(|a, b| a.1.cmp(&b.1));
-            v
-        })
-        .unwrap_or_default();
+    let sigs = collect_varying_signals(world);
 
     ui.menu_button("🔗 Bind signal", |ui| {
         if sigs.is_empty() {
@@ -262,17 +278,7 @@ pub(super) fn render_empty_menu(
     // run; signal entries appear once the active sim has populated
     // `SignalRegistry`. An empty plot can be bound later via the
     // inspector.
-    let sigs: Vec<(bevy::prelude::Entity, String)> = world
-        .get_resource::<lunco_viz::SignalRegistry>()
-        .map(|r| {
-            let mut v: Vec<_> = r
-                .iter_scalar()
-                .map(|(s, _)| (s.entity, s.path.clone()))
-                .collect();
-            v.sort_by(|a, b| a.1.cmp(&b.1));
-            v
-        })
-        .unwrap_or_default();
+    let sigs = collect_varying_signals(world);
     ui.menu_button("📊 Add Plot here", |ui| {
         // TODO(menu-height): the height is "so-so" — sometimes
         // collapses to 3 rows. Match how the Modelica

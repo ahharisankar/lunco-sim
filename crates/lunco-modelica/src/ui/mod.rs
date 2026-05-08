@@ -473,7 +473,7 @@ pub struct AnalyzePerspective;
 
 impl Perspective for AnalyzePerspective {
     fn id(&self) -> PerspectiveId { PerspectiveId("modelica_analyze") }
-    fn title(&self) -> String { "📊 Analyze".into() }
+    fn title(&self) -> String { "📐 Design".into() }
     fn apply(&self, layout: &mut WorkbenchLayout) {
         layout.set_activity_bar(false);
         // Side dock = Twin Browser only. The legacy
@@ -683,6 +683,8 @@ impl Plugin for ModelicaUiPlugin {
             .init_resource::<input_activity::InputActivity>()
             .add_systems(bevy::prelude::PreUpdate, input_activity::stamp_user_input)
             .add_systems(Startup, register_settings_menu)
+            .add_systems(Startup, register_edit_menu)
+            .init_resource::<panels::code_editor::CodeEditorMenuRequest>()
             // Image-loader install is a first-frame one-shot — runs
             // in the egui primary-context pass until the context is
             // ready and the loaders land, then the marker resource
@@ -885,6 +887,49 @@ fn register_settings_menu(world: &mut World) {
             );
         });
         drop(snap);
+    });
+}
+
+/// Contribute Cut/Copy/Paste/Select-All entries to the workbench's
+/// global Edit menu. The entries flip flags on
+/// [`panels::code_editor::CodeEditorMenuRequest`]; the code-editor
+/// render reads & clears them next frame, OR-merging into the same
+/// flags the in-panel toolbar uses. Keeps clipboard/selection
+/// handling in one place while letting the menu drive it.
+fn register_edit_menu(world: &mut World) {
+    let Some(mut layout) = world
+        .get_resource_mut::<lunco_workbench::WorkbenchLayout>()
+    else {
+        return;
+    };
+    layout.register_edit_menu(|ui, world| {
+        // TODO: promote Cut / Copy / Paste / Select All to typed
+        // `#[Command]` events so the HTTP API can drive them too
+        // (mirrors the existing `Undo` / `Redo` commands in
+        // `ui/commands.rs`). Today they only flow through the menu /
+        // toolbar / keyboard since the operation is scoped to the
+        // currently-focused egui TextEdit, which has no
+        // representation on the API side — a typed command would
+        // need an explicit `doc` + range/text payload.
+        let mut req = world
+            .resource_mut::<panels::code_editor::CodeEditorMenuRequest>();
+        if ui.button("Cut\tCtrl+X").clicked() {
+            req.cut = true;
+            ui.close();
+        }
+        if ui.button("Copy\tCtrl+C").clicked() {
+            req.copy = true;
+            ui.close();
+        }
+        if ui.button("Paste\tCtrl+V").clicked() {
+            req.paste = true;
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Select All\tCtrl+A").clicked() {
+            req.select_all = true;
+            ui.close();
+        }
     });
 }
 

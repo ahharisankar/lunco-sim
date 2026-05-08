@@ -980,8 +980,9 @@ pub(super) fn auto_arrange_now(world: &mut World, doc_id: lunco_doc::DocumentId)
 /// Resolve the active class name for an Auto-Arrange target. Prefers
 /// the drilled-in class name (for MSL drill-in tabs); falls back to
 /// the open document's detected model name.
-pub(super) fn active_class_for_doc(world: &mut World, doc_id: lunco_doc::DocumentId) -> Option<String> {
-    // B.3: derive from `ModelTabs`.
+pub fn active_class_for_doc(world: &mut World, doc_id: lunco_doc::DocumentId) -> Option<String> {
+    // B.3: drilled scope from `ModelTabs` (replaces the retired
+    // `DrilledInClassNames` cache).
     if let Some(c) = crate::ui::panels::model_view::drilled_class_for_doc(world, doc_id) {
         return Some(c);
     }
