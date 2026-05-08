@@ -652,27 +652,12 @@ impl CanvasDiagramState {
         }
     }
 
-    /// Migration shim — accepts the old `(doc, drilled)` key shape
-    /// from call sites that haven't moved to TabId yet. Routes to
-    /// the first tab matching `doc` (drilled ignored — same-doc
-    /// splits are independent tabs now). Read-only.
-    pub fn get_for(
-        &self,
-        doc: Option<lunco_doc::DocumentId>,
-        _drilled: Option<&str>,
-    ) -> &CanvasDocState {
-        self.get(doc)
-    }
-
-    /// Migration shim — mutable variant. Same routing as
-    /// [`get_for`].
-    pub fn get_mut_for(
-        &mut self,
-        doc: Option<lunco_doc::DocumentId>,
-        _drilled: Option<&str>,
-    ) -> &mut CanvasDocState {
-        self.get_mut(doc)
-    }
+    // `get_for(doc, drilled)` / `get_mut_for(doc, drilled)` migration
+    // shims deleted in B.4. The `drilled` argument was always ignored
+    // (drilled scopes are independent tabs since the Phase-1 tab
+    // refactor) and no callers remained outside test code. Use
+    // `get_for_render` / `get_mut_for_render` for tab-aware lookups
+    // or `get` / `get_mut` for the legacy first-tab fallback.
 
     /// First TabId viewing `doc`. Determinism is best-effort
     /// (HashMap iteration); non-render callers don't care which
@@ -730,14 +715,8 @@ impl CanvasDiagramState {
         self.first_tab_for(doc).is_some()
     }
 
-    /// Migration shim — old `(doc, drilled)` key shape.
-    pub fn has_entry_for(
-        &self,
-        doc: lunco_doc::DocumentId,
-        _drilled: Option<&str>,
-    ) -> bool {
-        self.has_entry(doc)
-    }
+    // `has_entry_for(doc, drilled)` migration shim deleted in B.4.
+    // No callers; use `has_entry(doc)` directly.
 
     /// Has *this specific tab* ever been projected? Renders the
     /// canvas use this to force a first-paint projection on a

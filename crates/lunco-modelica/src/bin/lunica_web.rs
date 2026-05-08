@@ -250,7 +250,7 @@ fn setup_web_workbench(
 
     // Open the model tab so the user lands on the actual model view
     // instead of the Welcome placeholder.
-    let tab_id = model_tabs.ensure(doc_id);
+    let tab_id = model_tabs.ensure_for(doc_id, None);
     layout.open_instance(
         lunco_modelica::ui::panels::model_view::MODEL_VIEW_KIND,
         tab_id,

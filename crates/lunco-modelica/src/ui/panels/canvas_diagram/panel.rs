@@ -71,9 +71,10 @@ impl Panel for CanvasDiagramPanel {
         // Each tab gets its own viewport / selection / scene —
         // splits of the same model can pan, zoom, and select
         // independently.
-        let render_drilled: Option<String> =
-            render_target(world).and_then(|(_, drilled)| drilled);
-        let render_drilled_ref: Option<&str> = render_drilled.as_deref();
+        // `render_drilled` snapshot deleted in B.4 — `render_tab_id`
+        // alone scopes the lookup correctly. `ModelTabState` carries
+        // the drilled class per-tab; nothing in this render path
+        // needs the drilled name as a separate variable.
         let render_tab_id: Option<crate::ui::panels::model_view::TabId> = world
             .resource::<crate::ui::panels::model_view::TabRenderContext>()
             .tab_id;
@@ -858,9 +859,10 @@ impl CanvasDiagramPanel {
     fn render_canvas(&self, ui: &mut egui::Ui, world: &mut World) {
         // Same per-render-call drill scope + tab id snapshot as the
         // parent `render` method.
-        let render_drilled: Option<String> =
-            render_target(world).and_then(|(_, drilled)| drilled);
-        let render_drilled_ref: Option<&str> = render_drilled.as_deref();
+        // `render_drilled` snapshot deleted in B.4 — `render_tab_id`
+        // alone scopes the lookup correctly. `ModelTabState` carries
+        // the drilled class per-tab; nothing in this render path
+        // needs the drilled name as a separate variable.
         let render_tab_id: Option<crate::ui::panels::model_view::TabId> = world
             .resource::<crate::ui::panels::model_view::TabRenderContext>()
             .tab_id;

@@ -143,6 +143,27 @@ impl ModelTabs {
         self.next_id
     }
 
+    // ── Tab lifecycle decision tree ───────────────────────────────
+    //
+    // Three entry points, three intents. Pick the one that matches
+    // the gesture; never invent a fourth.
+    //
+    // - `ensure_preview_for(doc, drilled)` — **browser single-click**.
+    //   Reuses the global preview slot if an existing preview is
+    //   showing a different `(doc, drilled)`. Pinned by user edit or
+    //   by an explicit pin gesture (right-click → Pin). VS Code's
+    //   single-click semantic.
+    //
+    // - `ensure_for(doc, drilled)` — **deliberate open** (drill-in
+    //   from canvas, double-click in browser, New File, Open File).
+    //   Produces a *pinned* tab matching `(doc, drilled)`. Reuses an
+    //   existing tab with the same key when one is open.
+    //
+    // - `open_new(doc, drilled)` — **split / open in new view**.
+    //   Always allocates a fresh `TabId`; ignores existing tabs on
+    //   the same `(doc, drilled)`. Two tabs viewing the same class
+    //   each carry their own viewport, selection, and scene state.
+
     /// Find an existing tab matching `(doc, drilled_class)` or
     /// allocate a fresh one. The newly-created tab is **pinned** by
     /// default — this entry point is for deliberate opens (drill-in,
@@ -251,12 +272,8 @@ impl ModelTabs {
         }
     }
 
-    /// Back-compat shim: ensure a no-drilled-class tab for `doc`.
-    /// Equivalent to `ensure_for(doc, None)`. Existing call sites
-    /// that opened "the tab for this doc" continue to work.
-    pub fn ensure(&mut self, doc: DocumentId) -> TabId {
-        self.ensure_for(doc, None)
-    }
+    // `ensure(doc)` migration shim deleted in B.4. All callers now
+    // use `ensure_for(doc, None)` directly.
 
     /// Close the specific tab. Returns the tab state if it existed.
     pub fn close_tab(&mut self, tab_id: TabId) -> Option<ModelTabState> {
