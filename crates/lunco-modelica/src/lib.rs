@@ -863,7 +863,6 @@ pub use ast_extract::{
     extract_parameters_from_ast,
     extract_inputs_with_defaults,
     extract_inputs_with_defaults_from_ast,
-    substitute_params_in_source,
     hash_content,
 };
 // `strip_input_defaults` is already imported via `use self::ast_extract::strip_input_defaults`

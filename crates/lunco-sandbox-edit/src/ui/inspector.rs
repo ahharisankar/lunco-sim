@@ -171,10 +171,10 @@ fn inspector_content(_panel: &mut Inspector, ui: &mut egui::Ui, world: &mut Worl
 
         // ── Modelica parameters component ───────────────────────────
         // Tunable Real parameters from the entity's Modelica model.
-        // Edits bake new values into the source via
-        // `substitute_params_in_source` and fire `UpdateParameters` at
-        // the worker, which recompiles and reseeds the stepper —
-        // same flow as lunco-modelica's Telemetry panel.
+        // Edits dispatch a `ModelicaOp::SetParameter` through the
+        // canonical op pipeline (span-patch + AST refresh + index
+        // patch + journal) and fire `UpdateParameters` at the worker,
+        // which recompiles and reseeds the stepper.
         let has_modelica = world
             .query::<&lunco_modelica::ModelicaModel>()
             .get(world, entity)
@@ -203,17 +203,19 @@ fn inspector_content(_panel: &mut Inspector, ui: &mut egui::Ui, world: &mut Worl
     }
 
 /// Render editable sliders for every tunable `parameter Real` in the
-/// entity's Modelica model. On any change, substitute the new values
-/// into the source, checkpoint into `ModelicaDocumentRegistry`, and
-/// send an `UpdateParameters` command to the worker.
+/// entity's Modelica model. On any change, dispatch a
+/// [`ModelicaOp::SetParameter`] through the canonical op pipeline
+/// (which span-patches the source, refreshes the AST cache, patches
+/// the index, and journals) and signal the worker to recompile.
 fn modelica_parameters_section(
     ui: &mut egui::Ui,
     world: &mut World,
     entity: Entity,
 ) {
     use lunco_modelica::ui::ModelicaDocumentRegistry;
+    use lunco_modelica::ui::panels::canvas_diagram::ops::apply_ops_public;
+    use lunco_modelica::document::ModelicaOp;
     use lunco_modelica::{ModelicaChannels, ModelicaCommand, ModelicaModel};
-    use std::collections::HashMap;
 
     // Snapshot the current params so we can render stable sliders
     // without holding a mutable borrow across the UI.
@@ -251,42 +253,59 @@ fn modelica_parameters_section(
 
     let Some((changed_key, new_value)) = changed_pair else { return };
 
-    // Apply the change: mutate the component, bump session id, gather
-    // the data needed to build an UpdateParameters command.
+    // Mirror the new value into ECS state for instant slider feedback;
+    // bump session id so the worker treats this as a fresh stepping
+    // generation.
     let mut session_id = 0u64;
-    let mut new_params: HashMap<String, f64> = HashMap::new();
     if let Ok(mut m) = world.query::<&mut ModelicaModel>().get_mut(world, entity) {
         if let Some(slot) = m.parameters.get_mut(&changed_key) {
             *slot = new_value;
         }
         m.session_id += 1;
         session_id = m.session_id;
-        new_params = m.parameters.clone();
         m.is_stepping = true;
     }
 
-    // Canonical source comes from the Document registry. Resolve the
-    // entity's DocumentId first — the registry now keys all lookups by
-    // document id, and the entity map is a secondary reverse index.
-    let (doc_id, source) = {
+    // Resolve doc id + root class from the registry.
+    let (doc_id, class_name) = {
         let registry = world.resource::<ModelicaDocumentRegistry>();
         let doc = registry.document_of(entity);
-        let src = doc
+        let class = doc
             .and_then(|d| registry.host(d))
-            .map(|h| h.document().source().to_string());
-        (doc, src)
+            .and_then(|h| {
+                lunco_modelica::ast_extract::extract_model_name_from_ast(
+                    h.document().syntax().ast(),
+                )
+            });
+        (doc, class)
     };
-    let (Some(doc_id), Some(source)) = (doc_id, source) else { return };
+    let (Some(doc_id), Some(class_name)) = (doc_id, class_name) else { return };
 
-    let new_source = lunco_modelica::ast_extract::substitute_params_in_source(&source, &new_params);
+    // Dispatch through the canonical op pipeline. `param: ""` is the
+    // sentinel for the component's primary binding (the `= expr` after
+    // the name), which is what top-level `parameter Real k = 5;`
+    // declarations need.
+    apply_ops_public(
+        world,
+        doc_id,
+        vec![ModelicaOp::SetParameter {
+            class: class_name,
+            component: changed_key,
+            param: String::new(),
+            value: format!("{new_value}"),
+        }],
+    );
 
-    // Checkpoint the new source into the Document so CodePanel and
-    // other readers see the updated values next frame.
-    world
-        .resource_mut::<ModelicaDocumentRegistry>()
-        .checkpoint_source(doc_id, new_source.clone());
-
-    if let Some(channels) = world.get_resource::<ModelicaChannels>() {
+    // Pull the freshly-patched source back out and signal the worker
+    // to recompile. The op pipeline already updated the source +
+    // generation; this just hands the worker the new bytes.
+    let new_source = world
+        .resource::<ModelicaDocumentRegistry>()
+        .host(doc_id)
+        .map(|h| h.document().source().to_string());
+    if let (Some(new_source), Some(channels)) =
+        (new_source, world.get_resource::<ModelicaChannels>())
+    {
         let _ = channels.tx.send(ModelicaCommand::UpdateParameters {
             entity,
             session_id,

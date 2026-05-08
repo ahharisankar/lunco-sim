@@ -201,8 +201,11 @@ pub fn lookup_class_mut<'a>(
 /// special-case attribute to its dedicated field; everything else goes
 /// through the `modifications` map.
 ///
-/// Today we route only `start` because it's the only attribute the
-/// canvas/inspector edit on the existing op surface. Add a row when a
+/// `param == ""` is the sentinel for the component's *primary
+/// binding* — the `= expr` after the name, used to mutate top-level
+/// parameter declarations like `parameter Real k = 5;`. `param ==
+/// "start"` routes to the dedicated `start` field. Anything else
+/// goes through the generic `modifications` map. Add a row when a
 /// new dedicated field shows up in `Component`.
 ///
 /// **Why parse instead of build the `Expression` by hand:** rumoca's
@@ -231,6 +234,9 @@ pub fn set_parameter(
         })?;
     let expr = parse_value_fragment(value_text)?;
     match param {
+        "" => {
+            comp.binding = Some(expr);
+        }
         "start" => {
             comp.start = expr;
             comp.start_is_modification = true;

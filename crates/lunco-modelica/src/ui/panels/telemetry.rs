@@ -5,7 +5,7 @@ use bevy_egui::egui;
 use lunco_workbench::{Panel, PanelId, PanelSlot};
 use std::collections::HashMap;
 
-use crate::ui::{CompileState, CompileStates, ModelicaDocumentRegistry, WorkbenchState};
+use crate::ui::WorkbenchState;
 use crate::ui::viz::{is_signal_plotted, set_signal_plotted};
 use crate::{ModelicaModel, ModelicaChannels, ModelicaCommand};
 
@@ -159,11 +159,13 @@ impl Panel for TelemetryPanel {
             return;
         }
 
-        // Read model snapshot for display
-        let (model_name, is_paused, current_time, parameters, inputs, descriptions, parameter_bounds) = {
+        // Read model snapshot for display. Parameter editing lives in
+        // `render_selected_components_inspector` (op-pipeline based);
+        // the panel only reads runtime values here.
+        let (model_name, is_paused, current_time, inputs, descriptions, parameter_bounds) = {
             if let Some(model) = world.get::<ModelicaModel>(entity) {
                 (model.model_name.clone(), model.paused, model.current_time,
-                 model.parameters.clone(), model.inputs.clone(),
+                 model.inputs.clone(),
                  model.descriptions.clone(), model.parameter_bounds.clone())
             } else {
                 ui.label("Model not found.");
@@ -212,139 +214,6 @@ impl Panel for TelemetryPanel {
             }
         });
         ui.separator();
-
-        // Build a leaf → qualified-instance-path map so each
-        // parameter row labels with the component it belongs to
-        // (`tank.m_initial`, `engine.Isp`, …) instead of bare
-        // `m_initial` / `Isp`. Uses the workspace engine for cross-
-        // doc type resolution, same as the variables flatten.
-        let param_path: HashMap<String, String> = {
-            let doc_opt = world
-                .get_resource::<lunco_workbench::WorkspaceResource>()
-                .and_then(|w| w.active_document);
-            if let Some(doc_id) = doc_opt {
-                let ast = world
-                    .get_resource::<ModelicaDocumentRegistry>()
-                    .and_then(|r| r.host(doc_id))
-                    .map(|h| h.document().syntax().ast().clone());
-                let model_short = ast.as_ref().and_then(|a| {
-                    crate::ast_extract::extract_model_name_from_ast(a).map(|m| {
-                        m.rsplit('.').next().unwrap_or(&m).to_string()
-                    })
-                });
-                let engine = world
-                    .get_resource::<crate::engine_resource::ModelicaEngineHandle>()
-                    .cloned();
-                match (ast, model_short, engine) {
-                    (Some(ast), Some(short), Some(engine)) => {
-                        crate::ast_extract::extract_flat_parameters_with_resolver(
-                            &ast,
-                            &short,
-                            |t| engine.lock().class_def(t),
-                        )
-                        .into_iter()
-                        .map(|(qual, leaf)| (leaf, qual))
-                        .collect()
-                    }
-                    _ => HashMap::new(),
-                }
-            } else {
-                HashMap::new()
-            }
-        };
-
-        // Parameters
-        if !parameters.is_empty() {
-            ui.label("Parameters (Dynamic Tuning):");
-            // Resizable horizontal divider below the params list —
-            // the user drags the bar between Parameters and the
-            // sections below to claim more vertical space for whichever
-            // they're focused on. Height persists across sessions via
-            // egui memory.
-            resizable_v_section(ui, "params_height", 150.0, |ui| {
-                egui::ScrollArea::vertical().id_salt("params_scroll").auto_shrink([false, false]).show(ui, |ui| {
-                    let mut param_keys: Vec<_> = parameters.keys().cloned().collect();
-                    param_keys.sort();
-                    // Grid: column 0 = label (auto-fits longest name),
-                    // column 1 = DragValue stretched to fill remaining
-                    // width. Striped rows for legibility on long lists.
-                    egui::Grid::new("params_grid")
-                        .num_columns(2)
-                        .striped(true)
-                        .spacing([8.0, 4.0])
-                        .show(ui, |ui| {
-                            for key in &param_keys {
-                                let val = parameters.get(key).copied().unwrap_or(0.0);
-                                let display = param_path
-                                    .get(key)
-                                    .cloned()
-                                    .unwrap_or_else(|| key.clone());
-                                let label = egui::Label::new(display)
-                                    .sense(egui::Sense::hover());
-                                let resp = ui.add(label);
-                                if let Some(desc) = lookup_desc(&descriptions, key) {
-                                    resp.on_hover_text(desc);
-                                }
-                                let mut v = val;
-                                let (mn, mx) = lookup_bounds(&parameter_bounds, key);
-                                let dv = egui::DragValue::new(&mut v)
-                                    .speed(0.01)
-                                    .fixed_decimals(2)
-                                    .range(
-                                        mn.unwrap_or(f64::NEG_INFINITY)
-                                            ..=mx.unwrap_or(f64::INFINITY),
-                                    );
-                                let avail = ui.available_width().max(60.0);
-                                let resp = ui.add_sized([avail, 20.0], dv);
-                                ui.end_row();
-                                if resp.changed() {
-                                    let mut trigger_update = false;
-                                    let mut model_name = String::new();
-                                    let mut session_id = 0;
-                                    let mut new_params = HashMap::new();
-                                    let (doc_id, source) = {
-                                        let registry = world.resource::<ModelicaDocumentRegistry>();
-                                        let doc = registry.document_of(entity);
-                                        let src = doc.and_then(|d| registry.host(d))
-                                            .map(|h| h.document().source().to_string());
-                                        (doc, src)
-                                    };
-                                    if let Ok(mut m) = world.query::<&mut ModelicaModel>().get_mut(world, entity) {
-                                        if let Some(p) = m.parameters.get_mut(key) {
-                                            *p = v;
-                                            trigger_update = true;
-                                            model_name = m.model_name.clone();
-                                            m.session_id += 1;
-                                            session_id = m.session_id;
-                                            new_params = m.parameters.clone();
-                                            m.is_stepping = true;
-                                        }
-                                    }
-                                    if trigger_update {
-                                        if let (Some(doc), Some(source)) = (doc_id, source) {
-                                            let new_source = crate::ast_extract::substitute_params_in_source(&source, &new_params);
-                                            world
-                                                .resource_mut::<ModelicaDocumentRegistry>()
-                                                .checkpoint_source(doc, new_source.clone());
-                                            world
-                                                .resource_mut::<CompileStates>()
-                                                .set(doc, CompileState::Compiling);
-                                            if let Some(channels) = world.get_resource::<ModelicaChannels>() {
-                                                let _ = channels.tx.send(ModelicaCommand::UpdateParameters {
-                                                    entity,
-                                                    session_id,
-                                                    model_name,
-                                                    source: new_source,
-                                                });
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        });
-                });
-            });
-        }
 
         // Inputs
         if !inputs.is_empty() {

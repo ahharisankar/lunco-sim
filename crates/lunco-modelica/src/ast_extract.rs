@@ -396,67 +396,6 @@ fn collect_input_binding_ranges(
     }
 }
 
-/// Substitute parameter values into Modelica source code.
-///
-/// Replaces `parameter <type> <name> = <value>` declarations with the
-/// given numeric values, enabling recompilation with different
-/// parameter values. Walks the parsed AST to find each parameter
-/// component matching `parameters`'s keys and splices its
-/// `= <expr>` range with `= <new_value>` (via
-/// [`rumoca_session::parsing::ast::Component::binding_range_with_equals`]).
-///
-/// TODO(rumoca-runtime-override): even AST-driven, this is a
-/// workaround for rumoca not accepting parameter overrides at
-/// simulation time. The cleanest fix exposes
-/// `Session::set_runtime_overrides(HashMap<SymbolPath, Value>)` — at
-/// which point this function disappears entirely. See
-/// REFACTOR_PLAN.md upstream ask #7.
-pub fn substitute_params_in_source(source: &str, parameters: &HashMap<String, f64>) -> String {
-    if parameters.is_empty() {
-        return source.to_string();
-    }
-    let Some(ast) = parse(source) else {
-        return source.to_string();
-    };
-    // Collect (range, new-value) pairs, then splice in reverse order
-    // so earlier offsets stay valid.
-    let mut edits: Vec<(usize, usize, String)> = Vec::new();
-    collect_param_substitution_edits(&ast.classes, source, parameters, &mut edits);
-    edits.sort_by_key(|(start, _, _)| *start);
-    let mut modified = source.to_string();
-    for (start, end, replacement) in edits.into_iter().rev() {
-        if end <= modified.len() && start <= end {
-            modified.replace_range(start..end, &replacement);
-        }
-    }
-    modified
-}
-
-fn collect_param_substitution_edits(
-    classes: &indexmap::IndexMap<String, ClassDef>,
-    source: &str,
-    parameters: &HashMap<String, f64>,
-    out: &mut Vec<(usize, usize, String)>,
-) {
-    for class in classes.values() {
-        for component in class.components.values() {
-            if !matches!(component.variability, Variability::Parameter(_)) {
-                continue;
-            }
-            let Some(new_value) = parameters.get(&component.name) else {
-                continue;
-            };
-            let Some((start, end)) = component.binding_range_with_equals(source) else {
-                continue;
-            };
-            // Replace the whole `= <old>` range with `= <new>` —
-            // single space matches the formatter convention.
-            out.push((start, end, format!(" = {}", new_value)));
-        }
-        collect_param_substitution_edits(&class.classes, source, parameters, out);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Internal AST walkers
 // ---------------------------------------------------------------------------
@@ -566,71 +505,6 @@ pub fn extract_flat_variables_from_ast(
     };
     let mut out = Vec::new();
     walk_flat_vars(root, ast, "", parameters, &mut out);
-    out
-}
-
-/// Same flatten as [`extract_flat_variables_from_ast`] but for
-/// parameters — emits `(qualified_instance_path, leaf_name)` pairs
-/// like `("tank.m_initial", "m_initial")` so the UI can show
-/// users *which* component a parameter belongs to without losing
-/// the leaf identity that the existing edit / substitute pipeline
-/// expects. Top-level params on the root class come back with the
-/// leaf as the qualified path (no prefix).
-pub fn extract_flat_parameters_with_resolver(
-    ast: &StoredDefinition,
-    root_class_short_name: &str,
-    mut resolve_class: impl FnMut(&str) -> Option<ClassDef>,
-) -> Vec<(String, String)> {
-    let Some(root) = find_class_by_short_name(ast, root_class_short_name).cloned() else {
-        return Vec::new();
-    };
-    let mut out: Vec<(String, String)> = Vec::new();
-    let mut work: Vec<(ClassDef, String)> = vec![(root, String::new())];
-    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
-    while let Some((class, prefix)) = work.pop() {
-        for component in class.components.values() {
-            let is_input = matches!(component.causality, Causality::Input(_));
-            if is_input {
-                continue;
-            }
-            let qualified = if prefix.is_empty() {
-                component.name.clone()
-            } else {
-                format!("{prefix}{}", component.name)
-            };
-            let is_parameter = matches!(component.variability, Variability::Parameter(_));
-            let is_constant = matches!(component.variability, Variability::Constant(_));
-            if is_parameter || is_constant {
-                out.push((qualified, component.name.clone()));
-                continue;
-            }
-            // Non-parameter scalar — recurse into its type to find
-            // nested parameters. Same in-doc-then-cross-doc lookup
-            // as the variable walker.
-            let type_short = component
-                .type_name
-                .name
-                .last()
-                .map(|tok| tok.text.clone());
-            let type_qualified: String = component
-                .type_name
-                .name
-                .iter()
-                .map(|tok| tok.text.clone())
-                .collect::<Vec<_>>()
-                .join(".");
-            let in_doc = type_short
-                .as_deref()
-                .and_then(|n| find_class_by_short_name(ast, n))
-                .cloned();
-            let resolved = in_doc.or_else(|| resolve_class(&type_qualified));
-            if let Some(nested) = resolved {
-                if visited.insert(qualified.clone()) {
-                    work.push((nested, format!("{qualified}.")));
-                }
-            }
-        }
-    }
     out
 }
 
