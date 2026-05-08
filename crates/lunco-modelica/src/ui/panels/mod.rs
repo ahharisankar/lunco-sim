@@ -15,3 +15,4 @@ pub mod inspector;
 pub mod palette;
 pub mod welcome;
 pub mod placeholder;
+pub mod experiments;

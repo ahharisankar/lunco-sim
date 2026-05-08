@@ -709,6 +709,8 @@ impl Plugin for ModelicaUiPlugin {
             .register_panel(panels::console::ConsolePanel)
             .register_panel(panels::diagnostics::DiagnosticsPanel)
             .register_panel(panels::journal::JournalPanel)
+            .register_panel(panels::experiments::ExperimentsPanel)
+            .init_resource::<panels::experiments::ExperimentVisibility>()
             .register_panel(panels::canvas_diagram::CanvasDiagramPanel)
             .init_resource::<panels::canvas_diagram::CanvasDiagramState>()
             .init_resource::<panels::canvas_diagram::PaletteSettings>()

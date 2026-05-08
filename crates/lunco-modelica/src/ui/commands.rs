@@ -399,6 +399,7 @@ register_commands!(
     on_duplicate_active_doc,
     on_duplicate_model_from_read_only,
     on_exit,
+    on_fast_run_active_model,
     on_fit_canvas,
     on_focus_component,
     on_focus_document_by_name,
@@ -3066,6 +3067,130 @@ fn on_resume_active_model(trigger: On<ResumeActiveModel>, mut commands: Commands
                 model.paused = false;
             }
         }
+    });
+}
+
+/// Fast Run — compile + simulate end-to-end off-thread (Web Worker on
+/// wasm, std::thread on native). The result is stored as an Experiment
+/// in [`lunco_experiments::ExperimentRegistry`]. See
+/// `docs/architecture/25-experiments.md`.
+#[Command(default)]
+pub struct FastRunActiveModel {
+    pub doc: DocumentId,
+}
+
+#[on_command(FastRunActiveModel)]
+fn on_fast_run_active_model(trigger: On<FastRunActiveModel>, mut commands: Commands) {
+    use lunco_experiments::ExperimentRunner;
+    let raw = trigger.event().doc;
+    commands.queue(move |world: &mut World| {
+        let Some(doc) = (if raw.is_unassigned() {
+            resolve_active_doc(world)
+        } else {
+            Some(raw)
+        }) else {
+            bevy::log::warn!("[FastRunActiveModel] no active document");
+            return;
+        };
+
+        // Resolve source + target class.
+        let registry = world.resource::<crate::ui::state::ModelicaDocumentRegistry>();
+        let host = match registry.host(doc) {
+            Some(h) => h,
+            None => {
+                bevy::log::warn!("[FastRunActiveModel] doc {} not in registry", doc.raw());
+                return;
+            }
+        };
+        let document = host.document();
+        let source = document.source().to_string();
+        let filename = document.origin().display_name().to_string();
+        // Pick the first non-package top-level class as the target.
+        // Future: respect the class picker / drilled-in tab state.
+        let model_name = document
+            .strict_ast()
+            .and_then(|ast| {
+                ast.classes
+                    .iter()
+                    .find(|(_, c)| {
+                        !matches!(
+                            c.class_type,
+                            rumoca_session::parsing::ast::ClassType::Package
+                        )
+                    })
+                    .map(|(n, _)| n.clone())
+            })
+            .unwrap_or_default();
+        if model_name.is_empty() {
+            bevy::log::warn!(
+                "[FastRunActiveModel] doc {} has no compilable top-level class",
+                doc.raw()
+            );
+            return;
+        }
+
+        let model_ref = lunco_experiments::ModelRef(model_name.clone());
+
+        // Snapshot source into the runner so the worker thread / web
+        // worker can compile without touching the live editor state.
+        let runner_res = match world.get_resource::<crate::ModelicaRunnerResource>() {
+            Some(r) => r.clone(),
+            None => {
+                bevy::log::error!("[FastRunActiveModel] runner resource missing");
+                return;
+            }
+        };
+        runner_res.0.set_model_source(
+            model_ref.clone(),
+            crate::experiments_runner::ModelSource {
+                model_name: model_name.clone(),
+                source,
+                filename,
+                extras: Vec::new(),
+            },
+        );
+
+        // Bounds default from runner-side annotation cache (populated
+        // after a successful Compile via set_model_defaults). Fallback
+        // 0..1.
+        let bounds = runner_res
+            .0
+            .default_bounds(&model_ref)
+            .unwrap_or_else(|| lunco_experiments::RunBounds {
+                t_start: 0.0,
+                t_end: 1.0,
+                dt: None,
+                tolerance: None,
+                solver: None,
+            });
+
+        // Insert experiment + dispatch run.
+        let twin_id = lunco_experiments::TwinId("default".into());
+        let exp_id = {
+            let mut reg = world.resource_mut::<lunco_experiments::ExperimentRegistry>();
+            reg.insert_new(twin_id, model_ref, Default::default(), bounds)
+        };
+        let exp = world
+            .resource::<lunco_experiments::ExperimentRegistry>()
+            .get(exp_id)
+            .cloned();
+        let Some(exp) = exp else {
+            bevy::log::error!("[FastRunActiveModel] experiment vanished after insert");
+            return;
+        };
+
+        let handle = runner_res.0.run_fast(&exp);
+        // Store the handle so a draining system can pump updates into
+        // registry status.
+        world
+            .resource_mut::<crate::experiments_runner::PendingHandles>()
+            .0
+            .push(handle);
+        bevy::log::info!(
+            "[FastRunActiveModel] dispatched run {:?} for class '{}'",
+            exp_id,
+            model_name
+        );
     });
 }
 

@@ -1118,6 +1118,7 @@ fn render_unified_toolbar(
 
     // Collect button presses without touching world inside the closure.
     let mut compile_clicked = false;
+    let mut fast_run_clicked = false;
     let mut undo_clicked = false;
     let mut redo_clicked = false;
     let mut dismiss_error = false;
@@ -1257,6 +1258,33 @@ fn render_unified_toolbar(
             .on_hover_text("Compile the current model and run it (F5)")
             .clicked();
 
+        // Fast Run — batch simulation off-thread (Web Worker on wasm,
+        // std::thread on native). Independent of the realtime
+        // Interactive stepping. Bounds come from the model's
+        // `experiment(...)` annotation; fallback 0..1.
+        // See docs/architecture/25-experiments.md.
+        let runner_busy = world
+            .get_resource::<crate::ModelicaRunnerResource>()
+            .map(|r| r.0.is_busy())
+            .unwrap_or(false);
+        let fast_enabled = compile_enabled && !runner_busy;
+        let fast_label = if compact {
+            "⏩".to_string()
+        } else if runner_busy {
+            "⏩ Fast (busy)".to_string()
+        } else {
+            "⏩ Fast".to_string()
+        };
+        fast_run_clicked = ui
+            .add_enabled(fast_enabled, egui::Button::new(fast_label))
+            .on_hover_text(
+                "Fast Run: compile + simulate end-to-end as fast as possible. \
+                 Result lands in the Experiments registry; multiple runs can be \
+                 plotted together. Bounds default from the model's experiment(...) \
+                 annotation.",
+            )
+            .clicked();
+
         // Run-control group. Only meaningful once a stepper exists
         // (i.e. the model compiled and linked a ModelicaModel
         // component). Before that, the worker has nothing to pause or
@@ -1368,6 +1396,11 @@ fn render_unified_toolbar(
         world
             .commands()
             .trigger(crate::ui::commands::AutoArrangeDiagram { doc });
+    }
+    if fast_run_clicked {
+        world
+            .commands()
+            .trigger(crate::ui::commands::FastRunActiveModel { doc });
     }
     if compile_clicked {
         match new_view_mode {

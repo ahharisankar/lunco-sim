@@ -29,10 +29,12 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use bevy::prelude::*;
 use crossbeam_channel::{Sender, unbounded};
 use lunco_experiments::{
-    Experiment, ExperimentId, ExperimentRunner, ModelRef, ParamPath, ParamValue,
-    RunBounds, RunHandle, RunMeta, RunResult, RunUpdate,
+    Experiment, ExperimentId, ExperimentRegistry, ExperimentRunner, ModelRef, ParamPath,
+    ParamValue, RunBounds, RunCancelled, RunCompleted, RunFailed, RunHandle, RunMeta,
+    RunProgress, RunResult, RunStatus, RunUpdate,
 };
 
 /// Bound to the model source kept by the runner. The runner doesn't
@@ -569,6 +571,82 @@ fn replace_param_literal(
     out.push_str(new_literal);
     out.push_str(&source[head_end + end_off..]);
     Ok(out)
+}
+
+/// Bevy resource holding RunHandles for in-flight experiments.
+/// Drained each Update by [`drain_pending_handles`]: terminal updates
+/// get written back into the registry + emitted as Bevy messages.
+#[derive(Resource, Default)]
+pub struct PendingHandles(pub Vec<RunHandle>);
+
+/// Bevy system: drain RunUpdate messages from each pending handle,
+/// update the registry status, and emit lifecycle Bevy messages
+/// (`RunProgress` / `RunCompleted` / `RunFailed` / `RunCancelled`).
+/// Removes handles whose runs have terminated.
+pub fn drain_pending_handles(
+    mut pending: ResMut<PendingHandles>,
+    mut registry: ResMut<ExperimentRegistry>,
+    mut ev_progress: MessageWriter<RunProgress>,
+    mut ev_completed: MessageWriter<RunCompleted>,
+    mut ev_failed: MessageWriter<RunFailed>,
+    mut ev_cancelled: MessageWriter<RunCancelled>,
+) {
+    let mut keep: Vec<RunHandle> = Vec::with_capacity(pending.0.len());
+    for handle in pending.0.drain(..) {
+        let mut terminal = false;
+        while let Ok(update) = handle.progress_rx.try_recv() {
+            match update {
+                RunUpdate::Progress { t_current } => {
+                    registry.set_status(handle.run_id, RunStatus::Running { t_current });
+                    ev_progress.write(RunProgress {
+                        experiment_id: handle.run_id,
+                        t_current,
+                    });
+                }
+                RunUpdate::Completed(result) => {
+                    let wall = result.meta.wall_time_ms;
+                    registry.set_result(handle.run_id, result);
+                    registry.set_status(
+                        handle.run_id,
+                        RunStatus::Done { wall_time_ms: wall },
+                    );
+                    ev_completed.write(RunCompleted {
+                        experiment_id: handle.run_id,
+                    });
+                    terminal = true;
+                }
+                RunUpdate::Failed { error, partial } => {
+                    let had_partial = partial.is_some();
+                    if let Some(p) = partial {
+                        registry.set_result(handle.run_id, p);
+                    }
+                    registry.set_status(
+                        handle.run_id,
+                        RunStatus::Failed {
+                            error: error.clone(),
+                            partial: had_partial,
+                        },
+                    );
+                    ev_failed.write(RunFailed {
+                        experiment_id: handle.run_id,
+                        error,
+                    });
+                    terminal = true;
+                }
+                RunUpdate::Cancelled => {
+                    registry.set_status(handle.run_id, RunStatus::Cancelled);
+                    ev_cancelled.write(RunCancelled {
+                        experiment_id: handle.run_id,
+                    });
+                    terminal = true;
+                }
+            }
+        }
+        if !terminal {
+            keep.push(handle);
+        }
+    }
+    pending.0 = keep;
 }
 
 #[cfg(test)]
