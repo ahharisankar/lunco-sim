@@ -15,7 +15,7 @@ use crate::document::ModelicaOp;
 use crate::ui::state::{ModelicaDocumentRegistry, WorkbenchState};
 use crate::ui::theme::ModelicaThemeExt;
 
-use super::loads::{DrillInLoads, DrilledInClassNames, DuplicateLoads, drill_into_class};
+use super::loads::{DrillInLoads, DuplicateLoads, drill_into_class};
 use super::node::IconNodeData;
 use super::ops::{self, apply_ops_public};
 use super::projection::{
@@ -139,8 +139,8 @@ impl Panel for CanvasDiagramPanel {
                 .and_then(|(_, drilled)| drilled)
                 .or_else(|| {
                     world
-                        .get_resource::<DrilledInClassNames>()
-                        .and_then(|m| m.get(doc_id).map(str::to_string))
+                        .get_resource::<crate::ui::panels::model_view::ModelTabs>()
+                        .and_then(|t| t.drilled_class_for_doc(doc_id))
                 });
             let target_changed = live_target != docstate.last_seen_target;
             // Hash-skip: when the gen bumped but the projection-
@@ -278,8 +278,8 @@ impl Panel for CanvasDiagramPanel {
                 .and_then(|(_, drilled)| drilled)
                 .or_else(|| {
                     world
-                        .get_resource::<DrilledInClassNames>()
-                        .and_then(|m| m.get(doc_id).map(str::to_string))
+                        .get_resource::<crate::ui::panels::model_view::ModelTabs>()
+                        .and_then(|t| t.drilled_class_for_doc(doc_id))
                 });
             // Snapshot the auto-layout grid so the bg task can fall
             // back to configurable spacing for components without a
@@ -1240,8 +1240,8 @@ impl CanvasDiagramPanel {
                         // class. Same fallback the palette click uses.
                         let class = editing_class.clone().unwrap_or_else(|| {
                             world
-                                .get_resource::<DrilledInClassNames>()
-                                .and_then(|m| m.get(doc_id).map(str::to_string))
+                                .get_resource::<crate::ui::panels::model_view::ModelTabs>()
+                                .and_then(|t| t.drilled_class_for_doc(doc_id))
                                 .or_else(|| {
                                     let registry =
                                         world.resource::<crate::ui::state::ModelicaDocumentRegistry>();

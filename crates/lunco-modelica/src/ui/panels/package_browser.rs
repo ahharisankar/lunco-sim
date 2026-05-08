@@ -2698,13 +2698,12 @@ pub(crate) fn render_root_subtree(world: &mut World, ui: &mut egui::Ui, root_id:
     // package, `AnnotatedRocketStage` when the package itself is
     // selected. Used for tree-row highlighting so the inner-class
     // bundled rows light up alongside their containing file.
+    // B.3: derive from `ModelTabs`.
     let active_drill: Option<String> = world
         .get_resource::<lunco_workbench::WorkspaceResource>()
         .and_then(|ws| ws.active_document)
         .and_then(|doc| {
-            world
-                .get_resource::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
-                .and_then(|m| m.get(doc).map(str::to_string))
+            crate::ui::panels::model_view::drilled_class_for_doc(world, doc)
         });
     let active_drill_ref = active_drill.as_deref();
     let theme = world

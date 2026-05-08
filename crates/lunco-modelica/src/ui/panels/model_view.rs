@@ -1505,9 +1505,8 @@ fn render_docs_view(ui: &mut egui::Ui, world: &mut World) {
     ) = match doc_id {
         None => (None, None, None, None),
         Some(doc) => {
-            let drilled = world
-                .get_resource::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
-                .and_then(|m| m.get(doc).map(str::to_string));
+            // B.3: derive from `ModelTabs`.
+            let drilled = drilled_class_for_doc(world, doc);
             // All four fields read from the per-doc Index. Description
             // and Documentation(info=, revisions=) are pre-extracted
             // during rebuild — no AST walk per render.

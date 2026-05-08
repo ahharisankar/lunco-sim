@@ -12,7 +12,8 @@ use crate::ui::state::{ModelicaDocumentRegistry, WorkbenchState};
 use crate::ui::theme::ModelicaThemeExt;
 
 use super::active_doc_from_world;
-use super::loads::DrilledInClassNames;
+// B.3: `DrilledInClassNames` reads migrated to
+// `crate::ui::panels::model_view::drilled_class_for_doc`.
 
 /// Rendered while a background file-read (and subsequent
 /// `ReplaceSource` re-parse) is running for a drill-in target.
@@ -204,10 +205,9 @@ pub(super) fn render_empty_diagram_overlay(
     // loading) or the active class isn't in the index.
     let counts = {
         let active_doc = active_doc_from_world(world);
+        // B.3: derive from `ModelTabs`.
         let drilled = active_doc.and_then(|doc| {
-            world
-                .get_resource::<DrilledInClassNames>()
-                .and_then(|m| m.get(doc).map(str::to_string))
+            crate::ui::panels::model_view::drilled_class_for_doc(world, doc)
         });
         let registry = world.resource::<ModelicaDocumentRegistry>();
         active_doc

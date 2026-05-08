@@ -888,9 +888,8 @@ pub(super) fn render_target(
     let doc = world
         .resource::<lunco_workbench::WorkspaceResource>()
         .active_document?;
-    let drilled = world
-        .get_resource::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
-        .and_then(|m| m.get(doc).map(str::to_string));
+    // B.3: derive from `ModelTabs`.
+    let drilled = crate::ui::panels::model_view::drilled_class_for_doc(world, doc);
     Some((doc, drilled))
 }
 

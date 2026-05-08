@@ -14,7 +14,8 @@ use crate::ui::state::{ModelicaDocumentRegistry, WorkbenchState};
 use crate::visual_diagram::MSLComponentDef;
 
 use super::coords::{ModelicaPos, canvas_to_modelica};
-use super::loads::DrilledInClassNames;
+// B.3: `DrilledInClassNames` reads migrated to
+// `crate::ui::panels::model_view::drilled_class_for_doc`.
 use super::port::{port_fallback_offset_for_size, port_kind_str, resolve_port_icons};
 use super::projection::{project_scene, projection_relevant_source_hash};
 use super::{CanvasDiagramState, IconNodeData, active_doc_from_world};
@@ -56,9 +57,9 @@ pub(super) fn resolve_doc_context(world: &World) -> (Option<lunco_doc::DocumentI
     // (AnnotatedRocketStage, every MSL example, …) is the *package*
     // wrapper. Adding a component to a package corrupts the file —
     // packages can only contain classes, not components.
-    let drilled_in = world
-        .get_resource::<DrilledInClassNames>()
-        .and_then(|m| m.get(doc_id).map(str::to_string));
+    // B.3: derive from `ModelTabs`.
+    let drilled_in =
+        crate::ui::panels::model_view::drilled_class_for_doc(world, doc_id);
     let open = world.resource::<WorkbenchState>().open_model.as_ref();
     let class = drilled_in
         .or_else(|| {
@@ -988,10 +989,9 @@ pub(super) fn auto_arrange_now(world: &mut World, doc_id: lunco_doc::DocumentId)
 /// the drilled-in class name (for MSL drill-in tabs); falls back to
 /// the open document's detected model name.
 pub(super) fn active_class_for_doc(world: &mut World, doc_id: lunco_doc::DocumentId) -> Option<String> {
-    if let Some(m) = world.get_resource::<DrilledInClassNames>() {
-        if let Some(c) = m.get(doc_id) {
-            return Some(c.to_string());
-        }
+    // B.3: derive from `ModelTabs`.
+    if let Some(c) = crate::ui::panels::model_view::drilled_class_for_doc(world, doc_id) {
+        return Some(c);
     }
     world
         .get_resource::<WorkbenchState>()

@@ -3137,9 +3137,8 @@ fn on_add_canvas_plot(trigger: On<AddCanvasPlot>, mut commands: Commands) {
         // does — drill-in target wins, then the workbench's
         // detected name. Empty class is a hard error: every plot
         // tile lives inside a specific class's Diagram annotation.
-        let class = world
-            .get_resource::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
-            .and_then(|m| m.get(doc).map(str::to_string))
+        // B.3: derive from `ModelTabs`.
+        let class = crate::ui::panels::model_view::drilled_class_for_doc(world, doc)
             .or_else(|| {
                 world
                     .get_resource::<crate::ui::WorkbenchState>()
@@ -3795,9 +3794,8 @@ fn on_move_component(trigger: On<MoveComponent>, mut commands: Commands) {
             // Mirror canvas_diagram::resolve_doc_context: read the
             // active editing class from the Workbench's open_model
             // detected name if we don't have one explicitly.
-            world
-                .get_resource::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
-                .and_then(|m| m.get(doc_id).map(str::to_string))
+            // B.3: derive from `ModelTabs`.
+            crate::ui::panels::model_view::drilled_class_for_doc(world, doc_id)
                 .or_else(|| {
                     world.get_resource::<crate::ui::WorkbenchState>()
                         .and_then(|s| s.open_model.as_ref().map(|m| m.detected_name.clone()))
