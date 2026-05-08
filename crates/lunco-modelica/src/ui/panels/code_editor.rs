@@ -12,7 +12,7 @@ use crate::ui::{ModelicaDocumentRegistry, WorkbenchState};
 /// Per-tab editor buffer snapshot. Stashed in `EditorBufferState.per_doc`
 /// when the user switches tabs and restored when they switch back, so
 /// in-progress edits survive tab navigation. Without this each tab
-/// switch re-mirrored `open_model.source` and clobbered any
+/// switch re-pulled the doc source and clobbered any
 /// uncommitted typing.
 ///
 /// Lives keyed by `model_path` (the same string `EditorBufferState`
@@ -34,7 +34,8 @@ pub struct TabBuffer {
 pub struct EditorBufferState {
     /// Hash of the source that was loaded into editor_buffer.
     pub source_hash: u64,
-    /// The model_path of the current open_model when buffer was last synced.
+    /// The doc origin path the buffer was last synced from
+    /// (`bundled://…`, `mem://…`, file path).
     pub model_path: String,
     /// Typed doc identity for the current buffer contents.
     /// B.3 phase 6 replacement for the `active_path == buffer.model_path`
@@ -154,7 +155,7 @@ impl EditorBufferState {
 
     /// Pull a previously-saved snapshot for `model_path` into the live
     /// fields. Returns `true` if a snapshot was found (caller can skip
-    /// the `open_model.source` re-sync), `false` otherwise.
+    /// the registry-source re-sync), `false` otherwise.
     pub fn restore_snapshot(&mut self, model_path: &str) -> bool {
         if let Some(snap) = self.per_doc.remove(model_path) {
             self.source_hash = snap.source_hash;
@@ -180,9 +181,9 @@ impl EditorBufferState {
 /// Pull the live source for `path` from the document registry by
 /// `doc` id and stuff it into `EditorBufferState`'s live fields.
 /// Per-tab routing (split views) requires the doc-id keyed lookup —
-/// the legacy `WorkbenchState.open_model`-based variant returned
+/// the legacy active-doc-only variant returned
 /// whichever tab rendered last.
-fn sync_buffer_from_open_model(world: &mut World, path: &str) {
+fn sync_buffer_from_registry(world: &mut World, path: &str) {
     // Resolve the rendering tab's doc the same way the editor body
     // does — TabRenderContext first, active_document fallback.
     let target_doc = world
@@ -247,7 +248,7 @@ impl Panel for CodeEditorPanel {
         // ── Determine what model to show ──
         // Resolve *this tab's* doc via the per-render
         // [`TabRenderContext`] — splits each render in the same
-        // frame, so reading the singleton `WorkbenchState.open_model`
+        // frame, so reading the singleton the registry-by-doc lookup
         // would mirror whichever tab rendered last. Fall back to the
         // workspace-wide active doc for non-tab render paths
         // (welcome screen, no tab open).
@@ -260,7 +261,7 @@ impl Panel for CodeEditorPanel {
                     .and_then(|ws| ws.active_document)
             });
         // Pull display fields from the registry directly — this
-        // bypasses the `WorkbenchState.open_model` snapshot which is
+        // bypasses the the registry-by-doc lookup snapshot which is
         // a singleton stamped by whichever tab rendered last.
         let (display_name, is_read_only, model_path, source_len) = match tab_target
             .and_then(|d| world.resource::<ModelicaDocumentRegistry>().host(d))
@@ -338,9 +339,9 @@ impl Panel for CodeEditorPanel {
         // first few columns hidden behind the left panel boundary.
         let mut model_switched = false;
         if let Some(ref path) = model_path {
-            // Resync from `open_model.source` when either
+            // Resync from the registry source when either
             //   (a) the model itself changed (`model_path` diverged), or
-            //   (b) some other panel mutated `open_model.source` —
+            //   (b) some other panel mutated the registry source —
             //       currently the diagram panel after applying AST
             //       ops — and the content hash now differs from what
             //       this buffer last synced.
@@ -352,7 +353,7 @@ impl Panel for CodeEditorPanel {
             // transitional gap until the code editor writes every
             // keystroke through the Document (its own `EditText` op).
             // External hash from the tab's *own* doc (not the
-            // singleton open_model snapshot) so split-Text panes
+            // registry source) so split-Text panes
             // don't fight over each other's content.
             let external_hash = tab_target
                 .and_then(|d| world.resource::<ModelicaDocumentRegistry>().host(d))
@@ -370,7 +371,7 @@ impl Panel for CodeEditorPanel {
                 // (whatever's in the live fields right now belongs to
                 // the previous `model_path`) before we overwrite.
                 // Try to restore the NEW tab's snapshot first; only
-                // fall back to re-syncing from `open_model.source`
+                // fall back to re-syncing from the registry source
                 // when this is the first time we've seen the tab —
                 // otherwise the user's uncommitted edits get clobbered.
                 if path_changed {
@@ -380,7 +381,7 @@ impl Panel for CodeEditorPanel {
                     drop(buf_state);
                     if restored {
                         // Restored from snapshot — no source pull
-                        // needed. But if `open_model.source` has
+                        // needed. But if the registry source has
                         // diverged since we saved (some other panel
                         // mutated it), the restored buffer is stale
                         // relative to `external_hash`. Detect that
@@ -396,26 +397,26 @@ impl Panel for CodeEditorPanel {
                         let buf_hash = world.resource::<EditorBufferState>().source_hash;
                         if buf_hash == external_hash {
                             // In sync; nothing more to do.
-                            // (Skip the open_model re-sync below.)
+                            // (Skip the registry-source re-sync below.)
                         } else {
                             // External edit happened while this tab
                             // was hidden; drop the stale snapshot
                             // and pull the fresh source.
-                            sync_buffer_from_open_model(world, path);
+                            sync_buffer_from_registry(world, path);
                         }
                     } else {
-                        sync_buffer_from_open_model(world, path);
+                        sync_buffer_from_registry(world, path);
                     }
                 } else {
                     // Same tab, but content hash diverged (some
-                    // panel mutated `open_model.source` — typically
+                    // panel mutated the registry source — typically
                     // the diagram panel after applying AST ops).
                     // Pull the fresh source. This still clobbers
                     // uncommitted text edits for now; the long-term
                     // fix is to write every keystroke through a
                     // Document op so the buffer never diverges from
                     // the doc to begin with.
-                    sync_buffer_from_open_model(world, path);
+                    sync_buffer_from_registry(world, path);
                 }
             }
         }
@@ -975,8 +976,8 @@ impl Panel for CodeEditorPanel {
             // ran per-edit). `detected_name` is updated through the
             // worker-parsed AST path on commit/flush; the live UI
             // consumers (inspector, model_view, package_browser,
-            // canvas overlays) all read `WorkbenchState.open_model
-            // .detected_name`, which is refreshed off-thread.
+            // canvas overlays) read it from the per-doc Index on
+            // the registry, which is refreshed off-thread.
             // Mark the buffer as dirty vs. the document. The flush
             // block below only commits once `now - pending_commit_at
             // >= EDIT_DEBOUNCE_SEC`, so a burst of typing resets this

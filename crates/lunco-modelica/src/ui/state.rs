@@ -122,20 +122,6 @@ pub struct WorkbenchState {
     /// [`lunco_workbench::WorkspaceResource::active_document`]. This
     /// field is a pre-flattened view of the registry's
     /// `host(active).document()` plus a few open-time-only fields
-    /// (display_name / model_path / read_only / library) that come
-    /// from the file-load path.
-    ///
-    /// Volatile fields (source / line_starts / detected_name) are
-    /// *re-derived from the registry every Update tick* by
-    /// [`mirror_active_open_model`] so a stale view is structurally
-    /// impossible. Static fields are still set by the file-load
-    /// path and are not mirrored — they don't change.
-    ///
-    /// Long term this struct should disappear: every reader migrates
-    /// to `WorkspaceResource.active_document` + a
-    /// `TabMetas`-keyed-by-`DocumentId` lookup. The 91 existing read
-    /// callsites make that a deliberate refactor; the mirror system
-    /// is the half-step that buys correctness now.
     // B.3 phase 6 (2026-05-08): `open_model` field retired.
     // All readers migrated to derive from
     // `ModelicaDocumentRegistry::host(doc).document()` directly.
@@ -343,9 +329,6 @@ pub fn display_name_for(world: &bevy::prelude::World, doc: DocumentId) -> Option
 /// - `EditorBufferState.text` — the egui TextEdit working buffer
 ///   (keystroke-responsive; committed into the Document on focus-loss
 ///   or Compile).
-/// - `WorkbenchState.open_model.source` — the library browser's
-///   "current file" slot, used before any compile/spawn. Will fold into
-///   the registry once file-open creates a Document directly.
 #[derive(Resource, Default)]
 pub struct ModelicaDocumentRegistry {
     hosts: HashMap<DocumentId, DocumentHost<ModelicaDocument>>,
@@ -667,54 +650,10 @@ impl Default for WorkbenchState {
     }
 }
 
-/// Mirror system — Fix 3, half-step.
-///
-/// Every Update tick, re-derive the volatile fields of
-/// [`WorkbenchState::open_model`] (`source`, `line_starts`,
-/// `detected_name`) from the registry's `host(active_document)`.
-/// Static fields (`model_path`, `display_name`, `read_only`,
-/// `library`, `cached_galley`) are left alone — those are set once
-/// at open time by the file-load path and don't drift.
-///
-/// Why this exists
-/// ---------------
-/// `open_model` is read by ~91 callsites scattered across canvas,
-/// code editor, ops, overlays, etc. For most of the codebase's
-/// history those reads were authoritative — the file-load path was
-/// the only writer, so the snapshot was always fresh. Then the
-/// diagram-edit path started mutating `open_model.source` directly
-/// after `apply_ops` (see `canvas_diagram/ops.rs` ~line 843), which
-/// works but adds a second writer. Add a third (e.g., undo/redo,
-/// API-driven `SetDocumentSource`) and you have a *replicated state*
-/// problem: each writer has to remember to update the mirror, and
-/// missing one anywhere produces stale reads.
-///
-/// The proper fix is to delete `open_model` and have every reader
-/// pull from the registry. That's a 91-callsite refactor; deferred.
-/// In the meantime, this mirror system reads the *single source of
-/// truth* (the doc in the registry) every tick and pushes it into
-/// the snapshot. Multiple writers no longer matter — the mirror
-/// re-syncs every frame regardless. Correctness is restored without
-/// touching the read callsites.
-///
-/// Identity check
-/// --------------
-/// If the active doc id doesn't match `open_model.model_path`'s
-/// implied doc, we don't touch the snapshot — the file-load path is
-/// still mid-flight and will install a fresh `OpenModel` when its
-/// bg task completes. Re-deriving here would race with that path.
-pub fn mirror_active_open_model(
-    _workspace: Option<Res<lunco_workbench::WorkspaceResource>>,
-    _registry: Res<ModelicaDocumentRegistry>,
-    _state: ResMut<WorkbenchState>,
-) {
-    // B.3 phase 6 (2026-05-08): retired. The `open_model` cache it
-    // mirrored is gone; readers go directly through
-    // `ModelicaDocumentRegistry::host(doc).document()`. Stub kept
-    // as a no-op so the plugin's `add_systems` chain doesn't have
-    // to drop the registration in the same change — tidy up in a
-    // follow-up.
-}
+// `mirror_active_open_model` deleted in B.3 phase 6 (2026-05-08).
+// The `WorkbenchState::open_model` cache it kept fresh is gone;
+// readers derive source/metadata from
+// `ModelicaDocumentRegistry::host(doc).document()` directly.
 
 #[cfg(test)]
 mod tests {

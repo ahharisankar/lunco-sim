@@ -35,7 +35,7 @@ fn render_tab_id(world: &World) -> Option<crate::ui::panels::model_view::TabId> 
 /// Used by the canvas + neighbours so they target the same class when
 /// `open_model` is bound.
 pub(super) fn resolve_doc_context(world: &World) -> (Option<lunco_doc::DocumentId>, Option<String>) {
-    // Active doc from the Workspace session; `open_model.detected_name`
+    // Active doc from the Workspace session; the per-doc Index
     // is read as a display-cache fallback when the registry AST hasn't
     // caught up yet. Both paths are optional — the caller tolerates
     // `(None, None)` by deferring.
@@ -50,7 +50,7 @@ pub(super) fn resolve_doc_context(world: &World) -> (Option<lunco_doc::DocumentI
     // up with what compile / projection consider authoritative:
     //   1. drilled-in pin (user explicitly navigated into a class)
     //   2. first non-package class via `extract_model_name_from_ast`
-    //   3. `WorkbenchState.open_model.detected_name` (display cache)
+    //   3. the per-doc Index (display cache)
     //
     // The previous `s.classes.keys().next()` returned the IndexMap's
     // first key, which for a multi-class file wrapped in a `package`
@@ -770,7 +770,7 @@ pub(super) fn apply_ops(
     }
 
     let t_mirror_start = web_time::Instant::now();
-    // Mirror the post-edit source back to `WorkbenchState.open_model`
+    // Mirror the post-edit source back to the registry-by-doc lookup
     // so every other panel (code editor, breadcrumb, inspector)
     // that reads the cached source sees the update immediately —
     // the code editor doesn't watch the registry directly; it
@@ -876,7 +876,7 @@ pub fn on_auto_arrange_diagram(
     // run at the next command-flush boundary.
     commands.queue(move |world: &mut World| {
         // `doc = 0` = API / script default = "the tab the user is
-        // looking at right now". Resolve from `WorkbenchState.open_model`
+        // looking at right now". Resolve from the registry-by-doc lookup
         // so the LunCo API can fire the command without tracking ids.
         let doc_id = if raw.is_unassigned() {
             match active_doc_from_world(world) {

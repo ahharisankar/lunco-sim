@@ -1227,7 +1227,10 @@ pub fn spawn_modelica_requests(
 pub fn handle_modelica_responses(
     channels: Res<ModelicaChannels>,
     mut q_models: Query<&mut ModelicaModel>,
-    mut workbench_state: ResMut<crate::ui::WorkbenchState>,
+    // `workbench_state` was the home of `compilation_error` (B.3
+    // phase 4, retired). Param kept in the signature in case other
+    // worker paths need it; prefix `_` silences the unused warning.
+    mut _workbench_state: ResMut<crate::ui::WorkbenchState>,
     // Headless callers (e.g. cosim tests) run this system without the
     // UI plugin, so the console + compile-state resources may be
     // absent. Make both optional so the core stepping path survives

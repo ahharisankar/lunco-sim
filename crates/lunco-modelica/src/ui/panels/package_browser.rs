@@ -93,7 +93,7 @@ pub struct FileLoadResult {
 pub struct InMemoryEntry {
     /// Human-readable name (matches the `model <name>` declaration).
     pub display_name: String,
-    /// The `mem://<name>` id used as a stable `OpenModel.model_path`.
+    /// The `mem://<name>` id used as the doc's stable identity string.
     pub id: String,
     /// DocumentId in the registry — source of truth for the model's text.
     /// Kept for direct lookups (close-entry, duplicate, etc.); the
@@ -872,7 +872,11 @@ pub fn handle_package_loading_tasks(
     mut registry: ResMut<ModelicaDocumentRegistry>,
     mut model_tabs: ResMut<crate::ui::panels::model_view::ModelTabs>,
     mut layout: ResMut<lunco_workbench::WorkbenchLayout>,
-    mut egui_ctx: bevy_egui::EguiContexts,
+    // `egui_ctx` was used to shape the bg-precomputed galley for
+    // `OpenModel.cached_galley` (B.3 phase 6, retired). Param kept
+    // for now since other handlers may need it; prefix `_` silences
+    // the unused warning.
+    mut _egui_ctx: bevy_egui::EguiContexts,
     mut pending_drill_ins: ResMut<crate::ui::browser_dispatch::PendingDrillIns>,
     mut workspace: ResMut<lunco_workbench::WorkspaceResource>,
 ) {
@@ -942,10 +946,11 @@ pub fn handle_package_loading_tasks(
         // now go through the registry-lookup branch and re-focus
         // the existing tab instead of spawning another parse.
         cache.loading_ids.remove(&result.id);
-        // Final font-dependent shaping on main thread
-        let cached_galley = result.layout_job.map(|job| {
-            egui_ctx.ctx_mut().unwrap().fonts_mut(|f| f.layout_job(job))
-        });
+        // Layout-job shaping deleted with the `OpenModel.cached_galley`
+        // field (B.3 phase 6). The editor's TextEdit re-shapes per
+        // frame anyway; the bg-precomputed galley was only ever
+        // consumed by the cache write that's now gone.
+        let _ = result.layout_job;
 
         // Document was pre-allocated off-thread by the bg task —
         // installing here is just a HashMap insert. The expensive
@@ -970,9 +975,6 @@ pub fn handle_package_loading_tasks(
             }
         }
 
-        // B.3 phase 6: `open_model` cache write retired. Source +
-        // metadata derive from the registry directly.
-        let _ = (result.source, result.line_starts, result.detected_name, cached_galley);
         workbench.diagram_dirty = true;
         // B.3 phase 5: `is_loading` retired; per-doc derivation
         // comes from `PackageTreeCache::is_loading(doc)`,
@@ -1656,15 +1658,13 @@ fn commit_current_model_edits(world: &mut World) {
     // active* doc. `EditorBufferState` is a singleton (one buffer
     // shared across every tab) — when the user switches tabs, the
     // buffer still holds the previous tab's text until `code_editor`
-    // re-mirrors `open_model.source` into it on the next render.
+    // re-syncs from the registry on the next render.
     // Checkpointing without this guard pushes the previous tab's
     // bytes into the *new* active doc on every switch, bumping its
     // `generation` and triggering a spurious 5 s rumoca reparse on
     // wasm — the "switching back to AnnotatedRocketStage stalls"
-    // symptom. `EditorBufferState.model_path` is updated to the
-    // active model's path each time the editor mirrors the source;
-    // if it matches `state.open_model.model_path` we know the buffer
-    // genuinely belongs to this doc.
+    // symptom. `EditorBufferState.bound_doc` carries the typed
+    // identity used here.
     // B.3 phase 6: use typed `bound_doc` identity instead of the
     // legacy origin-prefixed `model_path` string comparison.
     let (buffer_bound, buffer_text) = world
@@ -2314,8 +2314,6 @@ pub(crate) fn open_model(
             }
         }
 
-        // B.3 phase 6: `open_model` cache write retired.
-        let _ = (name, mem_name_str, library);
         if let Some(mut state) = world.get_resource_mut::<WorkbenchState>() {
             let source_arc: std::sync::Arc<str> = source.into();
             state.editor_buffer = source_arc.to_string();
@@ -2621,8 +2619,8 @@ pub(crate) fn open_model(
         // Heavy: rumoca parse happens here, off the UI thread. The
         // resulting `ModelicaDocument` carries its own copy of the
         // source; we still return `source: Arc<str>` for the
-        // editor / open_model fields so the main thread doesn't
-        // need to clone the doc's source out under a lock.
+        // editor buffer so the main thread doesn't need to clone
+        // the doc's source out under a lock.
         let doc = crate::document::ModelicaDocument::with_origin(
             reserved_doc_id,
             source_text.clone(),

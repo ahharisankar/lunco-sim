@@ -910,9 +910,9 @@ fn apply_undo_or_redo(
     // doc (Duplicate-to-Workspace copies, freshly-typed scratch
     // models). Those are fully editable; the predicate's name is
     // misleading. The canvas's apply_ops gates on
-    // `WorkbenchState.open_model.read_only` (true only for
-    // bundled / library tabs); we mirror that here so undo/redo
-    // works on Untitled docs.
+    // `Document::is_read_only()` (true only for bundled / library
+    // tabs); we mirror that here so undo/redo works on Untitled
+    // docs.
     if registry.host(doc).is_none() {
         return;
     }
@@ -972,9 +972,8 @@ fn sync_editor_buffer_to_source(
     // `ast_extract::extract_model_name` doc) and stalls the UI on
     // every undo / redo / restore. The worker reparses off-thread
     // via the `DocumentChanged` pipeline that callers fire after
-    // mutating the document, and that path refreshes the AST cache
-    // that all UI consumers (`open_model.detected_name`, inspector,
-    // canvas overlays) actually read.
+    // mutating the document, and that path refreshes the per-doc
+    // Index that UI consumers (inspector, canvas overlays) read.
     editor.source_hash = hash_content(source);
     workbench.editor_buffer = source.to_string();
 }
@@ -1509,8 +1508,6 @@ fn on_create_new_scratch_model(
             doc: doc_id,
         });
 
-    // B.3 phase 6: `open_model` cache write retired.
-    let _ = (mem_id, name);
     let source_arc: std::sync::Arc<str> = source.into();
     workbench.editor_buffer = source_arc.to_string();
     workbench.diagram_dirty = true;
@@ -3789,12 +3786,9 @@ fn on_move_component(trigger: On<MoveComponent>, mut commands: Commands) {
             return;
         };
         let class = if ev.class.is_empty() {
-            // Mirror canvas_diagram::resolve_doc_context: read the
-            // active editing class from the Workbench's open_model
-            // detected name if we don't have one explicitly.
-            // B.3: derive from `ModelTabs`.
+            // Mirror canvas_diagram::resolve_doc_context: drilled
+            // scope first, then the registry's detected name.
             crate::ui::panels::model_view::drilled_class_for_doc(world, doc_id)
-                // B.3 phase 6: derive from registry.
                 .or_else(|| crate::ui::state::detected_name_for(world, doc_id))
                 .unwrap_or_default()
         } else {

@@ -199,8 +199,6 @@ pub(super) fn render_empty_diagram_overlay(
         .get_resource::<lunco_theme::Theme>()
         .cloned()
         .unwrap_or_else(lunco_theme::Theme::dark);
-    let source: std::sync::Arc<str> =
-        std::sync::Arc::from(document.source().to_string());
     let class_name = document
         .strict_ast()
         .and_then(|ast| crate::ast_extract::extract_model_name_from_ast(&ast))

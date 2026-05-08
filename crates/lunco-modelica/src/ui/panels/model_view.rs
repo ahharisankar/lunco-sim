@@ -5,16 +5,13 @@
 //! raw [`DocumentId`] it views; per-tab state (current view mode,
 //! future: text cursor, pan/zoom) lives in the [`ModelTabs`] resource.
 //!
-//! Rendering strategy for v1: the active tab writes
-//! `WorkbenchState.open_model` and sets `diagram_dirty` on every
-//! render pass. That keeps the existing side panels (Telemetry,
-//! Inspector, Graphs), the code editor body, and the diagram body
-//! working unchanged — they all read the singleton `open_model` /
-//! `EditorBufferState` / `DiagramState` as before. The cost is that
-//! split views (two tabs visible at once) currently flicker as each
-//! render pass overwrites the singletons; real per-tab view state
-//! will move the buffer and diagram state into `ModelTabs` in a
-//! follow-up pass.
+//! Rendering strategy: every reader names the doc/tab it's reading.
+//! Source + metadata derive from
+//! `ModelicaDocumentRegistry::host(doc).document()`; per-tab UI
+//! state (drilled scope, view mode, pinned) lives on
+//! `ModelTabState`; per-doc compile state on `CompileStates`.
+//! `EditorBufferState.bound_doc` is the typed identity for the
+//! editor's current contents.
 
 use std::collections::HashMap;
 
@@ -548,11 +545,9 @@ impl InstancePanel for ModelViewPanel {
             return;
         };
 
-        // Sync the singleton `open_model` / editor buffer / diagram
-        // state to *this* tab before rendering. Also publishes the
-        // tab's drilled class into `DrilledInClassNames[doc]` so
-        // canvas projection / inspector / palette readers (which
-        // still key by doc) see this tab's scope.
+        // Sync the editor buffer + diagram_dirty flag to this tab
+        // before rendering. (Drilled scope + most other state now
+        // derive from `ModelTabs` / registry directly.)
         sync_active_tab_to_doc(world, doc, drilled.as_deref());
 
         // Read the tab's desired view mode so the toolbar can reflect
@@ -645,10 +640,10 @@ impl InstancePanel for ModelViewPanel {
             }
         }
 
-        // Body — delegate to the existing code / diagram panels
-        // (both of which still read `open_model` / `EditorBufferState`
-        // / `DiagramState`, which `sync_active_tab_to_doc` just
-        // pointed at this tab's document).
+        // Body — delegate to the existing code / diagram panels.
+        // Each panel reads its inputs from the registry by `doc`
+        // and from `EditorBufferState` (which `sync_active_tab_to_doc`
+        // just pointed at this tab's document).
         // Diagnostic: log on first render per tab (view switches
         // don't re-log — one-shot per tab open) so we can see which
         // body path the freeze is hitting. Throw-away; promoted to
@@ -819,13 +814,11 @@ fn resolve_tab_title(
         return (base, document.is_dirty(), document.is_read_only());
     }
 
-    // Fall back to any live `open_model.display_name` when it's the
-    // current active tab. Active-doc identity is the Workspace's
-    // concern; `open_model` is only a display cache of the same.
+    // Display name + read_only derive from the registry directly.
+    // Active-doc identity is the Workspace's concern.
     let active_doc = world
         .get_resource::<lunco_workbench::WorkspaceResource>()
         .and_then(|ws| ws.active_document);
-    // B.3 phase 6: derive display name + read_only from registry.
     if active_doc == Some(doc) {
         if let Some(name) = crate::ui::state::display_name_for(world, doc) {
             return (name, false, crate::ui::state::read_only_for(world, doc));
@@ -834,15 +827,14 @@ fn resolve_tab_title(
     (format!("Model #{}", doc.raw()), false, false)
 }
 
-/// Point the singleton `WorkbenchState.open_model` / `editor_buffer`
-/// / `diagram_dirty` / `selected_entity` at `doc`, loading source and
-/// display info from the registry.
+/// Point `editor_buffer` / `diagram_dirty` / `selected_entity` at
+/// `doc`, loading source from the registry.
 ///
-/// No-op if `open_model` already targets this doc (avoids a
-/// `diagram_dirty = true` spam when rendering a tab that's already
-/// the active one). Mutates `selected_entity` to one of the entities
-/// linked to `doc`, if any — that's what the Telemetry / Inspector
-/// / Graphs side panels filter by.
+/// Fast-path skip when `EditorBufferState.text` length already
+/// matches the live source for this doc — avoids `diagram_dirty`
+/// spam on re-render. Mutates `selected_entity` to one of the
+/// entities linked to `doc`, if any — that's what the Telemetry /
+/// Inspector / Graphs side panels filter by.
 pub(crate) fn sync_active_tab_to_doc(
     world: &mut World,
     doc: DocumentId,
@@ -869,10 +861,8 @@ pub(crate) fn sync_active_tab_to_doc(
         .get_resource::<lunco_workbench::WorkspaceResource>()
         .and_then(|ws| ws.active_document)
         == Some(doc);
-    // B.3 phase 6: fast-path now keys on EditorBufferState (the
-    // last write target) instead of the retiring `open_model`
-    // cache. If the buffer's text length matches the live source
-    // for this doc and we're already active, nothing to do.
+    // Fast-path: if the buffer's text length matches the live
+    // source for this doc and we're already active, nothing to do.
     let buffer_matches_live = {
         let live = world
             .resource::<ModelicaDocumentRegistry>()
@@ -952,13 +942,13 @@ pub(crate) fn sync_active_tab_to_doc(
 
     // Fallback: the doc is a placeholder reserved by drill-in and
     // its bg load hasn't finished yet (so `registry.host(doc)` is
-    // still None). We still need to flip `open_model.doc` to this
-    // tab's id — otherwise every per-doc lookup downstream (canvas
-    // state, loading overlay, read-only gate) keeps routing to the
-    // PREVIOUS tab's doc and the new tab visually mirrors it until
-    // the parse completes. Use the DrillInLoads entry for a
-    // display name; the source stays empty until the real document
-    // is installed.
+    // still None). We still need to flip `WorkspaceResource.active_document`
+    // to this tab's id — otherwise every per-doc lookup downstream
+    // (canvas state, loading overlay, read-only gate) keeps
+    // routing to the PREVIOUS tab's doc and the new tab visually
+    // mirrors it until the parse completes. Use the DrillInLoads
+    // entry for a display name; the source stays empty until the
+    // real document is installed.
     let snapshot = snapshot.or_else(|| {
         // Drill-in tab still loading? Use the qualified name as
         // the placeholder identity.
@@ -1007,7 +997,7 @@ pub(crate) fn sync_active_tab_to_doc(
         return;
     };
 
-    // Compute line starts for the editor buffer + open_model.
+    // Compute line starts for the editor buffer.
     let mut line_starts: Vec<usize> = vec![0];
     for (i, b) in source.as_bytes().iter().enumerate() {
         if *b == b'\n' {
@@ -1015,8 +1005,7 @@ pub(crate) fn sync_active_tab_to_doc(
         }
     }
 
-    // B.3 phase 6: `open_model` cache write retired. Just refresh
-    // editor_buffer (legacy mirror — also retiring) + diagram_dirty.
+    // Refresh `editor_buffer` mirror + `diagram_dirty`.
     let _ = (display_name, read_only, library);
     {
         let source_arc: std::sync::Arc<str> = source.clone().into();
@@ -1025,19 +1014,15 @@ pub(crate) fn sync_active_tab_to_doc(
         state.diagram_dirty = true;
     }
 
-    // Mirror active-document into the Workspace session. Workspace is
-    // the single source of truth for "which doc has focus"; open_model
-    // stays as a UI-side cache of derived fields (source Arc, line
-    // starts, galley) that aren't worth putting into the session type.
+    // Workspace is the single source of truth for "which doc has
+    // focus" — flip its pointer to this tab's doc.
     {
         let mut ws = world.resource_mut::<lunco_workbench::WorkspaceResource>();
         ws.active_document = Some(doc);
     }
 
-    // B.3 phase 6: use the snapshot's `path_str` directly instead
-    // of round-tripping through `WorkbenchState.open_model`.
-    // `bound_doc` carries the typed doc identity used by
-    // package_browser's stale-buffer check.
+    // Editor buffer carries typed `bound_doc` identity used by
+    // `package_browser`'s stale-buffer check.
     {
         let mut buf = world.resource_mut::<EditorBufferState>();
         buf.text = source;
@@ -1433,10 +1418,10 @@ fn render_unified_toolbar(
 /// Render the class's icon. Priority order:
 ///
 /// 1. MSL-registered class: look up its `icon_asset` in
-///    `msl_component_library` by qualified name (from
-///    `open_model.model_path` when it's an `msl://…` id, or from
-///    `detected_name` for plain-short-name matches) and render the
-///    SVG if present.
+///    `msl_component_library` by qualified name (from the doc's
+///    origin display name when it's an `msl://…` id, or from the
+///    detected model name for plain-short-name matches) and render
+///    the SVG if present.
 /// 2. Class with an inline `Icon` annotation: TBD — needs an Icon-
 ///    primitives renderer. Currently shows the placeholder.
 /// 3. Everything else: a friendly "no icon defined" placeholder so
@@ -1804,7 +1789,7 @@ fn render_icon_view(ui: &mut egui::Ui, world: &mut World) {
         .get_resource::<lunco_theme::Theme>()
         .cloned()
         .unwrap_or_else(lunco_theme::Theme::dark);
-    // B.3 phase 6: derive from registry; `open_model` cache retiring.
+    // Derive name + source from the registry directly.
     let (qualified, _source) = {
         let active = world
             .get_resource::<lunco_workbench::WorkspaceResource>()

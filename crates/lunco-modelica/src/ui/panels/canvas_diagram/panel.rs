@@ -272,7 +272,7 @@ impl Panel for CanvasDiagramPanel {
             // name the drill-in tab points at. Read from
             // `DrilledInClassNames`, which the drill-in install
             // populated and which persists for the tab's lifetime.
-            // Reading `open_model.model_path` doesn't work here —
+            // Reading the doc origin display name doesn't work here —
             // for installed docs it's the filesystem path, not the
             // `msl://…` URI. `None` for Untitled / user-authored
             // docs — builder picks the first non-package class as

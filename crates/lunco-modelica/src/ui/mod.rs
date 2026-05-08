@@ -173,14 +173,8 @@ fn drop_workspace_class_on_doc_closed(
 ///
 /// Runs alongside (not instead of) the existing open paths during the
 /// 5b.1 migration. Once step 5c retires the legacy `ModelicaDocumentRegistry`
-/// / `ModelTabs` / `WorkbenchState.open_model` triad, this observer
+/// / `ModelTabs` / the registry-by-doc lookup triad, this observer
 /// becomes the sole population point for the Workspace's document list.
-/// Observer: a Modelica doc was mutated → re-mirror the post-edit
-/// source into `WorkbenchState::open_model` so the code editor (which
-/// reads `open_model.source`, not the registry) shows the change
-/// immediately. Covers every edit path uniformly: SetDocumentSource,
-/// Add/RemoveComponent, Connect/Disconnect, undo/redo, canvas drag,
-/// scripted batches.
 /// Wholesale-clear the canvas paint-side port-icon cache when any
 /// doc changes. Cheap on rumoca's content-hash cache; the next
 /// paint refills.
@@ -247,18 +241,7 @@ fn close_drilled_tabs_on_class_removed(
     watermark.0.insert(doc, highest_gen);
 }
 
-fn mirror_open_model_on_doc_changed(
-    trigger: On<lunco_doc_bevy::DocumentChanged>,
-    registry: Res<ModelicaDocumentRegistry>,
-    workspace: Res<lunco_workbench::WorkspaceResource>,
-    mut state: ResMut<crate::ui::state::WorkbenchState>,
-) {
-    // B.3 phase 6: source / line_starts mirror retired — readers
-    // now go through the registry directly. Observer kept as a
-    // no-op for scheduler ordering until the OpenModel struct is
-    // deleted entirely.
-    let _ = (trigger, registry, state, workspace);
-}
+// `mirror_open_model_on_doc_changed` deleted in B.3 phase 6 cleanup.
 
 fn sync_workspace_on_doc_opened(
     trigger: On<lunco_doc_bevy::DocumentOpened>,
@@ -655,28 +638,20 @@ impl Plugin for ModelicaUiPlugin {
             .add_systems(Update, cleanup_removed_documents)
             .add_systems(Update, drain_document_changes)
             // Mirror the active document's volatile fields (source,
-            // line_starts, detected_name) into `WorkbenchState.open_model`
-            // every Update tick. Half-step Fix 3: until the 91 read
-            // sites migrate off `open_model` directly, this re-derives
-            // it from the registry so multiple writers (file load,
-            // diagram apply_ops, undo/redo, API edits) can't leave
-            // it stale. See `mirror_active_open_model` rustdoc.
-            .add_systems(Update, crate::ui::state::mirror_active_open_model)
+            // line_starts, detected_name) into the registry-by-doc lookup
+            // B.3 phase 6 (2026-05-08): the
+            // `mirror_active_open_model` Update system + the
+            // `mirror_open_model_on_doc_changed` observer were
+            // deleted with the `OpenModel` cache. All readers now
+            // derive source/metadata from
+            // `ModelicaDocumentRegistry::host(doc).document()`
+            // directly — no mirror needed.
+            //
             // Workspace shadow-sync: keep `WorkspaceResource` populated
-            // from the existing document-registry lifecycle so the new
-            // session surface is ready for step 5b.2 readers.
+            // from the existing document-registry lifecycle.
             .add_observer(sync_workspace_on_doc_opened)
             .add_observer(sync_workspace_on_doc_closed)
             .add_observer(sync_workspace_on_doc_saved)
-            // Mirror the post-edit source from the registry into
-            // `WorkbenchState::open_model` whenever any mutation lands —
-            // structured ops via API, canvas drag, code-editor keystroke.
-            // The code editor reads `open_model.source` (Arc<str>), not
-            // the registry directly, so without this fan-out
-            // SetDocumentSource / Add* / Connect* edits update the
-            // canvas (which reads the registry) but leave the text
-            // editor stuck on the old source.
-            .add_observer(mirror_open_model_on_doc_changed)
             // Coarse cache invalidation: any doc edit can shift
             // cross-file inheritance chains, so the paint-hot
             // port-icon cache flushes wholesale. Re-fills lazily
