@@ -1112,20 +1112,6 @@ pub struct ModelicaModel {
     pub inputs: HashMap<String, f64>,
     /// All other observable variables (Real soc, etc)
     pub variables: HashMap<String, f64>,
-    /// Per-variable description strings lifted from the Modelica source
-    /// (MLS §A.2.5). Populated on compile-type results so the UI can
-    /// render them as hover tooltips in Telemetry, Inspector, Diagram,
-    /// etc. Not reflected — these are derived from the source and can
-    /// be recomputed on reload.
-    #[reflect(ignore)]
-    pub descriptions: HashMap<String, String>,
-    /// Per-parameter `(min, max)` bounds lifted from Modelica
-    /// `parameter Real x(min=..., max=...) = ...` declarations.
-    /// `None` at either end means unbounded on that side. The
-    /// Telemetry panel clamps the DragValue to this range so users
-    /// can't push a model out of its authored operating envelope.
-    #[reflect(ignore)]
-    pub parameter_bounds: HashMap<String, (Option<f64>, Option<f64>)>,
     /// Canonical id of the Modelica source document backing this entity,
     /// looked up in [`ui::ModelicaDocumentRegistry`]. `DocumentId::default()`
     /// (`0`) means "no document assigned yet"; systems should treat it as
@@ -1331,18 +1317,10 @@ pub fn handle_modelica_responses(
                 }
             }
 
-            // Variable description strings for hover tooltips (Telemetry,
-            // Inspector, Diagram). Populated on compile-type results only;
-            // step results leave `detected_descriptions` empty so we
-            // don't blow away the map on every step.
-            if (result.is_new_model || result.is_parameter_update || result.is_reset)
-                && !result.detected_descriptions.is_empty()
-            {
-                model.descriptions.clear();
-                for (name, desc) in &result.detected_descriptions {
-                    model.descriptions.insert(name.clone(), desc.clone());
-                }
-            }
+            // Variable description strings now live on the document
+            // index ([`ModelicaIndex::find_component_by_leaf`]); panels
+            // read them directly. The worker no longer mirrors them
+            // into ECS state.
 
             if let Some(err) = &result.error {
                 workbench_state.compilation_error = Some(err.clone());

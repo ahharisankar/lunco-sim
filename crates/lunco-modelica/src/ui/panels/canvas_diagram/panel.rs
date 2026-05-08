@@ -1078,23 +1078,27 @@ impl CanvasDiagramPanel {
         // Stash the input-control snapshot so each canvas icon can
         // render an in-canvas control widget bound to its own
         // RealInput(s). Includes the input's current value plus
-        // declared min/max bounds (with the same leaf-name fallback
-        // Telemetry uses, since `parameter_bounds` keys by leaf
-        // component name and the runtime queries by qualified path).
-        // Publishing this every frame keeps the widgets responsive
-        // to recompiles, parameter changes, and external writes.
+        // declared min/max bounds resolved via
+        // [`crate::index::ModelicaIndex::find_component_by_leaf`]
+        // (qualified-then-leaf precedence). Publishing this every
+        // frame keeps the widgets responsive to recompiles,
+        // parameter changes, and external writes.
         {
             let mut control_snapshot =
                 lunco_viz::kinds::canvas_plot_node::InputControlSnapshot::default();
             if let Some(entity) = canvas_sim {
                 if let Some(model) = world.get::<crate::ModelicaModel>(entity) {
+                    let index_ref = world
+                        .get_resource::<crate::ui::ModelicaDocumentRegistry>()
+                        .and_then(|r| r.host(model.document))
+                        .map(|h| h.document().index());
                     for (qualified, value) in &model.inputs {
-                        let leaf = qualified.rsplit('.').next().unwrap_or(qualified);
-                        let (mn, mx) = model
-                            .parameter_bounds
-                            .get(qualified)
-                            .copied()
-                            .or_else(|| model.parameter_bounds.get(leaf).copied())
+                        let (mn, mx) = index_ref
+                            .and_then(|idx| idx.find_component_by_leaf(qualified))
+                            .map(|entry| (
+                                entry.modifications.get("min").and_then(|s| s.parse().ok()),
+                                entry.modifications.get("max").and_then(|s| s.parse().ok()),
+                            ))
                             .unwrap_or((None, None));
                         control_snapshot
                             .inputs

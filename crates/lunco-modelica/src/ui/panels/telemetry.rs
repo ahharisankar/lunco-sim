@@ -3,54 +3,21 @@
 use bevy::prelude::*;
 use bevy_egui::egui;
 use lunco_workbench::{Panel, PanelId, PanelSlot};
-use std::collections::HashMap;
 
 use crate::ui::WorkbenchState;
 use crate::ui::viz::{is_signal_plotted, set_signal_plotted};
 use crate::{ModelicaModel, ModelicaChannels, ModelicaCommand};
 
-/// Look up a description string with a leaf-name fallback. Runtime
-/// variable names are fully-qualified (e.g. `"engine.thrust"`) but
-/// `extract_descriptions` keys by the local component name
-/// (`"thrust"` declared inside `model Engine`). Try the full name
-/// first — covers top-level components of the target class — then
-/// fall back to the last dotted segment.
-fn lookup_desc<'a>(
-    descriptions: &'a HashMap<String, String>,
-    name: &str,
-) -> Option<&'a String> {
-    if let Some(d) = descriptions.get(name) {
-        return Some(d);
-    }
-    let leaf = name.rsplit('.').next().unwrap_or(name);
-    if leaf != name {
-        descriptions.get(leaf)
-    } else {
-        None
-    }
-}
-
-/// Same leaf-name fallback as `lookup_desc`, applied to the
-/// `(min, max)` bounds map. The AST extractor keys bounds by leaf
-/// component name (`opening`) because bound declarations live inside
-/// the component class; the runtime queries by fully-qualified
-/// instance path (`valve.opening`). Try the qualified name first
-/// (handles top-level components of the active class) then fall back
-/// to the leaf.
-fn lookup_bounds(
-    bounds: &HashMap<String, (Option<f64>, Option<f64>)>,
-    name: &str,
-) -> (Option<f64>, Option<f64>) {
-    if let Some(b) = bounds.get(name) {
-        return *b;
-    }
-    let leaf = name.rsplit('.').next().unwrap_or(name);
-    if leaf != name {
-        if let Some(b) = bounds.get(leaf) {
-            return *b;
-        }
-    }
-    (None, None)
+/// Per-input metadata snapshot — built once per render from
+/// [`crate::index::ModelicaIndex`] so the grid loop doesn't reborrow
+/// the document registry per row. Description and bounds resolve via
+/// [`crate::index::ModelicaIndex::find_component_by_leaf`].
+struct InputRow {
+    name: String,
+    value: f64,
+    description: Option<String>,
+    min: Option<f64>,
+    max: Option<f64>,
 }
 
 /// Render `body` inside a fixed-height region with a draggable
@@ -163,15 +130,44 @@ impl Panel for TelemetryPanel {
         // Read model snapshot for display. Parameter editing lives in
         // `render_selected_components_inspector` (op-pipeline based);
         // the panel only reads runtime values here.
-        let (model_name, is_paused, current_time, inputs, descriptions, parameter_bounds) = {
+        let (model_name, is_paused, current_time, inputs, doc_id) = {
             if let Some(model) = world.get::<ModelicaModel>(entity) {
                 (model.model_name.clone(), model.paused, model.current_time,
-                 model.inputs.clone(),
-                 model.descriptions.clone(), model.parameter_bounds.clone())
+                 model.inputs.clone(), model.document)
             } else {
                 ui.label("Model not found.");
                 return;
             }
+        };
+
+        // Snapshot per-input metadata from the document index so the
+        // inputs grid below can render tooltips and bound-clamped
+        // sliders without reborrowing the registry per row.
+        let input_rows: Vec<InputRow> = {
+            let mut sorted: Vec<(String, f64)> = inputs.into_iter().collect();
+            sorted.sort_by(|a, b| a.0.cmp(&b.0));
+            let registry = world.get_resource::<crate::ui::ModelicaDocumentRegistry>();
+            let index_ref = registry
+                .and_then(|r| r.host(doc_id))
+                .map(|h| h.document().index());
+            sorted
+                .into_iter()
+                .map(|(name, value)| {
+                    let entry =
+                        index_ref.and_then(|idx| idx.find_component_by_leaf(&name));
+                    InputRow {
+                        description: entry
+                            .map(|e| e.description.clone())
+                            .filter(|s| !s.is_empty()),
+                        min: entry
+                            .and_then(|e| e.modifications.get("min").and_then(|s| s.parse().ok())),
+                        max: entry
+                            .and_then(|e| e.modifications.get("max").and_then(|s| s.parse().ok())),
+                        name,
+                        value,
+                    }
+                })
+                .collect()
         };
 
         let display_name = world.query::<Option<&Name>>().get(world, entity).ok().flatten()
@@ -217,27 +213,23 @@ impl Panel for TelemetryPanel {
         ui.separator();
 
         // Inputs
-        if !inputs.is_empty() {
+        if !input_rows.is_empty() {
             ui.label("Inputs (Real-time):");
             resizable_v_section(ui, "inputs_height", 120.0, |ui| {
                 egui::ScrollArea::vertical().id_salt("inputs_scroll").auto_shrink([false, false]).show(ui, |ui| {
-                    let mut input_keys: Vec<_> = inputs.keys().cloned().collect();
-                    input_keys.sort();
                     egui::Grid::new("inputs_grid")
                         .num_columns(2)
                         .striped(true)
                         .spacing([8.0, 4.0])
                         .show(ui, |ui| {
-                            for key in input_keys {
-                                let val = inputs.get(&key).copied().unwrap_or(0.0);
-                                let label = egui::Label::new(format!("{key}"))
+                            for row in &input_rows {
+                                let label = egui::Label::new(row.name.clone())
                                     .sense(egui::Sense::hover());
                                 let resp = ui.add(label);
-                                if let Some(desc) = lookup_desc(&descriptions, &key) {
+                                if let Some(desc) = &row.description {
                                     resp.on_hover_text(desc);
                                 }
-                                let mut v = val;
-                                let (mn, mx) = lookup_bounds(&parameter_bounds, &key);
+                                let mut v = row.value;
                                 let avail = ui.available_width().max(60.0);
                                 ui.add_sized(
                                     [avail, 20.0],
@@ -245,14 +237,14 @@ impl Panel for TelemetryPanel {
                                         .speed(0.1)
                                         .fixed_decimals(2)
                                         .range(
-                                            mn.unwrap_or(f64::NEG_INFINITY)
-                                                ..=mx.unwrap_or(f64::INFINITY),
+                                            row.min.unwrap_or(f64::NEG_INFINITY)
+                                                ..=row.max.unwrap_or(f64::INFINITY),
                                         ),
                                 );
                                 ui.end_row();
-                                if (v - val).abs() > 1e-10 {
+                                if (v - row.value).abs() > 1e-10 {
                                     if let Ok(mut m) = world.query::<&mut ModelicaModel>().get_mut(world, entity) {
-                                        if let Some(inp) = m.inputs.get_mut(&key) { *inp = v; }
+                                        if let Some(inp) = m.inputs.get_mut(&row.name) { *inp = v; }
                                     }
                                 }
                             }
@@ -293,6 +285,27 @@ impl Panel for TelemetryPanel {
             all_names.sort();
             all_names.dedup();
 
+            // Snapshot per-variable descriptions from the document index
+            // up front so the row loop doesn't reborrow the registry per
+            // checkbox.
+            let var_desc: std::collections::HashMap<String, String> = {
+                let registry = world.get_resource::<crate::ui::ModelicaDocumentRegistry>();
+                let index_ref = registry
+                    .and_then(|r| r.host(doc_id))
+                    .map(|h| h.document().index());
+                all_names
+                    .iter()
+                    .filter_map(|n| {
+                        let entry = index_ref.and_then(|idx| idx.find_component_by_leaf(n))?;
+                        if entry.description.is_empty() {
+                            None
+                        } else {
+                            Some((n.clone(), entry.description.clone()))
+                        }
+                    })
+                    .collect()
+            };
+
             for name in all_names {
                 let mut is_plotted = plotted.contains(&name);
                 ui.horizontal(|ui| {
@@ -309,7 +322,7 @@ impl Panel for TelemetryPanel {
                     }
                     let label = egui::Label::new(&name).sense(egui::Sense::hover());
                     let resp = ui.add(label);
-                    if let Some(desc) = lookup_desc(&descriptions, &name).filter(|d| !d.trim().is_empty()) {
+                    if let Some(desc) = var_desc.get(&name).filter(|d| !d.trim().is_empty()) {
                         // Hover for the full string (can be long),
                         // plus a muted inline preview so users who
                         // never hover still see the hint exists.
