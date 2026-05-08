@@ -131,6 +131,7 @@ impl Panel for TelemetryPanel {
         // through the same `SetParameter` op the canvas drag flow
         // uses, so undo / re-projection / journaling stay consistent.
         render_selected_components_inspector(ui, world, muted);
+        render_active_class_parameters(ui, world, muted);
 
         // Resolve the entity to display: explicit pin (`selected_entity`)
         // wins so the future "Pin to a specific model" UX stays
@@ -470,5 +471,96 @@ fn render_selected_components_inspector(
             });
         }
     });
+    ui.separator();
+}
+
+/// Render every top-level `parameter` / `constant` declaration on the
+/// active class as an editable list. Complements
+/// [`render_selected_components_inspector`] by surfacing parameters
+/// declared *directly* on the root model — these have no canvas icon
+/// and would otherwise be unreachable through the inspector.
+///
+/// Reads from the document's [`crate::index::ModelicaIndex`] (already
+/// kept current by the op pipeline) — no AST walk per frame, no engine
+/// lock, no shadow ECS state. Edits dispatch
+/// `ModelicaOp::SetParameter { component, param: "", value }` — the
+/// `""` sentinel routes the value into the component's primary
+/// binding.
+fn render_active_class_parameters(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    muted: egui::Color32,
+) {
+    use crate::document::ModelicaOp;
+    use crate::index::Variability;
+    use crate::ui::panels::canvas_diagram::{
+        active_class_for_doc, active_doc_from_world, apply_ops_public,
+    };
+
+    let Some(doc_id) = active_doc_from_world(world) else { return };
+    let Some(active) = active_class_for_doc(world, doc_id) else { return };
+
+    // Snapshot rows from the index up front so we can release the
+    // registry borrow before issuing apply_ops_public mutations.
+    struct Row { name: String, value: String }
+    let rows: Vec<Row> = {
+        let Some(registry) = world.get_resource::<crate::ui::ModelicaDocumentRegistry>() else {
+            return;
+        };
+        let Some(host) = registry.host(doc_id) else { return };
+        let index = host.document().index();
+        let Some(keys) = index.components_by_class.get(&active) else {
+            return;
+        };
+        keys.iter()
+            .filter_map(|k| index.components.get(k.0 as usize))
+            .filter(|e| matches!(e.variability, Variability::Parameter | Variability::Constant))
+            .map(|e| Row {
+                name: e.name.clone(),
+                value: e.binding.clone().unwrap_or_default(),
+            })
+            .collect()
+    };
+    if rows.is_empty() {
+        return;
+    }
+
+    egui::CollapsingHeader::new(format!("⚙ Parameters ({})", rows.len()))
+        .id_salt("active_class_parameters")
+        .default_open(true)
+        .show(ui, |ui| {
+            // Two-pass: gather edits, apply after the immutable borrow
+            // on `rows` is released.
+            let mut edits: Vec<(String, String)> = Vec::new();
+            for row in &rows {
+                let mut buf = row.value.clone();
+                ui.horizontal(|ui| {
+                    ui.label(format!("{:14}", row.name));
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut buf).desired_width(120.0),
+                    );
+                    let commit = (resp.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                        || (resp.lost_focus() && buf != row.value);
+                    if commit && buf != row.value {
+                        edits.push((row.name.clone(), buf.clone()));
+                    }
+                });
+            }
+            if edits.is_empty() {
+                let _ = muted;
+                return;
+            }
+            let ops: Vec<ModelicaOp> = edits
+                .into_iter()
+                .map(|(component, value)| ModelicaOp::SetParameter {
+                    class: active.clone(),
+                    component,
+                    param: String::new(),
+                    value,
+                })
+                .collect();
+            apply_ops_public(world, doc_id, ops);
+        });
     ui.separator();
 }
