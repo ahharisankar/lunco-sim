@@ -904,11 +904,9 @@ impl CanvasDiagramPanel {
         // effect here. We gate the whole right-click menu on this
         // so readonly tabs don't even offer "Add component" etc.;
         // the canvas itself stays fully navigable (pan/zoom/select).
-        let tab_read_only = world
-            .resource::<WorkbenchState>()
-            .open_model
-            .as_ref()
-            .map(|m| m.read_only)
+        // B.3 phase 6: derive from registry.
+        let tab_read_only = active_doc
+            .map(|d| crate::ui::state::read_only_for(world, d))
             .unwrap_or(false);
 
         // Render the canvas and collect its events. Flip the

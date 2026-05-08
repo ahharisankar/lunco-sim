@@ -1635,15 +1635,16 @@ fn commit_current_model_edits(world: &mut World) {
         Some(id) => id,
         None => return,
     };
+    // B.3 phase 6: derive from registry.
     let (is_read_only, model_name) = {
-        let state = world.resource::<WorkbenchState>();
-        let Some(m) = state.open_model.as_ref() else { return };
-        (
-            m.read_only,
-            m.detected_name
-                .clone()
-                .unwrap_or_else(|| m.display_name.clone()),
-        )
+        let registry = world.resource::<ModelicaDocumentRegistry>();
+        let Some(host) = registry.host(doc_id) else { return };
+        let document = host.document();
+        let detected = document
+            .strict_ast()
+            .and_then(|ast| crate::ast_extract::extract_model_name_from_ast(&ast))
+            .unwrap_or_else(|| document.origin().display_name().to_string());
+        (document.is_read_only(), detected)
     };
     if is_read_only {
         return;

@@ -825,11 +825,10 @@ fn resolve_tab_title(
     let active_doc = world
         .get_resource::<lunco_workbench::WorkspaceResource>()
         .and_then(|ws| ws.active_document);
+    // B.3 phase 6: derive display name + read_only from registry.
     if active_doc == Some(doc) {
-        if let Some(state) = world.get_resource::<WorkbenchState>() {
-            if let Some(open) = state.open_model.as_ref() {
-                return (open.display_name.clone(), false, open.read_only);
-            }
+        if let Some(name) = crate::ui::state::display_name_for(world, doc) {
+            return (name, false, crate::ui::state::read_only_for(world, doc));
         }
     }
     (format!("Model #{}", doc.raw()), false, false)
@@ -870,26 +869,23 @@ pub(crate) fn sync_active_tab_to_doc(
         .get_resource::<lunco_workbench::WorkspaceResource>()
         .and_then(|ws| ws.active_document)
         == Some(doc);
-    let cached_source_len = world
-        .resource::<WorkbenchState>()
-        .open_model
-        .as_ref()
-        .map(|o| o.source.len());
-    let live_source_len = world
-        .resource::<ModelicaDocumentRegistry>()
-        .host(doc)
-        .map(|h| h.document().source().len());
-    let source_matches = cached_source_len == live_source_len;
-    let (already_active, source_is_placeholder) = {
-        let ws = world.resource::<WorkbenchState>();
-        match ws.open_model.as_ref() {
-            Some(open) => (active_matches, open.source.is_empty()),
-            None => (false, false),
-        }
+    // B.3 phase 6: fast-path now keys on EditorBufferState (the
+    // last write target) instead of the retiring `open_model`
+    // cache. If the buffer's text length matches the live source
+    // for this doc and we're already active, nothing to do.
+    let buffer_matches_live = {
+        let live = world
+            .resource::<ModelicaDocumentRegistry>()
+            .host(doc)
+            .map(|h| h.document().source().len())
+            .unwrap_or(0);
+        let buf_len = world
+            .get_resource::<EditorBufferState>()
+            .map(|b| b.text.len())
+            .unwrap_or(0);
+        live > 0 && live == buf_len
     };
-    if already_active && !source_is_placeholder && source_matches {
-        // Still refresh selected_entity in case an entity linked to
-        // this doc was spawned since the last switch.
+    if active_matches && buffer_matches_live {
         refresh_selected_entity_for(world, doc);
         return;
     }
@@ -1019,20 +1015,12 @@ pub(crate) fn sync_active_tab_to_doc(
         }
     }
 
-    // Update WorkbenchState.
+    // B.3 phase 6: `open_model` cache write retired. Just refresh
+    // editor_buffer (legacy mirror — also retiring) + diagram_dirty.
+    let _ = (display_name, read_only, library);
     {
         let source_arc: std::sync::Arc<str> = source.clone().into();
         let mut state = world.resource_mut::<WorkbenchState>();
-        state.open_model = Some(crate::ui::OpenModel {
-            model_path: path_str,
-            display_name,
-            source: source_arc.clone(),
-            line_starts: line_starts.clone().into(),
-            detected_name: detected_name.clone(),
-            cached_galley: None,
-            read_only,
-            library,
-        });
         state.editor_buffer = source_arc.to_string();
         state.diagram_dirty = true;
     }
@@ -1046,17 +1034,14 @@ pub(crate) fn sync_active_tab_to_doc(
         ws.active_document = Some(doc);
     }
 
-    // Update the editor buffer state (used by the code-editor body).
-    let model_path = world
-        .get_resource::<WorkbenchState>()
-        .and_then(|s| s.open_model.as_ref().map(|m| m.model_path.clone()))
-        .unwrap_or_default();
+    // B.3 phase 6: use the snapshot's `path_str` directly instead
+    // of round-tripping through `WorkbenchState.open_model`.
     {
         let mut buf = world.resource_mut::<EditorBufferState>();
         buf.text = source;
         buf.line_starts = line_starts.into();
         buf.detected_name = detected_name;
-        buf.model_path = model_path;
+        buf.model_path = path_str.clone();
     }
 
     // The canvas viewer reprojects from the document AST every frame
@@ -1099,33 +1084,16 @@ fn render_unified_toolbar(
         .unwrap_or_else(|| lunco_theme::Theme::dark().tokens.clone());
     // Snapshot everything we need before the closure so we don't
     // fight the borrow checker mid-layout.
-    let display_name = world
-        .resource::<WorkbenchState>()
-        .open_model
-        .as_ref()
-        .map(|m| m.display_name.clone())
+    // B.3 phase 6: derive from registry / origin.
+    let display_name = crate::ui::state::display_name_for(world, doc)
         .unwrap_or_else(|| format!("Model #{}", doc.raw()));
 
     let compile_state = world.resource::<CompileStates>().state_of(doc);
-    let is_read_only = world
-        .resource::<WorkbenchState>()
-        .open_model
-        .as_ref()
-        .map(|m| m.read_only)
-        .unwrap_or(false);
-    // Icon-only class (MSL `Modelica.*.Icons.*` subtree): no
-    // connectors, nothing to diagram. `model_path` carries the
-    // `msl://<qualified>` URI for drill-in tabs, so the
-    // path-based helper works on it directly.
-    let is_icon_only_tab = world
-        .resource::<WorkbenchState>()
-        .open_model
-        .as_ref()
-        .map(|m| {
-            crate::ui::loaded_classes::is_icon_only_class(&m.model_path)
-                || m.model_path.contains("/Icons/")
-        })
-        .unwrap_or(false);
+    let is_read_only = crate::ui::state::read_only_for(world, doc);
+    // Icon-only class detection — read the origin's display name
+    // (carries `msl://Foo` for drill-in tabs).
+    let is_icon_only_tab = crate::ui::loaded_classes::is_icon_only_class(&display_name)
+        || display_name.contains("/Icons/");
     // B.3 phase 4: per-doc error on CompileStates.
     let compilation_error = world
         .get_resource::<crate::ui::CompileStates>()
@@ -1833,27 +1801,40 @@ fn render_icon_view(ui: &mut egui::Ui, world: &mut World) {
         .get_resource::<lunco_theme::Theme>()
         .cloned()
         .unwrap_or_else(lunco_theme::Theme::dark);
+    // B.3 phase 6: derive from registry; `open_model` cache retiring.
     let (qualified, _source) = {
-        let ws = world.resource::<WorkbenchState>();
-        let Some(open) = ws.open_model.as_ref() else {
+        let active = world
+            .get_resource::<lunco_workbench::WorkspaceResource>()
+            .and_then(|ws| ws.active_document);
+        let Some(doc) = active else {
             ui.centered_and_justified(|ui| {
-                ui.label(
-                    egui::RichText::new("No model open").weak(),
-                );
+                ui.label(egui::RichText::new("No model open").weak());
             });
             return;
         };
-        // Prefer the msl://Full.Qualified.Name path if we have one
-        // (drill-in sets this); otherwise fall back to detected
-        // short name, which matches MSL entries by suffix.
-        let from_path = open
-            .model_path
+        let registry = world.resource::<ModelicaDocumentRegistry>();
+        let Some(host) = registry.host(doc) else {
+            ui.centered_and_justified(|ui| {
+                ui.label(egui::RichText::new("No model open").weak());
+            });
+            return;
+        };
+        let document = host.document();
+        // `model_path` no longer exists outside the cache. Use the
+        // origin's display name + canonical_path heuristic to
+        // reconstruct the `msl://` prefix when applicable.
+        let display = document.origin().display_name().to_string();
+        let from_path = display
             .strip_prefix("msl://")
             .map(|s| s.to_string());
-        let short = open.detected_name.clone().unwrap_or_default();
+        let short = document
+            .strict_ast()
+            .and_then(|ast| crate::ast_extract::extract_model_name_from_ast(&ast))
+            .unwrap_or_default();
+        let source = document.source().to_string();
         (
             from_path.unwrap_or_else(|| short.clone()),
-            open.source.clone(),
+            std::sync::Arc::<str>::from(source),
         )
     };
 

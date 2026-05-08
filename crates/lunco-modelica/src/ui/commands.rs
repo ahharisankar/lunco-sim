@@ -918,11 +918,15 @@ fn apply_undo_or_redo(
     if registry.host(doc).is_none() {
         return;
     }
-    let workbench_read_only = workbench
-        .open_model
-        .as_ref()
-        .map(|m| m.read_only)
+    // B.3 phase 6: read read-only from the document directly.
+    let workbench_read_only = registry
+        .host(doc)
+        .map(|h| {
+            use lunco_doc::Document as _;
+            h.document().is_read_only()
+        })
         .unwrap_or(false);
+    let _ = workbench;
     if workbench_read_only {
         return;
     }
@@ -2845,6 +2849,11 @@ fn update_status_bar(
         return;
     }
     let active_doc = workspace.as_ref().and_then(|w| w.active_document);
+    // B.3 phase 6 partial: cache still populated by
+    // `mirror_open_model_on_doc_changed`, so this reader uses it
+    // until the cache is fully retired. Migration TODO: pass
+    // `Res<ModelicaDocumentRegistry>` into this system to derive
+    // detected_name + display_name directly.
     let model_name = workbench
         .open_model
         .as_ref()
