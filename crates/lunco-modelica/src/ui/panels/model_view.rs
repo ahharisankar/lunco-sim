@@ -82,6 +82,11 @@ pub struct ModelTabState {
     /// permanent fixture; the next browser click then opens a fresh
     /// preview alongside it.
     pub pinned: bool,
+    /// Set when an off-thread drill-in / duplicate load fails (e.g.
+    /// MSL bundle not yet available, class missing, parse error).
+    /// Read by the canvas to swap the spinner for an error card so
+    /// the tab doesn't sit on "Loading resource…" forever.
+    pub load_error: Option<String>,
 }
 
 /// Newtype-ish alias for tab instance ids. Stored on the workbench
@@ -212,6 +217,7 @@ impl ModelTabs {
                 drilled_class,
                 view_mode: ModelViewMode::default(),
                 pinned: true,
+                load_error: None,
             },
         );
         id
@@ -251,6 +257,7 @@ impl ModelTabs {
                 drilled_class,
                 view_mode: ModelViewMode::default(),
                 pinned: false,
+                load_error: None,
             },
         );
         id
@@ -273,6 +280,7 @@ impl ModelTabs {
                 drilled_class,
                 view_mode: ModelViewMode::default(),
                 pinned: true,
+                load_error: None,
             },
         );
         id

@@ -64,7 +64,6 @@ fn command_label(cmd: &ModelicaCommand) -> String {
 /// Without this the UI keeps a "Compiling…" spinner running forever
 /// after a rumoca panic.
 fn command_session(cmd: &ModelicaCommand) -> (bevy::prelude::Entity, u64) {
-    use bevy::prelude::Entity;
     match cmd {
         ModelicaCommand::Step { entity, session_id, .. }
         | ModelicaCommand::Compile { entity, session_id, .. }
@@ -87,7 +86,6 @@ fn synth_panic_result(entity: bevy::prelude::Entity, session_id: u64, msg: &str)
         is_parameter_update: false,
         is_reset: false,
         detected_input_names: Vec::new(),
-        detected_descriptions: Vec::new(),
     }
 }
 use wasm_bindgen::closure::Closure;

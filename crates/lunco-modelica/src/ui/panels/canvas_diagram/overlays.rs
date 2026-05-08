@@ -105,6 +105,77 @@ pub(super) fn render_drill_in_loading_overlay(
     ui.ctx().request_repaint();
 }
 
+/// Painted when a drill-in / duplicate load failed (e.g. MSL bundle
+/// not yet ready, class missing, parse error). Replaces the spinner
+/// so the tab doesn't sit on "Loading resource…" forever.
+pub(super) fn render_drill_in_error_overlay(
+    ui: &mut egui::Ui,
+    canvas_rect: egui::Rect,
+    class_name: &str,
+    error: &str,
+    theme: &lunco_theme::Theme,
+) {
+    let card_w = 420.0;
+    let card_h = 110.0;
+    let card_rect = egui::Rect::from_center_size(
+        canvas_rect.center(),
+        egui::vec2(card_w, card_h),
+    );
+    let painter = ui.painter().clone().with_clip_rect(ui.clip_rect().intersect(canvas_rect));
+    let painter = &painter;
+    let shadow = {
+        let b = theme.colors.base;
+        egui::Color32::from_rgba_unmultiplied(b.r(), b.g(), b.b(), 100)
+    };
+    painter.rect_filled(
+        card_rect.translate(egui::vec2(0.0, 3.0)),
+        8.0,
+        shadow,
+    );
+    painter.rect_filled(card_rect, 8.0, theme.tokens.surface_raised);
+    painter.rect_stroke(
+        card_rect,
+        8.0,
+        egui::Stroke::new(1.0, theme.tokens.error),
+        egui::StrokeKind::Outside,
+    );
+    painter.text(
+        egui::pos2(card_rect.min.x + 16.0, card_rect.min.y + 16.0),
+        egui::Align2::LEFT_TOP,
+        "Failed to load resource",
+        egui::FontId::proportional(14.0),
+        theme.tokens.error,
+    );
+    let display = if class_name.len() > 56 {
+        format!("…{}", &class_name[class_name.len() - 55..])
+    } else {
+        class_name.to_string()
+    };
+    painter.text(
+        egui::pos2(card_rect.min.x + 16.0, card_rect.min.y + 38.0),
+        egui::Align2::LEFT_TOP,
+        display,
+        egui::FontId::monospace(11.0),
+        theme.tokens.text_subdued,
+    );
+    let trimmed = if error.len() > 220 {
+        format!("{}…", &error[..219])
+    } else {
+        error.to_string()
+    };
+    let galley = painter.layout(
+        trimmed,
+        egui::FontId::proportional(11.0),
+        theme.tokens.text,
+        card_w - 32.0,
+    );
+    painter.galley(
+        egui::pos2(card_rect.min.x + 16.0, card_rect.min.y + 58.0),
+        galley,
+        theme.tokens.text,
+    );
+}
+
 // ─── Loading / projection overlay ──────────────────────────────────
 
 /// Small "Projecting…" card centred on the canvas while an

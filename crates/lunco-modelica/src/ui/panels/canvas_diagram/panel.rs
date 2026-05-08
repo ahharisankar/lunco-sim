@@ -1346,6 +1346,14 @@ impl CanvasDiagramPanel {
         //      misrepresent what's going on.
         //   2. Projection task in flight → "Projecting…" spinner.
         //   3. Empty scene, no task → equation-only model summary.
+        let load_error: Option<(String, String)> = render_tab_id.and_then(|tid| {
+            let tabs = world.resource::<crate::ui::panels::model_view::ModelTabs>();
+            tabs.get(tid).and_then(|t| {
+                t.load_error
+                    .as_ref()
+                    .map(|err| (t.drilled_class.clone().unwrap_or_default(), err.clone()))
+            })
+        });
         let (loading_info, projecting, parse_pending, show_empty_overlay, scene_has_content) = {
             let state = world.resource::<CanvasDiagramState>();
             let loads = world.resource::<DrillInLoads>();
@@ -1421,7 +1429,9 @@ impl CanvasDiagramPanel {
             .get_resource::<lunco_theme::Theme>()
             .cloned()
             .unwrap_or_else(lunco_theme::Theme::dark);
-        if let Some((class, secs)) = loading_info {
+        if let Some((class, err)) = load_error {
+            overlays::render_drill_in_error_overlay(ui, response.rect, &class, &err, &theme_snapshot_for_overlay);
+        } else if let Some((class, secs)) = loading_info {
             if !scene_has_content {
                 overlays::render_drill_in_loading_overlay(ui, response.rect, &class, secs, &theme_snapshot_for_overlay);
             }

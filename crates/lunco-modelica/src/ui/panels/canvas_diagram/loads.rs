@@ -294,6 +294,14 @@ pub fn drive_drill_in_loads(
                     "[CanvasDiagram] drill-in: class `{}` load failed: {}",
                     qualified, msg
                 );
+                // Surface the failure on every tab waiting on this
+                // (doc, drilled_class). Without this the canvas overlay
+                // would show "Loading resource…" forever.
+                for (_id, state) in tabs.iter_mut_for_doc(doc_id) {
+                    if state.drilled_class.as_deref() == Some(qualified.as_str()) {
+                        state.load_error = Some(msg.clone());
+                    }
+                }
                 continue;
             }
         };
