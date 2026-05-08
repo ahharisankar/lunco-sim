@@ -1183,7 +1183,7 @@ fn on_compile_model(
     // compile (see `ModelicaCommand::Compile`), so any AST staleness
     // here only affects telemetry-panel labels for one debounce
     // cycle, not the compiled model itself.
-    let (source, ast_for_extract, candidate_classes, detected_first_class) =
+    let (source, ast_for_extract, candidate_classes, detected_first_class, params, inputs_with_defaults, runtime_inputs) =
         match registry.host(doc) {
             Some(h) => {
                 let doc_ref = h.document();
@@ -1203,11 +1203,44 @@ fn on_compile_model(
                     .values()
                     .find(|c| !matches!(c.kind, crate::index::ClassKind::Package))
                     .map(|c| c.name.clone());
+                // Compile-time seed values for `ModelicaModel`
+                // (parameters / input defaults / runtime input names)
+                // — read straight from the index. Replaces three
+                // `ast_extract::extract_*_from_ast` calls that walked
+                // the same data.
+                let mut params: HashMap<String, f64> = HashMap::new();
+                let mut inputs_with_defaults: HashMap<String, f64> = HashMap::new();
+                let mut runtime_inputs: Vec<String> = Vec::new();
+                for entry in &index.components {
+                    let numeric = entry
+                        .binding
+                        .as_ref()
+                        .and_then(|s| s.parse::<f64>().ok());
+                    match (entry.variability, entry.causality) {
+                        (crate::index::Variability::Parameter, _)
+                        | (crate::index::Variability::Constant, _) => {
+                            if let Some(v) = numeric {
+                                params.insert(entry.name.clone(), v);
+                            }
+                        }
+                        (_, crate::index::Causality::Input) => {
+                            if let Some(v) = numeric {
+                                inputs_with_defaults.insert(entry.name.clone(), v);
+                            } else {
+                                runtime_inputs.push(entry.name.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 (
                     doc_ref.source().to_string(),
                     ast,
                     candidates,
                     first_non_package,
+                    params,
+                    inputs_with_defaults,
+                    runtime_inputs,
                 )
             }
             None => return,
@@ -1295,11 +1328,6 @@ fn on_compile_model(
         console.error(format!("Compile failed: {msg}"));
         return;
     };
-    let params = crate::ast_extract::extract_parameters_from_ast(&ast);
-    let inputs_with_defaults =
-        crate::ast_extract::extract_inputs_with_defaults_from_ast(&ast);
-    let runtime_inputs = crate::ast_extract::extract_input_names_from_ast(&ast);
-
     // Find or spawn the entity linked to this document.
     let linked = registry.entities_linked_to(doc);
 

@@ -159,19 +159,6 @@ fn find_first_non_package_qualified(
         .map(|n| if parent.is_empty() { n.to_string() } else { format!("{parent}.{n}") })
 }
 
-/// Extract the Modelica description string (`"..."` after a
-/// declaration, per MLS §A.2.5) for every component across all classes
-/// in the source. Returns a `name → description` map.
-///
-/// Rumoca's compiled DAE drops component descriptions during
-/// compile → DAE lowering (as of rumoca `main` at the time of writing),
-/// so we can't read them from `Dae.states[name].description`. The
-/// AST-level `Component.description: Vec<Token>` still has them,
-/// which is what we walk here.
-///
-/// Used by the worker to feed hover tooltips in the Telemetry panel,
-/// the Diagram icon block, and anywhere else a variable name appears
-/// that benefits from inline docs.
 /// Extract parameter values from Modelica source code.
 ///
 /// Finds all components with `parameter` variability across all classes and
@@ -247,21 +234,6 @@ pub fn extract_variable_names(source: &str) -> Vec<String> {
     let mut names = Vec::new();
     collect_variable_names_from_classes(&ast.classes, &mut names);
     names
-}
-
-/// AST-based variant — see `extract_parameters_from_ast`.
-pub fn extract_variable_names_from_ast(ast: &StoredDefinition) -> Vec<String> {
-    let mut names = Vec::new();
-    collect_variable_names_from_classes(&ast.classes, &mut names);
-    names
-}
-
-
-/// AST-based variant — see `extract_parameters_from_ast`.
-pub fn extract_input_names_from_ast(ast: &StoredDefinition) -> Vec<String> {
-    let mut inputs = Vec::new();
-    collect_input_names_from_classes(&ast.classes, &mut inputs);
-    inputs
 }
 
 /// Strip default values from `input` declarations in source code.
@@ -379,22 +351,6 @@ fn collect_variable_names_from_classes(
             }
         }
         collect_variable_names_from_classes(&class.classes, names);
-    }
-}
-
-fn collect_input_names_from_classes(
-    classes: &indexmap::IndexMap<String, ClassDef>,
-    inputs: &mut Vec<String>,
-) {
-    for class in classes.values() {
-        for component in class.components.values() {
-            if matches!(component.causality, Causality::Input(_)) {
-                if extract_numeric_binding(&component.binding).is_none() {
-                    inputs.push(component.name.clone());
-                }
-            }
-        }
-        collect_input_names_from_classes(&class.classes, inputs);
     }
 }
 
