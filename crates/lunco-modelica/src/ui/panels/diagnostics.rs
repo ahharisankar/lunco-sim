@@ -25,7 +25,7 @@ use bevy_egui::egui;
 use lunco_workbench::{Panel, PanelId, PanelSlot};
 
 use crate::ui::panels::log::{render_log_view, LogEntry, LogLevel};
-use crate::ui::state::{ModelicaDocumentRegistry, WorkbenchState};
+use crate::ui::state::ModelicaDocumentRegistry;
 
 /// Panel id.
 pub const DIAGNOSTICS_PANEL_ID: PanelId = PanelId("modelica_diagnostics");
@@ -156,9 +156,11 @@ fn hash_str(s: Option<&str>) -> u64 {
 /// the initial implementation and kept the log's internal VecDeque
 /// churning even when nothing was changing.
 pub fn refresh_diagnostics(
-    workbench: Res<WorkbenchState>,
+    // B.3 phase 4: `WorkbenchState.compilation_error` retired; per-doc
+    // error lives on `CompileStates`.
     workspace: Res<lunco_workbench::WorkspaceResource>,
     registry: Res<ModelicaDocumentRegistry>,
+    compile_states: Res<crate::ui::CompileStates>,
     mut diagnostics: ResMut<DiagnosticsLog>,
     mut cursor: bevy::prelude::Local<DiagnosticsCursor>,
 ) {
@@ -188,7 +190,7 @@ pub fn refresh_diagnostics(
     };
 
     let ast_gen = host.document().ast().generation;
-    let err_hash = hash_str(workbench.compilation_error.as_deref());
+    let err_hash = hash_str(compile_states.error_for(doc_id));
     // Lint depends on source content. AST gen ticks on every source
     // mutation, so combining (ast_gen, err_hash) is enough — no extra
     // source hash needed.
@@ -226,16 +228,15 @@ pub fn refresh_diagnostics(
         });
     }
 
-    // 2. Compile / run errors — the simulator worker writes these
-    // into `WorkbenchState.compilation_error` whenever a compile
-    // or simulation step fails. Without mirroring them here the
-    // Diagnostics panel stayed empty even when a red "Error" chip
-    // was visible in the toolbar.
-    if let Some(msg) = workbench.compilation_error.as_ref() {
+    // 2. Compile / run errors — the worker stores them per-doc on
+    // `CompileStates.errors[doc]` (B.3 phase 4). Without mirroring
+    // them here the Diagnostics panel stayed empty even when a red
+    // "Error" chip was visible in the toolbar.
+    if let Some(msg) = compile_states.error_for(doc_id) {
         entries.push(LogEntry {
             at: web_time::Instant::now(),
             level: LogLevel::Error,
-            text: msg.clone(),
+            text: msg.to_string(),
             model: model_tag.clone(),
         });
     }

@@ -744,10 +744,12 @@ pub(super) fn apply_ops(
     }
 
     if hit_read_only {
-        if let Some(mut ws) = world.get_resource_mut::<WorkbenchState>() {
+        // B.3 phase 4: per-doc error.
+        if let Some(mut cs) = world.get_resource_mut::<crate::ui::CompileStates>() {
             // Don't clobber a real compile error.
-            if ws.compilation_error.is_none() {
-                ws.compilation_error = Some(
+            if cs.error_for(doc_id).is_none() {
+                cs.set_error(
+                    doc_id,
                     "Read-only library tab — edits rejected. \
                      Use File → Duplicate to Workspace to create an \
                      editable copy."

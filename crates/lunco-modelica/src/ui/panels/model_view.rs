@@ -1129,7 +1129,10 @@ fn render_unified_toolbar(
                 || m.model_path.contains("/Icons/")
         })
         .unwrap_or(false);
-    let compilation_error = world.resource::<WorkbenchState>().compilation_error.clone();
+    // B.3 phase 4: per-doc error on CompileStates.
+    let compilation_error = world
+        .get_resource::<crate::ui::CompileStates>()
+        .and_then(|cs| cs.error_for(doc).map(str::to_string));
 
     let undo_redo = world
         .resource::<ModelicaDocumentRegistry>()
@@ -1364,8 +1367,9 @@ fn render_unified_toolbar(
 
     // Apply side effects after the closure.
     if dismiss_error {
-        if let Some(mut s) = world.get_resource_mut::<WorkbenchState>() {
-            s.compilation_error = None;
+        // B.3 phase 4: per-doc error on CompileStates.
+        if let Some(mut cs) = world.get_resource_mut::<crate::ui::CompileStates>() {
+            cs.clear_error(doc);
         }
     }
     if undo_clicked {

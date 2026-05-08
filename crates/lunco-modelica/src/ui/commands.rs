@@ -739,7 +739,8 @@ fn on_document_closed_cleanup(
         workspace.active_document = None;
         workbench.open_model = None;
         workbench.editor_buffer.clear();
-        workbench.compilation_error = None;
+        // B.3 phase 4: per-doc error already removed by
+        // `compile_states.remove(doc)` above.
     }
 }
 
@@ -1224,7 +1225,8 @@ fn on_compile_model(
         // extractors, which at least try once; if they also fail,
         // the error message below fires.
         let msg = "Could not parse Modelica source for compile.".to_string();
-        workbench.compilation_error = Some(msg.clone());
+        // B.3 phase 4: per-doc error.
+        compile_states.set_error(doc, msg.clone());
         console.error(format!("Compile failed: {msg}"));
         return;
     };
@@ -1261,9 +1263,10 @@ fn on_compile_model(
                     "compile_model class `{cls}` not found. Candidates: [{}]",
                     candidates.join(", ")
                 );
-                workbench.compilation_error = Some(msg.clone());
+                // B.3 phase 4: per-doc error.
+                compile_states.set_error(doc, msg.clone());
                 console.error(format!("Compile failed: {msg}"));
-                let _ = diagnostics; // surfaced via console + workbench
+                let _ = diagnostics;
                 return;
             }
         }
@@ -1296,7 +1299,8 @@ fn on_compile_model(
         .or(detected_first_class);
     let Some(model_name) = model_name else {
         let msg = "Could not find a valid model declaration.".to_string();
-        workbench.compilation_error = Some(msg.clone());
+        // B.3 phase 4: per-doc error.
+        compile_states.set_error(doc, msg.clone());
         console.error(format!("Compile failed: {msg}"));
         return;
     };

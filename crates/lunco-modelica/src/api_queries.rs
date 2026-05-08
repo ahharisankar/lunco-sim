@@ -475,12 +475,10 @@ impl ApiQueryProvider for CompileStatusProvider {
             && drilled_in.is_none()
             && candidates.len() >= 2;
 
-        // Error message lives on `WorkbenchState.compilation_error`. It
-        // is doc-global today (one slot, last writer wins) — fine for
-        // single-doc workflows; revisit if multi-doc compile lands.
+        // B.3 phase 4: per-doc error on CompileStates.
         let error_message = world
-            .get_resource::<crate::ui::state::WorkbenchState>()
-            .and_then(|ws| ws.compilation_error.clone());
+            .get_resource::<crate::ui::CompileStates>()
+            .and_then(|cs| cs.error_for(doc_id).map(str::to_string));
 
         let state_label = match state {
             CompileState::Idle => "idle",

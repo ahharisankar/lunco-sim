@@ -276,9 +276,14 @@ impl Panel for CodeEditorPanel {
         };
         let (compilation_error, selected_entity, is_loading) = {
             let state = world.resource::<WorkbenchState>();
-            let err = state.compilation_error.clone();
             let entity = state.selected_entity;
             let loading = state.is_loading && source_len == 0;
+            // B.3 phase 4: per-doc error from CompileStates.
+            let err = tab_target.and_then(|d| {
+                world
+                    .get_resource::<crate::ui::CompileStates>()
+                    .and_then(|cs| cs.error_for(d).map(str::to_string))
+            });
             (err, entity, loading)
         };
 

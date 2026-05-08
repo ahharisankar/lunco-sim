@@ -123,8 +123,9 @@ pub struct WorkbenchState {
     /// **Selection bridge**: which `ModelicaModel` entity panels are viewing.
     /// Set by any context (library, 3D viewport, colony tree).
     pub selected_entity: Option<Entity>,
-    /// Last compilation error message, if any.
-    pub compilation_error: Option<String>,
+    // B.3 phase 4: `compilation_error` field retired. Per-doc
+    // storage on `CompileStates.errors[doc]`; readers go through
+    // `compile_states.error_for(doc)`.
     /// Render-side **derived projection** of the active document.
     ///
     /// Identity (which doc is active) lives on
@@ -188,8 +189,9 @@ pub enum CompileState {
     Compiling,
     /// The last compile succeeded. The worker's cached DAE is current.
     Ready,
-    /// The last compile failed. See `WorkbenchState::compilation_error`
-    /// for details (will migrate to per-document error storage later).
+    /// The last compile failed. Use [`CompileStates::error_for`]
+    /// to fetch the message text (B.3 phase 4 — moved from
+    /// `WorkbenchState.compilation_error`).
     Error,
 }
 
@@ -208,6 +210,11 @@ pub struct CompileStates {
     /// "compile X finished in Y ms" to Console / Diagnostics when
     /// the worker responds.
     compile_started: HashMap<DocumentId, web_time::Instant>,
+    /// Last compile error message per document. B.3 phase 4 —
+    /// migrated from `WorkbenchState.compilation_error` (which was
+    /// a singleton keyed to the active doc). Cleared on the next
+    /// successful compile via [`mark_finished`].
+    errors: HashMap<DocumentId, String>,
 }
 
 impl CompileStates {
@@ -251,6 +258,28 @@ impl CompileStates {
     pub fn remove(&mut self, doc: DocumentId) {
         self.by_doc.remove(&doc);
         self.compile_started.remove(&doc);
+        self.errors.remove(&doc);
+    }
+
+    /// Fetch the last compile error message for `doc`, or `None`
+    /// when the doc compiled cleanly (or hasn't been compiled yet).
+    /// B.3 phase 4 replacement for
+    /// `WorkbenchState.compilation_error`.
+    pub fn error_for(&self, doc: DocumentId) -> Option<&str> {
+        self.errors.get(&doc).map(String::as_str)
+    }
+
+    /// Stamp an error message and transition to
+    /// [`CompileState::Error`].
+    pub fn set_error(&mut self, doc: DocumentId, msg: String) {
+        self.errors.insert(doc, msg);
+        self.by_doc.insert(doc, CompileState::Error);
+    }
+
+    /// Clear any recorded error for `doc` (next successful compile,
+    /// next dispatch, or any caller that wants to reset the slot).
+    pub fn clear_error(&mut self, doc: DocumentId) {
+        self.errors.remove(&doc);
     }
 }
 
@@ -603,7 +632,6 @@ impl Default for WorkbenchState {
         Self {
             editor_buffer: String::new(),
             selected_entity: None,
-            compilation_error: None,
             open_model: None,
             diagram_dirty: false,
             is_loading: false,

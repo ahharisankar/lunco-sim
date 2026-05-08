@@ -1345,7 +1345,10 @@ pub fn handle_modelica_responses(
             }
 
             if let Some(err) = &result.error {
-                workbench_state.compilation_error = Some(err.clone());
+                // B.3 phase 4: per-doc error on CompileStates.
+                if let Some(cs) = compile_states.as_mut() {
+                    cs.set_error(model.document, err.clone());
+                }
                 warn!("[Modelica] {err}");
                 // Classify for the console: compile-time errors are
                 // distinct from solver blowups during Step. Both are
@@ -1370,8 +1373,9 @@ pub fn handle_modelica_responses(
                 // fresh Compile rather than a doomed Step. Compile
                 // errors flip this in the `is_new_model` block below.
                 model.is_compiled = false;
-            } else if workbench_state.selected_entity == Some(result.entity) {
-                workbench_state.compilation_error = None;
+            } else if let Some(cs) = compile_states.as_mut() {
+                // B.3 phase 4: clear the per-doc error on success.
+                cs.clear_error(model.document);
             }
 
             if result.is_new_model {
