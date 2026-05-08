@@ -44,7 +44,15 @@ impl Plugin for WasmAutosavePlugin {
         // builds can also gate future native autosave on it without
         // a separate resource. Default `false` so behaviour is
         // unchanged until setters wire in.
-        app.init_resource::<IsGestureActive>();
+        app.init_resource::<IsGestureActive>()
+            // Mirror the editor's debounced-commit window into the
+            // `text` source. Single-driver system: caller-side
+            // setters in panel renders only handle their own field
+            // (canvas in canvas_diagram::panel; modal — TODO), and
+            // the text field is decoupled from the editor's render
+            // path because `pending_commit_at` is just a timestamp
+            // we can observe headlessly.
+            .add_systems(bevy::prelude::Update, drive_text_gesture_flag);
         #[cfg(target_arch = "wasm32")]
         {
             app.add_systems(bevy::prelude::Startup, restore_from_localstorage)
@@ -52,6 +60,21 @@ impl Plugin for WasmAutosavePlugin {
                 .add_observer(forget_on_closed);
         }
         let _ = app;
+    }
+}
+
+/// Mirror `EditorBufferState.pending_commit_at.is_some()` into
+/// [`IsGestureActive::text`] every frame. Active while the editor
+/// has uncommitted bytes; clears on the debounce flush (which sets
+/// `pending_commit_at = None`). Cheap — two resource reads + one
+/// write.
+fn drive_text_gesture_flag(
+    buf: bevy::prelude::Res<crate::ui::panels::code_editor::EditorBufferState>,
+    mut gesture: bevy::prelude::ResMut<IsGestureActive>,
+) {
+    let active = buf.pending_commit_at.is_some();
+    if gesture.text != active {
+        gesture.text = active;
     }
 }
 

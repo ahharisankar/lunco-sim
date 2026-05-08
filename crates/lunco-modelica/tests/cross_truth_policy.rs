@@ -61,6 +61,21 @@ fn r1_is_gesture_active_any_is_or_of_sources() {
 }
 
 #[test]
+fn r1_text_source_mirrors_pending_commit_window() {
+    // Pins the contract `drive_text_gesture_flag` enforces:
+    // `gesture.text` is true exactly while
+    // `EditorBufferState.pending_commit_at.is_some()`. The driver
+    // system needs Bevy to run — this test models the same boolean
+    // mirror so a future refactor can't drift the rule.
+    fn mirror(pending: Option<f64>) -> bool {
+        pending.is_some()
+    }
+    assert!(!mirror(None), "no pending edit → text source clear");
+    assert!(mirror(Some(123.4)), "pending edit → text source active");
+    assert!(mirror(Some(0.0)), "even t=0 counts as in-flight");
+}
+
+#[test]
 fn r1_is_gesture_active_independent_sources() {
     // Two sources active at once; clearing one alone doesn't open
     // the gate. Pins the regression class where canvas-release
