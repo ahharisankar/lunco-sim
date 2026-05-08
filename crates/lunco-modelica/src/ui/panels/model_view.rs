@@ -118,6 +118,34 @@ impl TabRenderContext {
     }
 }
 
+/// Free-form drilled-class lookup for `doc` from a Bevy world.
+///
+/// Render-context-aware: when [`TabRenderContext`] names a tab and
+/// that tab is on `doc`, returns its scope. Outside render scope
+/// (observers, off-render systems) falls back to
+/// [`ModelTabs::drilled_class_for_doc`] (first-tab match).
+///
+/// **B.3 migration target:** every reader of
+/// `DrilledInClassNames.get(doc)` should switch to this helper.
+/// Once no `DrilledInClassNames` readers remain, the singleton
+/// retires (writes via `sync_active_tab_to_doc` go away too).
+pub fn drilled_class_for_doc(
+    world: &bevy::prelude::World,
+    doc: DocumentId,
+) -> Option<String> {
+    if let Some(ctx) = world.get_resource::<TabRenderContext>() {
+        if let Some(tab_id) = ctx.tab_id {
+            let tabs = world.resource::<ModelTabs>();
+            if let Some(state) = tabs.get(tab_id) {
+                if state.doc == doc {
+                    return state.drilled_class.clone();
+                }
+            }
+        }
+    }
+    world.resource::<ModelTabs>().drilled_class_for_doc(doc)
+}
+
 /// Registry of open [`ModelViewPanel`] tabs.
 ///
 /// Keyed by [`TabId`] (allocated from `next_id`). Multiple tabs can
@@ -278,6 +306,21 @@ impl ModelTabs {
     /// Close the specific tab. Returns the tab state if it existed.
     pub fn close_tab(&mut self, tab_id: TabId) -> Option<ModelTabState> {
         self.tabs.remove(&tab_id)
+    }
+
+    /// Drilled class for `doc` derived from the tab table —
+    /// authoritative source per the B.3 singleton-retire plan.
+    /// Picks the first tab matching `doc` (HashMap iteration order
+    /// — best-effort determinism, fine for the common
+    /// one-tab-per-doc case).
+    ///
+    /// Replaces `DrilledInClassNames.get(doc)` reads. Writers into
+    /// `ModelTabState.drilled_class` are the new source of truth;
+    /// this method derives the same answer without going through
+    /// the legacy cache.
+    pub fn drilled_class_for_doc(&self, doc: DocumentId) -> Option<String> {
+        let tab_id = self.any_for_doc(doc)?;
+        self.get(tab_id)?.drilled_class.clone()
     }
 
     /// Close every tab whose `drilled_class` is `qualified` or a

@@ -235,6 +235,42 @@ fn allocated_tab_ids_are_monotonic() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// drilled_class_for_doc — B.3 helper that replaces
+// `DrilledInClassNames.get(doc)` reads. Pin the lookup semantics so
+// the migration's reader rewrites stay safe.
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn drilled_class_for_doc_returns_none_when_no_tab() {
+    let tabs = ModelTabs::default();
+    assert_eq!(tabs.drilled_class_for_doc(doc(1)), None);
+}
+
+#[test]
+fn drilled_class_for_doc_returns_no_drill_for_root_tab() {
+    let mut tabs = ModelTabs::default();
+    let _id = tabs.ensure_for(doc(1), None);
+    assert_eq!(tabs.drilled_class_for_doc(doc(1)), None, "root tab → None");
+}
+
+#[test]
+fn drilled_class_for_doc_returns_scope_for_drilled_tab() {
+    let mut tabs = ModelTabs::default();
+    let _id = tabs.ensure_for(doc(1), Some("Foo.Bar".into()));
+    assert_eq!(
+        tabs.drilled_class_for_doc(doc(1)),
+        Some("Foo.Bar".into()),
+    );
+}
+
+#[test]
+fn drilled_class_for_doc_unknown_doc_is_none() {
+    let mut tabs = ModelTabs::default();
+    let _id = tabs.ensure_for(doc(1), Some("Foo".into()));
+    assert_eq!(tabs.drilled_class_for_doc(doc(9)), None);
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // close_drilled_into — cross-truth rule R4 (RemoveClass closes
 // drilled tabs). Helper-level pin; observer wiring is a separate
 // chokepoint.

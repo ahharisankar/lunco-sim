@@ -39,7 +39,8 @@ use rumoca_session::parsing::ClassType;
 
 use crate::document::SyntaxCache;
 
-use crate::ui::panels::canvas_diagram::DrilledInClassNames;
+// `DrilledInClassNames` reads migrated to
+// `crate::ui::panels::model_view::drilled_class_for_doc` (B.3).
 use crate::ui::state::ModelicaDocumentRegistry;
 
 /// One Modelica class entry rendered in the tree.
@@ -169,9 +170,8 @@ pub(crate) fn render_workspace_doc(
         .get_resource::<lunco_workbench::WorkspaceResource>()
         .and_then(|ws| ws.active_document);
     let active_qualified: Option<String> = active_doc.and_then(|d| {
-        ctx.world
-            .get_resource::<DrilledInClassNames>()
-            .and_then(|m| m.get(d).map(str::to_string))
+        // B.3: derive from `ModelTabs` instead of `DrilledInClassNames`.
+        crate::ui::panels::model_view::drilled_class_for_doc(ctx.world, d)
     });
 
     // Collapse the redundant wrapper when the document holds a

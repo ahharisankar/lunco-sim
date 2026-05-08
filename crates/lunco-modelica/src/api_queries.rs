@@ -27,7 +27,8 @@ use lunco_workbench::WorkspaceResource;
 
 use crate::ast_extract;
 use crate::models::bundled_models;
-use crate::ui::panels::canvas_diagram::DrilledInClassNames;
+// `DrilledInClassNames` reads migrated to
+// `crate::ui::panels::model_view::drilled_class_for_doc` (B.3).
 use crate::ui::state::{CompileState, CompileStates, ModelicaDocumentRegistry};
 use crate::visual_diagram::{msl_component_library, MSLComponentDef};
 use lunco_doc::DocumentId;
@@ -433,9 +434,13 @@ impl ApiQueryProvider for CompileStatusProvider {
             .get_resource::<CompileStates>()
             .map(|cs| cs.state_of(doc_id))
             .unwrap_or(CompileState::Idle);
-        let drilled_in = world
-            .get_resource::<DrilledInClassNames>()
-            .and_then(|m| m.get(doc_id).map(str::to_string));
+        // B.3: derive drilled scope from `ModelTabs` directly instead
+        // of going through the `DrilledInClassNames` cache. The
+        // helper falls back to first-tab-for-doc when no
+        // `TabRenderContext` is in scope (which is the case here —
+        // API queries run off-render).
+        let drilled_in =
+            crate::ui::panels::model_view::drilled_class_for_doc(world, doc_id);
         // `picker_pending` mirrors the gate in `on_compile_model`: we
         // would be in the picker branch if no class is pinned and the
         // doc has 2+ non-package classes. Easier to recompute than to
@@ -595,9 +600,13 @@ impl ApiQueryProvider for DescribeModelProvider {
         // borrow the modelica registry — `DrilledInClassNames` is a
         // separate resource and we need both. Reading them in
         // sequence keeps the borrow checker simple.
-        let drilled_in = world
-            .get_resource::<DrilledInClassNames>()
-            .and_then(|m| m.get(doc_id).map(str::to_string));
+        // B.3: derive drilled scope from `ModelTabs` directly instead
+        // of going through the `DrilledInClassNames` cache. The
+        // helper falls back to first-tab-for-doc when no
+        // `TabRenderContext` is in scope (which is the case here —
+        // API queries run off-render).
+        let drilled_in =
+            crate::ui::panels::model_view::drilled_class_for_doc(world, doc_id);
 
         let registry = world.resource::<ModelicaDocumentRegistry>();
         let Some(host) = registry.host(doc_id) else {

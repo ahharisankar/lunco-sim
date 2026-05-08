@@ -129,9 +129,9 @@ impl Panel for InspectorPanel {
         // drilled-in pin wins when set, otherwise the document's
         // first non-package class (the same default the canvas
         // projects).
-        let drilled_in = world
-            .get_resource::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
-            .and_then(|m| m.get(doc_id).map(str::to_string));
+        // B.3: derive from `ModelTabs` directly.
+        let drilled_in =
+            crate::ui::panels::model_view::drilled_class_for_doc(world, doc_id);
 
         // Resolve the target class + component via the per-document
         // [`crate::index::ModelicaIndex`]. The Index is patched
@@ -434,9 +434,8 @@ fn apply_plot_title(
             }
         }
     }
-    let class = world
-        .get_resource::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
-        .and_then(|m| m.get(doc_id).map(str::to_string))
+    // B.3: derive from `ModelTabs`.
+    let class = crate::ui::panels::model_view::drilled_class_for_doc(world, doc_id)
         .or_else(|| {
             world
                 .get_resource::<crate::ui::WorkbenchState>()
@@ -507,9 +506,8 @@ fn apply_plot_binding(
     //    the diagram annotation tracks the user's choice. Empty
     //    `signal_path` is "unbind" — only emit the Remove. Empty
     //    `prev_signal` is "first bind" — only emit the Add.
-    let class = world
-        .get_resource::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
-        .and_then(|m| m.get(doc_id).map(str::to_string))
+    // B.3: derive from `ModelTabs`.
+    let class = crate::ui::panels::model_view::drilled_class_for_doc(world, doc_id)
         .or_else(|| {
             world
                 .get_resource::<crate::ui::WorkbenchState>()
@@ -636,9 +634,8 @@ fn apply_diagram_text_string(
             }
         }
     }
-    let class = world
-        .get_resource::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
-        .and_then(|m| m.get(doc_id).map(str::to_string))
+    // B.3: derive from `ModelTabs`.
+    let class = crate::ui::panels::model_view::drilled_class_for_doc(world, doc_id)
         .or_else(|| {
             world
                 .get_resource::<crate::ui::WorkbenchState>()

@@ -494,10 +494,9 @@ pub(crate) fn place_component(
     // panels would duplicate the policy and inevitably drift.
 
     // Resolve target class — drilled-in class on the canvas if set,
-    // otherwise the doc's first detected non-package class.
-    let drilled_in = world
-        .get_resource::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
-        .and_then(|m| m.get(doc_id).map(str::to_string));
+    // otherwise the doc's first detected non-package class. B.3:
+    // derive scope from `ModelTabs` directly.
+    let drilled_in = crate::ui::panels::model_view::drilled_class_for_doc(world, doc_id);
     let class = drilled_in
         .or_else(|| {
             // Fallback to the document's first non-package class, read
