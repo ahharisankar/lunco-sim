@@ -926,27 +926,30 @@ mod observables_smoke {
     }
 
     /// Verifies that `"..."` description strings (MLS §A.2.5) survive
-    /// the AST-based extraction pipeline and reach the worker's
-    /// description map. If this regresses, Telemetry tooltips go dark.
+    /// into the per-doc [`crate::index::ModelicaIndex`] — that's what
+    /// panels read for hover tooltips. If this regresses, Telemetry
+    /// tooltips go dark.
     #[test]
     fn rocket_engine_descriptions_populate() {
         let raw = include_str!("../../../assets/models/RocketEngine.mo");
-        let (src, _) = ast_extract::strip_input_defaults(raw);
-        let descs: std::collections::HashMap<String, String> =
-            collect_variable_descriptions(&src).into_iter().collect();
+        let ast = rumoca_phase_parse::parse_to_ast(raw, "RocketEngine.mo")
+            .expect("parses");
+        let mut index = crate::index::ModelicaIndex::new();
+        index.rebuild_from_ast(&ast, raw);
         for (var, needle) in [
             ("m_dot_max", "mass flow"),
             ("throttle",  "Throttle"),
             ("m_prop",    "Propellant"),
             ("thrust",    "Thrust"),
         ] {
-            let desc = descs.get(var)
-                .unwrap_or_else(|| panic!(
-                    "no description for '{var}'; got {:?}",
-                    descs.keys().collect::<Vec<_>>()
-                ));
-            assert!(desc.contains(needle),
-                "'{var}' description should contain '{needle}', got: {desc:?}");
+            let entry = index
+                .find_component_by_leaf(var)
+                .unwrap_or_else(|| panic!("no component '{var}' in index"));
+            assert!(
+                entry.description.contains(needle),
+                "'{var}' description should contain '{needle}', got: {:?}",
+                entry.description
+            );
         }
     }
 
