@@ -439,8 +439,8 @@ fn apply_plot_title(
         .or_else(|| {
             world
                 .get_resource::<crate::ui::WorkbenchState>()
-                .and_then(|s| s.open_model.as_ref().map(|m| m.detected_name.clone()))
-                .flatten()
+                // B.3 phase 6: derive from registry instead of `open_model`.
+                .and_then(|_s| crate::ui::state::detected_name_for(world, doc_id))
         })
         .unwrap_or_default();
     if class.is_empty() {
@@ -511,8 +511,8 @@ fn apply_plot_binding(
         .or_else(|| {
             world
                 .get_resource::<crate::ui::WorkbenchState>()
-                .and_then(|s| s.open_model.as_ref().map(|m| m.detected_name.clone()))
-                .flatten()
+                // B.3 phase 6: derive from registry instead of `open_model`.
+                .and_then(|_s| crate::ui::state::detected_name_for(world, doc_id))
         })
         .unwrap_or_default();
     if class.is_empty() {
@@ -639,8 +639,8 @@ fn apply_diagram_text_string(
         .or_else(|| {
             world
                 .get_resource::<crate::ui::WorkbenchState>()
-                .and_then(|s| s.open_model.as_ref().map(|m| m.detected_name.clone()))
-                .flatten()
+                // B.3 phase 6: derive from registry instead of `open_model`.
+                .and_then(|_s| crate::ui::state::detected_name_for(world, doc_id))
         })
         .unwrap_or_default();
     if class.is_empty() {

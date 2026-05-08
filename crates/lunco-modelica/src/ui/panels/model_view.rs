@@ -599,11 +599,8 @@ impl InstancePanel for ModelViewPanel {
         // ops layer — so the user saw nothing when they tried to
         // modify something. A visible strip with a Duplicate
         // button is unmissable and one click from the fix.
-        let tab_read_only = world
-            .get_resource::<WorkbenchState>()
-            .and_then(|s| s.open_model.as_ref())
-            .map(|m| m.read_only)
-            .unwrap_or(false);
+        // B.3 phase 6: derive from registry.
+        let tab_read_only = crate::ui::state::read_only_for(world, doc);
         if tab_read_only {
             let mut banner_duplicate_clicked = false;
             egui::Frame::NONE

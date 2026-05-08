@@ -60,7 +60,6 @@ pub(super) fn resolve_doc_context(world: &World) -> (Option<lunco_doc::DocumentI
     // B.3: derive from `ModelTabs`.
     let drilled_in =
         crate::ui::panels::model_view::drilled_class_for_doc(world, doc_id);
-    let open = world.resource::<WorkbenchState>().open_model.as_ref();
     let class = drilled_in
         .or_else(|| {
             world
@@ -72,7 +71,8 @@ pub(super) fn resolve_doc_context(world: &World) -> (Option<lunco_doc::DocumentI
                         .and_then(|ast| crate::ast_extract::extract_model_name_from_ast(&ast))
                 })
         })
-        .or_else(|| open.and_then(|o| o.detected_name.clone()));
+        // B.3 phase 6: detected_name now derives from registry directly.
+        .or_else(|| crate::ui::state::detected_name_for(world, doc_id));
     (Some(doc_id), class)
 }
 
@@ -995,8 +995,6 @@ pub(super) fn active_class_for_doc(world: &mut World, doc_id: lunco_doc::Documen
     if let Some(c) = crate::ui::panels::model_view::drilled_class_for_doc(world, doc_id) {
         return Some(c);
     }
-    world
-        .get_resource::<WorkbenchState>()
-        .and_then(|ws| ws.open_model.as_ref())
-        .and_then(|o| o.detected_name.clone())
+    // B.3 phase 6: derive from registry.
+    crate::ui::state::detected_name_for(world, doc_id)
 }

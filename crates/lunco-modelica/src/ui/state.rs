@@ -286,6 +286,42 @@ impl CompileStates {
 }
 
 // ---------------------------------------------------------------------------
+// B.3 phase 6 helpers — drop-in replacements for `OpenModel` field
+// reads. Derive each field from the document registry so the legacy
+// `WorkbenchState.open_model` cache can be retired one reader at a
+// time.
+// ---------------------------------------------------------------------------
+
+/// Detected top-level model name for `doc`. Replaces
+/// `open_model.detected_name`. Returns `None` when the doc has no
+/// AST yet (parse pending) or when no model declaration exists.
+pub fn detected_name_for(world: &bevy::prelude::World, doc: DocumentId) -> Option<String> {
+    use lunco_doc::Document as _;
+    let host = world.resource::<ModelicaDocumentRegistry>().host(doc)?;
+    let ast = host.document().strict_ast()?;
+    crate::ast_extract::extract_model_name_from_ast(&ast)
+}
+
+/// Read-only flag for `doc`. Replaces `open_model.read_only`.
+pub fn read_only_for(world: &bevy::prelude::World, doc: DocumentId) -> bool {
+    use lunco_doc::Document as _;
+    world
+        .resource::<ModelicaDocumentRegistry>()
+        .host(doc)
+        .map(|h| h.document().is_read_only())
+        .unwrap_or(false)
+}
+
+/// Display name for `doc`. Replaces `open_model.display_name`.
+pub fn display_name_for(world: &bevy::prelude::World, doc: DocumentId) -> Option<String> {
+    use lunco_doc::Document as _;
+    world
+        .resource::<ModelicaDocumentRegistry>()
+        .host(doc)
+        .map(|h| h.document().origin().display_name().to_string())
+}
+
+// ---------------------------------------------------------------------------
 // ModelicaDocumentRegistry — DocumentId-keyed DocumentHost storage
 // ---------------------------------------------------------------------------
 

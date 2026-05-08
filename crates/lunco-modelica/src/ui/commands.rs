@@ -2743,10 +2743,8 @@ fn on_format_document(trigger: On<FormatDocument>, mut commands: Commands) {
             bevy::log::warn!("[FormatDocument] no active document");
             return;
         };
-        let workbench_read_only = world
-            .get_resource::<crate::ui::WorkbenchState>()
-            .and_then(|s| s.open_model.as_ref().map(|m| m.read_only))
-            .unwrap_or(false);
+        // B.3 phase 6: derive from registry.
+        let workbench_read_only = crate::ui::state::read_only_for(world, doc);
         if workbench_read_only {
             bevy::log::info!("[FormatDocument] tab is read-only — skipping");
             return;
@@ -3145,12 +3143,8 @@ fn on_add_canvas_plot(trigger: On<AddCanvasPlot>, mut commands: Commands) {
         // tile lives inside a specific class's Diagram annotation.
         // B.3: derive from `ModelTabs`.
         let class = crate::ui::panels::model_view::drilled_class_for_doc(world, doc)
-            .or_else(|| {
-                world
-                    .get_resource::<crate::ui::WorkbenchState>()
-                    .and_then(|s| s.open_model.as_ref().map(|m| m.detected_name.clone()))
-                    .flatten()
-            })
+            // B.3 phase 6: derive from registry.
+            .or_else(|| crate::ui::state::detected_name_for(world, doc))
             .unwrap_or_default();
         if class.is_empty() {
             bevy::log::warn!("[AddCanvasPlot] could not resolve target class for doc");
@@ -3802,11 +3796,8 @@ fn on_move_component(trigger: On<MoveComponent>, mut commands: Commands) {
             // detected name if we don't have one explicitly.
             // B.3: derive from `ModelTabs`.
             crate::ui::panels::model_view::drilled_class_for_doc(world, doc_id)
-                .or_else(|| {
-                    world.get_resource::<crate::ui::WorkbenchState>()
-                        .and_then(|s| s.open_model.as_ref().map(|m| m.detected_name.clone()))
-                        .flatten()
-                })
+                // B.3 phase 6: derive from registry.
+                .or_else(|| crate::ui::state::detected_name_for(world, doc_id))
                 .unwrap_or_default()
         } else {
             ev.class.clone()

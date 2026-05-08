@@ -98,7 +98,13 @@ impl Panel for CanvasDiagramPanel {
                 self.render_canvas(ui, world);
                 return;
             };
-            if world.resource::<WorkbenchState>().open_model.is_none() {
+            // B.3 phase 6: derive presence from registry+workspace.
+            if world
+                .resource::<lunco_workbench::WorkspaceResource>()
+                .active_document
+                .and_then(|d| world.resource::<ModelicaDocumentRegistry>().host(d))
+                .is_none()
+            {
                 self.render_canvas(ui, world);
                 return;
             }
