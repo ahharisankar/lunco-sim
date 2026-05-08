@@ -195,6 +195,15 @@ impl TwinNode {
 }
 
 impl PackageTreeCache {
+    /// True when this doc is the target of an in-flight package
+    /// load. Used by R1's loading-overlay reader to derive the
+    /// "is anything still loading?" boolean per doc, without going
+    /// through the retired `WorkbenchState.is_loading` singleton
+    /// (B.3 phase 5).
+    pub fn is_loading(&self, doc: lunco_doc::DocumentId) -> bool {
+        self.loading_ids.values().any(|d| *d == doc)
+    }
+
     pub fn new() -> Self {
         let msl_root = lunco_assets::msl_dir();
         let modelica_dir = msl_root.join("Modelica");
@@ -973,7 +982,10 @@ pub fn handle_package_loading_tasks(
             library: result.library,
         });
         workbench.diagram_dirty = true;
-        workbench.is_loading = false;
+        // B.3 phase 5: `is_loading` retired; per-doc derivation
+        // comes from `PackageTreeCache::is_loading(doc)`,
+        // `DrillInLoads::is_loading(doc)`, and
+        // `DuplicateLoads::is_loading(doc)`.
         // Sync active document into the Workspace session.
         workspace.active_document = Some(doc_id);
 
@@ -2244,9 +2256,9 @@ pub(crate) fn open_model(
     // commit so the user's changes survive a round-trip.
     commit_current_model_edits(world);
 
-    if let Some(mut state) = world.get_resource_mut::<WorkbenchState>() {
-        state.is_loading = true;
-    }
+    // B.3 phase 5: per-doc loading is now derived from
+    // `PackageTreeCache::loading_ids` (the entry inserted further
+    // below already encodes "this doc is loading").
 
     // Bundled inner-class click: ids of the form
     // `bundled://<file>#<qualified>` carry a drill-in target in the
@@ -2325,7 +2337,7 @@ pub(crate) fn open_model(
             });
             state.editor_buffer = source_arc.to_string();
             state.diagram_dirty = true;
-            state.is_loading = false;
+            // B.3 phase 5: `is_loading` retired.
         }
         // Sync into the Workspace session. Only when we actually have
         // a doc id — a missing id here means we didn't allocate (first

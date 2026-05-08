@@ -149,8 +149,10 @@ pub struct WorkbenchState {
     pub open_model: Option<OpenModel>,
     /// Flag to signal the diagram panel should rebuild from open_model source.
     pub diagram_dirty: bool,
-    /// Whether a model is currently being loaded in the background.
-    pub is_loading: bool,
+    // B.3 phase 5: `is_loading` retired. Per-doc loading derives from
+    // `PackageTreeCache::is_loading(doc)`,
+    // `DrillInLoads::is_loading(doc)`, and
+    // `DuplicateLoads::is_loading(doc)`.
 }
 
 // ---------------------------------------------------------------------------
@@ -634,7 +636,6 @@ impl Default for WorkbenchState {
             selected_entity: None,
             open_model: None,
             diagram_dirty: false,
-            is_loading: false,
         }
     }
 }

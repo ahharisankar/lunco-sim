@@ -277,7 +277,28 @@ impl Panel for CodeEditorPanel {
         let (compilation_error, selected_entity, is_loading) = {
             let state = world.resource::<WorkbenchState>();
             let entity = state.selected_entity;
-            let loading = state.is_loading && source_len == 0;
+            // B.3 phase 5: per-doc loading derives from the three
+            // load resources (drill-in / duplicate /
+            // package-tree). Singleton `WorkbenchState.is_loading`
+            // retired.
+            let loading = source_len == 0
+                && tab_target
+                    .map(|d| {
+                        let drill = world
+                            .get_resource::<crate::ui::panels::canvas_diagram::DrillInLoads>()
+                            .map(|l| l.is_loading(d))
+                            .unwrap_or(false);
+                        let dup = world
+                            .get_resource::<crate::ui::panels::canvas_diagram::DuplicateLoads>()
+                            .map(|l| l.is_loading(d))
+                            .unwrap_or(false);
+                        let pkg = world
+                            .get_resource::<crate::ui::panels::package_browser::PackageTreeCache>()
+                            .map(|c| c.is_loading(d))
+                            .unwrap_or(false);
+                        drill || dup || pkg
+                    })
+                    .unwrap_or(false);
             // B.3 phase 4: per-doc error from CompileStates.
             let err = tab_target.and_then(|d| {
                 world
