@@ -1119,6 +1119,17 @@ impl CanvasDiagramPanel {
         };
         mark("canvas.ui (scene render)", &mut phase_t, &mut phase_log);
 
+        // R1: write the canvas-gesture flag from the response's
+        // pointer-down state. egui's `is_pointer_button_down_on`
+        // is true exactly while the user holds a button on this
+        // widget — drag-in-progress is the canonical "mid-gesture"
+        // signal we don't want autosave snapshotting through. Any
+        // other source (text edit, modal) writes its own field on
+        // the same resource.
+        if let Some(mut active) = world.get_resource_mut::<crate::ui::wasm_autosave::IsGestureActive>() {
+            active.canvas = response.is_pointer_button_down_on();
+        }
+
         // Sibling-tab event replay was removed in A.5. After the
         // AST-canonical migration each mutation flows
         // canvas → host.apply → AST → source → DocumentChanged → next
