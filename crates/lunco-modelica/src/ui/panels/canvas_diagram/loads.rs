@@ -45,22 +45,12 @@ pub struct DrillInLoads {
 /// specific class: the installed `ModelicaDocument.canonical_path`
 /// is the `.mo` file, which for multi-class package files doesn't
 /// tell us which of the dozen classes inside the user meant.
-#[derive(bevy::prelude::Resource, Default)]
-pub struct DrilledInClassNames {
-    pub by_doc: std::collections::HashMap<lunco_doc::DocumentId, String>,
-}
-
-impl DrilledInClassNames {
-    pub fn get(&self, doc: lunco_doc::DocumentId) -> Option<&str> {
-        self.by_doc.get(&doc).map(String::as_str)
-    }
-    pub fn set(&mut self, doc: lunco_doc::DocumentId, qualified: String) {
-        self.by_doc.insert(doc, qualified);
-    }
-    pub fn remove(&mut self, doc: lunco_doc::DocumentId) -> Option<String> {
-        self.by_doc.remove(&doc)
-    }
-}
+// B.3 phase 3: `DrilledInClassNames` resource retired (2026-05-08).
+// Drilled scope now lives on `ModelTabState.drilled_class`; readers
+// go through `crate::ui::panels::model_view::drilled_class_for_doc`
+// (or `ModelTabs::drilled_class_for_doc` directly when a Res<>
+// borrow is in scope). Writers update the tab via `ensure_for(doc,
+// Some(qualified))` or by mutating `tab.drilled_class` directly.
 
 pub struct DrillInBinding {
     pub qualified: String,
@@ -162,7 +152,7 @@ pub fn drive_duplicate_loads(
     mut registry: bevy::prelude::ResMut<ModelicaDocumentRegistry>,
     mut probe: Option<bevy::prelude::ResMut<crate::FrameTimeProbe>>,
     mut egui_q: bevy::prelude::Query<&mut bevy_egui::EguiContext>,
-    mut class_names: bevy::prelude::ResMut<DrilledInClassNames>,
+    mut tabs: bevy::prelude::ResMut<crate::ui::panels::model_view::ModelTabs>,
 ) {
     use bevy::prelude::*;
     // While any duplicate is in-flight, ping egui every tick so the
@@ -222,8 +212,15 @@ pub fn drive_duplicate_loads(
                     .find(|c| !matches!(c.kind, crate::index::ClassKind::Package))
                     .map(|c| c.name.clone()),
             };
+            // B.3 phase 3: write the drilled scope onto the tab
+            // (now authoritative) instead of the legacy
+            // `DrilledInClassNames` cache. The duplicate flow opened
+            // the tab with `drilled_class = None`; once the inner
+            // class resolves we update every tab on this doc.
             if let Some(q) = qualified {
-                class_names.set(doc_id, q);
+                for (_, state) in tabs.iter_mut_for_doc(doc_id) {
+                    state.drilled_class = Some(q.clone());
+                }
             }
         }
         // Pre-warm the MSL inheritance chain on a dedicated thread so
@@ -267,7 +264,6 @@ pub fn drive_drill_in_loads(
     mut loads: bevy::prelude::ResMut<DrillInLoads>,
     mut registry: bevy::prelude::ResMut<ModelicaDocumentRegistry>,
     mut tabs: bevy::prelude::ResMut<crate::ui::panels::model_view::ModelTabs>,
-    mut class_names: bevy::prelude::ResMut<DrilledInClassNames>,
     mut egui_q: bevy::prelude::Query<&mut bevy_egui::EguiContext>,
 ) {
     use bevy::prelude::*;
@@ -319,10 +315,9 @@ pub fn drive_drill_in_loads(
             (path, has_components)
         };
         registry.install_prebuilt(doc_id, doc);
-        // Persistent binding so projection can scope to this class
-        // after `loads` is cleared — required for multi-class package
-        // files where `canonical_path` only tells us the `.mo` file.
-        class_names.set(doc_id, qualified.clone());
+        // B.3 phase 3: drilled scope lives on `ModelTabState`, set
+        // by the upstream `drill_into_class` call before this
+        // driver runs.
         let land_in_icon_view =
             crate::ui::loaded_classes::is_icon_only_class(&qualified)
                 || has_components == Some(false);
@@ -388,16 +383,9 @@ pub fn drill_into_class(world: &mut World, qualified: &str) {
             }
             tab_id
         };
-        // `DrilledInClassNames[doc]` is now refreshed every render
-        // pass by `sync_active_tab_to_doc`, but seed it here too so
-        // any system that runs between the OpenTab dispatch and the
-        // first render (e.g. canvas projection's drive system) sees
-        // the right scope immediately.
-        if let Some(mut names) =
-            world.get_resource_mut::<DrilledInClassNames>()
-        {
-            names.set(doc_id, qualified.to_string());
-        }
+        // B.3 phase 3: drilled scope lives on `ModelTabState` —
+        // `ensure_for(doc_id, Some(qualified))` immediately above
+        // already wrote it.
         if let Some(mut workspace) =
             world.get_resource_mut::<lunco_workbench::WorkspaceResource>()
         {
@@ -505,14 +493,11 @@ fn open_drill_in_tab(
             },
         );
     }
-    // Bind the drilled-in class eagerly — without this, a second
-    // drill into a sibling class in the same file would race the
-    // (post-install) `class_names.set` and find no class binding,
-    // letting the file-level dedup re-fire and steal the tab.
-    {
-        let mut class_names = world.resource_mut::<DrilledInClassNames>();
-        class_names.set(doc_id, qualified.to_string());
-    }
+    // B.3 phase 3: eager singleton-bind removed. The `ensure_for`
+    // call below is in the same stack frame, so no observer can
+    // run between this point and the tab carrying the drilled
+    // scope — the original race the eager bind protected against
+    // doesn't exist when the source-of-truth IS the tab.
 
     let _ = model_path_id;
 

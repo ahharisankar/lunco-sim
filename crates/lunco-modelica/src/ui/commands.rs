@@ -235,7 +235,7 @@ pub struct CompileClassPickerState(pub Option<CompileClassPickerEntry>);
 pub(crate) fn render_compile_class_picker(
     mut egui_ctx: bevy_egui::EguiContexts,
     mut picker: ResMut<CompileClassPickerState>,
-    mut drilled_in: ResMut<crate::ui::panels::canvas_diagram::DrilledInClassNames>,
+    mut tabs: ResMut<crate::ui::panels::model_view::ModelTabs>,
     mut commands: Commands,
 ) {
     let Ok(ctx) = egui_ctx.ctx_mut() else {
@@ -297,7 +297,13 @@ pub(crate) fn render_compile_class_picker(
     }
     if let Some(qualified) = confirmed {
         let doc = entry.doc;
-        drilled_in.set(doc, qualified);
+        // B.3 phase 3: write the picked class onto every tab
+        // viewing this doc so subsequent reads via
+        // `drilled_class_for_doc` see the user's choice. Replaces
+        // the legacy `DrilledInClassNames` cache write.
+        for (_, state) in tabs.iter_mut_for_doc(doc) {
+            state.drilled_class = Some(qualified.clone());
+        }
         picker.0 = None;
         commands.trigger(CompileModel { doc, class: None });
     } else if cancelled {
@@ -1155,7 +1161,7 @@ fn on_compile_model(
     mut sim_streams: ResMut<crate::SimStreamRegistry>,
     channels: Option<Res<ModelicaChannels>>,
     mut q_models: Query<&mut ModelicaModel>,
-    drilled_in_classes: Option<Res<crate::ui::panels::canvas_diagram::DrilledInClassNames>>,
+    model_tabs: Res<crate::ui::panels::model_view::ModelTabs>,
 ) {
     let doc = trigger.event().doc;
     let explicit_class = trigger.event().class.clone();
@@ -1228,9 +1234,8 @@ fn on_compile_model(
     // package. Without this the compile picks the first non-package
     // class (often the package wrapper) and the simulator returns
     // `EmptySystem`.
-    let drilled_in_class: Option<String> = drilled_in_classes
-        .as_ref()
-        .and_then(|d| d.get(doc).map(str::to_string));
+    // B.3 phase 3: derive from `ModelTabs`.
+    let drilled_in_class: Option<String> = model_tabs.drilled_class_for_doc(doc);
     // Class resolution priority:
     //   1. explicit_class on the event       — API caller knows exactly
     //   2. drilled_in_class                  — UI drill-in pin
@@ -1530,7 +1535,6 @@ fn on_duplicate_model_from_read_only(
     mut registry: ResMut<ModelicaDocumentRegistry>,
     mut cache: ResMut<crate::ui::panels::package_browser::PackageTreeCache>,
     mut model_tabs: ResMut<crate::ui::panels::model_view::ModelTabs>,
-    class_names: Option<Res<crate::ui::panels::canvas_diagram::DrilledInClassNames>>,
     mut duplicate_loads: ResMut<
         crate::ui::panels::canvas_diagram::DuplicateLoads,
     >,
@@ -1561,10 +1565,8 @@ fn on_duplicate_model_from_read_only(
             return;
         };
         let doc = host.document();
-        let fqn = class_names
-            .as_ref()
-            .and_then(|m| m.get(source_doc))
-            .map(String::from);
+        // B.3 phase 3: derive from `ModelTabs`.
+        let fqn = model_tabs.drilled_class_for_doc(source_doc);
         let ast_opt = doc.strict_ast();
         // Top-level class name = first key in `ast.classes` if we
         // have a parsed AST, otherwise fall back to the origin's

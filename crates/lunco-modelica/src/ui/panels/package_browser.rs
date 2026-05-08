@@ -865,7 +865,6 @@ pub fn handle_package_loading_tasks(
     mut layout: ResMut<lunco_workbench::WorkbenchLayout>,
     mut egui_ctx: bevy_egui::EguiContexts,
     mut pending_drill_ins: ResMut<crate::ui::browser_dispatch::PendingDrillIns>,
-    mut drilled_in: ResMut<crate::ui::panels::canvas_diagram::DrilledInClassNames>,
     mut workspace: ResMut<lunco_workbench::WorkspaceResource>,
 ) {
     let mut finished_results = Vec::new();
@@ -953,9 +952,10 @@ pub fn handle_package_loading_tasks(
         // tab's `drilled_class` so `sync_active_tab_to_doc` keeps
         // republishing this scope on every render and so the tab
         // title reflects the class name (not the package file).
+        // B.3 phase 3: write to the tab directly; legacy
+        // `DrilledInClassNames` cache mirror removed.
         let queued_qualified = pending_drill_ins.take(&result.id);
         if let Some(qualified) = queued_qualified {
-            drilled_in.set(doc_id, qualified.clone());
             if let Some(tab) = model_tabs.find_for_mut(doc_id, None) {
                 tab.drilled_class = Some(qualified);
             }
@@ -2412,17 +2412,9 @@ pub(crate) fn open_model(
         }
     };
     if let Some(doc) = already_open {
-        // Sibling classes from the same .mo file get distinct tabs.
-        // Seed `DrilledInClassNames[doc]` for the projector before
-        // the tab renders — `sync_active_tab_to_doc` republishes from
-        // the tab on every render, and tabs without a `drilled_class`
-        // (legacy refocus) leave the resource untouched, so this
-        // initial set sticks.
-        if let Some(q) = target_class.as_deref() {
-            world
-                .resource_mut::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
-                .set(doc, q.to_string());
-        }
+        // B.3 phase 3: drilled scope flows through `acquire_tab`'s
+        // call to `ensure_for(doc, target_class)`; the tab table
+        // is now authoritative.
         let tab_id = acquire_tab(world, doc);
         world.commands().trigger(lunco_workbench::OpenTab {
             kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
@@ -2435,11 +2427,6 @@ pub(crate) fn open_model(
         .loading_ids
         .get(&id)
     {
-        if let Some(q) = target_class.as_deref() {
-            world
-                .resource_mut::<crate::ui::panels::canvas_diagram::DrilledInClassNames>()
-                .set(doc, q.to_string());
-        }
         let tab_id = acquire_tab(world, doc);
         world.commands().trigger(lunco_workbench::OpenTab {
             kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,

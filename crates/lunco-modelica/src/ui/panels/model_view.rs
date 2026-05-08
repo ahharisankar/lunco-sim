@@ -308,6 +308,20 @@ impl ModelTabs {
         self.tabs.remove(&tab_id)
     }
 
+    /// Mutable iterator over `(TabId, &mut ModelTabState)` for every
+    /// tab viewing `doc`. Used by writers that previously updated
+    /// the legacy `DrilledInClassNames` cache — they now update the
+    /// tabs directly (B.3 phase 3 — singleton retire).
+    pub fn iter_mut_for_doc(
+        &mut self,
+        doc: DocumentId,
+    ) -> impl Iterator<Item = (TabId, &mut ModelTabState)> + '_ {
+        self.tabs
+            .iter_mut()
+            .filter(move |(_, s)| s.doc == doc)
+            .map(|(id, s)| (*id, s))
+    }
+
     /// Drilled class for `doc` derived from the tab table —
     /// authoritative source per the B.3 singleton-retire plan.
     /// Picks the first tab matching `doc` (HashMap iteration order
@@ -838,23 +852,11 @@ pub(crate) fn sync_active_tab_to_doc(
     doc: DocumentId,
     drilled_class: Option<&str>,
 ) {
-    // Publish the active tab's drilled-class scope into the legacy
-    // `DrilledInClassNames[doc]` map so canvas projection /
-    // inspector / palette readers (still keyed by `doc`) see this
-    // tab's class — not whatever the previously-active tab put
-    // there. Only WRITE when the tab itself has a scope; never
-    // clear, because non-tab code paths (Twin Browser drill-in
-    // queue, browser_dispatch OpenLoadedClass) seed
-    // `DrilledInClassNames` directly and we must not overwrite
-    // their work just because *this* tab happens to have no
-    // explicit scope (which would unset their drill on the next
-    // render pass and the canvas would re-project at the package
-    // root, showing zero nodes).
-    if let Some(q) = drilled_class {
-        let mut names = world
-            .resource_mut::<crate::ui::panels::canvas_diagram::DrilledInClassNames>();
-        names.set(doc, q.to_string());
-    }
+    // B.3 phase 3: legacy `DrilledInClassNames` cache mirror
+    // removed. `ModelTabState.drilled_class` is now authoritative
+    // and readers go through
+    // `crate::ui::panels::model_view::drilled_class_for_doc`.
+    let _ = drilled_class;
     // Already active AND the cached snapshot is from the real doc
     // (not a placeholder that filled in while a drill-in load was
     // still in flight). The check on non-empty source distinguishes:

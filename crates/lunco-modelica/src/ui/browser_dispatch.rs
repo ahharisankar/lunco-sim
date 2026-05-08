@@ -20,7 +20,8 @@ use bevy::prelude::*;
 use lunco_workbench::{BrowserAction, BrowserActions};
 use std::collections::HashMap;
 
-use crate::ui::panels::canvas_diagram::DrilledInClassNames;
+// B.3 phase 3: `DrilledInClassNames` retired — drilled scope lives
+// on `ModelTabState.drilled_class`.
 use crate::ui::state::ModelLibrary;
 
 /// `file_id (absolute path string) → qualified class path` queued by
@@ -150,14 +151,10 @@ pub fn drain_browser_actions(world: &mut World) {
                 qualified_path,
             } => {
                 let doc = lunco_doc::DocumentId::new(doc_id);
-                // Set the drill-in target *before* the tab opens so
-                // the canvas projector picks it up on first paint.
-                world
-                    .resource_mut::<DrilledInClassNames>()
-                    .set(doc, qualified_path.clone());
-                // Allocate (or focus) a tab dedicated to this
-                // `(doc, qualified_path)` pair. Sibling classes in
-                // the same package now get distinct tabs.
+                // B.3 phase 3: `ensure_preview_for(doc,
+                // Some(qualified_path))` writes the drilled scope
+                // onto the tab — the tab table is now authoritative,
+                // legacy `DrilledInClassNames` cache mirror removed.
                 let tab_id = {
                     let mut model_tabs = world
                         .resource_mut::<crate::ui::panels::model_view::ModelTabs>();

@@ -82,7 +82,7 @@ pub use pulse::{
 };
 use pulse::{EdgePulseLayer, PulseGlowLayer};
 pub use palette::{DiagramProjectionLimits, PaletteSettings};
-pub use loads::{DrillInBinding, DrillInLoads, DrilledInClassNames, DuplicateBinding, DuplicateLoads, drill_into_class, drive_drill_in_loads, drive_duplicate_loads};
+pub use loads::{DrillInBinding, DrillInLoads, DuplicateBinding, DuplicateLoads, drill_into_class, drive_drill_in_loads, drive_duplicate_loads};
 pub use edge::ConnectionEdgeData;
 pub use node::IconNodeData;
 pub use projection::ProjectionTask;

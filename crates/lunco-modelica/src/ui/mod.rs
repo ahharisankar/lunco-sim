@@ -460,14 +460,13 @@ fn cleanup_removed_documents(
     registry: Option<ResMut<ModelicaDocumentRegistry>>,
     compile_states: Option<ResMut<CompileStates>>,
     canvas_state: Option<ResMut<panels::canvas_diagram::CanvasDiagramState>>,
-    class_names: Option<ResMut<panels::canvas_diagram::DrilledInClassNames>>,
+    // B.3 phase 3: `DrilledInClassNames` retired.
     signals: Option<ResMut<lunco_viz::SignalRegistry>>,
     viz_registry: Option<ResMut<lunco_viz::VisualizationRegistry>>,
 ) {
     let Some(mut registry) = registry else { return };
     let mut compile_states = compile_states;
     let mut canvas_state = canvas_state;
-    let mut class_names = class_names;
     let mut signals = signals;
     let mut viz_registry = viz_registry;
     for entity in removed.read() {
@@ -482,9 +481,9 @@ fn cleanup_removed_documents(
             if let Some(canvas) = canvas_state.as_mut() {
                 canvas.drop_doc(doc);
             }
-            if let Some(names) = class_names.as_mut() {
-                names.remove(doc);
-            }
+            // B.3 phase 3: `DrilledInClassNames` retired —
+            // tab-removal handled by `ModelTabs::close` /
+            // `close_all_for_doc` already.
         }
         // Drop every registered signal + plot binding for this entity
         // so stale plots don't keep reading the last values forever.
@@ -751,7 +750,7 @@ impl Plugin for ModelicaUiPlugin {
             .init_resource::<panels::canvas_diagram::CanvasDiagramState>()
             .init_resource::<panels::canvas_diagram::PaletteSettings>()
             .init_resource::<panels::canvas_diagram::DiagramProjectionLimits>()
-            .init_resource::<panels::canvas_diagram::DrilledInClassNames>()
+            // B.3 phase 3: `DrilledInClassNames` retired.
             .init_resource::<panels::canvas_diagram::DrillInLoads>()
             .init_resource::<panels::canvas_diagram::CanvasSnapSettings>()
             .init_resource::<panels::canvas_diagram::DuplicateLoads>()
