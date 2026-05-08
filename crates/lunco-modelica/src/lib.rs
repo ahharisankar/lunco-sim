@@ -865,8 +865,6 @@ pub use ast_extract::{
     extract_inputs_with_defaults_from_ast,
     substitute_params_in_source,
     hash_content,
-    extract_from_source,
-    ModelicaSymbols,
 };
 // `strip_input_defaults` is already imported via `use self::ast_extract::strip_input_defaults`
 // above and is available publicly through the `pub mod ast_extract` declaration.

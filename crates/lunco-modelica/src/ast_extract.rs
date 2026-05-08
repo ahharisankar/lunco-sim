@@ -182,15 +182,6 @@ pub fn extract_descriptions(source: &str) -> HashMap<String, String> {
     out
 }
 
-/// AST-based variant — see `extract_parameters_from_ast`.
-pub fn extract_descriptions_from_ast(
-    ast: &StoredDefinition,
-) -> HashMap<String, String> {
-    let mut out: HashMap<String, String> = HashMap::new();
-    collect_descriptions_from_classes(&ast.classes, &mut out);
-    out
-}
-
 fn collect_descriptions_from_classes(
     classes: &indexmap::IndexMap<String, ClassDef>,
     out: &mut HashMap<String, String>,
@@ -467,84 +458,8 @@ fn collect_param_substitution_edits(
 }
 
 // ---------------------------------------------------------------------------
-// Combined extraction (single-pass, future-facing)
-// ---------------------------------------------------------------------------
-
-/// Extract all symbols from Modelica source in a single parse pass.
-///
-/// This is the preferred API for new code. It avoids re-parsing the source
-/// multiple times (unlike calling each `extract_*` function separately).
-pub fn extract_from_source(source: &str) -> ModelicaSymbols {
-    let mut result = ModelicaSymbols::default();
-    let ast = match parse(source) {
-        Some(a) => a,
-        None => return result,
-    };
-
-    extract_from_ast(&ast, &mut result);
-    result
-}
-
-/// All extractable symbols from a Modelica source file.
-#[derive(Debug, Default, Clone)]
-pub struct ModelicaSymbols {
-    /// Top-level class name (first non-package class found).
-    pub model_name: Option<String>,
-    /// Parameters with numeric binding values.
-    pub parameters: HashMap<String, f64>,
-    /// Input names without defaults (true runtime-settable slots).
-    pub input_names: Vec<String>,
-    /// Input names with defaults (require recompile to change).
-    pub inputs_with_defaults: HashMap<String, f64>,
-}
-
-/// Extract all symbols from a parsed AST into the given result struct.
-///
-/// Use this when you already have a `StoredDefinition` (e.g., from a cached
-/// parse) and want to avoid re-parsing.
-pub fn extract_from_ast(ast: &StoredDefinition, result: &mut ModelicaSymbols) {
-    // Model name: first non-package class
-    for (name, class) in &ast.classes {
-        if class.class_type != ClassType::Package {
-            result.model_name = Some(name.as_str().to_string());
-            break;
-        }
-    }
-
-    // Walk all classes
-    for class in ast.classes.values() {
-        walk_class(class, result);
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Internal AST walkers
 // ---------------------------------------------------------------------------
-
-fn walk_class(class: &ClassDef, result: &mut ModelicaSymbols) {
-    for component in class.components.values() {
-        // Parameters
-        if matches!(component.variability, Variability::Parameter(_)) {
-            if let Some(value) = extract_numeric_binding(&component.binding) {
-                result.parameters.insert(component.name.clone(), value);
-            }
-        }
-
-        // Inputs
-        if matches!(component.causality, Causality::Input(_)) {
-            if let Some(value) = extract_numeric_binding(&component.binding) {
-                result.inputs_with_defaults.insert(component.name.clone(), value);
-            } else {
-                result.input_names.push(component.name.clone());
-            }
-        }
-    }
-
-    // Recurse into nested classes
-    for nested in class.classes.values() {
-        walk_class(nested, result);
-    }
-}
 
 fn collect_parameters_from_classes(
     classes: &indexmap::IndexMap<String, ClassDef>,
@@ -846,81 +761,6 @@ fn walk_flat_vars(
     }
 }
 
-/// Like [`extract_variable_names_from_ast`] but also tags each
-/// variable with the short name of the class it was declared in
-/// (`("Tank", "m")`). Lets the UI show users *where* each variable
-/// lives — pure annotation pass over the existing class walk, no
-/// type-resolution / flattening.
-pub fn extract_variable_names_with_class_from_ast(
-    ast: &StoredDefinition,
-) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    collect_variable_names_with_class(&ast.classes, &mut out);
-    out
-}
-
-fn collect_variable_names_with_class(
-    classes: &indexmap::IndexMap<String, ClassDef>,
-    out: &mut Vec<(String, String)>,
-) {
-    for (class_name, class) in classes {
-        for component in class.components.values() {
-            let is_parameter = matches!(component.variability, Variability::Parameter(_));
-            let is_constant = matches!(component.variability, Variability::Constant(_));
-            let is_input = matches!(component.causality, Causality::Input(_));
-            if !is_parameter && !is_constant && !is_input {
-                out.push((class_name.clone(), component.name.clone()));
-            }
-        }
-        collect_variable_names_with_class(&class.classes, out);
-    }
-}
-
-/// Variable `start=` modifier values, resolved against `parameters` for
-/// the common `Real m(start = m_initial)` pattern. Modelica's MLS §3.6
-/// `start` attribute is what the simulator uses as the initial value
-/// for a continuous state — the same value that should drive the
-/// component's icon when the user is staring at a paused / pre-compile
-/// model. Without this, every variable starts at 0 and visualisations
-/// like the propellant tank show empty until the simulator runs.
-///
-/// Recurses into nested classes the same way the other extractors do.
-/// Returns numeric values when:
-/// - `start = 4000` (literal)
-/// - `start = m_initial` and `m_initial` is in `parameters`
-/// Symbolic refs that don't resolve are dropped (no fallback).
-pub fn extract_variable_starts_from_ast(
-    ast: &StoredDefinition,
-    parameters: &HashMap<String, f64>,
-) -> HashMap<String, f64> {
-    let mut starts = HashMap::new();
-    collect_variable_starts(&ast.classes, parameters, &mut starts);
-    starts
-}
-
-fn collect_variable_starts(
-    classes: &indexmap::IndexMap<String, ClassDef>,
-    parameters: &HashMap<String, f64>,
-    out: &mut HashMap<String, f64>,
-) {
-    for class in classes.values() {
-        for component in class.components.values() {
-            let is_parameter = matches!(component.variability, Variability::Parameter(_));
-            let is_constant = matches!(component.variability, Variability::Constant(_));
-            let is_input = matches!(component.causality, Causality::Input(_));
-            if is_parameter || is_constant || is_input {
-                continue;
-            }
-            if let Some(expr) = component.modifications.get("start") {
-                if let Some(v) = resolve_with_params(expr, parameters) {
-                    out.insert(component.name.clone(), v);
-                }
-            }
-        }
-        collect_variable_starts(&class.classes, parameters, out);
-    }
-}
-
 /// Numeric resolver for modifier expressions: literal first, then
 /// fall back to looking up the qualified component-reference path
 /// in `parameters`. Lets `start = m_initial` become 4000 when
@@ -1168,19 +1008,6 @@ fn expression_to_string(expr: &Expression) -> String {
     }
 }
 
-/// Pull the `unit="..."` modification for a component, if any. Returns
-/// the inner string with quotes stripped.
-pub fn unit_of_component(comp: &rumoca_session::parsing::ast::Component) -> Option<String> {
-    comp.modifications
-        .get("unit")
-        .and_then(|expr| match expr {
-            Expression::Terminal { terminal_type: TerminalType::String, token } => {
-                Some(token.text.trim_matches('"').to_string())
-            }
-            _ => None,
-        })
-}
-
 /// Extract every input-typed component for a class with rich metadata
 /// (name, type, unit, default if any, description). Companion to the
 /// existing `extract_input_names_from_ast` which only returns names.
@@ -1248,6 +1075,19 @@ fn is_output_connector_type(type_name: &str) -> bool {
         short,
         "RealOutput" | "IntegerOutput" | "BooleanOutput" | "StringOutput"
     ) || short.ends_with("Output")
+}
+
+/// Pull the `unit="..."` modification for a component, if any. Returns
+/// the inner string with quotes stripped.
+fn unit_of_component(comp: &rumoca_session::parsing::ast::Component) -> Option<String> {
+    comp.modifications
+        .get("unit")
+        .and_then(|expr| match expr {
+            Expression::Terminal { terminal_type: TerminalType::String, token } => {
+                Some(token.text.trim_matches('"').to_string())
+            }
+            _ => None,
+        })
 }
 
 fn typed_components_filtered<F>(class: &ClassDef, want: F) -> Vec<TypedComponent>
