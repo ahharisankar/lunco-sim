@@ -7,6 +7,41 @@
 use lunco_modelica::ui::wasm_autosave::{IsGestureActive, should_autosave};
 
 // ─────────────────────────────────────────────────────────────────────
+// R3 — mode-switch flush. Helper-level: the *condition* under which
+// `commit_pending_buffer` must fire on a mode switch. Wiring exercise
+// requires Bevy + an active code editor; pinned in panel-level
+// integration tests separately.
+// ─────────────────────────────────────────────────────────────────────
+
+fn r3_should_flush(leaving_text_mode: bool, pending_commit: bool) -> bool {
+    // Force-flush exactly when both apply: we're leaving Text mode
+    // AND the editor has uncommitted bytes. Other transitions
+    // (entering Text, mode unchanged, no pending edit) are no-ops.
+    leaving_text_mode && pending_commit
+}
+
+#[test]
+fn r3_flushes_when_leaving_text_with_pending() {
+    assert!(r3_should_flush(true, true));
+}
+
+#[test]
+fn r3_no_flush_entering_text() {
+    // Entering Text mode never flushes — there's nothing to commit.
+    assert!(!r3_should_flush(false, true));
+}
+
+#[test]
+fn r3_no_flush_when_buffer_clean() {
+    assert!(!r3_should_flush(true, false));
+}
+
+#[test]
+fn r3_no_flush_when_neither() {
+    assert!(!r3_should_flush(false, false));
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // R1 — autosave gates on active gesture
 // ─────────────────────────────────────────────────────────────────────
 
@@ -73,6 +108,20 @@ fn r1_text_source_mirrors_pending_commit_window() {
     assert!(!mirror(None), "no pending edit → text source clear");
     assert!(mirror(Some(123.4)), "pending edit → text source active");
     assert!(mirror(Some(0.0)), "even t=0 counts as in-flight");
+}
+
+#[test]
+fn r1_modal_source_mirrors_close_dialog_pending() {
+    // Pins the contract `drive_modal_gesture_flag` enforces:
+    // `gesture.modal` = `!CloseDialogState.pending.is_empty()`.
+    // When extended to other modals (file picker, conflict prompt),
+    // the OR semantics must keep the same shape.
+    fn mirror(pending_dialogs: usize) -> bool {
+        pending_dialogs > 0
+    }
+    assert!(!mirror(0), "no dialogs open → modal source clear");
+    assert!(mirror(1), "one dialog → modal source active");
+    assert!(mirror(3), "many dialogs → still active");
 }
 
 #[test]

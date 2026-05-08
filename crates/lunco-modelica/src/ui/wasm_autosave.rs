@@ -52,7 +52,10 @@ impl Plugin for WasmAutosavePlugin {
             // the text field is decoupled from the editor's render
             // path because `pending_commit_at` is just a timestamp
             // we can observe headlessly.
-            .add_systems(bevy::prelude::Update, drive_text_gesture_flag);
+            .add_systems(
+                bevy::prelude::Update,
+                (drive_text_gesture_flag, drive_modal_gesture_flag),
+            );
         #[cfg(target_arch = "wasm32")]
         {
             app.add_systems(bevy::prelude::Startup, restore_from_localstorage)
@@ -75,6 +78,25 @@ fn drive_text_gesture_flag(
     let active = buf.pending_commit_at.is_some();
     if gesture.text != active {
         gesture.text = active;
+    }
+}
+
+/// Mirror "any modal dialog open" into [`IsGestureActive::modal`].
+/// Currently observes the unsaved-close prompt (the only resource-
+/// keyed dialog state on the bus today). When new modals land
+/// (e.g. an in-app file picker, conflict-resolution prompt) extend
+/// this driver to OR their pending state in.
+///
+/// `Option<Res<...>>` because the dialog state resource is owned by
+/// `ModelicaCommandsPlugin`; if that plugin isn't loaded (minimal
+/// test apps), the driver is a no-op.
+fn drive_modal_gesture_flag(
+    dialogs: Option<bevy::prelude::Res<crate::ui::commands::CloseDialogState>>,
+    mut gesture: bevy::prelude::ResMut<IsGestureActive>,
+) {
+    let active = dialogs.map(|d| !d.pending.is_empty()).unwrap_or(false);
+    if gesture.modal != active {
+        gesture.modal = active;
     }
 }
 

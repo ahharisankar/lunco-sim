@@ -508,6 +508,24 @@ impl InstancePanel for ModelViewPanel {
 
         let new_view_mode = render_unified_toolbar(doc, view_mode, ui, world);
         if new_view_mode != view_mode {
+            // R3 (B0_CROSS_TRUTH_POLICY.md): if the user is leaving
+            // Text mode while the editor still has uncommitted bytes,
+            // force-flush via the same `EditText` op the debounce
+            // timer would have run. The mode switch then activates
+            // *after* the op lands, so the canvas tab's first render
+            // observes the new generation.
+            //
+            // No prompt: the buffer is committed, not discarded —
+            // identical semantics to a debounced commit, just earlier.
+            if view_mode == ModelViewMode::Text {
+                let pending = world
+                    .get_resource::<EditorBufferState>()
+                    .map(|b| b.pending_commit_at.is_some())
+                    .unwrap_or(false);
+                if pending {
+                    crate::ui::panels::code_editor::commit_pending_buffer(world, doc);
+                }
+            }
             if let Some(state) = world.resource_mut::<ModelTabs>().get_mut(tab_id) {
                 state.view_mode = new_view_mode;
             }
