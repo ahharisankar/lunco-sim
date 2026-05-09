@@ -144,11 +144,23 @@ fn render_modelica_plot(ui: &mut egui::Ui, world: &mut World, viz_id: VizId) {
                 }
             } else {
                 ui.label(
-                    egui::RichText::new(
-                        "No data yet — pick variables in Telemetry and run a model.",
-                    )
-                    .size(11.0)
-                    .color(muted),
+                    egui::RichText::new("No data yet — pick variables in")
+                        .size(11.0)
+                        .color(muted),
+                );
+                if ui
+                    .small_button("Telemetry")
+                    .on_hover_text("Focus the Telemetry panel.")
+                    .clicked()
+                {
+                    world.commands().trigger(lunco_workbench::FocusPanel {
+                        id: "modelica_inspector".into(),
+                    });
+                }
+                ui.label(
+                    egui::RichText::new("and run a model.")
+                        .size(11.0)
+                        .color(muted),
                 );
             }
 
@@ -160,6 +172,18 @@ fn render_modelica_plot(ui: &mut egui::Ui, world: &mut World, viz_id: VizId) {
                     world
                         .commands()
                         .trigger(crate::ui::commands::NewPlotPanel::default());
+                }
+                let dup = ui
+                    .small_button("📄")
+                    .on_hover_text(
+                        "Duplicate this plot — new tab with the same \
+                         signal bindings and picked variables.",
+                    );
+                if dup.clicked() {
+                    world.commands().trigger(crate::ui::commands::NewPlotPanel {
+                        source: viz_id.0,
+                        ..Default::default()
+                    });
                 }
                 if has_live {
                     let fit = ui

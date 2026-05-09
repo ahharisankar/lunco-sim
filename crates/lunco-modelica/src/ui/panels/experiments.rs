@@ -37,6 +37,12 @@ pub struct ExperimentVisibility {
     /// show their name as a plain label. Committed on Enter or
     /// focus-loss.
     pub editing_name: Option<(ExperimentId, String)>,
+    /// Telemetry's "Plot in" router target. `None` ⇒ route to the
+    /// active plot (`ActivePlot::or_default()`); `Some(viz)` pins
+    /// Telemetry checkboxes to a specific plot tab regardless of
+    /// which one is focused. Mirrors Dymola's "current plot window"
+    /// pin.
+    pub target_plot: Option<VizId>,
 }
 
 impl ExperimentVisibility {
