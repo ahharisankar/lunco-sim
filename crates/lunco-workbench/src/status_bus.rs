@@ -46,8 +46,11 @@ pub const STATUS_HISTORY_CAPACITY: usize = 200;
 /// - Diagnostics inclusion (Error / Warn surface there; Info / Progress don't).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StatusLevel {
+    /// Routine notification — green dot, console `info`.
     Info,
+    /// Recoverable issue — yellow dot, console `warn`, surfaces in Diagnostics.
     Warn,
+    /// Failure — red dot, console `error`, surfaces in Diagnostics.
     Error,
     /// In-flight progress tick. Replaces the last `Progress` from the
     /// same source instead of appending. Use [`StatusBus::push_progress`].
@@ -60,11 +63,14 @@ pub enum StatusLevel {
 pub struct StatusEvent {
     /// Short subsystem identifier shown to the user (`"MSL"`, `"Compile"`).
     pub source: &'static str,
+    /// Severity classification — drives icon, log level, and Diagnostics inclusion.
     pub level: StatusLevel,
+    /// Human-readable message body.
     pub message: String,
     /// `(done, total)` for progress events; `None` for discrete events.
     /// `total == 0` means indeterminate progress (show shimmer / spinner).
     pub progress: Option<(u64, u64)>,
+    /// Wall-clock time the event was pushed, used for ordering and decay.
     pub at: Instant,
 }
 

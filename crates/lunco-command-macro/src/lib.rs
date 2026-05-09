@@ -140,7 +140,16 @@ pub fn Command(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote!()
     };
 
+    // Forward the input struct's outer attributes (notably `#[doc = "..."]`
+    // comments) so rustdoc and `missing_docs` see the user-written docs.
+    let attrs = &input.attrs;
+
     let expanded = quote! {
+        #(#attrs)*
+        // `Reflect` (and other derives) generate associated impl helpers
+        // that satisfy the public-API trait surface but are not user-
+        // facing items worth documenting individually.
+        #[allow(missing_docs)]
         #[derive(#(#derives),*)]
         #reflect
         #serde_crate_attr

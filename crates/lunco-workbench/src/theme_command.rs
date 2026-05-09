@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 /// `"theme"` key of `settings.json`.
 #[derive(Resource, Serialize, Deserialize, Default, Clone, Copy, PartialEq, Debug)]
 pub struct ThemePreference {
+    /// Currently active theme mode (Light / Dark / System / etc.).
     pub mode: ThemeMode,
 }
 
@@ -74,6 +75,8 @@ fn apply_pref_to_theme(pref: Res<ThemePreference>, mut theme: ResMut<Theme>) {
 
 register_commands!(on_set_theme,);
 
+/// Plugin registering the [`ThemePreference`] settings section and the
+/// [`SetTheme`] command observer.
 pub struct ThemeCommandPlugin;
 
 impl Plugin for ThemeCommandPlugin {

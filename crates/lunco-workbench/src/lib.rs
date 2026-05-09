@@ -505,6 +505,8 @@ impl WorkbenchLayout {
         self.edit_menu.push(Box::new(callback));
     }
 
+    /// Register a perspective (named workbench layout). The first one
+    /// registered becomes the active default.
     pub fn register_perspective<W: Perspective + 'static>(&mut self, perspective: W) {
         let id = perspective.id();
         let first = self.perspectives.is_empty();

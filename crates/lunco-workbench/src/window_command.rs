@@ -83,6 +83,8 @@ fn on_close(
 
 register_commands!(on_minimize, on_maximize, on_close,);
 
+/// Plugin registering the window-control commands ([`MinimizeWindow`],
+/// [`MaximizeWindow`], [`CloseWindow`]) and the [`WindowMaximized`] resource.
 pub struct WindowCommandPlugin;
 
 impl Plugin for WindowCommandPlugin {

@@ -37,9 +37,11 @@ use crate::{DocumentId, DocumentOp, SymbolPath};
 pub struct NodeId(pub String);
 
 impl NodeId {
+    /// Construct a `NodeId` from any string-like value.
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
     }
+    /// Borrow the underlying identifier as a `&str`.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -63,7 +65,9 @@ pub struct SymbolRef {
 /// [`SymbolPath`] resolves to.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedRef {
+    /// Document the symbol resolved into.
     pub doc: DocumentId,
+    /// Node within that document carrying the symbol definition.
     pub node: NodeId,
 }
 
@@ -74,28 +78,40 @@ pub struct ResolvedRef {
 /// Half-open byte range in document source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TextRange {
+    /// Inclusive byte offset where the range begins.
     pub start: usize,
+    /// Exclusive byte offset where the range ends.
     pub end: usize,
 }
 
 impl TextRange {
+    /// Construct a half-open `[start, end)` byte range.
     pub const fn new(start: usize, end: usize) -> Self {
         Self { start, end }
     }
 }
 
+/// Severity level reported by a [`Diagnostic`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DiagnosticSeverity {
+    /// Compilation/parse error — blocks downstream work.
     Error,
+    /// Non-blocking issue worth surfacing to the user.
     Warning,
+    /// Informational note (e.g. style suggestion).
     Info,
+    /// Lighter than `Info` — IDE-style improvement hint.
     Hint,
 }
 
+/// One diagnostic produced by the domain engine for a document.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Diagnostic {
+    /// How the diagnostic should be classified by the UI.
     pub severity: DiagnosticSeverity,
+    /// Human-readable message body.
     pub message: String,
+    /// Source-text range the diagnostic refers to, if known.
     pub range: Option<TextRange>,
 }
 
@@ -199,11 +215,18 @@ pub trait DomainEngine: Send + Sync + 'static {
 // Errors
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Failure modes returned by [`DomainEngine`] operations.
 #[derive(Debug)]
 pub enum DomainEngineError {
+    /// `apply`/`source`/`print` was called for a document the engine
+    /// hasn't opened (no prior `open` or `close` was already invoked).
     NotOpen(DocumentId),
+    /// The op rejected by the domain (e.g. references a missing class,
+    /// violates a domain invariant). Carries a human-readable reason.
     InvalidOp(String),
+    /// `apply` failed while mutating the engine's internal state.
     Apply(String),
+    /// `open` failed because the source could not be parsed.
     Parse(String),
 }
 

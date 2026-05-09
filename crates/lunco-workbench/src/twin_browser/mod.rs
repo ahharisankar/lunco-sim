@@ -140,6 +140,7 @@ pub struct UnsavedDocEntry {
 /// list with per-row dirty markers.
 #[derive(Resource, Default, Debug, Clone)]
 pub struct UnsavedDocs {
+    /// One entry per dirty document the Files section should mark.
     pub entries: Vec<UnsavedDocEntry>,
 }
 
