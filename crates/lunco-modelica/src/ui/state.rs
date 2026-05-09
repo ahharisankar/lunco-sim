@@ -111,7 +111,6 @@ pub struct WorkbenchState {
     /// **Selection bridge**: which `ModelicaModel` entity panels are viewing.
     /// Set by any context (library, 3D viewport, colony tree).
     pub selected_entity: Option<Entity>,
-    // B.3 phase 4: `compilation_error` field retired. Per-doc
     // storage on `CompileStates.errors[doc]`; readers go through
     // `compile_states.error_for(doc)`.
     /// Render-side **derived projection** of the active document.
@@ -125,7 +124,6 @@ pub struct WorkbenchState {
     // `ModelicaDocumentRegistry::host(doc).document()` directly.
     /// Flag to signal the diagram panel should rebuild from registry source.
     pub diagram_dirty: bool,
-    // B.3 phase 5: `is_loading` retired. Per-doc loading derives from
     // `PackageTreeCache::is_loading(doc)`,
     // `DrillInLoads::is_loading(doc)`, and
     // `DuplicateLoads::is_loading(doc)`.

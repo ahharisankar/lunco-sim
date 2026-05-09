@@ -429,7 +429,6 @@ fn cleanup_removed_documents(
     registry: Option<ResMut<ModelicaDocumentRegistry>>,
     compile_states: Option<ResMut<CompileStates>>,
     canvas_state: Option<ResMut<panels::canvas_diagram::CanvasDiagramState>>,
-    // B.3 phase 3: `DrilledInClassNames` retired.
     signals: Option<ResMut<lunco_viz::SignalRegistry>>,
     viz_registry: Option<ResMut<lunco_viz::VisualizationRegistry>>,
 ) {
@@ -450,7 +449,6 @@ fn cleanup_removed_documents(
             if let Some(canvas) = canvas_state.as_mut() {
                 canvas.drop_doc(doc);
             }
-            // B.3 phase 3: `DrilledInClassNames` retired —
             // tab-removal handled by `ModelTabs::close` /
             // `close_all_for_doc` already.
         }
@@ -716,7 +714,6 @@ impl Plugin for ModelicaUiPlugin {
             .init_resource::<panels::canvas_diagram::CanvasDiagramState>()
             .init_resource::<panels::canvas_diagram::PaletteSettings>()
             .init_resource::<panels::canvas_diagram::DiagramProjectionLimits>()
-            // B.3 phase 3: `DrilledInClassNames` retired.
             .init_resource::<panels::canvas_diagram::DrillInLoads>()
             .init_resource::<panels::canvas_diagram::CanvasSnapSettings>()
             .init_resource::<panels::canvas_diagram::DuplicateLoads>()

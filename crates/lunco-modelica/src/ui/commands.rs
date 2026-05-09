@@ -552,7 +552,6 @@ pub(crate) fn render_compile_class_picker(
     if let Some(qualified) = confirmed {
         let doc = entry.doc;
         let purpose = entry.purpose;
-        // B.3 phase 3: write the picked class onto every tab
         // viewing this doc so subsequent reads via
         // `drilled_class_for_doc` see the user's choice. Replaces
         // the legacy `DrilledInClassNames` cache write.
@@ -1050,7 +1049,6 @@ fn on_document_closed_cleanup(
     // both the Workspace pointer and the UI cache in lockstep.
     if workspace.active_document == Some(doc) {
         workspace.active_document = None;
-        // B.3 phase 6: `open_model` cache retired.
         workbench.editor_buffer.clear();
     }
 }
@@ -1569,7 +1567,6 @@ fn on_compile_model(
         // extractors, which at least try once; if they also fail,
         // the error message below fires.
         let msg = "Could not parse Modelica source for compile.".to_string();
-        // B.3 phase 4: per-doc error.
         compile_states.set_error(doc, msg.clone());
         console.error(format!("Compile failed: {msg}"));
         return;
@@ -1580,7 +1577,6 @@ fn on_compile_model(
     // package. Without this the compile picks the first non-package
     // class (often the package wrapper) and the simulator returns
     // `EmptySystem`.
-    // B.3 phase 3: derive from `ModelTabs`.
     let drilled_in_class: Option<String> = model_tabs.drilled_class_for_doc(doc);
     // Class resolution priority:
     //   1. explicit_class on the event       — API caller knows exactly
@@ -1607,7 +1603,6 @@ fn on_compile_model(
                     "compile_model class `{cls}` not found. Candidates: [{}]",
                     candidates.join(", ")
                 );
-                // B.3 phase 4: per-doc error.
                 compile_states.set_error(doc, msg.clone());
                 console.error(format!("Compile failed: {msg}"));
                 let _ = diagnostics;
@@ -1644,7 +1639,6 @@ fn on_compile_model(
         .or(detected_first_class);
     let Some(model_name) = model_name else {
         let msg = "Could not find a valid model declaration.".to_string();
-        // B.3 phase 4: per-doc error.
         compile_states.set_error(doc, msg.clone());
         console.error(format!("Compile failed: {msg}"));
         return;
@@ -1894,7 +1888,6 @@ fn on_duplicate_model_from_read_only(
             return;
         };
         let doc = host.document();
-        // B.3 phase 3: derive from `ModelTabs`.
         let fqn = model_tabs.drilled_class_for_doc(source_doc);
         let ast_opt = doc.strict_ast();
         // Top-level class name = first key in `ast.classes` if we
@@ -3092,7 +3085,6 @@ fn on_format_document(trigger: On<FormatDocument>, mut commands: Commands) {
             bevy::log::warn!("[FormatDocument] no active document");
             return;
         };
-        // B.3 phase 6: derive from registry.
         let workbench_read_only = crate::ui::state::read_only_for(world, doc);
         if workbench_read_only {
             bevy::log::info!("[FormatDocument] tab is read-only — skipping");
@@ -3195,7 +3187,6 @@ fn update_status_bar(
         return;
     }
     let active_doc = workspace.as_ref().and_then(|w| w.active_document);
-    // B.3 phase 6: derive from registry directly.
     let model_name = active_doc
         .and_then(|d| {
             registry.host(d).and_then(|h| {
@@ -3668,9 +3659,7 @@ fn on_add_canvas_plot(trigger: On<AddCanvasPlot>, mut commands: Commands) {
         // does — drill-in target wins, then the workbench's
         // detected name. Empty class is a hard error: every plot
         // tile lives inside a specific class's Diagram annotation.
-        // B.3: derive from `ModelTabs`.
         let class = crate::ui::panels::model_view::drilled_class_for_doc(world, doc)
-            // B.3 phase 6: derive from registry.
             .or_else(|| crate::ui::state::detected_name_for(world, doc))
             .unwrap_or_default();
         if class.is_empty() {

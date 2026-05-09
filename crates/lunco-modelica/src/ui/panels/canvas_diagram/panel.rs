@@ -96,7 +96,6 @@ impl Panel for CanvasDiagramPanel {
                 self.render_canvas(ui, world);
                 return;
             };
-            // B.3 phase 6: derive presence from registry+workspace.
             if world
                 .resource::<lunco_workbench::WorkspaceResource>()
                 .active_document
@@ -898,7 +897,6 @@ impl CanvasDiagramPanel {
         // effect here. We gate the whole right-click menu on this
         // so readonly tabs don't even offer "Add component" etc.;
         // the canvas itself stays fully navigable (pan/zoom/select).
-        // B.3 phase 6: derive from registry.
         let tab_read_only = active_doc
             .map(|d| crate::ui::state::read_only_for(world, d))
             .unwrap_or(false);

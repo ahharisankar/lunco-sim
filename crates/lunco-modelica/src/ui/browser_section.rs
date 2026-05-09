@@ -165,7 +165,6 @@ pub(crate) fn render_workspace_doc(
         .get_resource::<lunco_workbench::WorkspaceResource>()
         .and_then(|ws| ws.active_document);
     let active_qualified: Option<String> = active_doc.and_then(|d| {
-        // B.3: derive from `ModelTabs` instead of `DrilledInClassNames`.
         crate::ui::panels::model_view::drilled_class_for_doc(ctx.world, d)
     });
 

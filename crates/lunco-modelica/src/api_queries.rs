@@ -434,7 +434,6 @@ impl ApiQueryProvider for CompileStatusProvider {
             .get_resource::<CompileStates>()
             .map(|cs| cs.state_of(doc_id))
             .unwrap_or(CompileState::Idle);
-        // B.3: derive drilled scope from `ModelTabs` directly instead
         // of going through the `DrilledInClassNames` cache. The
         // helper falls back to first-tab-for-doc when no
         // `TabRenderContext` is in scope (which is the case here —
@@ -474,7 +473,6 @@ impl ApiQueryProvider for CompileStatusProvider {
             && drilled_in.is_none()
             && candidates.len() >= 2;
 
-        // B.3 phase 4: per-doc error on CompileStates.
         let error_message = world
             .get_resource::<crate::ui::CompileStates>()
             .and_then(|cs| cs.error_for(doc_id).map(str::to_string));
@@ -596,7 +594,6 @@ impl ApiQueryProvider for DescribeModelProvider {
         // borrow the modelica registry — `DrilledInClassNames` is a
         // separate resource and we need both. Reading them in
         // sequence keeps the borrow checker simple.
-        // B.3: derive drilled scope from `ModelTabs` directly instead
         // of going through the `DrilledInClassNames` cache. The
         // helper falls back to first-tab-for-doc when no
         // `TabRenderContext` is in scope (which is the case here —

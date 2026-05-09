@@ -42,7 +42,6 @@ pub struct DrillInLoads {
 /// specific class: the installed `ModelicaDocument.canonical_path`
 /// is the `.mo` file, which for multi-class package files doesn't
 /// tell us which of the dozen classes inside the user meant.
-// B.3 phase 3: `DrilledInClassNames` resource retired (2026-05-08).
 // Drilled scope now lives on `ModelTabState.drilled_class`; readers
 // go through `crate::ui::panels::model_view::drilled_class_for_doc`
 // (or `ModelTabs::drilled_class_for_doc` directly when a Res<>
@@ -337,7 +336,6 @@ pub fn drive_drill_in_loads(
             (path, has_components)
         };
         registry.install_prebuilt(doc_id, doc);
-        // B.3 phase 3: drilled scope lives on `ModelTabState`, set
         // by the upstream `drill_into_class` call before this
         // driver runs.
         let land_in_icon_view =
@@ -405,7 +403,6 @@ pub fn drill_into_class(world: &mut World, qualified: &str) {
             }
             tab_id
         };
-        // B.3 phase 3: drilled scope lives on `ModelTabState` —
         // `ensure_for(doc_id, Some(qualified))` immediately above
         // already wrote it.
         if let Some(mut workspace) =
@@ -515,7 +512,6 @@ fn open_drill_in_tab(
             },
         );
     }
-    // B.3 phase 3: eager singleton-bind removed. The `ensure_for`
     // call below is in the same stack frame, so no observer can
     // run between this point and the tab carrying the drilled
     // scope — the original race the eager bind protected against

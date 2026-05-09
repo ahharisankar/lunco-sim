@@ -1378,7 +1378,6 @@ pub fn handle_modelica_responses(
             // into ECS state.
 
             if let Some(err) = &result.error {
-                // B.3 phase 4: per-doc error on CompileStates.
                 if let Some(cs) = compile_states.as_mut() {
                     cs.set_error(model.document, err.clone());
                 }
@@ -1407,7 +1406,6 @@ pub fn handle_modelica_responses(
                 // errors flip this in the `is_new_model` block below.
                 model.is_compiled = false;
             } else if let Some(cs) = compile_states.as_mut() {
-                // B.3 phase 4: clear the per-doc error on success.
                 cs.clear_error(model.document);
             }
 

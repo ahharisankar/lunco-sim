@@ -974,7 +974,6 @@ pub fn handle_package_loading_tasks(
         // tab's `drilled_class` so `sync_active_tab_to_doc` keeps
         // republishing this scope on every render and so the tab
         // title reflects the class name (not the package file).
-        // B.3 phase 3: write to the tab directly; legacy
         // `DrilledInClassNames` cache mirror removed.
         let queued_qualified = pending_drill_ins.take(&result.id);
         if let Some(qualified) = queued_qualified {
@@ -984,7 +983,6 @@ pub fn handle_package_loading_tasks(
         }
 
         workbench.diagram_dirty = true;
-        // B.3 phase 5: `is_loading` retired; per-doc derivation
         // comes from `PackageTreeCache::is_loading(doc)`,
         // `DrillInLoads::is_loading(doc)`, and
         // `DuplicateLoads::is_loading(doc)`.
@@ -1018,7 +1016,6 @@ impl Panel for PackageBrowserPanel {
         });
 
 
-        // B.3 phase 6: derive active path from registry display_name.
         let active_path_str = world
             .get_resource::<lunco_workbench::WorkspaceResource>()
             .and_then(|ws| ws.active_document)
@@ -1635,7 +1632,6 @@ fn commit_current_model_edits(world: &mut World) {
         Some(id) => id,
         None => return,
     };
-    // B.3 phase 6: derive from registry.
     let (is_read_only, model_name) = {
         let registry = world.resource::<ModelicaDocumentRegistry>();
         let Some(host) = registry.host(doc_id) else { return };
@@ -1671,7 +1667,6 @@ fn commit_current_model_edits(world: &mut World) {
     // wasm — the "switching back to AnnotatedRocketStage stalls"
     // symptom. `EditorBufferState.bound_doc` carries the typed
     // identity used here.
-    // B.3 phase 6: use typed `bound_doc` identity instead of the
     // legacy origin-prefixed `model_path` string comparison.
     let (buffer_bound, buffer_text) = world
         .get_resource::<crate::ui::panels::code_editor::EditorBufferState>()
@@ -2253,7 +2248,6 @@ pub(crate) fn open_model(
     // commit so the user's changes survive a round-trip.
     commit_current_model_edits(world);
 
-    // B.3 phase 5: per-doc loading is now derived from
     // `PackageTreeCache::loading_ids` (the entry inserted further
     // below already encodes "this doc is loading").
 
@@ -2432,7 +2426,6 @@ pub(crate) fn open_model(
         tab_id
     };
     if let Some(doc) = already_open {
-        // B.3 phase 3: drilled scope flows through `acquire_tab`'s
         // call to `ensure_for(doc, target_class)`; the tab table
         // is now authoritative.
         let tab_id = acquire_tab(world, doc);
@@ -2702,7 +2695,6 @@ pub(crate) fn open_model(
 /// `"bundled_root"` for bundled examples. Unknown ids are silently
 /// no-op (caller's collapsing header just shows blank).
 pub(crate) fn render_root_subtree(world: &mut World, ui: &mut egui::Ui, root_id: &str) {
-    // B.3 phase 6: derive active path from registry display_name.
     let active_path = world
         .get_resource::<lunco_workbench::WorkspaceResource>()
         .and_then(|ws| ws.active_document)
@@ -2713,7 +2705,6 @@ pub(crate) fn render_root_subtree(world: &mut World, ui: &mut egui::Ui, root_id:
     // package, `AnnotatedRocketStage` when the package itself is
     // selected. Used for tree-row highlighting so the inner-class
     // bundled rows light up alongside their containing file.
-    // B.3: derive from `ModelTabs`.
     let active_drill: Option<String> = world
         .get_resource::<lunco_workbench::WorkspaceResource>()
         .and_then(|ws| ws.active_document)

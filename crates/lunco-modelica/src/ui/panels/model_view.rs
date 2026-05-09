@@ -629,7 +629,6 @@ impl InstancePanel for ModelViewPanel {
         // ops layer — so the user saw nothing when they tried to
         // modify something. A visible strip with a Duplicate
         // button is unmissable and one click from the fix.
-        // B.3 phase 6: derive from registry.
         let tab_read_only = crate::ui::state::read_only_for(world, doc);
         if tab_read_only {
             let mut banner_duplicate_clicked = false;
@@ -1107,7 +1106,6 @@ fn render_unified_toolbar(
         .unwrap_or_else(|| lunco_theme::Theme::dark().tokens.clone());
     // Snapshot everything we need before the closure so we don't
     // fight the borrow checker mid-layout.
-    // B.3 phase 6: derive from registry / origin.
     let display_name = crate::ui::state::display_name_for(world, doc)
         .unwrap_or_else(|| format!("Model #{}", doc.raw()));
 
@@ -1117,7 +1115,6 @@ fn render_unified_toolbar(
     // (carries `msl://Foo` for drill-in tabs).
     let is_icon_only_tab = crate::ui::loaded_classes::is_icon_only_class(&display_name)
         || display_name.contains("/Icons/");
-    // B.3 phase 4: per-doc error on CompileStates.
     let compilation_error = world
         .get_resource::<crate::ui::CompileStates>()
         .and_then(|cs| cs.error_for(doc).map(str::to_string));
@@ -1451,7 +1448,6 @@ fn render_unified_toolbar(
 
     // Apply side effects after the closure.
     if dismiss_error {
-        // B.3 phase 4: per-doc error on CompileStates.
         if let Some(mut cs) = world.get_resource_mut::<crate::ui::CompileStates>() {
             cs.clear_error(doc);
         }
@@ -1697,7 +1693,6 @@ fn render_docs_view(ui: &mut egui::Ui, world: &mut World) {
     ) = match doc_id {
         None => (None, None, None, None),
         Some(doc) => {
-            // B.3: derive from `ModelTabs`.
             let drilled = drilled_class_for_doc(world, doc);
             // All four fields read from the per-doc Index. Description
             // and Documentation(info=, revisions=) are pre-extracted

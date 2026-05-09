@@ -737,7 +737,6 @@ pub(super) fn render_target(
     let doc = world
         .resource::<lunco_workbench::WorkspaceResource>()
         .active_document?;
-    // B.3: derive from `ModelTabs`.
     let drilled = crate::ui::panels::model_view::drilled_class_for_doc(world, doc);
     Some((doc, drilled))
 }

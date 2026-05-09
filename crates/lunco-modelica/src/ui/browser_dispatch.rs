@@ -20,7 +20,6 @@ use bevy::prelude::*;
 use lunco_workbench::{BrowserAction, BrowserActions};
 use std::collections::HashMap;
 
-// B.3 phase 3: `DrilledInClassNames` retired — drilled scope lives
 // on `ModelTabState.drilled_class`.
 use crate::ui::state::ModelLibrary;
 

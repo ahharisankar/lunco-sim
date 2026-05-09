@@ -300,7 +300,6 @@ impl Panel for CodeEditorPanel {
         let (compilation_error, selected_entity, is_loading) = {
             let state = world.resource::<WorkbenchState>();
             let entity = state.selected_entity;
-            // B.3 phase 5: per-doc loading derives from the three
             // load resources (drill-in / duplicate /
             // package-tree). Singleton `WorkbenchState.is_loading`
             // retired.
@@ -322,7 +321,6 @@ impl Panel for CodeEditorPanel {
                         drill || dup || pkg
                     })
                     .unwrap_or(false);
-            // B.3 phase 4: per-doc error from CompileStates.
             let err = tab_target.and_then(|d| {
                 world
                     .get_resource::<crate::ui::CompileStates>()
