@@ -49,3 +49,6 @@ web-time = { workspace = true }
 [[example]]
 name = "hello_workbench"
 path = "examples/hello_workbench.rs"
+
+[lints]
+workspace = true

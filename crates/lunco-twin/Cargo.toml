@@ -29,3 +29,6 @@ bevy = ["dep:bevy"]
 
 [dev-dependencies]
 tempfile = "3.10"
+
+[lints]
+workspace = true

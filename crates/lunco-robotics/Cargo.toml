@@ -11,3 +11,6 @@ lunco-core = { path = "../lunco-core" }
 lunco-fsw = { path = "../lunco-fsw" }
 lunco-hardware = { path = "../lunco-hardware" }
 lunco-mobility = { path = "../lunco-mobility" }
+
+[lints]
+workspace = true

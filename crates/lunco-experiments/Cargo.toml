@@ -16,3 +16,6 @@ bevy = { workspace = true, optional = true }
 [features]
 default = ["bevy"]
 bevy = ["dep:bevy"]
+
+[lints]
+workspace = true

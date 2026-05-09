@@ -23,3 +23,6 @@ big_space = { workspace = true }
 lunco-mobility = { path = "../lunco-mobility" }
 lunco-usd-composer = { path = "../lunco-usd-composer" }
 lunco-fsw = { path = "../lunco-fsw" }
+
+[lints]
+workspace = true

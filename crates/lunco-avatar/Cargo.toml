@@ -15,3 +15,6 @@ lunco-controller = { path = "../lunco-controller" }
 lunco-celestial = { path = "../lunco-celestial" }
 lunco-core = { path = "../lunco-core" }
 lunco-mobility = { path = "../lunco-mobility" }
+
+[lints]
+workspace = true

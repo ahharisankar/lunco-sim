@@ -14,3 +14,6 @@ web-time = "1"
 # log (for persistent history, time-travel, and future multi-user sync),
 # add: yrs = "0.21". The public API in this crate is shaped so that swap
 # is internal — callers don't change.
+
+[lints]
+workspace = true

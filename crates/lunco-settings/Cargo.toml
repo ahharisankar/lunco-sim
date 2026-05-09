@@ -16,3 +16,6 @@ lunco-assets = { path = "../lunco-assets" }
 # both sides — see `wasm_storage_read`/`wasm_storage_write` in lib.rs.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys = { version = "0.3", features = ["Window", "Storage"] }
+
+[lints]
+workspace = true

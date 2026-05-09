@@ -25,3 +25,6 @@ serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 # Only for tests. The toy TextDocument needs no external crates.
+
+[lints]
+workspace = true

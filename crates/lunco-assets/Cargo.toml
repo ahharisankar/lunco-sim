@@ -50,3 +50,6 @@ bincode = "1.3"
 resvg = { workspace = true }
 tiny-skia = { workspace = true }
 usvg = { workspace = true }
+
+[lints]
+workspace = true

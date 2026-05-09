@@ -19,3 +19,6 @@ lunco-mobility = { path = "../lunco-mobility" }
 lunco-workbench = { path = "../lunco-workbench" }
 lunco-modelica = { path = "../lunco-modelica" }
 lunco-usd-bevy = { path = "../lunco-usd-bevy" }
+
+[lints]
+workspace = true

@@ -10,3 +10,6 @@ lunco-usd-composer = { path = "../lunco-usd-composer" }
 big_space = { workspace = true }
 anyhow = "1.0"
 
+
+[lints]
+workspace = true

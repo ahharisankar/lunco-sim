@@ -8,3 +8,6 @@ bevy = { workspace = true, features = ["bevy_pbr", "bevy_gltf", "bevy_scene", "b
 openusd = { workspace = true }
 lunco-usd-bevy = { path = "../lunco-usd-bevy" }
 uuid = "1"
+
+[lints]
+workspace = true

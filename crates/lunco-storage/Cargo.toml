@@ -23,3 +23,6 @@ fsa_stub = []
 idb_stub = []
 opfs_stub = []
 http_stub = []
+
+[lints]
+workspace = true

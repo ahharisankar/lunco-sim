@@ -14,3 +14,6 @@ lunco-celestial = { path = "../lunco-celestial" }
 lunco-avatar = { path = "../lunco-avatar" }
 chrono = { workspace = true }
 egui_plot = "0.34"
+
+[lints]
+workspace = true

@@ -12,3 +12,6 @@ serde_json = "1.0"
 lunco-command-macro = { path = "../lunco-command-macro" }
 # `std::time::SystemTime::now()` panics on wasm32-unknown-unknown.
 web-time = { workspace = true }
+
+[lints]
+workspace = true

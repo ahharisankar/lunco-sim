@@ -7,3 +7,6 @@ edition = "2021"
 bevy = { workspace = true }
 avian3d = { workspace = true }
 lunco-core = { path = "../lunco-core" }
+
+[lints]
+workspace = true

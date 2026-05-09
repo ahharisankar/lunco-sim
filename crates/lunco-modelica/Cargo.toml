@@ -215,3 +215,6 @@ ruzstd = "0.7"
 # Tar reader to walk the decompressed MSL bundle. The `tar` crate is
 # fs-free if you only call `Archive::entries()`; works on wasm.
 tar = "0.4"
+
+[lints]
+workspace = true
