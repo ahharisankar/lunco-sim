@@ -150,6 +150,13 @@ fn build_registry() -> VisualRegistry {
             d.kind,
             crate::visual_diagram::PortKind::Input | crate::visual_diagram::PortKind::Output,
         ) || causal_by_name;
+        // Materialise the per-frame HashMap lookup keys here, once per
+        // projection — avoids two `format!()` allocations per edge per
+        // frame in `OrthogonalEdgeVisual::draw`.
+        let flow_lookup_keys = d.flow_vars.first().map(|fv| (
+            format!("{}.{}", d.source_path, fv.name),
+            format!("{}.{}", d.target_path, fv.name),
+        ));
         OrthogonalEdgeVisual {
             color: d
                 .icon_color
@@ -162,6 +169,7 @@ fn build_registry() -> VisualRegistry {
             target_path: d.target_path.clone(),
             flow_vars: d.flow_vars.clone(),
             connector_leaf: leaf,
+            flow_lookup_keys,
         }
     });
     reg

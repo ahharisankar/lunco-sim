@@ -101,6 +101,11 @@ pub(super) struct OrthogonalEdgeVisual {
     pub(super) target_path: String,
     pub(super) flow_vars: Vec<crate::visual_diagram::FlowVarMeta>,
     pub(super) connector_leaf: String,
+    /// Pre-built `("source.fv", "target.fv")` keys for the first
+    /// flow var, materialised at projection time so per-frame `draw`
+    /// does zero allocation on the lookup path. `None` when the edge
+    /// has no flow vars.
+    pub(super) flow_lookup_keys: Option<(String, String)>,
 }
 
 impl Default for OrthogonalEdgeVisual {
@@ -115,6 +120,7 @@ impl Default for OrthogonalEdgeVisual {
             target_path: String::new(),
             flow_vars: Vec::new(),
             connector_leaf: String::new(),
+            flow_lookup_keys: None,
         }
     }
 }
@@ -225,11 +231,11 @@ impl EdgeVisual for OrthogonalEdgeVisual {
         let node_state =
             lunco_viz::kinds::canvas_plot_node::fetch_node_state(ctx.ui.ctx());
         const ACTIVITY_EPS: f64 = 1e-6;
-        let physical_flow = if let Some(fv) = self.flow_vars.first() {
-            let src_key = format!("{}.{}", self.source_path, fv.name);
-            let tgt_key = format!("{}.{}", self.target_path, fv.name);
-            let v_src = node_state.values.get(&src_key).copied();
-            let v_tgt = node_state.values.get(&tgt_key).copied();
+        let physical_flow = if let (Some(fv), Some((src_key, tgt_key))) =
+            (self.flow_vars.first(), self.flow_lookup_keys.as_ref())
+        {
+            let v_src = node_state.values.get(src_key.as_str()).copied();
+            let v_tgt = node_state.values.get(tgt_key.as_str()).copied();
             // ── DIAG: log once per (source_path,target_path,fv) which
             // keys hit/missed, and what near-miss keys exist in
             // node_state. Helps diagnose why some edges animate only
