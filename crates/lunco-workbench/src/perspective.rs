@@ -124,15 +124,6 @@ impl WorkbenchLayout {
         self.rebuild_dock();
     }
 
-    /// Compatibility shim — under egui_dock there is no "hidden but
-    /// docked" state. To hide the bottom panel, call
-    /// [`set_bottom`](Self::set_bottom)`(None)`. Kept as a no-op so
-    /// existing workspace presets compile during the migration.
-    #[deprecated(note = "Use set_bottom(None) to hide. Under egui_dock visibility = membership in the tree.")]
-    pub fn set_bottom_visible(&mut self, _visible: bool) {
-        // intentionally a no-op
-    }
-
     /// Show or hide the activity bar on the far left.
     pub fn set_activity_bar(&mut self, visible: bool) {
         self.activity_bar = visible;

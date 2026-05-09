@@ -399,7 +399,13 @@ impl NodeVisual for PlotNodeVisual {
         // when the card is large enough that they don't dominate the
         // line. Below 140×100 we keep the bare line + title.
         let show_chrome = card_w >= 140.0 && card_h >= 100.0;
-        let plot = Plot::new(("plot_node", node.id.0))
+        // Salt the Plot widget id by the parent UI id so the same
+        // canvas NodeId in a different document/tab doesn't collide.
+        // Without this, duplicating a running model can render two
+        // canvases in one frame whose plot nodes share id (X, N) but
+        // live under different egui layers, tripping egui's
+        // "widget changed layer_id" assertion in widget_rect.rs.
+        let plot = Plot::new(ctx.ui.id().with(("plot_node", node.id.0)))
             .width(plot_w)
             .height(plot_h)
             // We draw our own min/max overlays inside the chart, so

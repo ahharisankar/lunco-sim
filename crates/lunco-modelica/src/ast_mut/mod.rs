@@ -1392,7 +1392,7 @@ pub fn regenerate_class_patch<F>(
     parsed: &StoredDefinition,
     class: &str,
     mutate: F,
-) -> Result<(Range<usize>, String), AstMutError>
+) -> Result<(Range<usize>, String, std::sync::Arc<StoredDefinition>), AstMutError>
 where
     F: FnOnce(&mut ClassDef) -> Result<(), AstMutError>,
 {
@@ -1400,6 +1400,13 @@ where
     // through `lookup_class_mut` without aliasing the caller's
     // snapshot. Cheap on lunco-sized models; cost scales with class
     // count, not modification depth.
+    //
+    // The mutated clone is the third return value: the document layer
+    // installs it directly into the SyntaxCache so consumers
+    // (engine session, projection, sibling tabs) see the fresh AST
+    // without rumoca re-parsing. Source-as-canonical re-parse round-trip
+    // was a 1-8s window per drag — eliminated by handing back the AST
+    // we just produced.
     let mut sd_clone = parsed.clone();
     let class_def = lookup_class_mut(&mut sd_clone, class)?;
     mutate(class_def)?;
@@ -1438,7 +1445,7 @@ where
         regen.pop();
     }
 
-    Ok((start..end, regen))
+    Ok((start..end, regen, std::sync::Arc::new(sd_clone)))
 }
 
 /// Run an AST mutation against the whole `StoredDefinition` and
@@ -1453,14 +1460,14 @@ pub fn regenerate_document_patch<F>(
     source: &str,
     parsed: &StoredDefinition,
     mutate: F,
-) -> Result<(Range<usize>, String), AstMutError>
+) -> Result<(Range<usize>, String, std::sync::Arc<StoredDefinition>), AstMutError>
 where
     F: FnOnce(&mut StoredDefinition) -> Result<(), AstMutError>,
 {
     let mut sd_clone = parsed.clone();
     mutate(&mut sd_clone)?;
     let regen = sd_clone.to_modelica();
-    Ok((0..source.len(), regen))
+    Ok((0..source.len(), regen, std::sync::Arc::new(sd_clone)))
 }
 
 /// Walk back from `name_start` (the byte offset of the class name in

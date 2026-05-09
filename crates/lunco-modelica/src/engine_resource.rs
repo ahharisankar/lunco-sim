@@ -429,6 +429,12 @@ pub fn drive_engine_sync(
             break;
         }
         // Look up the doc to decide first-parse-vs-edit-reparse.
+        // Note: AST-canonical structured ops never reach this path
+        // because they install a fresh AST inline (see
+        // document::apply_patch), so `ast_is_stale` is false and the
+        // earlier `fresh_ast` branch took the sync `upsert` route. Only
+        // free-form text edits land here, and the debounce + activity
+        // gates exist to coalesce keystroke bursts on those.
         let (was_parsed, last_edit) = match registry.host(doc_id) {
             Some(host) => {
                 let doc = host.document();
@@ -440,7 +446,6 @@ pub fn drive_engine_sync(
             None => (false, None),
         };
         if was_parsed {
-            // Edit case: defer until burst settles + UI idles.
             let elapsed_ok = match last_edit {
                 Some(t) => now.duration_since(t).as_millis() >= AST_DEBOUNCE_MS,
                 None => true,

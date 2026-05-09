@@ -1290,9 +1290,9 @@ impl Document for ModelicaDocument {
         // `ReplaceSource` is expressed as replacing the full buffer —
         // no special-casing needed below. Every op follows the same
         // mutate / bump-generation / refresh-cache / emit-change path.
-        let (range, replacement, change) =
+        let (range, replacement, change, fresh_ast) =
             op_to_patch(&self.source, &self.syntax, &self.syntax.ast, op)?;
-        self.apply_patch(range, replacement, change)
+        self.apply_patch(range, replacement, change, fresh_ast)
     }
 }
 
@@ -1308,6 +1308,14 @@ impl ModelicaDocument {
         range: Range<usize>,
         replacement: String,
         change: ModelicaChange,
+        // When `Some`, the caller (an AST-canonical structured op)
+        // hands us the already-mutated `StoredDefinition`. We install
+        // it into the SyntaxCache after the source splice so
+        // `ast_is_stale()` returns false immediately — no rumoca
+        // re-parse round-trip on the hot path. `None` for raw text
+        // edits (typing in the code editor): AST is left stale and the
+        // text-edit reparse driver lands a fresh tree later.
+        fresh_ast: Option<std::sync::Arc<rumoca_session::parsing::ast::StoredDefinition>>,
     ) -> Result<ModelicaOp, DocumentError> {
         if range.start > range.end || range.end > self.source.len() {
             return Err(DocumentError::ValidationFailed(format!(
@@ -1344,6 +1352,21 @@ impl ModelicaDocument {
         //     (Compile) check `ast().generation == self.generation`
         //     and force a reparse via `refresh_ast_now()`.
         self.last_source_edit_at = Some(web_time::Instant::now());
+        // AST-canonical install: structured ops produce the mutated
+        // tree as a side effect of regenerate_*_patch. Installing it
+        // here keeps `ast_is_stale() == false` post-edit, which means
+        // engine sync's fast-path is reachable, sibling tabs reproject
+        // immediately, and rumoca never re-parses on the hot path.
+        // For text edits (`fresh_ast = None`), we fall through and the
+        // AST stays at its prior generation — the text-edit reparse
+        // driver will catch up.
+        if let Some(ast) = fresh_ast {
+            self.syntax = std::sync::Arc::new(SyntaxCache {
+                generation: self.generation,
+                ast,
+                errors: Vec::new(),
+            });
+        }
         // Optimistic Index patch BEFORE push_change so panel-side
         // observers reading the Index see the new entries by the time
         // they get the change notification. Reconcile happens on the
@@ -1469,15 +1492,31 @@ fn op_to_patch(
     ast: &AstCache,
     parsed: &rumoca_session::parsing::ast::StoredDefinition,
     op: ModelicaOp,
-) -> Result<(Range<usize>, String, ModelicaChange), DocumentError> {
+) -> Result<
+    (
+        Range<usize>,
+        String,
+        ModelicaChange,
+        // The mutated AST. `Some` for AST-canonical structured ops
+        // (SetPlacement, AddComponent, ...) that produce a fresh tree
+        // as a side effect — the caller installs it directly into
+        // SyntaxCache so consumers skip the rumoca re-parse round-trip.
+        // `None` for raw text edits (`EditText`, `ReplaceSource`) that
+        // have no fresh AST to hand out — those still require an async
+        // re-parse before consumers see a fresh tree.
+        Option<std::sync::Arc<rumoca_session::parsing::ast::StoredDefinition>>,
+    ),
+    DocumentError,
+> {
     match op {
         ModelicaOp::ReplaceSource { new } => Ok((
             0..source.len(),
             new,
             ModelicaChange::TextReplaced,
+            None,
         )),
         ModelicaOp::EditText { range, replacement } => {
-            Ok((range, replacement, ModelicaChange::TextReplaced))
+            Ok((range, replacement, ModelicaChange::TextReplaced, None))
         }
         ModelicaOp::AddComponent { class, decl } => {
             // AST-canonical path (A.2 batch 2). Legacy
@@ -1487,7 +1526,7 @@ fn op_to_patch(
             // `change` payload so we clone here.
             ast_check_no_parse_error(ast)?;
             let added_name = decl.name.clone();
-            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
                 source,
                 parsed,
                 &class,
@@ -1498,13 +1537,13 @@ fn op_to_patch(
                 class,
                 name: added_name,
             };
-            Ok((r, rp, change))
+            Ok((r, rp, change, Some(fresh_ast)))
         }
         ModelicaOp::AddConnection { class, eq } => {
             ast_check_no_parse_error(ast)?;
             let from = eq.from.clone();
             let to = eq.to.clone();
-            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
                 source,
                 parsed,
                 &class,
@@ -1512,11 +1551,11 @@ fn op_to_patch(
             )
             .map_err(ast_mut_to_doc_error)?;
             let change = ModelicaChange::ConnectionAdded { class, from, to };
-            Ok((r, rp, change))
+            Ok((r, rp, change, Some(fresh_ast)))
         }
         ModelicaOp::RemoveComponent { class, name } => {
             ast_check_no_parse_error(ast)?;
-            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
                 source,
                 parsed,
                 &class,
@@ -1524,11 +1563,11 @@ fn op_to_patch(
             )
             .map_err(ast_mut_to_doc_error)?;
             let change = ModelicaChange::ComponentRemoved { class, name };
-            Ok((r, rp, change))
+            Ok((r, rp, change, Some(fresh_ast)))
         }
         ModelicaOp::RemoveConnection { class, from, to } => {
             ast_check_no_parse_error(ast)?;
-            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
                 source,
                 parsed,
                 &class,
@@ -1536,7 +1575,7 @@ fn op_to_patch(
             )
             .map_err(ast_mut_to_doc_error)?;
             let change = ModelicaChange::ConnectionRemoved { class, from, to };
-            Ok((r, rp, change))
+            Ok((r, rp, change, Some(fresh_ast)))
         }
         ModelicaOp::SetPlacement { class, name, placement } => {
             // AST-canonical path (A.2 batch 1). Regenerates the whole
@@ -1547,7 +1586,7 @@ fn op_to_patch(
             // matches the legacy path's error type so consumers don't
             // need to handle a new variant.
             ast_check_no_parse_error(ast)?;
-            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
                 source,
                 parsed,
                 &class,
@@ -1559,11 +1598,11 @@ fn op_to_patch(
                 component: name,
                 placement,
             };
-            Ok((r, rp, change))
+            Ok((r, rp, change, Some(fresh_ast)))
         }
         ModelicaOp::SetParameter { class, component, param, value } => {
             ast_check_no_parse_error(ast)?;
-            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
                 source,
                 parsed,
                 &class,
@@ -1576,87 +1615,87 @@ fn op_to_patch(
                 param,
                 value,
             };
-            Ok((r, rp, change))
+            Ok((r, rp, change, Some(fresh_ast)))
         }
         ModelicaOp::AddPlotNode { class, plot } => {
             // AST-canonical (A.2 batch 3b — graphics ops). Plot edits
             // only touch the Diagram annotation tree; consumers
             // observe `TextReplaced` and rebuild from source.
             ast_check_no_parse_error(ast)?;
-            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
                 source,
                 parsed,
                 &class,
                 |c| crate::ast_mut::add_plot_node(c, &plot),
             )
             .map_err(ast_mut_to_doc_error)?;
-            Ok((r, rp, ModelicaChange::TextReplaced))
+            Ok((r, rp, ModelicaChange::TextReplaced, Some(fresh_ast)))
         }
         ModelicaOp::RemovePlotNode { class, signal_path } => {
             ast_check_no_parse_error(ast)?;
-            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
                 source,
                 parsed,
                 &class,
                 |c| crate::ast_mut::remove_plot_node(c, &signal_path),
             )
             .map_err(ast_mut_to_doc_error)?;
-            Ok((r, rp, ModelicaChange::TextReplaced))
+            Ok((r, rp, ModelicaChange::TextReplaced, Some(fresh_ast)))
         }
         ModelicaOp::SetPlotNodeExtent { class, signal_path, x1, y1, x2, y2 } => {
             ast_check_no_parse_error(ast)?;
-            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
                 source,
                 parsed,
                 &class,
                 |c| crate::ast_mut::set_plot_node_extent(c, &signal_path, x1, y1, x2, y2),
             )
             .map_err(ast_mut_to_doc_error)?;
-            Ok((r, rp, ModelicaChange::TextReplaced))
+            Ok((r, rp, ModelicaChange::TextReplaced, Some(fresh_ast)))
         }
         ModelicaOp::SetPlotNodeTitle { class, signal_path, title } => {
             ast_check_no_parse_error(ast)?;
-            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
                 source,
                 parsed,
                 &class,
                 |c| crate::ast_mut::set_plot_node_title(c, &signal_path, &title),
             )
             .map_err(ast_mut_to_doc_error)?;
-            Ok((r, rp, ModelicaChange::TextReplaced))
+            Ok((r, rp, ModelicaChange::TextReplaced, Some(fresh_ast)))
         }
         ModelicaOp::SetDiagramTextExtent { class, index, x1, y1, x2, y2 } => {
             ast_check_no_parse_error(ast)?;
-            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
                 source,
                 parsed,
                 &class,
                 |c| crate::ast_mut::set_diagram_text_extent(c, index, x1, y1, x2, y2),
             )
             .map_err(ast_mut_to_doc_error)?;
-            Ok((r, rp, ModelicaChange::TextReplaced))
+            Ok((r, rp, ModelicaChange::TextReplaced, Some(fresh_ast)))
         }
         ModelicaOp::SetDiagramTextString { class, index, text } => {
             ast_check_no_parse_error(ast)?;
-            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
                 source,
                 parsed,
                 &class,
                 |c| crate::ast_mut::set_diagram_text_string(c, index, &text),
             )
             .map_err(ast_mut_to_doc_error)?;
-            Ok((r, rp, ModelicaChange::TextReplaced))
+            Ok((r, rp, ModelicaChange::TextReplaced, Some(fresh_ast)))
         }
         ModelicaOp::RemoveDiagramText { class, index } => {
             ast_check_no_parse_error(ast)?;
-            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
                 source,
                 parsed,
                 &class,
                 |c| crate::ast_mut::remove_diagram_text(c, index),
             )
             .map_err(ast_mut_to_doc_error)?;
-            Ok((r, rp, ModelicaChange::TextReplaced))
+            Ok((r, rp, ModelicaChange::TextReplaced, Some(fresh_ast)))
         }
         ModelicaOp::AddClass { parent, name, kind, description, partial } => {
             // AST-canonical (A.2 batch 3). AddClass / RemoveClass
@@ -1666,7 +1705,7 @@ fn op_to_patch(
             // so unchanged classes round-trip byte-stably; only the
             // newly-added or removed class block actually shifts.
             ast_check_no_parse_error(ast)?;
-            let (r, rp) = crate::ast_mut::regenerate_document_patch(source, parsed, |sd| {
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_document_patch(source, parsed, |sd| {
                 crate::ast_mut::add_class(sd, &parent, &name, kind, &description, partial)
             })
             .map_err(ast_mut_to_doc_error)?;
@@ -1675,21 +1714,21 @@ fn op_to_patch(
             } else {
                 format!("{}.{}", parent, name)
             };
-            Ok((r, rp, ModelicaChange::ClassAdded { qualified, kind }))
+            Ok((r, rp, ModelicaChange::ClassAdded { qualified, kind }, Some(fresh_ast)))
         }
         ModelicaOp::RemoveClass { qualified } => {
             ast_check_no_parse_error(ast)?;
-            let (r, rp) = crate::ast_mut::regenerate_document_patch(source, parsed, |sd| {
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_document_patch(source, parsed, |sd| {
                 crate::ast_mut::remove_class(sd, &qualified)
             })
             .map_err(ast_mut_to_doc_error)?;
-            Ok((r, rp, ModelicaChange::ClassRemoved { qualified }))
+            Ok((r, rp, ModelicaChange::ClassRemoved { qualified }, Some(fresh_ast)))
         }
         ModelicaOp::AddShortClass { parent, name, kind, base, prefixes, modifications } => {
             // Same whole-document path as AddClass — both ops change
             // the document's class set. AST-canonical (A.2 batch 3b).
             ast_check_no_parse_error(ast)?;
-            let (r, rp) = crate::ast_mut::regenerate_document_patch(source, parsed, |sd| {
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_document_patch(source, parsed, |sd| {
                 crate::ast_mut::add_short_class(
                     sd, &parent, &name, kind, &base, &prefixes, &modifications,
                 )
@@ -1700,14 +1739,14 @@ fn op_to_patch(
             } else {
                 format!("{}.{}", parent, name)
             };
-            Ok((r, rp, ModelicaChange::ClassAdded { qualified, kind }))
+            Ok((r, rp, ModelicaChange::ClassAdded { qualified, kind }, Some(fresh_ast)))
         }
         ModelicaOp::AddVariable { class, decl } => {
             // Variables and typed components share `components: IndexMap`
             // in the AST. Same regenerate-class path as AddComponent.
             ast_check_no_parse_error(ast)?;
             let added_name = decl.name.clone();
-            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
                 source,
                 parsed,
                 &class,
@@ -1718,11 +1757,11 @@ fn op_to_patch(
                 class,
                 name: added_name,
             };
-            Ok((r, rp, change))
+            Ok((r, rp, change, Some(fresh_ast)))
         }
         ModelicaOp::RemoveVariable { class, name } => {
             ast_check_no_parse_error(ast)?;
-            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
                 source,
                 parsed,
                 &class,
@@ -1730,57 +1769,57 @@ fn op_to_patch(
             )
             .map_err(ast_mut_to_doc_error)?;
             let change = ModelicaChange::ComponentRemoved { class, name };
-            Ok((r, rp, change))
+            Ok((r, rp, change, Some(fresh_ast)))
         }
         ModelicaOp::AddEquation { class, eq } => {
             // Generic equation append. AST-canonical (A.2 batch 3b).
             ast_check_no_parse_error(ast)?;
-            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
                 source,
                 parsed,
                 &class,
                 |c| crate::ast_mut::add_equation(c, &eq),
             )
             .map_err(ast_mut_to_doc_error)?;
-            Ok((r, rp, ModelicaChange::TextReplaced))
+            Ok((r, rp, ModelicaChange::TextReplaced, Some(fresh_ast)))
         }
         ModelicaOp::AddIconGraphic { class, graphic } => {
             ast_check_no_parse_error(ast)?;
             let graphic_text = crate::pretty::graphic_inner(&graphic);
-            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
                 source,
                 parsed,
                 &class,
                 |c| crate::ast_mut::add_named_graphic(c, "Icon", &graphic_text),
             )
             .map_err(ast_mut_to_doc_error)?;
-            Ok((r, rp, ModelicaChange::TextReplaced))
+            Ok((r, rp, ModelicaChange::TextReplaced, Some(fresh_ast)))
         }
         ModelicaOp::AddDiagramGraphic { class, graphic } => {
             ast_check_no_parse_error(ast)?;
             let graphic_text = crate::pretty::graphic_inner(&graphic);
-            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
                 source,
                 parsed,
                 &class,
                 |c| crate::ast_mut::add_named_graphic(c, "Diagram", &graphic_text),
             )
             .map_err(ast_mut_to_doc_error)?;
-            Ok((r, rp, ModelicaChange::TextReplaced))
+            Ok((r, rp, ModelicaChange::TextReplaced, Some(fresh_ast)))
         }
         ModelicaOp::SetExperimentAnnotation { class, start_time, stop_time, tolerance, interval } => {
             // AST-canonical (A.2 batch 3b). Class-level `experiment(...)`
             // is one flat entry in `ClassDef.annotation` — no nested
             // graphics-array navigation required.
             ast_check_no_parse_error(ast)?;
-            let (r, rp) = crate::ast_mut::regenerate_class_patch(
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
                 source,
                 parsed,
                 &class,
                 |c| crate::ast_mut::set_experiment(c, start_time, stop_time, tolerance, interval),
             )
             .map_err(ast_mut_to_doc_error)?;
-            Ok((r, rp, ModelicaChange::TextReplaced))
+            Ok((r, rp, ModelicaChange::TextReplaced, Some(fresh_ast)))
         }
     }
 }

@@ -819,8 +819,14 @@ pub(super) fn apply_ops(
                 docstate.last_seen_gen = new_gen;
                 docstate.last_seen_source_hash = new_hash;
             } else {
-                // Non-render-context dispatch (API, observer);
-                // legacy single-tab path.
+                // Non-render-context dispatch (API, observer); doc-keyed
+                // fallback slot. The per-tab slots are untouched, so
+                // sibling tabs gate normally on their next render —
+                // their `last_seen_gen` is older than the new gen, the
+                // hash check sees the source change, and they reproject
+                // from the freshly-installed AST. No invalidation hack
+                // needed since AST-canonical ops keep `ast_is_stale`
+                // false (see document::apply_patch fresh_ast install).
                 let docstate = state.get_mut(Some(doc_id));
                 docstate.canvas_acked_gen = new_gen;
                 docstate.last_seen_gen = new_gen;

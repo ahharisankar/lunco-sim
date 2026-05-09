@@ -2638,6 +2638,31 @@ fn prewarm_msl_library() {
         .detach();
 }
 
+/// Open the same document in a new tab (split / sibling view).
+/// Equivalent to the tab-title context-menu action "🪟 Open in new view".
+/// Used by tests to drive the same-doc sibling-sync path through the API.
+#[Command(default)]
+pub struct OpenInNewView {
+    pub doc: lunco_doc::DocumentId,
+}
+
+#[on_command(OpenInNewView)]
+fn on_open_in_new_view(trigger: On<OpenInNewView>, mut commands: Commands) {
+    let doc = trigger.event().doc;
+    commands.queue(move |world: &mut World| {
+        let drilled = world
+            .get_resource::<crate::ui::panels::model_view::ModelTabs>()
+            .and_then(|t| t.drilled_class_for_doc(doc));
+        let new_id = world
+            .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
+            .open_new(doc, drilled);
+        world.commands().trigger(lunco_workbench::OpenTab {
+            kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
+            instance: new_id,
+        });
+    });
+}
+
 #[on_command(OpenClass)]
 fn on_open_class(trigger: On<OpenClass>, mut commands: Commands) {
     let ev = trigger.event();
@@ -3168,7 +3193,7 @@ fn on_fast_run_active_model(trigger: On<FastRunActiveModel>, mut commands: Comma
         let twin_id = lunco_experiments::TwinId("default".into());
         let exp_id = {
             let mut reg = world.resource_mut::<lunco_experiments::ExperimentRegistry>();
-            reg.insert_new(twin_id, model_ref, Default::default(), bounds)
+            reg.insert_new(twin_id, model_ref, Default::default(), Default::default(), bounds)
         };
         let exp = world
             .resource::<lunco_experiments::ExperimentRegistry>()

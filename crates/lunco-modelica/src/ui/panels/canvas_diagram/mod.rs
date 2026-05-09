@@ -298,132 +298,6 @@ pub type BackgroundDiagramHandle = std::sync::Arc<
     >,
 >;
 
-#[allow(dead_code)]
-#[cfg(any())]
-fn render_canvas_plots_deprecated(
-    ui: &mut bevy_egui::egui::Ui,
-    world: &mut World,
-    active_doc: Option<lunco_doc::DocumentId>,
-    canvas_screen_rect: bevy_egui::egui::Rect,
-) {
-    use bevy_egui::egui;
-    use egui_plot::{Line, Plot, PlotPoints};
-    let Some(active_doc) = active_doc else { return };
-
-    // Snapshot plot list + viewport so we don't hold the docstate
-    // borrow across egui_plot calls.
-    let (plots, viewport) = {
-        let state = world.resource::<CanvasDiagramState>();
-        let docstate = state.get(Some(active_doc));
-        if docstate.canvas_plots.is_empty() {
-            return;
-        }
-        (
-            docstate.canvas_plots.clone(),
-            docstate.canvas.viewport.clone(),
-        )
-    };
-
-    // Look up the active simulator entity once — same lookup
-    // NewPlotPanel uses to bind signal refs.
-    let model_entity = world
-        .query::<(bevy::prelude::Entity, &crate::ModelicaModel)>()
-        .iter(world)
-        .next()
-        .map(|(e, _)| e)
-        .unwrap_or(bevy::prelude::Entity::PLACEHOLDER);
-
-    let canvas_rect = lunco_canvas::Rect::from_min_max(
-        lunco_canvas::Pos::new(canvas_screen_rect.min.x, canvas_screen_rect.min.y),
-        lunco_canvas::Pos::new(canvas_screen_rect.max.x, canvas_screen_rect.max.y),
-    );
-
-    // Pull SignalRegistry once — it's a Resource we read for every
-    // plot below, no mutation.
-    let registry_present =
-        world.get_resource::<lunco_viz::SignalRegistry>().is_some();
-    if !registry_present {
-        return;
-    }
-
-    for (idx, plot) in plots.iter().enumerate() {
-        let screen_rect =
-            viewport.world_rect_to_screen(
-                lunco_canvas::Rect::from_min_max(plot.world_min, plot.world_max),
-                canvas_rect,
-            );
-        let egui_rect = egui::Rect::from_min_max(
-            egui::pos2(screen_rect.min.x, screen_rect.min.y),
-            egui::pos2(screen_rect.max.x, screen_rect.max.y),
-        );
-        // Skip plots fully outside the visible canvas area —
-        // pan/zoom can move them off-screen and rendering an
-        // off-canvas widget wastes layout time.
-        if !canvas_screen_rect.intersects(egui_rect) {
-            continue;
-        }
-
-        // Build the line points from SignalRegistry. Re-acquire
-        // the resource borrow per-plot so future per-plot
-        // multi-signal lookups stay simple.
-        let signal_ref =
-            lunco_viz::SignalRef::new(model_entity, plot.signal_path.clone());
-        let points: Vec<[f64; 2]> = world
-            .resource::<lunco_viz::SignalRegistry>()
-            .scalar_history(&signal_ref)
-            .map(|h| h.samples.iter().map(|s| [s.time, s.value]).collect())
-            .unwrap_or_default();
-
-        // Foreground layer so the plot draws on top of nodes/wires.
-        let fg_layer = egui::LayerId::new(
-            egui::Order::Foreground,
-            ui.id().with(("canvas_plot", active_doc.raw(), idx)),
-        );
-        let painter = ui.ctx().layer_painter(fg_layer);
-        // Card background so the plot stays readable over busy
-        // diagrams. Theme-driven colours come from the canvas
-        // overlay theme already used by the NavBar overlay.
-        let theme = lunco_canvas::theme::current(ui.ctx());
-        painter.rect_filled(egui_rect, 6.0, theme.overlay_fill);
-        painter.rect_stroke(
-            egui_rect,
-            6.0,
-            egui::Stroke::new(1.0, theme.overlay_stroke),
-            egui::StrokeKind::Outside,
-        );
-
-        // Plot body — small egui_plot inside the rect. Title bar
-        // shows the bound signal name.
-        let mut child = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(egui_rect.shrink(4.0))
-                .layout(egui::Layout::top_down(egui::Align::Min))
-                .layer_id(fg_layer),
-        );
-        child.label(
-            egui::RichText::new(&plot.signal_path)
-                .small()
-                .color(theme.overlay_text),
-        );
-        let plot_id = (
-            "lunco_canvas_plot",
-            active_doc.raw(),
-            idx as u64,
-        );
-        Plot::new(plot_id)
-            .show_axes([false, false])
-            .show_grid(false)
-            .allow_drag(false)
-            .allow_zoom(false)
-            .allow_scroll(false)
-            .show(&mut child, |plot_ui| {
-                if !points.is_empty() {
-                    plot_ui.line(Line::new("", PlotPoints::from(points)));
-                }
-            });
-    }
-}
-
 pub struct CanvasDocState {
     pub canvas: Canvas,
     pub last_seen_gen: u64,
@@ -615,6 +489,13 @@ impl CanvasDiagramState {
     ) -> &mut CanvasDocState {
         self.tab_doc.entry(tab_id).or_insert(doc);
         self.per_tab.entry(tab_id).or_default()
+    }
+
+    /// Iterate `(tab_id, doc_id)` for every tab known to the per-tab
+    /// state map. Used by sibling-sync invalidation in `apply_ops` to
+    /// find tabs viewing the just-edited doc.
+    pub fn tab_doc_iter(&self) -> impl Iterator<Item = (CanvasKey, lunco_doc::DocumentId)> + '_ {
+        self.tab_doc.iter().map(|(&tab, &doc)| (tab, doc))
     }
 
     /// Render-context lookup: route to the active tab when one is in
