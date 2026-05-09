@@ -249,7 +249,6 @@ impl ModelicaComponentBuilder {
                 for conn_name in &conn_ports {
                     let key = format!("{}.{}", comp_name, conn_name);
                     connector_registry.entry(key.clone()).or_insert_with(|| ConnectorInfo {
-                        name: key.clone(),
                         comp_name: comp_name.clone(),
                         port_name: conn_name.clone(),
                         port_type: comp.type_name.to_string(),
@@ -876,8 +875,6 @@ fn scope_chain_candidates(raw: &str, ctx: Option<&str>) -> Vec<String> {
 /// Information about a connector instance in a Modelica model.
 #[derive(Debug, Clone)]
 struct ConnectorInfo {
-    #[allow(dead_code)]
-    name: String,
     comp_name: String,
     port_name: String,
     port_type: String,

@@ -190,13 +190,8 @@ impl Default for ModelicaResult {
 /// after Reset without recompiling, and detect when the Step command's
 /// model_path points to stale source.
 struct CachedModel {
-    #[allow(dead_code)]
-    session_id: u64,
     model_name: String,
-    #[allow(dead_code)]
     source: Arc<str>,
-    #[allow(dead_code)]
-    dae: Box<rumoca_session::compile::DaeCompilationResult>,
 }
 
 /// Collect every readable variable from the stepper — states, inputs, and
@@ -369,10 +364,8 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                                         let input_names: Vec<String> = stepper.input_names().to_vec();
                                         let symbols = collect_stepper_observables(&stepper);
                                         cached_models.insert(entity, CachedModel {
-                                            session_id,
                                             model_name: model_name.clone(),
                                             source: Arc::from(source.clone()),
-                                            dae: comp_res,
                                         });
                                         steppers.insert(entity, (session_id, model_name.clone(), stepper));
                                         let _ = tx_inner.send(ModelicaResult {
@@ -479,10 +472,8 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                                         let _ = std::fs::write(&temp_path, &source);
 
                                         cached_models.insert(entity, CachedModel {
-                                            session_id,
                                             model_name: model_name.clone(),
                                             source: Arc::from(source.clone()),
-                                            dae: comp_res,
                                         });
                                         steppers.insert(entity, (session_id, model_name.clone(), stepper));
                                         let _ = tx_inner.send(ModelicaResult {
@@ -566,10 +557,8 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                                         if let Ok(mut s) = SimStepper::new(&comp_res.dae, opts) {
                                             for (name, val) in &inputs { let _ = s.set_input(name, *val); }
                                             cached_models.insert(entity, CachedModel {
-                                                session_id,
                                                 model_name: model_name.clone(),
                                                 source: Arc::from(std::fs::read_to_string(&model_path).unwrap_or_default()),
-                                                dae: comp_res,
                                             });
 
                                             steppers.insert(entity, (session_id, model_name.clone(), s));
@@ -960,8 +949,7 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                             let input_names: Vec<String> = stepper.input_names().to_vec();
                             let symbols = collect_stepper_observables(&stepper);
                             w.cached_models.insert(entity, CachedModel {
-                                session_id, model_name: model_name.clone(), source: Arc::from(source.clone()),
-                                dae: comp_res.clone(),
+                                model_name: model_name.clone(), source: Arc::from(source.clone()),
                             });
 
                             w.steppers.insert(entity, (session_id, model_name.clone(), stepper));
@@ -1085,8 +1073,7 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                             let input_names: Vec<String> = stepper.input_names().to_vec();
                             let symbols = collect_stepper_observables(&stepper);
                             w.cached_models.insert(entity, CachedModel {
-                                session_id, model_name: model_name.clone(), source: Arc::from(source.clone()),
-                                dae: comp_res,
+                                model_name: model_name.clone(), source: Arc::from(source.clone()),
                             });
 
                             w.steppers.insert(entity, (session_id, model_name.clone(), stepper));

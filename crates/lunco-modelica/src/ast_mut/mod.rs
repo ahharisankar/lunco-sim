@@ -1615,15 +1615,3 @@ pub(crate) fn synth_token(text: impl Into<Arc<str>>) -> Token {
         token_type: 0,
     }
 }
-
-/// Construct a synthetic terminal expression (numeric literal, string,
-/// bool). Pairs with [`synth_token`] for the unusual case where parsing
-/// a fragment is overkill — e.g. fixed boolean modifications from a
-/// checkbox in the inspector.
-#[allow(dead_code)]
-pub(crate) fn synth_terminal(terminal_type: TerminalType, text: impl Into<Arc<str>>) -> Expression {
-    Expression::Terminal {
-        terminal_type,
-        token: synth_token(text),
-    }
-}
