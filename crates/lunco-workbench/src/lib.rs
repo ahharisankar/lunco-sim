@@ -1023,7 +1023,7 @@ fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut 
     #[cfg(not(target_os = "macos"))]
     {
         const RESIZE_BORDER: f32 = 6.0;
-        let screen = ctx.screen_rect();
+        let screen = ctx.content_rect();
         let pointer = ctx.input(|i| i.pointer.hover_pos());
         if let Some(p) = pointer {
             let dx = if p.x < screen.left() + RESIZE_BORDER { -1 }
@@ -1079,7 +1079,7 @@ fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut 
         .any(|p| p.transparent_background());
     if !any_transparent {
         let painter = ctx.layer_painter(egui::LayerId::background());
-        painter.rect_filled(ctx.screen_rect(), 0.0, get_panel_backdrop(theme));
+        painter.rect_filled(ctx.content_rect(), 0.0, get_panel_backdrop(theme));
     }
 
     // ── Menu bar ────────────────────────────────────────────────────
@@ -1774,7 +1774,7 @@ fn render_status_bar_inner(
             .on_hover_text("Click to view recent status events");
 
         if response.clicked() {
-            ui.memory_mut(|m| m.toggle_popup(popup_id));
+            egui::Popup::toggle_id(ui.ctx(), popup_id);
         }
 
         // Right-aligned perf segment. Hidden when the HUD is off so

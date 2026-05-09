@@ -1467,7 +1467,7 @@ impl CanvasDiagramPanel {
         // showing right now" — more reliable than our own cache
         // sync, because `context_menu` may open/close between frames
         // without going through our code path.
-        let popup_was_open_before = ui.ctx().memory(|m| m.any_popup_open());
+        let popup_was_open_before = egui::Popup::is_any_open(ui.ctx());
 
         // Track whether this frame wants to dismiss (second-right-
         // click to close). If so, we SKIP `response.context_menu()`
@@ -1489,7 +1489,7 @@ impl CanvasDiagramPanel {
                 .context_menu
                 .is_some();
             if our_menu_cached {
-                ui.ctx().memory_mut(|m| m.close_all_popups());
+                egui::Popup::close_all(ui.ctx());
                 world
                     .resource_mut::<CanvasDiagramState>()
                     .get_mut(active_doc)
@@ -1522,7 +1522,7 @@ impl CanvasDiagramPanel {
                         .resource_mut::<CanvasDiagramState>()
                         .get_mut(active_doc)
                         .context_menu = None;
-                    ui.ctx().memory_mut(|m| m.close_all_popups());
+                    egui::Popup::close_all(ui.ctx());
                     suppress_menu = true;
                 } else {
                     // If egui still thinks a popup is open (from a
@@ -1531,7 +1531,7 @@ impl CanvasDiagramPanel {
                     // one without egui deduping against the stale
                     // popup id.
                     if popup_was_open_before {
-                        ui.ctx().memory_mut(|m| m.close_all_popups());
+                        egui::Popup::close_all(ui.ctx());
                     }
                     // Fresh right-click: capture world position +
                     // hit-test origin while `press_origin` still
@@ -1626,7 +1626,7 @@ impl CanvasDiagramPanel {
         // an entry) and we still have a cache, drop the cache.
         // Running this *after* keeps us from clearing the cache we
         // just populated on a fresh right-click.
-        let popup_open_now = ui.ctx().memory(|m| m.any_popup_open());
+        let popup_open_now = egui::Popup::is_any_open(ui.ctx());
         if !popup_open_now
             && world
                 .resource::<CanvasDiagramState>()

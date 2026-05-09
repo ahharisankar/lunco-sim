@@ -623,7 +623,7 @@ pub(super) fn paint_hover_card(
 
     // Anchor card to the right of the cursor with a small offset;
     // flip to the left if we'd run off the screen edge.
-    let screen = ui.ctx().screen_rect();
+    let screen = ui.ctx().content_rect();
     let mut origin =
         egui::pos2(cursor.x + 14.0, cursor.y + 14.0);
     if origin.x + card_w > screen.max.x {
