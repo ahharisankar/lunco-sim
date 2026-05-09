@@ -1733,6 +1733,13 @@ fn seed_state_from_latest_experiment(
     let twin = TwinId("default".into());
     let visibility = world
         .get_resource::<crate::ui::panels::experiments::ExperimentVisibility>();
+    let active_plot = world
+        .get_resource::<crate::ui::panels::experiments::ActivePlot>()
+        .copied()
+        .unwrap_or_default()
+        .or_default();
+    let plot_states = world
+        .get_resource::<crate::ui::panels::experiments::PlotPanelStates>();
     let Some(registry) = world.get_resource::<ExperimentRegistry>() else {
         return;
     };
@@ -1754,7 +1761,7 @@ fn seed_state_from_latest_experiment(
     // Scrub time wins over final-time when set. Find the sample
     // index whose time is closest to the user-picked scrub time so
     // the canvas reflects the system state at that moment.
-    let scrub_time = visibility.and_then(|v| v.scrub_time);
+    let scrub_time = plot_states.and_then(|s| s.scrub(active_plot));
     let idx = match scrub_time {
         Some(t) => {
             let mut best = 0usize;

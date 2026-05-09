@@ -18,6 +18,7 @@ use egui_plot::{Legend, Line, LineStyle, Plot, PlotPoints, VLine};
 use lunco_experiments::{
     ExperimentId, ExperimentRegistry, RunStatus, TwinId,
 };
+use lunco_viz::viz::VizId;
 use lunco_workbench::{Panel, PanelId, PanelSlot};
 
 pub const EXPERIMENTS_PANEL_ID: PanelId = PanelId("modelica_experiments");
@@ -28,19 +29,9 @@ pub const EXPERIMENTS_PANEL_ID: PanelId = PanelId("modelica_experiments");
 #[derive(Resource, Default, Debug)]
 pub struct ExperimentVisibility {
     pub visible: std::collections::HashSet<ExperimentId>,
-    /// Variables ticked for plotting. Plotted once per visible
-    /// experiment that has the variable.
-    pub picked_vars: std::collections::BTreeSet<String>,
     /// Free-text filter for the variable picker. Case-insensitive
     /// substring match against the dotted variable path.
     pub var_filter: String,
-    /// Current scrub time. `None` = pinned to the latest sample of
-    /// the latest visible experiment (default; what the canvas
-    /// overlay was showing before the scrubber landed). `Some(t)` =
-    /// snap canvas + plot cursor to the run's sample closest to `t`.
-    /// Set by clicking on the experiments plot; cleared via the
-    /// "↻ Reset" button.
-    pub scrub_time: Option<f64>,
     /// Inline-rename state. `Some((id, draft_text))` → row `id`
     /// renders a `TextEdit` instead of a `Label`; `None` → all rows
     /// show their name as a plain label. Committed on Enter or
@@ -57,10 +48,65 @@ impl ExperimentVisibility {
             self.visible.remove(&id);
         }
     }
-    pub fn toggle_var(&mut self, var: String) {
-        if !self.picked_vars.insert(var.clone()) {
-            self.picked_vars.remove(&var);
+}
+
+/// Per-plot-panel state — picked variables and scrub cursor. Keyed
+/// by `VizId` so each plot tab maintains independent picks.
+#[derive(Default, Debug, Clone)]
+pub struct PlotPanelState {
+    pub picked_vars: std::collections::BTreeSet<String>,
+    pub scrub_time: Option<f64>,
+}
+
+#[derive(Resource, Default, Debug)]
+pub struct PlotPanelStates {
+    pub by_viz: std::collections::HashMap<VizId, PlotPanelState>,
+}
+
+impl PlotPanelStates {
+    pub fn get(&self, viz: VizId) -> Option<&PlotPanelState> {
+        self.by_viz.get(&viz)
+    }
+    pub fn entry(&mut self, viz: VizId) -> &mut PlotPanelState {
+        self.by_viz.entry(viz).or_default()
+    }
+    pub fn picked(&self, viz: VizId) -> std::collections::BTreeSet<String> {
+        self.by_viz
+            .get(&viz)
+            .map(|s| s.picked_vars.clone())
+            .unwrap_or_default()
+    }
+    pub fn scrub(&self, viz: VizId) -> Option<f64> {
+        self.by_viz.get(&viz).and_then(|s| s.scrub_time)
+    }
+    pub fn toggle_var(&mut self, viz: VizId, var: String) {
+        let s = self.entry(viz);
+        if !s.picked_vars.insert(var.clone()) {
+            s.picked_vars.remove(&var);
         }
+    }
+    pub fn set_var(&mut self, viz: VizId, var: String, on: bool) {
+        let s = self.entry(viz);
+        if on {
+            s.picked_vars.insert(var);
+        } else {
+            s.picked_vars.remove(&var);
+        }
+    }
+    pub fn set_scrub(&mut self, viz: VizId, t: Option<f64>) {
+        self.entry(viz).scrub_time = t;
+    }
+}
+
+/// Most-recently-rendered plot panel. Used by canvas overlay /
+/// telemetry / runner so global readers can pick a sensible default
+/// plot when they need per-plot state. Updated on every plot render.
+#[derive(Resource, Default, Debug, Copy, Clone)]
+pub struct ActivePlot(pub Option<VizId>);
+
+impl ActivePlot {
+    pub fn or_default(self) -> VizId {
+        self.0.unwrap_or(crate::ui::viz::DEFAULT_MODELICA_GRAPH)
     }
 }
 
@@ -796,9 +842,18 @@ impl ExperimentsPanel {
     fn render_plot_section(&self, ui: &mut egui::Ui, world: &mut World, twin: &TwinId) {
         // Snapshot relevant data so we can render without holding
         // resource borrows across egui calls.
-        let (visible, picked_vars) = world
+        let visible = world
             .get_resource::<ExperimentVisibility>()
-            .map(|v| (v.visible.clone(), v.picked_vars.clone()))
+            .map(|v| v.visible.clone())
+            .unwrap_or_default();
+        let active = world
+            .get_resource::<ActivePlot>()
+            .copied()
+            .unwrap_or_default()
+            .or_default();
+        let picked_vars = world
+            .get_resource::<PlotPanelStates>()
+            .map(|s| s.picked(active))
             .unwrap_or_default();
 
         // All variables across visible+done experiments — the picker's
@@ -855,8 +910,8 @@ impl ExperimentsPanel {
                     }
                 });
             if let Some(v) = toggle_var {
-                if let Some(mut vis) = world.get_resource_mut::<ExperimentVisibility>() {
-                    vis.toggle_var(v);
+                if let Some(mut states) = world.get_resource_mut::<PlotPanelStates>() {
+                    states.toggle_var(active, v);
                 }
             }
         });
@@ -1136,20 +1191,28 @@ struct PlotSeries {
 /// - Y-axis label: shows the unit when every visible variable shares
 ///   one; otherwise blank (mixed-unit plots happen often when users
 ///   tick variables across components).
-pub fn render_experiments_plot(ui: &mut egui::Ui, world: &mut World) -> ExpPlotSummary {
+pub fn render_experiments_plot(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    viz_id: VizId,
+) -> ExpPlotSummary {
     let twin = TwinId("default".into());
     let (col_warning, col_accent) = {
         let t = world.resource::<lunco_theme::Theme>();
         (t.tokens.warning, t.tokens.accent)
     };
 
-    let (visible, picked_vars) = world
+    let visible = world
         .get_resource::<ExperimentVisibility>()
-        .map(|v| (v.visible.clone(), v.picked_vars.clone()))
+        .map(|v| v.visible.clone())
+        .unwrap_or_default();
+    let picked_vars = world
+        .get_resource::<PlotPanelStates>()
+        .map(|s| s.picked(viz_id))
         .unwrap_or_default();
 
     // Build var -> unit map from the active doc index.
-    let units: std::collections::HashMap<String, String> = active_doc_units(world);
+    let units: std::collections::HashMap<String, String> = active_doc_units(world, viz_id);
 
     let mut series: Vec<PlotSeries> = Vec::new();
     let mut total_runs = 0usize;
@@ -1227,8 +1290,8 @@ pub fn render_experiments_plot(ui: &mut egui::Ui, world: &mut World) -> ExpPlotS
     }
 
     let scrub_time = world
-        .get_resource::<ExperimentVisibility>()
-        .and_then(|v| v.scrub_time);
+        .get_resource::<PlotPanelStates>()
+        .and_then(|s| s.scrub(viz_id));
 
     let mut new_scrub: Option<Option<f64>> = None;
 
@@ -1263,8 +1326,8 @@ pub fn render_experiments_plot(ui: &mut egui::Ui, world: &mut World) -> ExpPlotS
     let mut fit_clicked = false;
     let mut new_plot_clicked = false;
     let scrub_time = world
-        .get_resource::<ExperimentVisibility>()
-        .and_then(|v| v.scrub_time);
+        .get_resource::<PlotPanelStates>()
+        .and_then(|s| s.scrub(viz_id));
     if !all_vars.is_empty() {
         let mut groups: std::collections::BTreeMap<String, Vec<String>> =
             std::collections::BTreeMap::new();
@@ -1345,8 +1408,8 @@ pub fn render_experiments_plot(ui: &mut egui::Ui, world: &mut World) -> ExpPlotS
         });
     }
     if let Some(v) = toggle_var {
-        if let Some(mut vis) = world.get_resource_mut::<ExperimentVisibility>() {
-            vis.toggle_var(v);
+        if let Some(mut states) = world.get_resource_mut::<PlotPanelStates>() {
+            states.toggle_var(viz_id, v);
         }
     }
     if new_plot_clicked {
@@ -1408,8 +1471,8 @@ pub fn render_experiments_plot(ui: &mut egui::Ui, world: &mut World) -> ExpPlotS
     }
 
     if let Some(s) = new_scrub {
-        if let Some(mut vis) = world.get_resource_mut::<ExperimentVisibility>() {
-            vis.scrub_time = s;
+        if let Some(mut states) = world.get_resource_mut::<PlotPanelStates>() {
+            states.set_scrub(viz_id, s);
         }
     }
     ExpPlotSummary {
@@ -1580,7 +1643,10 @@ fn load_run_into_draft(world: &mut World, id: ExperimentId) {
 /// in the model with leaf name `thrust`. First match wins on
 /// collisions across classes — same trade-off the rest of the UI
 /// already makes.
-fn active_doc_units(world: &World) -> std::collections::HashMap<String, String> {
+fn active_doc_units(
+    world: &World,
+    viz_id: VizId,
+) -> std::collections::HashMap<String, String> {
     let mut out: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let Some(doc) = world
@@ -1597,8 +1663,8 @@ fn active_doc_units(world: &World) -> std::collections::HashMap<String, String> 
         return out;
     };
     let Some(picked) = world
-        .get_resource::<ExperimentVisibility>()
-        .map(|v| v.picked_vars.clone())
+        .get_resource::<PlotPanelStates>()
+        .map(|s| s.picked(viz_id))
     else {
         return out;
     };
@@ -1629,11 +1695,15 @@ pub struct ExpPlotSummary {
 
 /// Compute an [`ExpPlotSummary`] without rendering. Lets the Graphs
 /// panel show counts in its top header row before drawing the plot.
-pub fn experiments_plot_summary(world: &World) -> ExpPlotSummary {
+pub fn experiments_plot_summary(world: &World, viz_id: VizId) -> ExpPlotSummary {
     let twin = TwinId("default".into());
-    let (visible, picked_vars) = world
+    let visible = world
         .get_resource::<ExperimentVisibility>()
-        .map(|v| (v.visible.clone(), v.picked_vars.clone()))
+        .map(|v| v.visible.clone())
+        .unwrap_or_default();
+    let picked_vars = world
+        .get_resource::<PlotPanelStates>()
+        .map(|s| s.picked(viz_id))
         .unwrap_or_default();
     let mut total_runs = 0usize;
     let mut visible_runs = 0usize;

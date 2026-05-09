@@ -60,6 +60,14 @@ impl InstancePanel for ModelicaPlotPanel {
 /// renders the polished toolbar (live-summary / Fit / CSV / new-plot),
 /// then dispatches to the experiments overlay + LinePlot kind.
 fn render_modelica_plot(ui: &mut egui::Ui, world: &mut World, viz_id: VizId) {
+    // Mark this plot as the active one for global readers (canvas
+    // overlay, telemetry, runner auto-pick). Most-recently-rendered
+    // wins; acceptable until per-plot focus tracking lands.
+    if let Some(mut active) =
+        world.get_resource_mut::<crate::ui::panels::experiments::ActivePlot>()
+    {
+        active.0 = Some(viz_id);
+    }
     let muted = world
         .get_resource::<lunco_theme::Theme>()
         .map(|t| t.tokens.text_subdued)
@@ -107,17 +115,13 @@ fn render_modelica_plot(ui: &mut egui::Ui, world: &mut World, viz_id: VizId) {
 
     let mut fit_clicked = false;
     let mut export_csv_clicked = false;
-    // Experiments overlay state is global today (one picked-vars set
-    // for the whole app). Only the *first* plot tab renders the
-    // overlay so we don't draw the same series in every plot panel.
-    // Per-panel experiment state is a follow-up.
-    let exp_summary = if viz_id == DEFAULT_MODELICA_GRAPH {
-        crate::ui::panels::experiments::experiments_plot_summary(world)
-    } else {
-        crate::ui::panels::experiments::ExpPlotSummary::default()
-    };
+    // Per-plot experiment overlay: each tab has its own picked-vars
+    // and scrub cursor, so every plot can render the experiments
+    // overlay independently.
+    let exp_summary =
+        crate::ui::panels::experiments::experiments_plot_summary(world, viz_id);
     let has_live = bound_count > 0;
-    let has_exp = exp_summary.total_runs > 0 && viz_id == DEFAULT_MODELICA_GRAPH;
+    let has_exp = exp_summary.total_runs > 0;
 
     let show_top_header = has_live || (!has_live && !has_exp);
     if show_top_header {
@@ -187,12 +191,12 @@ fn render_modelica_plot(ui: &mut egui::Ui, world: &mut World, viz_id: VizId) {
     if has_exp && has_live {
         let avail = ui.available_height();
         ui.allocate_ui(egui::vec2(ui.available_width(), avail * 0.5), |ui| {
-            crate::ui::panels::experiments::render_experiments_plot(ui, world);
+            crate::ui::panels::experiments::render_experiments_plot(ui, world, viz_id);
         });
         ui.separator();
         render_line_plot(ui, world, viz_id);
     } else if has_exp {
-        crate::ui::panels::experiments::render_experiments_plot(ui, world);
+        crate::ui::panels::experiments::render_experiments_plot(ui, world, viz_id);
     } else if has_live {
         render_line_plot(ui, world, viz_id);
     }

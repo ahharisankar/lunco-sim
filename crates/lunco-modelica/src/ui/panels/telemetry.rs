@@ -323,10 +323,17 @@ impl Panel for TelemetryPanel {
                     .collect())
                 .unwrap_or_default();
 
-            // Picked-for-experiments set, snapshotted once.
+            // Picked-for-experiments set, snapshotted once. Read from
+            // the active plot panel (most-recently-rendered) so the
+            // checkboxes reflect that plot's picks.
+            let active_plot = world
+                .get_resource::<crate::ui::panels::experiments::ActivePlot>()
+                .copied()
+                .unwrap_or_default()
+                .or_default();
             let picked_exp: std::collections::BTreeSet<String> = world
-                .get_resource::<crate::ui::panels::experiments::ExperimentVisibility>()
-                .map(|v| v.picked_vars.clone())
+                .get_resource::<crate::ui::panels::experiments::PlotPanelStates>()
+                .map(|s| s.picked(active_plot))
                 .unwrap_or_default();
 
             // Variables sourced from completed experiments — surface
@@ -439,14 +446,10 @@ impl Panel for TelemetryPanel {
                         on,
                     );
                 }
-                if let Some(mut vis) = world
-                    .get_resource_mut::<crate::ui::panels::experiments::ExperimentVisibility>()
+                if let Some(mut states) = world
+                    .get_resource_mut::<crate::ui::panels::experiments::PlotPanelStates>()
                 {
-                    if on {
-                        vis.picked_vars.insert(name);
-                    } else {
-                        vis.picked_vars.remove(&name);
-                    }
+                    states.set_var(active_plot, name, on);
                 }
             }
             let _ = is_signal_plotted; // re-export available for future UIs
