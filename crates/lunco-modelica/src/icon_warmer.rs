@@ -3,7 +3,7 @@
 //! On [`DocumentOpened`](lunco_doc_bevy::DocumentOpened) we walk the
 //! doc's AST collecting every cross-package type referenced (component
 //! types, extends bases, connector port types). A single
-//! [`AsyncComputeTaskPool`] task fans out
+//! [`bevy::tasks::AsyncComputeTaskPool`] task fans out
 //! [`crate::class_cache::peek_or_load_msl_class_blocking`] for each unique
 //! qualified name, then primes the engine's icon resolution by calling
 //! [`crate::engine::ModelicaEngine::icon_for`] for each one.

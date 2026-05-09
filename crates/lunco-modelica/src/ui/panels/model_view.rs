@@ -2,7 +2,7 @@
 //!
 //! Implements [`InstancePanel`] so the workbench can host arbitrarily
 //! many model tabs in the center dock. Each tab's instance id is the
-//! raw [`DocumentId`] it views; per-tab state (current view mode,
+//! raw [`lunco_doc::DocumentId`] it views; per-tab state (current view mode,
 //! future: text cursor, pan/zoom) lives in the [`ModelTabs`] resource.
 //!
 //! Rendering strategy: every reader names the doc/tab it's reading.
@@ -57,7 +57,7 @@ pub enum ModelViewMode {
 /// Per-tab state for a [`ModelViewPanel`] instance.
 ///
 /// Tabs are now keyed by an opaque [`TabId`] (a counter-allocated
-/// `u64`) rather than the [`DocumentId`] they view. This lets the
+/// `u64`) rather than the [`lunco_doc::DocumentId`] they view. This lets the
 /// same document live in multiple tabs (e.g. a Text view and a
 /// Canvas view side-by-side) and lets sibling classes from the same
 /// `.mo` file open in distinct tabs (drilled-in classes set
@@ -151,7 +151,7 @@ pub fn drilled_class_for_doc(
 /// Registry of open [`ModelViewPanel`] tabs.
 ///
 /// Keyed by [`TabId`] (allocated from `next_id`). Multiple tabs can
-/// reference the same [`DocumentId`] — distinguished by their
+/// reference the same [`lunco_doc::DocumentId`] — distinguished by their
 /// `drilled_class` slot.
 ///
 /// Closing a tab drops its entry here but *does not* remove the

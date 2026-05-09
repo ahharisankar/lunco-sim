@@ -23,7 +23,7 @@ pub struct FileEntry {
 /// Classification of a file inside a Twin.
 ///
 /// Mirrors the three-way distinction in
-/// [`docs/architecture/10-document-system.md`] § 2a:
+/// `docs/architecture/10-document-system.md` § 2a:
 ///
 /// - [`Document`](FileKind::Document) — editable inside LunCoSim via typed
 ///   ops on structured content (`.mo`, `.usda`, `.sysml`, `.mission.ron`).

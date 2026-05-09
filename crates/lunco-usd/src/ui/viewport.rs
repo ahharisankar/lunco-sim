@@ -41,16 +41,16 @@
 //!
 //! ## Lifecycle (observers)
 //!
-//! - [`DocumentOpened`](lunco_doc_bevy::DocumentOpened) for our kind
+//! - [`DocumentOpened`] for our kind
 //!   → bootstrap render scaffolding on first open, set this doc as
 //!   the active viewport target, parse + install asset, mount on
 //!   `scene_root`.
-//! - [`DocumentChanged`](lunco_doc_bevy::DocumentChanged) for the
+//! - [`lunco_doc_bevy::DocumentChanged`] for the
 //!   active doc → re-parse, **mutate the asset in-place** so the
 //!   `Handle<UsdStageAsset>` stays valid, despawn synced children,
 //!   clear the `UsdVisualSynced` marker on `scene_root` so
 //!   `sync_usd_visuals` re-runs.
-//! - [`DocumentClosed`](lunco_doc_bevy::DocumentClosed) → if it was
+//! - [`DocumentClosed`] → if it was
 //!   the active doc, drop the asset and clear `scene_root`'s
 //!   `UsdPrimPath`. Render scaffolding (image, camera, BigSpace) is
 //!   kept warm so the next open doesn't pay the bootstrap cost.

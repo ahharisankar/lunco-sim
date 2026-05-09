@@ -1,7 +1,7 @@
 //! # lunco-workbench
 //!
 //! LunCoSim's own workbench shell. Renders the standard engineering-IDE
-//! layout documented in [`docs/architecture/11-workbench.md`]:
+//! layout documented in `docs/architecture/11-workbench.md`:
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────┐

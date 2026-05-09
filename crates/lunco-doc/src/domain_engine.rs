@@ -5,7 +5,7 @@
 //! and projects each open document into a UI-friendly [`DomainEngine::Index`].
 //!
 //! UI code reads the Index, never the engine's internal AST. Edits are
-//! applied as typed [`DocumentOp`](crate::DocumentOp)s; the engine returns
+//! applied as typed [`DocumentOp`]s; the engine returns
 //! the inverse op for undo.
 //!
 //! One engine instance per process per domain — the engine owns cross-file

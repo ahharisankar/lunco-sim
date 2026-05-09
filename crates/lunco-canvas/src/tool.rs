@@ -2,7 +2,7 @@
 //! scene mutations.
 //!
 //! Exactly one tool is **active** at a time; the canvas dispatches
-//! each [`InputEvent`](crate::event::InputEvent) to the active tool,
+//! each [`InputEvent`] to the active tool,
 //! which decides whether to consume it (start a drag, begin an edge
 //! connection) or let built-in navigation handle it (pan, zoom).
 //!
@@ -18,7 +18,7 @@
 //!
 //! Tools don't get a `&mut Canvas`. They get a narrow `CanvasOps`
 //! facade that lets them mutate the scene / selection / viewport
-//! and emit [`SceneEvent`](crate::event::SceneEvent)s, but not reach
+//! and emit [`SceneEvent`]s, but not reach
 //! for layers/overlays/other tools. Makes tool impls independently
 //! testable and protects the canvas from tool-side invariant breaks.
 //!
@@ -67,7 +67,7 @@ pub struct CanvasOps<'a> {
     /// When `true`, tools must not mutate `scene` — no drag-to-move,
     /// no drag-to-connect, no delete-on-key. Pan/zoom/selection
     /// stay fine (those mutate `viewport` / `selection`, not the
-    /// authored scene). Surfaced as a [`Canvas::read_only`] field
+    /// authored scene). Surfaced as a [`crate::Canvas::read_only`] field
     /// that the embedding app flips per tab (e.g. MSL library tabs).
     pub read_only: bool,
     /// Optional drag-to-grid snap. When `Some`, the default tool

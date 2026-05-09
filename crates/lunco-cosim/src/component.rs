@@ -40,7 +40,7 @@ pub struct SimComponent {
     pub inputs: HashMap<String, f64>,
     /// Output connectors — values produced by the model.
     ///
-    /// Other models and Avian read these through [`SimConnection`] connections.
+    /// Other models and Avian read these through [`crate::SimConnection`] connections.
     pub outputs: HashMap<String, f64>,
     /// Compile-time parameters — set before simulation starts.
     ///
@@ -66,7 +66,7 @@ impl Default for SimComponent {
     }
 }
 
-/// Current status of a [`SimComponent`].
+/// Current status of a [`crate::SimComponent`].
 #[derive(Debug, Clone, PartialEq, Default, Reflect)]
 pub enum SimStatus {
     /// Model is loaded but not yet run.

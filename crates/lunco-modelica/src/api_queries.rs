@@ -1174,7 +1174,7 @@ fn document_kind_label(kind: &DocumentKind) -> String {
     }
 }
 
-/// Project a [`DocumentOrigin`] onto a JSON object. Untitled docs carry
+/// Project a [`lunco_doc::DocumentOrigin`] onto a JSON object. Untitled docs carry
 /// only a name; File docs carry an absolute path + writability flag —
 /// matches the discriminator the Twin Browser already shows in the UI.
 fn origin_to_json(origin: &DocumentOrigin) -> serde_json::Value {

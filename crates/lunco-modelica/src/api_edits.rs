@@ -332,7 +332,7 @@ fn is_ident_byte(b: u8) -> bool {
 
 // ─── AddModelicaComponent ──────────────────────────────────────────────
 
-/// Add a sub-component to a class. Wraps [`ModelicaOp::AddComponent`].
+/// Add a sub-component to a class. Wraps [`crate::document::ModelicaOp::AddComponent`].
 ///
 /// `class` is the parent class name where the component lands (e.g.
 /// `"RocketStage"`). `type_name` is the component's declared type
@@ -1099,7 +1099,7 @@ fn on_apply_modelica_ops(
     });
 }
 
-/// Convert one mirror [`ApiOp`] to the internal [`ModelicaOp`].
+/// Convert one mirror [`ApiOp`] to the internal [`crate::document::ModelicaOp`].
 /// Returns `None` for `Noop` and for malformed payloads (e.g.
 /// `placement.width <= 0` we treat as "no override" → default extent).
 fn api_op_to_internal(op: &ApiOp) -> Option<ModelicaOp> {
@@ -1406,13 +1406,13 @@ fn port_ref_or_none(component: &str, port: &str) -> Option<PortRef> {
     Some(PortRef::new(component.to_string(), port.to_string()))
 }
 
-/// Convert an internal [`ModelicaOp`] back to its [`ApiOp`] mirror.
+/// Convert an internal [`crate::document::ModelicaOp`] back to its [`ApiOp`] mirror.
 /// Used by GUI panels (canvas drag-drop, diagram viewer) to fire
 /// [`ApplyModelicaOps`] with already-constructed ops, keeping a single
 /// command pipeline for both UI and external API callers (per
 /// AGENTS.md §4.1).
 ///
-/// Returns `None` only for [`ModelicaOp::ReplaceSource`] — full-buffer
+/// Returns `None` only for [`crate::document::ModelicaOp::ReplaceSource`] — full-buffer
 /// replace has no ApiOp mirror; callers use the [`SetDocumentSource`]
 /// typed command instead.
 pub(crate) fn internal_op_to_api(op: &ModelicaOp) -> Option<ApiOp> {

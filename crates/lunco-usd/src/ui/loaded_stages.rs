@@ -2,7 +2,7 @@
 //! access to in this session.
 //!
 //! Mirrors `lunco_modelica::ui::loaded_classes::LoadedModelicaClasses`:
-//! a flat registry of [`LoadedStage`] entries surfaced as siblings in
+//! a flat registry of [`crate::ui::loaded_stages::LoadedStage`] entries surfaced as siblings in
 //! the Twin browser's Models scope, regardless of where they came
 //! from. Workspace docs, future bundled stages, future Twin externals
 //! — all show up the same way.
@@ -77,7 +77,7 @@ pub trait LoadedStage: Send + Sync + 'static {
     }
 }
 
-/// Live registry of [`LoadedStage`] entries. Iterated by the
+/// Live registry of [`crate::ui::loaded_stages::LoadedStage`] entries. Iterated by the
 /// [`UsdSceneSection`](crate::ui::browser_section::UsdSceneSection)
 /// each frame; mutated by the lifecycle observers in
 /// [`UsdUiPlugin`](crate::ui::UsdUiPlugin).
@@ -112,12 +112,12 @@ impl LoadedUsdStages {
 // ─────────────────────────────────────────────────────────────────────
 
 /// A writable USD document the user is authoring — one
-/// [`LoadedStage`] per document, matching the Modelica WorkspaceClass
+/// [`crate::ui::loaded_stages::LoadedStage`] per document, matching the Modelica WorkspaceClass
 /// shape where `Untitled1.mo`, `MyController.mo`, etc. each appear as
 /// siblings in the browser.
 ///
 /// Reads source-of-truth from
-/// [`UsdDocumentRegistry`](crate::registry::UsdDocumentRegistry):
+/// [`UsdDocumentRegistry`]:
 /// name + dirty state come from the live document. Stateless beyond
 /// the doc id.
 pub struct WorkspaceStage {

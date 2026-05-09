@@ -1,12 +1,12 @@
 //! `UsdDocumentRegistry` — owns every live [`UsdDocument`] keyed by
-//! [`DocumentId`].
+//! [`lunco_doc::DocumentId`].
 //!
 //! Mirrors the small surface of `ModelicaDocumentRegistry` but stays
 //! deliberately minimal in Phase 2: allocate / host / remove plus
 //! pending-event rings that the commands plugin drains into the
 //! `lunco-doc-bevy` notification triggers
 //! ([`DocumentOpened`](lunco_doc_bevy::DocumentOpened),
-//! [`DocumentChanged`](lunco_doc_bevy::DocumentChanged),
+//! [`lunco_doc_bevy::DocumentChanged`](lunco_doc_bevy::DocumentChanged),
 //! [`DocumentClosed`](lunco_doc_bevy::DocumentClosed)).
 //!
 //! Entity linking, async-load reservation, and AST-staleness tracking
@@ -32,7 +32,7 @@ pub struct UsdDocumentRegistry {
     /// [`DocumentOpened`](lunco_doc_bevy::DocumentOpened) triggers.
     pending_opened: Vec<DocumentId>,
     /// Docs whose generation just advanced — drained into
-    /// [`DocumentChanged`](lunco_doc_bevy::DocumentChanged).
+    /// [`lunco_doc_bevy::DocumentChanged`](lunco_doc_bevy::DocumentChanged).
     pending_changes: Vec<DocumentId>,
     /// Docs that were just dropped — drained into
     /// [`DocumentClosed`](lunco_doc_bevy::DocumentClosed).

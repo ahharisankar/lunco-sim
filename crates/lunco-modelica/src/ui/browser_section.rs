@@ -298,7 +298,7 @@ fn classes_from_index(index: &crate::index::ModelicaIndex) -> (Vec<ClassEntry>, 
 /// derive the class tree + error flag through the same path as the
 /// production renderer. Mirrors what `render` does, but starting
 /// from raw source (production gets the cache from
-/// [`ModelicaDocument`] via the off-thread refresh).
+/// [`crate::document::ModelicaDocument`] via the off-thread refresh).
 #[cfg(test)]
 fn parse_classes(source: &str) -> (Vec<ClassEntry>, bool) {
     let syntax = SyntaxCache::from_source(source, 0);

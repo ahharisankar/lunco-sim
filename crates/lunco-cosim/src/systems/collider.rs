@@ -1,6 +1,6 @@
 //! Collider synchronization from simulation outputs.
 //!
-//! Watches [`SimComponent`] outputs for `volume` and updates
+//! Watches [`crate::SimComponent`] outputs for `volume` and updates
 //! the entity's [`Collider`] to a sphere with the corresponding radius.
 
 use bevy::prelude::*;

@@ -1,8 +1,8 @@
 //! Simulation connections and ports.
 //!
 //! Follows the FMI/SSP ontology:
-//! - [`SimPort`] — a named interface point on a [`SimComponent`] (SSP: Connector)
-//! - [`SimConnection`] — a link between two ports (SSP: Connection)
+//! - [`SimPort`] — a named interface point on a [`crate::SimComponent`] (SSP: Connector)
+//! - [`crate::SimConnection`] — a link between two ports (SSP: Connection)
 //!
 //! `startElement.startConnector → endElement.endConnector`
 
@@ -42,7 +42,7 @@ pub enum PortType {
 /// available connection points; the USD loader uses them to validate
 /// connections defined in scene files.
 ///
-/// Ports are metadata — the actual values flow through [`SimComponent`]
+/// Ports are metadata — the actual values flow through [`crate::SimComponent`]
 /// inputs/outputs hash maps. A port just declares that a named slot exists
 /// and what kind of value it carries.
 #[derive(Debug, Clone, Reflect)]
@@ -57,7 +57,7 @@ pub struct SimPort {
 
 /// Collection of ports on a simulation entity.
 ///
-/// Attach this alongside a [`SimComponent`] to declare the entity's
+/// Attach this alongside a [`crate::SimComponent`] to declare the entity's
 /// connectable interface. Systems like `setup_balloon_wires` can build
 /// this from the Modelica model's input/output declarations.
 #[derive(Component, Debug, Clone, Reflect, Default)]
@@ -75,8 +75,8 @@ pub struct SimPorts {
 ///
 /// Connector names are resolved by [`propagate_connections`](crate::systems::propagate::propagate_connections):
 ///
-/// - `"netForce"`, `"volume"`, etc. → [`SimComponent`](crate::SimComponent) outputs
-/// - `"height"`, `"force_y"`, etc. → [`AvianSim`](crate::AvianSim) outputs/inputs
+/// - `"netForce"`, `"volume"`, etc. → [`crate::SimComponent`](crate::SimComponent) outputs
+/// - `"height"`, `"force_y"`, etc. → [`crate::AvianSim`](crate::AvianSim) outputs/inputs
 ///
 /// ## Example
 ///

@@ -70,7 +70,7 @@ pub struct DrillInBinding {
 /// *"no operations like that must be in UI thread"*.
 ///
 /// Same shape as [`DrillInLoads`]: the bg task returns a fully-built
-/// [`ModelicaDocument`], the driver system installs it into the
+/// [`crate::document::ModelicaDocument`], the driver system installs it into the
 /// registry via `install_prebuilt`. Cleared on install and on
 /// document removal.
 #[derive(bevy::prelude::Resource, Default)]

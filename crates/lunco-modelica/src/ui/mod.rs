@@ -420,7 +420,7 @@ fn scan_twin_on_added(
 /// any compile-state bookkeeping attached to that document.
 ///
 /// Behavior preserved from the entity-keyed era: when an entity is
-/// despawned, its backing [`ModelicaDocument`](crate::document::ModelicaDocument)
+/// despawned, its backing [`crate::document::ModelicaDocument`](crate::document::ModelicaDocument)
 /// is also removed. The long-term design lets documents outlive entities
 /// (edit-without-running, cosim re-spawn), so this will become opt-in
 /// once the tab/view layer can explicitly unload a document.
@@ -466,7 +466,7 @@ fn cleanup_removed_documents(
 /// The Modelica workbench's default workspace preset.
 ///
 /// Mirrors the "Analyze — Modelica deep dive" slot map from the workbench
-/// design doc ([`docs/architecture/11-workbench.md`] § 4).
+/// design doc (`docs/architecture/11-workbench.md` § 4).
 pub struct AnalyzePerspective;
 
 impl Perspective for AnalyzePerspective {

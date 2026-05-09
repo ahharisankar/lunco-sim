@@ -144,7 +144,7 @@ pub struct WorkbenchState {
 // CompileState — per-document compile lifecycle
 // ---------------------------------------------------------------------------
 
-/// Current compile-lifecycle state for a single [`ModelicaDocument`].
+/// Current compile-lifecycle state for a single [`crate::document::ModelicaDocument`].
 ///
 /// Separate from [`ModelicaModel::is_stepping`] (a per-entity simulation
 /// tick guard) and from error *content* (which lives in
@@ -296,7 +296,7 @@ world
 // ---------------------------------------------------------------------------
 
 /// Registry of [`DocumentHost<ModelicaDocument>`] instances, keyed by
-/// [`DocumentId`].
+/// [`lunco_doc::DocumentId`].
 ///
 /// **The single source of truth for Modelica source text.** Every spawn
 /// path (CodeEditor Compile, Diagram auto-compile, `balloon_setup`, the
@@ -344,7 +344,7 @@ pub struct ModelicaDocumentRegistry {
 }
 
 impl ModelicaDocumentRegistry {
-    /// Allocate a fresh Untitled [`DocumentId`] + [`DocumentHost`]
+    /// Allocate a fresh Untitled [`lunco_doc::DocumentId`] + [`DocumentHost`]
     /// holding `source`. Display name is `Untitled-<id>`. Not linked
     /// to any entity.
     pub fn allocate(&mut self, source: String) -> DocumentId {
@@ -358,7 +358,7 @@ impl ModelicaDocumentRegistry {
         id
     }
 
-    /// Allocate a fresh [`DocumentId`] + [`DocumentHost`] with an
+    /// Allocate a fresh [`lunco_doc::DocumentId`] + [`DocumentHost`] with an
     /// explicit origin. Use this when opening from disk or bundled
     /// assets so `SaveDocument` + read-only badges work.
     pub fn allocate_with_origin(
@@ -378,7 +378,7 @@ impl ModelicaDocumentRegistry {
         id
     }
 
-    /// Allocate a fresh [`DocumentId`] WITHOUT building the host.
+    /// Allocate a fresh [`lunco_doc::DocumentId`] WITHOUT building the host.
     /// Pairs with [`Self::install_prebuilt`]: caller uses the id
     /// to build a `ModelicaDocument` off-thread (the parse can take
     /// seconds on large MSL package files), then installs the
@@ -412,7 +412,7 @@ impl ModelicaDocumentRegistry {
     }
 
     /// Convenience: [`allocate`](Self::allocate) + [`link`](Self::link).
-    /// Returns the new [`DocumentId`] — the caller must also write it into
+    /// Returns the new [`lunco_doc::DocumentId`] — the caller must also write it into
     /// `ModelicaModel::document` so downstream systems can resolve it
     /// without touching the registry.
     pub fn open_for(&mut self, entity: Entity, source: String) -> DocumentId {
@@ -502,7 +502,7 @@ impl ModelicaDocumentRegistry {
     /// document changed (different source), `false` on no-op (identical
     /// source) or unknown id.
     ///
-    /// Queues a [`DocumentChanged`] notification when the source actually
+    /// Queues a [`lunco_doc_bevy::DocumentChanged`] notification when the source actually
     /// changes; [`drain_pending_changes`](Self::drain_pending_changes)
     /// emits the observer trigger on the next system run.
     pub fn checkpoint_source(&mut self, doc: DocumentId, source: String) -> bool {
@@ -583,7 +583,7 @@ impl ModelicaDocumentRegistry {
         self.hosts.iter().map(|(id, host)| (*id, host))
     }
 
-    /// Which [`DocumentId`] does `entity` reference, if any.
+    /// Which [`lunco_doc::DocumentId`] does `entity` reference, if any.
     pub fn document_of(&self, entity: Entity) -> Option<DocumentId> {
         self.by_entity.get(&entity).copied()
     }

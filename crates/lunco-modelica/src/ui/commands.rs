@@ -1,15 +1,15 @@
 //! Command bus for Modelica documents.
 //!
-//! Every user intent that mutates a [`ModelicaDocument`] is a Bevy event
+//! Every user intent that mutates a [`crate::document::ModelicaDocument`] is a Bevy event
 //! fired via `commands.trigger(...)`; the observers in this module are
 //! the single write surface. UI buttons, keyboard shortcuts, the remote
 //! API, and scripting all funnel through the same path.
 //!
 //! The generic commands ([`lunco_doc_bevy::UndoDocument`] /
-//! [`RedoDocument`](lunco_doc_bevy::RedoDocument) /
-//! [`SaveDocument`](lunco_doc_bevy::SaveDocument) /
-//! [`CloseDocument`](lunco_doc_bevy::CloseDocument)) carry a
-//! [`DocumentId`] without naming a domain. Each observer here checks
+//! [`RedoDocument`] /
+//! [`SaveDocument`] /
+//! [`CloseDocument`]) carry a
+//! [`lunco_doc::DocumentId`] without naming a domain. Each observer here checks
 //! whether [`ModelicaDocumentRegistry`] owns the id and acts or
 //! no-ops — USD, scripting, SysML can install parallel observers that
 //! handle *their* ids with no coordination needed.
@@ -44,7 +44,7 @@ use crate::{ModelicaChannels, ModelicaCommand, ModelicaModel};
 ///
 /// Matches VS Code's "New File" flow — no name dialog, no Save-As
 /// prompt. The observer picks the next free `Untitled<N>` name,
-/// allocates an in-memory [`ModelicaDocument`](crate::document::ModelicaDocument)
+/// allocates an in-memory [`crate::document::ModelicaDocument`](crate::document::ModelicaDocument)
 /// with a `mem://Untitled<N>` marker path, records it in the Package
 /// Browser's in-memory list, and triggers an [`OpenTab`](lunco_workbench::OpenTab)
 /// so the user lands on the editable tab immediately.

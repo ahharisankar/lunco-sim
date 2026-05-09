@@ -257,7 +257,7 @@ pub mod coords {
 // ─── Panel state + Bevy resource ───────────────────────────────────
 
 /// Per-document canvas state. Each open model tab owns one of
-/// these, keyed by [`DocumentId`] on [`CanvasDiagramState`]. Holds
+/// these, keyed by [`lunco_doc::DocumentId`] on [`CanvasDiagramState`]. Holds
 /// the transform + selection + in-flight projection task for that
 /// specific document so switching tabs doesn't leak viewport,
 /// selection, or a stale projection into a neighbour.

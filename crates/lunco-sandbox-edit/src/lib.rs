@@ -11,7 +11,7 @@
 //! ## UI
 //!
 //! All UI panels live in the `ui/` subdirectory and are registered via
-//! [`ui::SandboxEditUiPlugin`](ui::SandboxEditUiPlugin). This plugin should
+//! [`ui::SandboxEditUiPlugin`]. This plugin should
 //! be added alongside `SandboxEditPlugin` for full functionality.
 //!
 //! ## Adding New Spawn Types

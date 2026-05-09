@@ -200,7 +200,7 @@ impl DocumentOp for UsdOp {}
 
 /// The canonical Document representation of one USD source file.
 ///
-/// Owns the source text + a [`DocumentOrigin`] (where it came from,
+/// Owns the source text + a [`lunco_doc::DocumentOrigin`] (where it came from,
 /// whether it can be saved) + a generation counter that bumps on every
 /// successful op. Parsed-stage caching is **deferred to Phase 4** —
 /// the document layer holds text only; rendering/inspection layers
