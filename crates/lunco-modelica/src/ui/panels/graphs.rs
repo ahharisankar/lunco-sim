@@ -78,7 +78,12 @@ impl Panel for GraphsPanel {
         let mut export_csv_clicked = false;
         let exp_summary = crate::ui::panels::experiments::experiments_plot_summary(world);
         let has_live = bound_count > 0;
-        let has_exp = exp_summary.series_drawn > 0;
+        // Render the experiments plot section as long as there's at
+        // least one *run* (not just one drawn series). Without this
+        // the inline variable picker disappears the moment the user
+        // unticks the last variable, leaving them with no way to
+        // re-enable plotting.
+        let has_exp = exp_summary.total_runs > 0;
 
         // Single consolidated header line — live var count + exp run
         // status + time range + right-aligned controls. Replaces the

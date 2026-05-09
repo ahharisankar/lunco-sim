@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use bevy::prelude::*;
 use bevy_egui::egui;
-use egui_plot::{Legend, Line, Plot, PlotPoints, VLine};
+use egui_plot::{Legend, Line, LineStyle, Plot, PlotPoints, VLine};
 use lunco_experiments::{
     ExperimentId, ExperimentRegistry, RunStatus, TwinId,
 };
@@ -83,6 +83,13 @@ impl Panel for ExperimentsPanel {
         // v1 single-twin scope. Multi-twin filter lands when the twin
         // browser plumbs an active TwinId through the workspace.
         let twin = TwinId("default".into());
+        // Semantic colours from the theme. ThemePlugin is mandatory
+        // (installed by WorkbenchPlugin), so this resource is always
+        // present.
+        let (col_success, col_warning, col_error, col_subdued) = {
+            let t = world.resource::<lunco_theme::Theme>();
+            (t.tokens.success, t.tokens.warning, t.tokens.error, t.tokens.text_subdued)
+        };
 
         // Persistent Setup section — bounds + inputs editable inline,
         // ⏩ Run dispatches without re-opening the modal. Replaces the
@@ -105,12 +112,12 @@ impl Panel for ExperimentsPanel {
                     id: e.id,
                     name: e.name.clone(),
                     bounds: format!(
-                        "{:.2}..{:.2}{}",
+                        "{}→{}s · {}",
                         e.bounds.t_start,
                         e.bounds.t_end,
                         match e.bounds.dt {
-                            Some(d) => format!(", dt={d:.3}"),
-                            None => " adaptive".into(),
+                            Some(d) => format!("Δ{d}"),
+                            None => "auto".into(),
                         }
                     ),
                     status: status_label(&e.status),
@@ -173,6 +180,25 @@ impl Panel for ExperimentsPanel {
 
         ui.horizontal(|ui| {
             ui.weak(format!("{} experiment(s)", rows.len()));
+            // Surface the most recent terminal run's outcome inline
+            // so users get clear "did it finish?" feedback without
+            // hunting in Console. Picks the last Done/Failed/Cancelled
+            // by registry insertion order (rows are appended).
+            if let Some(last) = rows
+                .iter()
+                .rev()
+                .find(|r| r.is_terminal)
+            {
+                ui.separator();
+                let (txt, color) = if let Some(_err) = &last.error {
+                    (format!("⚠ {} failed", last.name), col_error)
+                } else if let Some(ms) = last.duration_ms {
+                    (format!("✓ {} done in {} ms", last.name, ms), col_success)
+                } else {
+                    (format!("⊘ {} cancelled", last.name), col_subdued)
+                };
+                ui.label(egui::RichText::new(txt).color(color).strong());
+            }
         });
         ui.separator();
 
@@ -194,8 +220,15 @@ impl Panel for ExperimentsPanel {
             .get_resource::<ExperimentVisibility>()
             .and_then(|v| v.editing_name.clone());
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::Grid::new("experiments_table")
+        // auto_shrink([false, false]) keeps the scrollbar visible even
+        // when the table is taller than the panel — without this, in a
+        // shrunken bottom dock the area collapses to one-row height
+        // and rows past the first are off-screen with no scroll
+        // affordance.
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                egui::Grid::new("experiments_table")
                 .num_columns(7)
                 .striped(true)
                 .show(ui, |ui| {
@@ -310,8 +343,8 @@ impl Panel for ExperimentsPanel {
                         // Color-code status: failed → red, cancelled →
                         // muted, running → amber, done → default.
                         let status_color = match (&row.error, row.is_terminal, row.duration_ms) {
-                            (Some(_), _, _) => Some(egui::Color32::from_rgb(219, 68, 55)),
-                            (None, false, None) => Some(egui::Color32::from_rgb(244, 180, 0)),
+                            (Some(_), _, _) => Some(col_error),
+                            (None, false, None) => Some(col_warning),
                             _ => None,
                         };
                         let status_text = match status_color {
@@ -451,6 +484,7 @@ impl ExperimentsPanel {
     /// per-`ModelRef` draft; the toolbar's ⏩ Fast button reads the
     /// same draft, so changes here are visible there immediately.
     fn render_setup_section(&self, ui: &mut egui::Ui, world: &mut World) {
+        let col_error = world.resource::<lunco_theme::Theme>().tokens.error;
         // Resolve active doc + model class.
         let Some(doc) = world
             .get_resource::<lunco_workbench::WorkspaceResource>()
@@ -551,19 +585,31 @@ impl ExperimentsPanel {
             });
         let from_annotation = annotation_defaults.is_some();
 
+        // Header row stays always visible — Run + Cancel + a tiny
+        // ▾ chip toggles the bounds/inputs detail section. This keeps
+        // the table area maximised when the dock is shrunk.
+        let mut cancel_active = false;
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(format!("Setup — {}", model_name)).strong());
+            ui.label(egui::RichText::new(format!("Setup — {}", model_name)).strong())
+                .on_hover_text("Bounds + inputs apply to the next run from this model.");
             if from_annotation {
                 ui.weak("· bounds default from experiment(...) annotation");
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if runner_busy
+                    && ui
+                        .small_button("⊘ Cancel")
+                        .on_hover_text("Stop the current run.")
+                        .clicked()
+                {
+                    cancel_active = true;
+                }
                 let label = if runner_busy { "⏩ Running…" } else { "⏩ Run" };
                 let valid = bounds.t_end > bounds.t_start;
                 let btn = ui.add_enabled(valid && !runner_busy, egui::Button::new(label));
                 let btn = if runner_busy {
                     btn.on_disabled_hover_text(
-                        "A run is already in progress. Cancel it from the row \
-                         below or wait for it to finish.",
+                        "A run is already in progress — use ⊘ Cancel.",
                     )
                 } else if !valid {
                     btn.on_disabled_hover_text(
@@ -575,15 +621,30 @@ impl ExperimentsPanel {
                 if btn.clicked() {
                     run_clicked = true;
                 }
+                ui.label(format!("t: {:.2}→{:.2}s", bounds.t_start, bounds.t_end));
             });
         });
         if bounds.t_end <= bounds.t_start {
             ui.label(
                 egui::RichText::new("⚠ t_end must be greater than t_start")
-                    .color(egui::Color32::from_rgb(219, 68, 55))
+                    .color(col_error)
                     .size(11.0),
             );
         }
+
+        // Bounds + inputs live behind a collapsing chip so the table
+        // area gets the panel's vertical space by default. The header
+        // already shows t_start→t_end inline so users see the active
+        // bounds without expanding.
+        let detail_label = if input_edits.is_empty() {
+            "bounds".to_string()
+        } else {
+            format!("bounds + {} input{}", input_edits.len(), if input_edits.len() == 1 { "" } else { "s" })
+        };
+        egui::CollapsingHeader::new(detail_label)
+            .id_salt("setup_detail")
+            .default_open(true)
+            .show(ui, |ui| {
 
         // Compact bounds row.
         ui.horizontal(|ui| {
@@ -649,7 +710,7 @@ impl ExperimentsPanel {
                             let mut edit = egui::TextEdit::singleline(value_text)
                                 .desired_width(70.0);
                             if !parses {
-                                edit = edit.text_color(egui::Color32::from_rgb(219, 68, 55));
+                                edit = edit.text_color(col_error);
                             }
                             let resp = ui.add(edit);
                             let resp = if !parses {
@@ -671,6 +732,19 @@ impl ExperimentsPanel {
                         }
                     });
                 });
+        }
+            }); // end CollapsingHeader
+
+        // Wire the inline ⊘ Cancel button to the runner.
+        if cancel_active {
+            // Latest in-flight handle.
+            if let Some(handles) = world
+                .get_resource::<crate::experiments_runner::PendingHandles>()
+            {
+                if let Some(h) = handles.0.last() {
+                    h.cancel();
+                }
+            }
         }
 
         // Persist edits.
@@ -753,6 +827,7 @@ impl ExperimentsPanel {
                             label: format!("{} · {}", exp.name, var),
                             color: palette_color(exp.color_hint),
                             points: pts,
+                            style_idx: 0,
                         });
                     }
                 }
@@ -855,8 +930,8 @@ impl ExperimentsPanel {
             return;
         }
 
-        egui::CollapsingHeader::new(format!("⚙ Overrides + Bounds — {}", model_name))
-            .default_open(false)
+        egui::CollapsingHeader::new(format!("⚙ Parameters — {}", model_name))
+            .default_open(true)
             .show(ui, |ui| {
                 use lunco_experiments::{ParamPath, ParamValue};
 
@@ -1045,6 +1120,9 @@ struct PlotSeries {
     label: String,
     color: (u8, u8, u8),
     points: Vec<[f64; 2]>,
+    /// Stroke pattern that distinguishes runs sharing the same
+    /// variable color. `0 = solid, 1 = dashed, 2 = dotted, 3 = dash-dot`.
+    style_idx: u8,
 }
 
 /// Render the experiments multi-series plot. Picker lives in
@@ -1060,6 +1138,10 @@ struct PlotSeries {
 ///   tick variables across components).
 pub fn render_experiments_plot(ui: &mut egui::Ui, world: &mut World) -> ExpPlotSummary {
     let twin = TwinId("default".into());
+    let (col_warning, col_accent) = {
+        let t = world.resource::<lunco_theme::Theme>();
+        (t.tokens.warning, t.tokens.accent)
+    };
 
     let (visible, picked_vars) = world
         .get_resource::<ExperimentVisibility>()
@@ -1074,6 +1156,14 @@ pub fn render_experiments_plot(ui: &mut egui::Ui, world: &mut World) -> ExpPlotS
     let mut visible_runs = 0usize;
     let mut shared_unit: Option<String> = None;
     let mut shared_unit_init = false;
+    // Stable per-variable index so each picked var gets a distinct
+    // colour rotation regardless of run. Sort the picked set so the
+    // mapping doesn't depend on insertion order.
+    let var_idx: std::collections::HashMap<String, usize> = {
+        let mut sorted: Vec<&String> = picked_vars.iter().collect();
+        sorted.sort();
+        sorted.into_iter().enumerate().map(|(i, s)| (s.clone(), i)).collect()
+    };
     if let Some(reg) = world.get_resource::<ExperimentRegistry>() {
         for exp in reg.list_for_twin(&twin) {
             total_runs += 1;
@@ -1093,11 +1183,23 @@ pub fn render_experiments_plot(ui: &mut egui::Ui, world: &mut World) -> ExpPlotS
                     } else if shared_unit != unit {
                         shared_unit = None;
                     }
+                    // Truncate long dotted paths to keep the legend
+                    // readable when nested components are picked.
+                    // Keep the leaf + previous segment; collapse the
+                    // rest as `…`.
+                    let var_short = {
+                        let parts: Vec<&str> = var.split('.').collect();
+                        if parts.len() <= 2 {
+                            var.clone()
+                        } else {
+                            format!("…{}.{}", parts[parts.len() - 2], parts[parts.len() - 1])
+                        }
+                    };
                     let label = match &unit {
                         Some(u) if !u.is_empty() => {
-                            format!("{} · {} [{}]", exp.name, var, u)
+                            format!("{} · {} [{}]", exp.name, var_short, u)
                         }
-                        _ => format!("{} · {}", exp.name, var),
+                        _ => format!("{} · {}", exp.name, var_short),
                     };
                     let pts: Vec<[f64; 2]> = result
                         .times
@@ -1105,10 +1207,19 @@ pub fn render_experiments_plot(ui: &mut egui::Ui, world: &mut World) -> ExpPlotS
                         .zip(values.iter())
                         .map(|(t, y)| [*t, *y])
                         .collect();
+                    // Convention: color = variable identity, line
+                    // style = run identity. So `airframe.altitude`
+                    // is always blue, but Run 1 = solid, Run 2 =
+                    // dashed, Run 3 = dotted. Lets the eye track a
+                    // variable across sweeps without legend hopping.
+                    let v_idx = var_idx.get(var).copied().unwrap_or(0) as u8;
+                    let color = palette_color(v_idx);
+                    let style_idx = exp.color_hint % 4;
                     series.push(PlotSeries {
                         label,
-                        color: palette_color(exp.color_hint),
+                        color,
                         points: pts,
+                        style_idx,
                     });
                 }
             }
@@ -1121,58 +1232,130 @@ pub fn render_experiments_plot(ui: &mut egui::Ui, world: &mut World) -> ExpPlotS
 
     let mut new_scrub: Option<Option<f64>> = None;
 
-    if !series.is_empty() {
-        // Compact toolbar above the chart: scrub-time readout + reset
-        // + mixed-units indicator. The mixed-units note matters when
-        // the user ticks variables with different physical units
-        // (e.g. force in N + altitude in m); in that case the y-axis
-        // label is intentionally suppressed and the units appear in
-        // each legend entry instead.
-        let mut reset_clicked = false;
+    // Inline variable picker — surfaces every variable known across
+    // visible runs as a chip-style toggle row, so the user doesn't
+    // need to hunt the Telemetry panel just to swap out a series.
+    // Renders even when nothing is plotted yet so a fresh run lands
+    // with an obvious "tick a chip" affordance.
+    let mut all_vars: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    if let Some(reg) = world.get_resource::<ExperimentRegistry>() {
+        for exp in reg.list_for_twin(&twin) {
+            if let Some(r) = &exp.result {
+                for k in r.series.keys() {
+                    all_vars.insert(k.clone());
+                }
+            }
+        }
+    }
+    // Variable picker — Dymola / OMEdit-style component tree.
+    // Variables group by their first dotted segment (the component
+    // name). Each group is a CollapsingHeader; leaves are
+    // checkboxes labelled with the leaf name. The whole tree sits
+    // in a small horizontal scroll-row above the plot so the
+    // common case (handful of components) reads at a glance and
+    // scrolls horizontally on long models.
+    // Picker tree + plot controls on a single line. Picker on the
+    // left (component groups, expandable); reset / fit / mixed-units
+    // chips right-aligned. Saves a row of vertical chrome above the
+    // plot.
+    let mut toggle_var: Option<String> = None;
+    let mut reset_clicked = false;
+    let mut fit_clicked = false;
+    let scrub_time = world
+        .get_resource::<ExperimentVisibility>()
+        .and_then(|v| v.scrub_time);
+    if !all_vars.is_empty() {
+        let mut groups: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for v in &all_vars {
+            let (head, tail) = match v.split_once('.') {
+                Some((h, t)) => (h.to_string(), t.to_string()),
+                None => (String::new(), v.clone()),
+            };
+            groups.entry(head).or_default().push(tail);
+        }
+        let group_count = groups.len();
         ui.horizontal(|ui| {
-            match scrub_time {
-                Some(t) => {
-                    ui.label(
-                        egui::RichText::new(format!("⏱ scrub: t = {t:.3} s"))
-                            .size(11.0)
-                            .monospace(),
-                    );
-                    if ui
-                        .small_button("↻ reset")
-                        .on_hover_text("Drop the scrub cursor — canvas overlay snaps back to the run's final time")
-                        .clicked()
-                    {
+            // Left: picker groups (horizontal scroll if many).
+            egui::ScrollArea::horizontal()
+                .id_salt("exp_picker_scroll")
+                .max_height(20.0)
+                .max_width(ui.available_width() - 200.0)
+                .show(ui, |ui| {
+                    for (head, tails) in &groups {
+                        let picked_in_group = tails.iter().filter(|t| {
+                            let full = if head.is_empty() { (*t).clone() } else { format!("{head}.{t}") };
+                            picked_vars.contains(&full)
+                        }).count();
+                        let label = if head.is_empty() {
+                            format!("(top) {}/{}", picked_in_group, tails.len())
+                        } else {
+                            format!("{head} {}/{}", picked_in_group, tails.len())
+                        };
+                        egui::CollapsingHeader::new(label)
+                            .id_salt(format!("exp_picker_group_{head}"))
+                            .default_open(group_count <= 1)
+                            .show(ui, |ui| {
+                                for t in tails {
+                                    let full = if head.is_empty() {
+                                        t.clone()
+                                    } else {
+                                        format!("{head}.{t}")
+                                    };
+                                    let mut on = picked_vars.contains(&full);
+                                    if ui.checkbox(&mut on, t).on_hover_text(&full).changed() {
+                                        toggle_var = Some(full);
+                                    }
+                                }
+                            });
+                    }
+                });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("📐 Fit").on_hover_text("Auto-fit axes to data").clicked() {
+                    fit_clicked = true;
+                }
+                if scrub_time.is_some() {
+                    if ui.small_button("↻").on_hover_text("Drop scrub cursor").clicked() {
                         reset_clicked = true;
                     }
+                    if let Some(t) = scrub_time {
+                        ui.label(
+                            egui::RichText::new(format!("⏱ {t:.3}s"))
+                                .size(11.0)
+                                .monospace(),
+                        );
+                    }
                 }
-                None => {
-                    ui.weak("Click plot to scrub time. Click legend item to hide a series.");
+                if shared_unit.is_none() && !series.is_empty() && picked_vars.len() > 1 {
+                    ui.label(
+                        egui::RichText::new("⚠ mixed units")
+                            .size(11.0)
+                            .color(col_warning),
+                    )
+                    .on_hover_text("Picked variables have different units; y-axis label suppressed.");
                 }
-            }
-            if shared_unit.is_none() && series.len() > 1 {
-                ui.separator();
-                ui.label(
-                    egui::RichText::new("⚠ mixed units")
-                        .size(11.0)
-                        .color(egui::Color32::from_rgb(244, 180, 0)),
-                )
-                .on_hover_text(
-                    "Picked variables have different units; y-axis label is \
-                     suppressed. Units are shown per-series in the legend.",
-                );
-            }
+            });
         });
-        if reset_clicked {
-            new_scrub = Some(None);
+    }
+    if let Some(v) = toggle_var {
+        if let Some(mut vis) = world.get_resource_mut::<ExperimentVisibility>() {
+            vis.toggle_var(v);
         }
+    }
 
+    // Plot frame always renders. x-axis label dropped: time is
+    // implicit in this panel and the label was burning a row of
+    // pixels for one symbol.
+    {
         let mut plot = Plot::new("graphs_experiments_plot")
             .legend(Legend::default())
-            .x_axis_label("t [s]")
             // Don't let the dragger eat clicks — we want clicks to set
             // the scrub cursor instead of pan/zoom. Box-zoom stays on
             // the modifier defaults; double-click still resets bounds.
             .allow_drag(false);
+        if fit_clicked {
+            plot = plot.reset();
+        }
         if let Some(u) = shared_unit.as_ref().filter(|u| !u.is_empty()) {
             plot = plot.y_axis_label(format!("[{u}]"));
         }
@@ -1180,14 +1363,21 @@ pub fn render_experiments_plot(ui: &mut egui::Ui, world: &mut World) -> ExpPlotS
         plot.show(ui, |plot_ui| {
             for s in &series {
                 let (r, g, b) = s.color;
+                let style = match s.style_idx {
+                    0 => LineStyle::Solid,
+                    1 => LineStyle::dashed_dense(),
+                    2 => LineStyle::dotted_dense(),
+                    _ => LineStyle::dashed_loose(),
+                };
                 let line = Line::new(s.label.clone(), PlotPoints::from(s.points.clone()))
-                    .color(egui::Color32::from_rgb(r, g, b));
+                    .color(egui::Color32::from_rgb(r, g, b))
+                    .style(style);
                 plot_ui.line(line);
             }
             if let Some(t) = scrub_time {
                 plot_ui.vline(
                     VLine::new("scrub", t)
-                        .color(egui::Color32::from_rgb(220, 220, 100))
+                        .color(col_accent)
                         .width(1.5),
                 );
             }

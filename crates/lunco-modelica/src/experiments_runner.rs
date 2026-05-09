@@ -889,8 +889,36 @@ pub fn drain_pending_handles(
                     );
                     // Auto-visible: a run that just completed is what
                     // the user is looking at, no checkbox needed.
+                    // Also auto-pick a few variables on the very first
+                    // completion so the plot has content without
+                    // hunting through Telemetry. Skip parameters
+                    // (constant series) — pick the first 3 dynamic
+                    // signals by series-variance heuristic.
                     if let Some(mut vis) = visibility.as_mut() {
                         vis.visible.insert(handle.run_id);
+                        if vis.picked_vars.is_empty() {
+                            let mut by_var: Vec<(&String, f64)> = result
+                                .series
+                                .iter()
+                                .map(|(k, v)| {
+                                    let n = v.len().max(1) as f64;
+                                    let mean = v.iter().copied().sum::<f64>() / n;
+                                    let var = v
+                                        .iter()
+                                        .map(|x| (x - mean) * (x - mean))
+                                        .sum::<f64>()
+                                        / n;
+                                    (k, var)
+                                })
+                                .filter(|(_, v)| v.is_finite() && *v > 1e-12)
+                                .collect();
+                            by_var.sort_by(|a, b| {
+                                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            for (k, _) in by_var.into_iter().take(3) {
+                                vis.picked_vars.insert(k.clone());
+                            }
+                        }
                     }
                     let run_name = registry
                         .get(handle.run_id)
