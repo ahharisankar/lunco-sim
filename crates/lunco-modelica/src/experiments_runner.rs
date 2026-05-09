@@ -160,6 +160,7 @@ impl ExperimentRunner for ModelicaRunner {
         // Snapshot inputs for the worker thread.
         let model_ref = exp.model_ref.clone();
         let overrides = exp.overrides.clone();
+        let inputs = exp.inputs.clone();
         let bounds = exp.bounds.clone();
         let state = self.state.clone();
         let busy_clear = self.state.clone();
@@ -199,6 +200,7 @@ impl ExperimentRunner for ModelicaRunner {
                         src.filename,
                         src.extras,
                         overrides,
+                        inputs,
                         bounds,
                     );
                     if !dispatched {
@@ -233,7 +235,7 @@ impl ExperimentRunner for ModelicaRunner {
             });
             let _ = run_id;
             std::thread::spawn(move || {
-                run_inner(state, model_ref, overrides, bounds, cancel, tx);
+                run_inner(state, model_ref, overrides, inputs, bounds, cancel, tx);
                 if let Ok(mut s) = busy_clear.lock() {
                     s.busy_with = None;
                 }
@@ -330,6 +332,7 @@ fn run_inner(
     state: Arc<Mutex<RunnerState>>,
     model_ref: ModelRef,
     overrides: BTreeMap<ParamPath, ParamValue>,
+    inputs: BTreeMap<ParamPath, ParamValue>,
     bounds: RunBounds,
     cancel: Arc<AtomicBool>,
     tx: Sender<RunUpdate>,
@@ -357,8 +360,19 @@ fn run_inner(
         }
     };
 
-    // Apply overrides via string injection.
-    let injected = match apply_overrides_to_source(&source.source, &overrides) {
+    // Apply input substitutions first (input → parameter), then
+    // parameter overrides on the rewritten source.
+    let after_inputs = match apply_inputs_to_source(&source.source, &inputs) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = tx.send(RunUpdate::Failed {
+                error: format!("input substitution failed: {e}"),
+                partial: None,
+            });
+            return;
+        }
+    };
+    let injected = match apply_overrides_to_source(&after_inputs, &overrides) {
         Ok(s) => s,
         Err(e) => {
             let _ = tx.send(RunUpdate::Failed {
@@ -415,21 +429,46 @@ fn run_inner(
     // TODO(progress): swap to PreparedSimulation + a step loop here
     // for native too, so cancel is responsive and progress fires.
     // v1 ships with batch-only on native.
-    let sim_result = rumoca_sim::simulate_dae(&dae_result.dae, &opts);
+    bevy::log::info!(
+        "[runner] simulate begin: t={}..{} dt={:?}",
+        opts.t_start, opts.t_end, opts.dt
+    );
+    let sim_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rumoca_sim::simulate_dae(&dae_result.dae, &opts)
+    }));
 
     if cancel.load(Ordering::SeqCst) {
         let _ = tx.send(RunUpdate::Cancelled);
         return;
     }
 
-    match sim_result {
-        Ok(r) => {
+    match sim_outcome {
+        Ok(Ok(r)) => {
+            bevy::log::info!(
+                "[runner] simulate ok: {} samples, {} vars, {:.2}s wall",
+                r.times.len(),
+                r.names.len(),
+                t_wall.elapsed().as_secs_f64(),
+            );
             let result = sim_result_to_run_result(r, t_wall.elapsed().as_millis() as u64);
             let _ = tx.send(RunUpdate::Completed(result));
         }
-        Err(e) => {
+        Ok(Err(e)) => {
+            bevy::log::warn!("[runner] simulate err: {e:?}");
             let _ = tx.send(RunUpdate::Failed {
                 error: format!("simulate failed: {e:?}"),
+                partial: None,
+            });
+        }
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<&'static str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(|s| s.as_str()))
+                .unwrap_or("(unknown panic)");
+            bevy::log::warn!("[runner] simulate panic: {msg}");
+            let _ = tx.send(RunUpdate::Failed {
+                error: format!("simulate panic: {msg}"),
                 partial: None,
             });
         }
@@ -455,6 +494,195 @@ fn sim_result_to_run_result(r: rumoca_sim::SimResult, wall_time_ms: u64) -> RunR
             notes: None,
         },
     }
+}
+
+/// One detected top-level `parameter` declaration. Used by the
+/// override editor UI to render an editable row per parameter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DetectedParam {
+    pub name: String,
+    /// The parameter's declared type, e.g. `Real`, `Integer`, `Boolean`,
+    /// `String`, or a class-qualified type. Used to choose the editor
+    /// widget kind.
+    pub type_name: String,
+    /// Default literal as it appears in the source (e.g. `1.5`,
+    /// `"foo"`, `true`). `None` if the parameter has no literal
+    /// default (e.g. expression-bound, inherited).
+    pub default_literal: Option<String>,
+    /// Whether v1's string-injection override path can mutate this
+    /// declaration. False for non-literal RHS (expression bindings),
+    /// for arrays / records, and for params not found at the top level.
+    pub supportable: bool,
+    /// Reason override is unsupported, when `!supportable`. Surfaced
+    /// in the editor as a tooltip.
+    pub reason: Option<String>,
+}
+
+/// One detected top-level `input` declaration. Modelica `input` vars
+/// have no defaults — at runtime the stepper sets them via
+/// `set_input(name, value)`. For batch Fast Run we substitute them
+/// into the source as `parameter <type> <name> = <value>` before
+/// compile so the simulator sees a fixed value instead of zero.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DetectedInput {
+    pub name: String,
+    pub type_name: String,
+}
+
+/// Find top-level `input <Type> <name>;` declarations in a model
+/// source. Used by the Setup dialog to render an Inputs section, and
+/// by the runner to substitute values into the source pre-compile.
+pub fn detect_top_level_inputs(source: &str) -> Vec<DetectedInput> {
+    let re = regex::Regex::new(
+        r"(?m)\binput\b\s+([A-Za-z_][A-Za-z0-9_.\[\]]*)\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+    )
+    .expect("regex");
+    let mut out = Vec::new();
+    for cap in re.captures_iter(source) {
+        let type_name = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let name = cap.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        out.push(DetectedInput { name, type_name });
+    }
+    out
+}
+
+/// Substitute input declarations with parameter declarations so the
+/// batch simulator sees a fixed value. Replaces
+/// `input <Type> <name>` with `parameter <Type> <name> = <value>`.
+/// Only fires for inputs the user actually set; unset inputs stay
+/// as `input` and the simulator defaults them to 0.
+pub fn apply_inputs_to_source(
+    source: &str,
+    inputs: &BTreeMap<ParamPath, ParamValue>,
+) -> Result<String, String> {
+    if inputs.is_empty() {
+        return Ok(source.to_string());
+    }
+    let mut out = source.to_string();
+    for (path, value) in inputs {
+        let leaf = path.0.rsplit('.').next().unwrap_or(&path.0);
+        let escaped = regex::escape(leaf);
+        let re = regex::Regex::new(&format!(
+            r"(?m)\binput\b(\s+[A-Za-z_][A-Za-z0-9_.\[\]]*)\s+{}\b\s*;",
+            escaped
+        ))
+        .map_err(|e| format!("input regex: {e}"))?;
+        let lit = format_literal(value);
+        let replaced = re
+            .replace(
+                &out,
+                format!("parameter$1 {} = {};", leaf, lit).as_str(),
+            )
+            .into_owned();
+        if replaced == out {
+            return Err(format!(
+                "input '{leaf}' not found at the top level of the model source"
+            ));
+        }
+        out = replaced;
+    }
+    Ok(out)
+}
+
+/// Detect top-level `parameter` declarations in a Modelica source
+/// string. v1: scans the textual source only (no AST traversal),
+/// matches the same patterns `replace_param_literal` accepts. Used by
+/// the override editor UI.
+///
+/// Inherited parameters (declared in a base class extends) are NOT
+/// detected — they don't appear in the model's own source. Surface
+/// them as unsupported in v2 once we lift detection to the AST.
+pub fn detect_top_level_literal_parameters(source: &str) -> Vec<DetectedParam> {
+    // Pattern: `parameter [final] [each] <Type> <name> [(modifiers)] [= <rhs>] ;`
+    // We capture name, type, optional rhs literal. To stay robust
+    // against modifier clauses, the regex is loose and a follow-up
+    // scan classifies the rhs literal vs expression.
+    let re = regex::Regex::new(
+        r"(?m)\bparameter\b\s+(?:final\s+|each\s+)*([A-Za-z_][A-Za-z0-9_.\[\]]*)\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+    )
+    .expect("regex");
+    let mut out = Vec::new();
+    for cap in re.captures_iter(source) {
+        let type_name = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let name = cap.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        // Find the `=` for this declaration up to next `;` (top-level).
+        let after = cap.get(0).unwrap().end();
+        let tail = &source[after..];
+        let mut depth: i32 = 0;
+        let mut eq_pos: Option<usize> = None;
+        let mut end_pos: Option<usize> = None;
+        for (i, ch) in tail.char_indices() {
+            match ch {
+                '{' | '(' | '[' => depth += 1,
+                '}' | ')' | ']' => depth -= 1,
+                '=' if depth == 0 && eq_pos.is_none() => eq_pos = Some(i),
+                ';' if depth == 0 => {
+                    end_pos = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let (default_literal, supportable, reason) = match (eq_pos, end_pos) {
+            (Some(eq), Some(end)) if end > eq + 1 => {
+                let rhs = tail[eq + 1..end].trim();
+                if rhs.is_empty() {
+                    (None, false, Some("no default value".to_string()))
+                } else if looks_like_literal(rhs) {
+                    (Some(rhs.to_string()), true, None)
+                } else {
+                    (
+                        Some(rhs.to_string()),
+                        false,
+                        Some("complex binding — override unsupported in v1".to_string()),
+                    )
+                }
+            }
+            _ => (
+                None,
+                false,
+                Some("no literal default — override unsupported in v1".to_string()),
+            ),
+        };
+        out.push(DetectedParam {
+            name,
+            type_name,
+            default_literal,
+            supportable,
+            reason,
+        });
+    }
+    out
+}
+
+fn looks_like_literal(rhs: &str) -> bool {
+    let s = rhs.trim();
+    if s.is_empty() {
+        return false;
+    }
+    // Real / Int / signed numbers, scientific notation.
+    if s.parse::<f64>().is_ok() {
+        return true;
+    }
+    if s.parse::<i64>().is_ok() {
+        return true;
+    }
+    if s == "true" || s == "false" {
+        return true;
+    }
+    // Quoted string literal, no string-concat / function calls.
+    if s.starts_with('"') && s.ends_with('"') && !s[1..s.len() - 1].contains('"') {
+        return true;
+    }
+    // Fall through: identifier / expression / function call / array
+    // literal — v1 doesn't substitute these via regex.
+    false
 }
 
 /// Mutate `source` so each top-level literal `parameter` declaration
@@ -573,11 +801,52 @@ fn replace_param_literal(
     Ok(out)
 }
 
+/// Per-model parameter override + bounds draft state. Edited by the
+/// override editor UI; read by `FastRunActiveModel` when constructing
+/// the experiment record. v1: keyed by `ModelRef`; v2 should key by
+/// (DocumentId, class) so two open tabs of different copies of the
+/// same class don't clobber each other.
+#[derive(Resource, Default, Debug)]
+pub struct ExperimentDrafts {
+    drafts: std::collections::HashMap<ModelRef, ExperimentDraft>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ExperimentDraft {
+    pub overrides: BTreeMap<ParamPath, ParamValue>,
+    /// User-set values for `input` variables. Stored separately from
+    /// parameter overrides because they get a different source-rewrite
+    /// (`input X y` → `parameter X y = value`).
+    pub inputs: BTreeMap<ParamPath, ParamValue>,
+    pub bounds_override: Option<RunBounds>,
+}
+
+impl ExperimentDrafts {
+    pub fn get(&self, model: &ModelRef) -> Option<&ExperimentDraft> {
+        self.drafts.get(model)
+    }
+    pub fn entry(&mut self, model: ModelRef) -> &mut ExperimentDraft {
+        self.drafts.entry(model).or_default()
+    }
+    pub fn clear(&mut self, model: &ModelRef) {
+        self.drafts.remove(model);
+    }
+}
+
 /// Bevy resource holding RunHandles for in-flight experiments.
 /// Drained each Update by [`drain_pending_handles`]: terminal updates
 /// get written back into the registry + emitted as Bevy messages.
 #[derive(Resource, Default)]
 pub struct PendingHandles(pub Vec<RunHandle>);
+
+/// Map experiment id → originating DocumentId. Lets the drain system
+/// route Fast Run errors back into the document's CompileStates +
+/// Console so failures surface in the Diagnostics panel like a
+/// regular compile error.
+#[derive(Resource, Default)]
+pub struct ExperimentSources(
+    pub std::collections::HashMap<ExperimentId, lunco_doc::DocumentId>,
+);
 
 /// Bevy system: drain RunUpdate messages from each pending handle,
 /// update the registry status, and emit lifecycle Bevy messages
@@ -590,6 +859,10 @@ pub fn drain_pending_handles(
     mut ev_completed: MessageWriter<RunCompleted>,
     mut ev_failed: MessageWriter<RunFailed>,
     mut ev_cancelled: MessageWriter<RunCancelled>,
+    mut sources: ResMut<ExperimentSources>,
+    mut compile_states: Option<ResMut<crate::ui::CompileStates>>,
+    mut console: Option<ResMut<crate::ui::panels::console::ConsoleLog>>,
+    mut visibility: Option<ResMut<crate::ui::panels::experiments::ExperimentVisibility>>,
 ) {
     let mut keep: Vec<RunHandle> = Vec::with_capacity(pending.0.len());
     for handle in pending.0.drain(..) {
@@ -605,6 +878,26 @@ pub fn drain_pending_handles(
                 }
                 RunUpdate::Completed(result) => {
                     let wall = result.meta.wall_time_ms;
+                    let n_samples = result.times.len();
+                    let n_vars = result.series.len();
+                    bevy::log::info!(
+                        "[experiments] run {:?} done: {} samples, {} vars, {} ms",
+                        handle.run_id,
+                        n_samples,
+                        n_vars,
+                        wall
+                    );
+                    // Auto-visible: a run that just completed is what
+                    // the user is looking at, no checkbox needed.
+                    if let Some(mut vis) = visibility.as_mut() {
+                        vis.visible.insert(handle.run_id);
+                    }
+                    if let Some(c) = console.as_mut() {
+                        c.info(format!(
+                            "✓ Fast Run done: {} samples × {} vars in {} ms",
+                            n_samples, n_vars, wall
+                        ));
+                    }
                     registry.set_result(handle.run_id, result);
                     registry.set_status(
                         handle.run_id,
@@ -616,6 +909,18 @@ pub fn drain_pending_handles(
                     terminal = true;
                 }
                 RunUpdate::Failed { error, partial } => {
+                    bevy::log::warn!(
+                        "[experiments] run {:?} failed: {error}",
+                        handle.run_id
+                    );
+                    if let Some(c) = console.as_mut() {
+                        c.error(format!("⏹ Fast Run FAILED: {error}"));
+                    }
+                    if let Some(doc) = sources.0.get(&handle.run_id).copied() {
+                        if let Some(cs) = compile_states.as_mut() {
+                            cs.set_error(doc, format!("Fast Run: {error}"));
+                        }
+                    }
                     let had_partial = partial.is_some();
                     if let Some(p) = partial {
                         registry.set_result(handle.run_id, p);
@@ -642,7 +947,9 @@ pub fn drain_pending_handles(
                 }
             }
         }
-        if !terminal {
+        if terminal {
+            sources.0.remove(&handle.run_id);
+        } else {
             keep.push(handle);
         }
     }

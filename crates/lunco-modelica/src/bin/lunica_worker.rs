@@ -86,6 +86,7 @@ fn synth_panic_result(entity: bevy::prelude::Entity, session_id: u64, msg: &str)
         is_parameter_update: false,
         is_reset: false,
         detected_input_names: Vec::new(),
+        ..Default::default()
     }
 }
 use wasm_bindgen::closure::Closure;
@@ -176,13 +177,28 @@ fn run_fast_in_worker(
     filename: &str,
     extras: &[(String, String)],
     overrides: &std::collections::BTreeMap<lunco_experiments::ParamPath, lunco_experiments::ParamValue>,
+    inputs: &std::collections::BTreeMap<lunco_experiments::ParamPath, lunco_experiments::ParamValue>,
     bounds: &lunco_experiments::RunBounds,
 ) {
-    use lunco_modelica::experiments_runner::apply_overrides_to_source;
+    use lunco_modelica::experiments_runner::{apply_inputs_to_source, apply_overrides_to_source};
     let started = web_time::Instant::now();
     post_log(scope, format!("run_fast: start run={run_id:?} model={model_name}"));
 
-    let injected = match apply_overrides_to_source(source, overrides) {
+    let after_inputs = match apply_inputs_to_source(source, inputs) {
+        Ok(s) => s,
+        Err(e) => {
+            post_run_update(
+                scope,
+                run_id,
+                lunco_experiments::RunUpdate::Failed {
+                    error: format!("input substitution failed: {e}"),
+                    partial: None,
+                },
+            );
+            return;
+        }
+    };
+    let injected = match apply_overrides_to_source(&after_inputs, overrides) {
         Ok(s) => s,
         Err(e) => {
             post_run_update(
@@ -473,6 +489,7 @@ pub fn run() -> Result<(), JsValue> {
                 filename,
                 extras,
                 overrides,
+                inputs,
                 bounds,
             } => {
                 let scope = scope_for_cb.clone();
@@ -484,6 +501,7 @@ pub fn run() -> Result<(), JsValue> {
                     &filename,
                     &extras,
                     &overrides,
+                    &inputs,
                     &bounds,
                 );
             }

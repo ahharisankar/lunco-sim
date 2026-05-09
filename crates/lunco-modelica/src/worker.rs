@@ -138,6 +138,28 @@ pub struct ModelicaResult {
     /// Input variable names discovered from the model (input Real ...).
     /// These can be changed at runtime without recompilation.
     pub detected_input_names: Vec<String>,
+    /// Modelica `experiment(...)` annotation values, lifted from
+    /// rumoca's `CompilationResult`. Populated only on
+    /// `is_new_model = true` (Compile / UpdateParameters); `None`
+    /// elsewhere. Plumbed end-to-end so the Fast Run toolbar can
+    /// prefill bounds from the model rather than always defaulting
+    /// to 0..1. See `docs/architecture/25-experiments.md` §"Bounds
+    /// from annotation".
+    #[serde(default)]
+    pub experiment_start_time: Option<f64>,
+    #[serde(default)]
+    pub experiment_stop_time: Option<f64>,
+    #[serde(default)]
+    pub experiment_tolerance: Option<f64>,
+    #[serde(default)]
+    pub experiment_interval: Option<f64>,
+    #[serde(default)]
+    pub experiment_solver: Option<String>,
+    /// Detected name of the compiled top-level class. Lets the main
+    /// thread route the `experiment_*` defaults into the runner's
+    /// per-`ModelRef` cache without a second AST pass.
+    #[serde(default)]
+    pub compiled_model_name: Option<String>,
 }
 
 impl Default for ModelicaResult {
@@ -154,6 +176,12 @@ impl Default for ModelicaResult {
             is_parameter_update: false,
             is_reset: false,
             detected_input_names: Vec::new(),
+            experiment_start_time: None,
+            experiment_stop_time: None,
+            experiment_tolerance: None,
+            experiment_interval: None,
+            experiment_solver: None,
+            compiled_model_name: None,
         }
     }
 }
@@ -193,12 +221,7 @@ fn result_ok(entity: Entity, session_id: u64) -> ModelicaResult {
     ModelicaResult {
         entity,
         session_id,
-        new_time: 0.0,
-        outputs: Vec::new(),
-        detected_symbols: Vec::new(),
-        error: None, log_message: None, is_new_model: false,
-        is_parameter_update: false, is_reset: false,
-        detected_input_names: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -289,6 +312,7 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                                                 log_message: Some("Reset complete.".to_string()),
                                                 is_new_model: false, is_parameter_update: false, is_reset: true,
                                                 detected_input_names: input_names,
+                                                ..Default::default()
                                             });
                                         }
                                         Err(e) => {
@@ -360,6 +384,7 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                                             log_message: Some("Parameters applied.".to_string()),
                                             is_new_model: false, is_parameter_update: true, is_reset: false,
                                             detected_input_names: input_names,
+                                            ..Default::default()
                                         });
                                     }
                                     Err(e) => {
@@ -431,6 +456,15 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                         );
                         match _compile_outcome {
                             Ok(comp_res) => {
+                                // Capture experiment(...) annotation
+                                // values BEFORE comp_res moves into the
+                                // cache; the Fast Run toolbar reads
+                                // these as bounds defaults.
+                                let exp_t_start = comp_res.experiment_start_time;
+                                let exp_t_end = comp_res.experiment_stop_time;
+                                let exp_tol = comp_res.experiment_tolerance;
+                                let exp_interval = comp_res.experiment_interval;
+                                let exp_solver = comp_res.experiment_solver.clone();
                                 let mut opts = StepperOptions::default();
                                 opts.atol = 1e-1; opts.rtol = 1e-1;
                                 match SimStepper::new(&comp_res.dae, opts) {
@@ -460,6 +494,12 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                                             log_message: Some(format!("Model '{}' compiled.", model_name)),
                                             is_new_model: true, is_parameter_update: false, is_reset: false,
                                             detected_input_names: input_names,
+                                            experiment_start_time: exp_t_start,
+                                            experiment_stop_time: exp_t_end,
+                                            experiment_tolerance: exp_tol,
+                                            experiment_interval: exp_interval,
+                                            experiment_solver: exp_solver,
+                                            compiled_model_name: Some(model_name.clone()),
                                         });
                                     }
                                     Err(e) => {
@@ -589,6 +629,7 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                                         is_new_model: false, detected_symbols: Vec::new(),
                                         is_parameter_update: false, is_reset: false,
                                         detected_input_names: Vec::new(),
+                                        ..Default::default()
                                     });
                                 }
                             } else {
@@ -636,6 +677,7 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                     error: Some("Internal Worker Panic!".to_string()), log_message: None,
                     is_new_model: false, is_parameter_update: false, is_reset: false,
                     detected_input_names: Vec::new(),
+                    ..Default::default()
                 });
             }
         }
@@ -851,6 +893,7 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                             detected_symbols: Vec::new(), error: Some(format!("Solver Error: {:?}", e)),
                             log_message: None, is_new_model: false, is_parameter_update: false,
                             is_reset: false, detected_input_names: Vec::new(),
+                            ..Default::default()
                         });
                         w.steppers.remove(&entity);
                     } else {
@@ -860,6 +903,7 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                             outputs, error: None,
                             log_message: None, is_new_model: false, detected_symbols: Vec::new(),
                             is_parameter_update: false, is_reset: false, detected_input_names: Vec::new(),
+                            ..Default::default()
                         });
                     }
                 } else {
@@ -884,6 +928,7 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                     ),
                     log_message: None, is_new_model: false, is_parameter_update: false,
                     is_reset: false, detected_input_names: Vec::new(),
+                    ..Default::default()
                 });
             }
         }
@@ -906,6 +951,11 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
             };
             match compile_outcome {
                 Ok(comp_res) => {
+                    let exp_t_start = comp_res.experiment_start_time;
+                    let exp_t_end = comp_res.experiment_stop_time;
+                    let exp_tol = comp_res.experiment_tolerance;
+                    let exp_interval = comp_res.experiment_interval;
+                    let exp_solver = comp_res.experiment_solver.clone();
                     match SimStepper::new(&comp_res.dae, opts) {
                         Ok(mut stepper) => {
                             for (name, val) in &input_defaults { let _ = stepper.set_input(name, *val); }
@@ -924,6 +974,12 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                                 log_message: Some("Compiled successfully.".to_string()),
                                 is_new_model: true, is_parameter_update: false, is_reset: false,
                                 detected_input_names: input_names,
+                                experiment_start_time: exp_t_start,
+                                experiment_stop_time: exp_t_end,
+                                experiment_tolerance: exp_tol,
+                                experiment_interval: exp_interval,
+                                experiment_solver: exp_solver,
+                                compiled_model_name: Some(model_name.clone()),
                             });
                         }
                         Err(e) => {
@@ -933,6 +989,7 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                                 detected_symbols: Vec::new(), error: Some(format!("Stepper Init Error: {:?}", e)),
                                 log_message: None, is_new_model: true, is_parameter_update: false, is_reset: false,
                                 detected_input_names: Vec::new(),
+                                ..Default::default()
                             });
                         }
                     }
@@ -944,6 +1001,7 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                         detected_symbols: Vec::new(), error: Some(format!("Compile Error: {:?}", e)),
                         log_message: None, is_new_model: true, is_parameter_update: false, is_reset: false,
                         detected_input_names: Vec::new(),
+                        ..Default::default()
                     });
                 }
             }
@@ -970,6 +1028,7 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                                 log_message: Some("Reset complete.".to_string()),
                                 is_new_model: false, is_parameter_update: false, is_reset: true,
                                 detected_input_names: input_names,
+                                ..Default::default()
                             });
 
                                 } else {
@@ -979,6 +1038,7 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                                 detected_symbols: Vec::new(), error: Some("Stepper init failed".to_string()),
                                 log_message: None, is_new_model: false, is_parameter_update: false, is_reset: true,
                                 detected_input_names: Vec::new(),
+                                ..Default::default()
                                 });
                                 }
                                 }
@@ -989,6 +1049,7 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                                 detected_symbols: Vec::new(), error: Some(format!("Reset compile error: {:?}", e)),
                                 log_message: None, is_new_model: false, is_parameter_update: false, is_reset: true,
                                 detected_input_names: Vec::new(),
+                                ..Default::default()
                                 });
                                 }
                                 }
@@ -1001,6 +1062,7 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                                 log_message: Some("Reset complete (no cached model).".to_string()),
                                 is_new_model: false, is_parameter_update: false, is_reset: true,
                                 detected_input_names: Vec::new(),
+                                ..Default::default()
                                 });
                                 }
 
@@ -1037,6 +1099,7 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                                 log_message: Some("Parameters applied.".to_string()),
                                 is_new_model: false, is_parameter_update: true, is_reset: false,
                                 detected_input_names: input_names,
+                                ..Default::default()
                             });
                         }
                         Err(e) => {
@@ -1046,6 +1109,7 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                                 detected_symbols: Vec::new(), error: Some(format!("Stepper Init Error: {:?}", e)),
                                 log_message: None, is_new_model: false, is_parameter_update: true, is_reset: false,
                                 detected_input_names: Vec::new(),
+                                ..Default::default()
                             });
                         }
                     }
@@ -1057,6 +1121,7 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                         detected_symbols: Vec::new(), error: Some(format!("Re-compile Error: {:?}", e)),
                         log_message: None, is_new_model: false, is_parameter_update: true, is_reset: false,
                         detected_input_names: Vec::new(),
+                        ..Default::default()
                     });
                 }
             }
@@ -1208,10 +1273,33 @@ pub fn handle_modelica_responses(
     // When present, signal-meta description tooltips read from the
     // doc index, keeping AST as the single source of truth.
     doc_registry: Option<Res<crate::ui::ModelicaDocumentRegistry>>,
+    runner_res: Option<Res<crate::ModelicaRunnerResource>>,
 ) {
     let mut compile_states = compile_states;
     let mut console = console;
     while let Ok(result) = channels.rx.try_recv() {
+        // Pipe Modelica `experiment(...)` annotation values into the
+        // experiments runner's per-ModelRef cache so the Fast Run
+        // toolbar's bounds readout reflects the model rather than
+        // always falling back to 0..1. Runs once per successful
+        // Compile (is_new_model = true).
+        if result.is_new_model && result.error.is_none() {
+            if let (Some(runner), Some(name)) =
+                (runner_res.as_ref(), result.compiled_model_name.as_ref())
+            {
+                runner.0.set_model_defaults(
+                    lunco_experiments::ModelRef(name.clone()),
+                    crate::experiments_runner::ModelDefaults {
+                        t_start: result.experiment_start_time,
+                        t_end: result.experiment_stop_time,
+                        tolerance: result.experiment_tolerance,
+                        interval: result.experiment_interval,
+                        solver: result.experiment_solver.clone(),
+                    },
+                );
+            }
+        }
+
         if result.entity == Entity::PLACEHOLDER {
             let msg = "Simulation worker crashed and restarted.";
             warn!("{msg}");

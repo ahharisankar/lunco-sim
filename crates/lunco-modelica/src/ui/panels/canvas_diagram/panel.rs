@@ -1030,6 +1030,12 @@ impl CanvasDiagramPanel {
         {
             let mut state =
                 lunco_viz::kinds::canvas_plot_node::NodeStateSnapshot::default();
+            // Layer order: experiment overlay first (final-time values
+            // from the most recent visible Fast Run), then live cosim
+            // values on top. When both exist the live values win,
+            // which is what the user expects (live is actively
+            // stepping; experiment is a snapshot).
+            seed_state_from_latest_experiment(world, &mut state);
             if let Some(entity) = canvas_sim {
                 if let Some(model) = world.get::<crate::ModelicaModel>(entity) {
                     for (k, v) in &model.parameters {
@@ -1699,6 +1705,75 @@ impl CanvasDiagramPanel {
                 bevy::log::info!(
                     "[CanvasDiagram] render_canvas phases (sum={total:.1}ms): {breakdown}"
                 );
+            }
+        }
+    }
+}
+
+/// Seed the canvas's node-state snapshot from the most recently
+/// completed visible Fast Run. Picks the newest visible experiment
+/// in the registry, takes the final-time value for every variable
+/// it recorded, and writes them to `state.values` keyed by the same
+/// dotted Modelica path the live cosim path uses.
+///
+/// Lets the same edge-animation + hover-tooltip code light up the
+/// diagram with a static snapshot of the run when no live cosim is
+/// active. Live values overwrite these afterwards; on tabs with an
+/// active stepper, this is invisible.
+///
+/// v1: takes the *final-time* sample (last entry in `times`). A
+/// future time scrubber would parameterize the index; for now the
+/// final value is the most useful default ("what does the system
+/// settle at?").
+fn seed_state_from_latest_experiment(
+    world: &bevy::prelude::World,
+    state: &mut lunco_viz::kinds::canvas_plot_node::NodeStateSnapshot,
+) {
+    use lunco_experiments::{ExperimentRegistry, TwinId};
+    let twin = TwinId("default".into());
+    let visibility = world
+        .get_resource::<crate::ui::panels::experiments::ExperimentVisibility>();
+    let Some(registry) = world.get_resource::<ExperimentRegistry>() else {
+        return;
+    };
+    // Pick the newest visible experiment with a result. The registry
+    // preserves insertion order; iterate from the back for "newest
+    // first".
+    let exps = registry.list_for_twin(&twin);
+    let chosen = exps.iter().rev().find(|e| {
+        e.result.is_some()
+            && visibility
+                .map(|v| v.visible.contains(&e.id))
+                .unwrap_or(true)
+    });
+    let Some(exp) = chosen else { return };
+    let Some(result) = &exp.result else { return };
+    if result.times.is_empty() {
+        return;
+    }
+    // Scrub time wins over final-time when set. Find the sample
+    // index whose time is closest to the user-picked scrub time so
+    // the canvas reflects the system state at that moment.
+    let scrub_time = visibility.and_then(|v| v.scrub_time);
+    let idx = match scrub_time {
+        Some(t) => {
+            let mut best = 0usize;
+            let mut best_d = f64::INFINITY;
+            for (i, ti) in result.times.iter().enumerate() {
+                let d = (ti - t).abs();
+                if d < best_d {
+                    best_d = d;
+                    best = i;
+                }
+            }
+            best
+        }
+        None => result.times.len() - 1,
+    };
+    for (name, samples) in &result.series {
+        if let Some(v) = samples.get(idx) {
+            if v.is_finite() {
+                state.values.insert(name.clone(), *v);
             }
         }
     }

@@ -218,6 +218,17 @@ pub struct CompileClassPickerEntry {
     pub candidates: Vec<String>,
     /// Index into `candidates` the modal's radio group starts on.
     pub preselected: usize,
+    /// What to do once the user confirms a class. Lets the same
+    /// picker serve both Compile and Fast Run without duplicating
+    /// the modal UI.
+    pub purpose: PickerPurpose,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PickerPurpose {
+    #[default]
+    Compile,
+    FastRun,
 }
 
 /// Modal picker state for the "which class in this package to
@@ -225,6 +236,241 @@ pub struct CompileClassPickerEntry {
 /// visible. See `render_compile_class_picker` in `ui/mod.rs`.
 #[derive(Resource, Default)]
 pub struct CompileClassPickerState(pub Option<CompileClassPickerEntry>);
+
+/// Pre-flight dialog state for Fast Run. Mirrors Dymola's
+/// "Simulation Setup" modal: confirm bounds before kicking off the
+/// batch simulation. Populated by the Fast Run toolbar button;
+/// rendered by [`render_fast_run_setup`]; on confirm dispatches
+/// `FastRunActiveModel` (which re-reads bounds from the draft this
+/// dialog wrote into).
+#[derive(Resource, Default)]
+pub struct FastRunSetupState(pub Option<FastRunSetupEntry>);
+
+#[derive(Debug, Clone)]
+pub struct FastRunSetupEntry {
+    pub doc: DocumentId,
+    pub model_ref: lunco_experiments::ModelRef,
+    pub bounds: lunco_experiments::RunBounds,
+    /// Set when overrides are non-empty so the dialog hint nudges
+    /// users toward the Experiments panel for full editing.
+    pub overrides_count: usize,
+    /// Detected `input` declarations + their current draft values
+    /// (or empty string if unset). Editable inline in the dialog so
+    /// users don't run a model with all-zero inputs.
+    pub inputs: Vec<FastRunInput>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FastRunInput {
+    pub name: String,
+    pub type_name: String,
+    /// User input as text. Parsed on Run; empty = leave as Modelica
+    /// `input` (default 0) without substitution.
+    pub value_text: String,
+}
+
+pub(crate) fn render_fast_run_setup(
+    mut egui_ctx: bevy_egui::EguiContexts,
+    mut setup: ResMut<FastRunSetupState>,
+    mut drafts: ResMut<crate::experiments_runner::ExperimentDrafts>,
+    mut commands: Commands,
+) {
+    let Ok(ctx) = egui_ctx.ctx_mut() else {
+        return;
+    };
+    let Some(entry) = setup.0.as_mut() else {
+        return;
+    };
+
+    let mut confirmed = false;
+    let mut cancelled = false;
+    let mut window_open = true;
+    egui::Window::new("Simulation Setup — Fast Run")
+        .id(egui::Id::new(("fast_run_setup", entry.doc.raw())))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut window_open)
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new(format!("Class: {}", entry.model_ref.0))
+                    .strong(),
+            );
+            ui.add_space(6.0);
+            egui::Grid::new("fastrun_setup_grid")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    ui.label("Start time");
+                    ui.add(
+                        egui::DragValue::new(&mut entry.bounds.t_start)
+                            .speed(0.1)
+                            .suffix(" s"),
+                    );
+                    ui.end_row();
+
+                    ui.label("Stop time");
+                    ui.add(
+                        egui::DragValue::new(&mut entry.bounds.t_end)
+                            .speed(0.1)
+                            .suffix(" s"),
+                    );
+                    ui.end_row();
+
+                    ui.label("dt");
+                    let mut adaptive = entry.bounds.dt.is_none();
+                    let mut dt_v = entry.bounds.dt.unwrap_or(0.01);
+                    ui.horizontal(|ui| {
+                        if ui.checkbox(&mut adaptive, "adaptive").changed() {
+                            entry.bounds.dt =
+                                if adaptive { None } else { Some(0.01) };
+                        }
+                        if !adaptive
+                            && ui
+                                .add(
+                                    egui::DragValue::new(&mut dt_v)
+                                        .speed(0.001)
+                                        .range(1e-6..=10.0),
+                                )
+                                .changed()
+                        {
+                            entry.bounds.dt = Some(dt_v);
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("Tolerance");
+                    let mut tol_on = entry.bounds.tolerance.is_some();
+                    let mut tol_v = entry.bounds.tolerance.unwrap_or(1e-6);
+                    ui.horizontal(|ui| {
+                        if ui.checkbox(&mut tol_on, "set").changed() {
+                            entry.bounds.tolerance =
+                                if tol_on { Some(1e-6) } else { None };
+                        }
+                        if tol_on
+                            && ui
+                                .add(
+                                    egui::DragValue::new(&mut tol_v)
+                                        .speed(1e-7)
+                                        .range(1e-12..=1.0),
+                                )
+                                .changed()
+                        {
+                            entry.bounds.tolerance = Some(tol_v);
+                        }
+                    });
+                    ui.end_row();
+                });
+
+            // Inputs — substitute input declarations with parameter
+            // values so the simulator sees something other than zero.
+            if !entry.inputs.is_empty() {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("Inputs").strong());
+                egui::Grid::new("fastrun_setup_inputs")
+                    .num_columns(3)
+                    .show(ui, |ui| {
+                        ui.weak("Type");
+                        ui.weak("Name");
+                        ui.weak("Value");
+                        ui.end_row();
+                        for inp in entry.inputs.iter_mut() {
+                            ui.label(&inp.type_name);
+                            ui.label(&inp.name);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut inp.value_text)
+                                    .desired_width(100.0),
+                            )
+                            .on_hover_text(
+                                "Leave empty to use Modelica default (0). \
+                                 The value is substituted into the source as a \
+                                 parameter before compile.",
+                            );
+                            ui.end_row();
+                        }
+                    });
+            }
+
+            ui.add_space(6.0);
+            if entry.overrides_count > 0 {
+                ui.colored_label(
+                    egui::Color32::from_rgb(180, 180, 100),
+                    format!(
+                        "{} parameter override(s) active — edit in 🧪 Experiments",
+                        entry.overrides_count
+                    ),
+                );
+            } else {
+                ui.weak("Tip: open 🧪 Experiments → ⚙ Overrides + Bounds to override parameters.");
+            }
+            ui.add_space(8.0);
+
+            // Validation
+            let valid = entry.bounds.t_end > entry.bounds.t_start;
+            ui.horizontal(|ui| {
+                let run = ui.add_enabled(
+                    valid,
+                    egui::Button::new(
+                        egui::RichText::new("⏩ Run").strong(),
+                    ),
+                );
+                if run.clicked() {
+                    confirmed = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancelled = true;
+                }
+                if !valid {
+                    ui.colored_label(
+                        egui::Color32::LIGHT_RED,
+                        "Stop time must be greater than start time",
+                    );
+                }
+            });
+        });
+
+    if !window_open {
+        cancelled = true;
+    }
+    if confirmed {
+        let entry = setup.0.take().unwrap();
+        // Persist edited bounds + inputs into the draft so
+        // FastRunActiveModel picks them up. Overrides untouched.
+        let draft = drafts.entry(entry.model_ref.clone());
+        draft.bounds_override = Some(entry.bounds);
+        // Parse input text → ParamValue. Empty fields are dropped
+        // (= leave as Modelica `input`, default 0).
+        let mut new_inputs: std::collections::BTreeMap<
+            lunco_experiments::ParamPath,
+            lunco_experiments::ParamValue,
+        > = std::collections::BTreeMap::new();
+        for inp in entry.inputs.iter() {
+            let txt = inp.value_text.trim();
+            if txt.is_empty() {
+                continue;
+            }
+            let v = match inp.type_name.as_str() {
+                "Real" => txt.parse::<f64>().ok().map(lunco_experiments::ParamValue::Real),
+                "Integer" | "Int" => txt.parse::<i64>().ok().map(lunco_experiments::ParamValue::Int),
+                "Boolean" | "Bool" => match txt {
+                    "true" => Some(lunco_experiments::ParamValue::Bool(true)),
+                    "false" => Some(lunco_experiments::ParamValue::Bool(false)),
+                    _ => None,
+                },
+                _ => txt
+                    .parse::<f64>()
+                    .ok()
+                    .map(lunco_experiments::ParamValue::Real),
+            };
+            if let Some(v) = v {
+                new_inputs.insert(lunco_experiments::ParamPath(inp.name.clone()), v);
+            }
+        }
+        draft.inputs = new_inputs;
+        commands.trigger(FastRunActiveModel { doc: entry.doc });
+    } else if cancelled {
+        setup.0 = None;
+    }
+}
 
 /// Render the compile-class picker modal when
 /// [`CompileClassPickerState`] is populated. Confirming re-dispatches
@@ -248,7 +494,11 @@ pub(crate) fn render_compile_class_picker(
     let mut confirmed: Option<String> = None;
     let mut cancelled = false;
     let mut window_open = true;
-    egui::Window::new("Which class should Compile run?")
+    let title = match entry.purpose {
+        PickerPurpose::Compile => "Which class should Compile run?",
+        PickerPurpose::FastRun => "Which class should Fast Run simulate?",
+    };
+    egui::Window::new(title)
         .id(egui::Id::new(("compile_class_picker", entry.doc.raw())))
         .collapsible(false)
         .resizable(false)
@@ -275,8 +525,12 @@ pub(crate) fn render_compile_class_picker(
             entry.preselected = selected;
             ui.add_space(10.0);
             ui.horizontal(|ui| {
+                let ok_label = match entry.purpose {
+                    PickerPurpose::Compile => "Compile",
+                    PickerPurpose::FastRun => "Fast Run",
+                };
                 let ok = ui.add(egui::Button::new(
-                    egui::RichText::new("Compile").strong(),
+                    egui::RichText::new(ok_label).strong(),
                 ));
                 if ok.clicked() {
                     confirmed = entry.candidates.get(selected).cloned();
@@ -297,6 +551,7 @@ pub(crate) fn render_compile_class_picker(
     }
     if let Some(qualified) = confirmed {
         let doc = entry.doc;
+        let purpose = entry.purpose;
         // B.3 phase 3: write the picked class onto every tab
         // viewing this doc so subsequent reads via
         // `drilled_class_for_doc` see the user's choice. Replaces
@@ -305,7 +560,16 @@ pub(crate) fn render_compile_class_picker(
             state.drilled_class = Some(qualified.clone());
         }
         picker.0 = None;
-        commands.trigger(CompileModel { doc, class: None });
+        match purpose {
+            PickerPurpose::Compile => {
+                commands.trigger(CompileModel { doc, class: None });
+            }
+            PickerPurpose::FastRun => {
+                // Re-dispatch — second-time-around the drilled-class
+                // pin is set so resolution skips the picker.
+                commands.trigger(FastRunActiveModel { doc });
+            }
+        }
     } else if cancelled {
         picker.0 = None;
     }
@@ -324,6 +588,7 @@ impl Plugin for ModelicaCommandsPlugin {
         app.init_resource::<CloseDialogState>()
             .init_resource::<PendingCloseAfterSave>()
             .init_resource::<CompileClassPickerState>()
+            .init_resource::<FastRunSetupState>()
             .add_observer(on_undo_document)
             .add_observer(on_redo_document)
             .add_observer(on_save_document)
@@ -373,7 +638,11 @@ impl Plugin for ModelicaCommandsPlugin {
             )
             .add_systems(
                 bevy_egui::EguiPrimaryContextPass,
-                (render_close_dialogs, render_compile_class_picker),
+                (
+                    render_close_dialogs,
+                    render_compile_class_picker,
+                    render_fast_run_setup,
+                ),
             );
 
         // All observers marked with `#[on_command(X)]` are registered
@@ -1367,6 +1636,7 @@ fn on_compile_model(
                     doc,
                     candidates: candidate_classes.clone(),
                     preselected: 0,
+                    purpose: PickerPurpose::Compile,
                 });
             }
             return;
@@ -3161,41 +3431,65 @@ fn on_fast_run_active_model(trigger: On<FastRunActiveModel>, mut commands: Comma
             return;
         };
 
-        // Resolve source + target class.
-        let registry = world.resource::<crate::ui::state::ModelicaDocumentRegistry>();
-        let host = match registry.host(doc) {
-            Some(h) => h,
-            None => {
-                bevy::log::warn!("[FastRunActiveModel] doc {} not in registry", doc.raw());
-                return;
-            }
+        // Resolve source + target class. Mirrors `on_compile_model`
+        // class resolution: drilled-in class > picker (when ambiguous)
+        // > sole non-package class. Without this, package-wrapped
+        // models (AnnotatedRocketStage etc.) fail with "no compilable
+        // top-level class".
+        let (source, filename, candidates) = {
+            let registry = world.resource::<crate::ui::state::ModelicaDocumentRegistry>();
+            let host = match registry.host(doc) {
+                Some(h) => h,
+                None => {
+                    bevy::log::warn!("[FastRunActiveModel] doc {} not in registry", doc.raw());
+                    return;
+                }
+            };
+            let document = host.document();
+            let source = document.source().to_string();
+            let filename = document.origin().display_name().to_string();
+            let index = document.index();
+            let candidates: Vec<String> = index
+                .classes
+                .values()
+                .filter(|c| !matches!(c.kind, crate::index::ClassKind::Package))
+                .map(|c| c.name.clone())
+                .collect();
+            (source, filename, candidates)
         };
-        let document = host.document();
-        let source = document.source().to_string();
-        let filename = document.origin().display_name().to_string();
-        // Pick the first non-package top-level class as the target.
-        // Future: respect the class picker / drilled-in tab state.
-        let model_name = document
-            .strict_ast()
-            .and_then(|ast| {
-                ast.classes
-                    .iter()
-                    .find(|(_, c)| {
-                        !matches!(
-                            c.class_type,
-                            rumoca_session::parsing::ast::ClassType::Package
-                        )
-                    })
-                    .map(|(n, _)| n.clone())
-            })
-            .unwrap_or_default();
-        if model_name.is_empty() {
-            bevy::log::warn!(
-                "[FastRunActiveModel] doc {} has no compilable top-level class",
-                doc.raw()
-            );
-            return;
-        }
+        let drilled =
+            crate::ui::panels::model_view::drilled_class_for_doc(world, doc);
+        let model_name = match drilled {
+            Some(c) => c,
+            None => match candidates.len() {
+                0 => {
+                    bevy::log::warn!(
+                        "[FastRunActiveModel] doc {} has no compilable top-level class",
+                        doc.raw()
+                    );
+                    return;
+                }
+                1 => candidates[0].clone(),
+                _ => {
+                    // Ambiguous — open the same modal Compile uses,
+                    // tagged with FastRun purpose so confirmation
+                    // re-dispatches FastRunActiveModel.
+                    if let Some(mut picker) =
+                        world.get_resource_mut::<CompileClassPickerState>()
+                    {
+                        if picker.0.as_ref().map(|p| p.doc) != Some(doc) {
+                            picker.0 = Some(CompileClassPickerEntry {
+                                doc,
+                                candidates,
+                                preselected: 0,
+                                purpose: PickerPurpose::FastRun,
+                            });
+                        }
+                    }
+                    return;
+                }
+            },
+        };
 
         let model_ref = lunco_experiments::ModelRef(model_name.clone());
 
@@ -3232,11 +3526,24 @@ fn on_fast_run_active_model(trigger: On<FastRunActiveModel>, mut commands: Comma
                 solver: None,
             });
 
+        // Pull the override + inputs + bounds draft for this model.
+        let (overrides, inputs, bounds) = {
+            let drafts = world.resource::<crate::experiments_runner::ExperimentDrafts>();
+            match drafts.get(&model_ref) {
+                Some(d) => (
+                    d.overrides.clone(),
+                    d.inputs.clone(),
+                    d.bounds_override.clone().unwrap_or(bounds),
+                ),
+                None => (Default::default(), Default::default(), bounds),
+            }
+        };
+
         // Insert experiment + dispatch run.
         let twin_id = lunco_experiments::TwinId("default".into());
         let exp_id = {
             let mut reg = world.resource_mut::<lunco_experiments::ExperimentRegistry>();
-            reg.insert_new(twin_id, model_ref, Default::default(), bounds)
+            reg.insert_new(twin_id, model_ref, overrides, inputs, bounds)
         };
         let exp = world
             .resource::<lunco_experiments::ExperimentRegistry>()
@@ -3248,6 +3555,12 @@ fn on_fast_run_active_model(trigger: On<FastRunActiveModel>, mut commands: Comma
         };
 
         let handle = runner_res.0.run_fast(&exp);
+        // Remember which document started this run so failures can be
+        // routed back into the doc's CompileStates + Console.
+        world
+            .resource_mut::<crate::experiments_runner::ExperimentSources>()
+            .0
+            .insert(exp_id, doc);
         // Store the handle so a draining system can pump updates into
         // registry status.
         world
@@ -3259,6 +3572,14 @@ fn on_fast_run_active_model(trigger: On<FastRunActiveModel>, mut commands: Comma
             exp_id,
             model_name
         );
+        if let Some(mut console) =
+            world.get_resource_mut::<crate::ui::panels::console::ConsoleLog>()
+        {
+            console.info(format!(
+                "▶ Fast Run: '{}' (t={:.2}→{:.2}s)",
+                model_name, exp.bounds.t_start, exp.bounds.t_end
+            ));
+        }
     });
 }
 

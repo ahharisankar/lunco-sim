@@ -255,12 +255,55 @@ impl Panel for TelemetryPanel {
 
         // Variables (Toggle to Plot).
         //
-        // Checkboxes read / write the default Modelica plot's
-        // `VisualizationConfig.inputs` directly — no shadow state,
-        // no per-frame sync. Toggling here instantly shows/hides the
-        // variable in the Graphs panel since both read the same
-        // config.
-        ui.label("Variables (Toggle to Plot):");
+        // Checkboxes write to TWO things in lockstep so this is the
+        // single place to pick variables for plotting:
+        //   1. `VisualizationConfig.inputs` — drives the live cosim
+        //      plot in Graphs (ticked vars stream samples there).
+        //   2. `ExperimentVisibility.picked_vars` — drives the
+        //      experiment plot in Graphs (ticked vars are drawn for
+        //      every visible Fast Run).
+        // Names match between the two paths (both come from the same
+        // model compile), so one tick = one curve per source.
+        //
+        // Filter + group: search field collapses noise on big models;
+        // collapsing-headers per top-level component group keep the
+        // panel scannable.
+        ui.horizontal(|ui| {
+            ui.label("Variables");
+            ui.weak("(toggle to plot)");
+        });
+
+        // Filter input lives on ExperimentVisibility — same resource
+        // that already holds `picked_vars`, no new state.
+        let mut filter_text = world
+            .get_resource::<crate::ui::panels::experiments::ExperimentVisibility>()
+            .map(|v| v.var_filter.clone())
+            .unwrap_or_default();
+        let mut filter_changed = false;
+        ui.horizontal(|ui| {
+            ui.label("🔍");
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut filter_text)
+                    .hint_text("filter…")
+                    .desired_width(160.0),
+            );
+            if resp.changed() {
+                filter_changed = true;
+            }
+            if ui.small_button("✕").on_hover_text("Clear filter").clicked() {
+                filter_text.clear();
+                filter_changed = true;
+            }
+        });
+        if filter_changed {
+            if let Some(mut vis) = world
+                .get_resource_mut::<crate::ui::panels::experiments::ExperimentVisibility>()
+            {
+                vis.var_filter = filter_text.clone();
+            }
+        }
+        let filter_lower = filter_text.to_ascii_lowercase();
+
         egui::ScrollArea::vertical().id_salt("telemetry_scroll").show(ui, |ui| {
             let (model_vars, model_inputs) = if let Some(m) = world.get::<ModelicaModel>(entity) {
                 (m.variables.keys().cloned().collect::<Vec<_>>(),
@@ -280,8 +323,20 @@ impl Panel for TelemetryPanel {
                     .collect())
                 .unwrap_or_default();
 
+            // Picked-for-experiments set, snapshotted once.
+            let picked_exp: std::collections::BTreeSet<String> = world
+                .get_resource::<crate::ui::panels::experiments::ExperimentVisibility>()
+                .map(|v| v.picked_vars.clone())
+                .unwrap_or_default();
+
+            // Variables sourced from completed experiments — surface
+            // them even when there's no live cosim entity yet.
+            let exp_vars: std::collections::BTreeSet<String> =
+                crate::ui::panels::experiments::all_experiment_variables(world);
+
             let mut all_names: Vec<_> = model_vars;
             all_names.extend(model_inputs);
+            all_names.extend(exp_vars.iter().cloned());
             all_names.sort();
             all_names.dedup();
 
@@ -306,38 +361,95 @@ impl Panel for TelemetryPanel {
                     .collect()
             };
 
+            // Group by leading dotted segment for compactness.
+            // Filtering happens before grouping so empty groups don't
+            // render at all.
+            let mut groups: std::collections::BTreeMap<String, Vec<String>> =
+                std::collections::BTreeMap::new();
             for name in all_names {
-                let mut is_plotted = plotted.contains(&name);
-                ui.horizontal(|ui| {
-                    if ui.checkbox(&mut is_plotted, "").changed() {
-                        if let Some(mut reg) =
-                            world.get_resource_mut::<lunco_viz::VisualizationRegistry>()
-                        {
-                            set_signal_plotted(
-                                &mut reg,
-                                lunco_viz::SignalRef::new(entity, name.clone()),
-                                is_plotted,
-                            );
-                        }
-                    }
-                    let label = egui::Label::new(&name).sense(egui::Sense::hover());
-                    let resp = ui.add(label);
-                    if let Some(desc) = var_desc.get(&name).filter(|d| !d.trim().is_empty()) {
-                        // Hover for the full string (can be long),
-                        // plus a muted inline preview so users who
-                        // never hover still see the hint exists.
-                        resp.on_hover_text(desc);
-                        ui.label(
-                            egui::RichText::new(desc.trim())
-                                .italics()
-                                .color(muted)
-                                .size(11.0),
-                        )
-                        .on_hover_text(desc);
-                    }
-                });
-                let _ = is_signal_plotted; // re-export available for future UIs
+                if !filter_lower.is_empty()
+                    && !name.to_ascii_lowercase().contains(&filter_lower)
+                {
+                    continue;
+                }
+                let head = name.split('.').next().unwrap_or(name.as_str()).to_string();
+                groups.entry(head).or_default().push(name);
             }
+
+            let mut toggles: Vec<(String, bool)> = Vec::new();
+            for (group_name, names) in &groups {
+                let picked_in_group = names
+                    .iter()
+                    .filter(|n| plotted.contains(*n) || picked_exp.contains(*n))
+                    .count();
+                let header = if picked_in_group > 0 {
+                    format!("{} ({}/{})", group_name, picked_in_group, names.len())
+                } else {
+                    format!("{} ({})", group_name, names.len())
+                };
+                let default_open = !filter_lower.is_empty() || picked_in_group > 0;
+                egui::CollapsingHeader::new(header)
+                    .id_salt(format!("telem_var_group_{group_name}"))
+                    .default_open(default_open)
+                    .show(ui, |ui| {
+                        for name in names {
+                            let mut is_picked =
+                                plotted.contains(name) || picked_exp.contains(name);
+                            ui.horizontal(|ui| {
+                                if ui.checkbox(&mut is_picked, "").changed() {
+                                    toggles.push((name.clone(), is_picked));
+                                }
+                                let short = name
+                                    .strip_prefix(&format!("{group_name}."))
+                                    .unwrap_or(name);
+                                let label =
+                                    egui::Label::new(short).sense(egui::Sense::hover());
+                                let resp = ui.add(label);
+                                if let Some(desc) =
+                                    var_desc.get(name).filter(|d| !d.trim().is_empty())
+                                {
+                                    resp.on_hover_text(desc);
+                                    ui.label(
+                                        egui::RichText::new(desc.trim())
+                                            .italics()
+                                            .color(muted)
+                                            .size(11.0),
+                                    )
+                                    .on_hover_text(desc);
+                                }
+                            });
+                        }
+                    });
+            }
+            if groups.is_empty() {
+                ui.weak("No variables match the filter.");
+            }
+
+            // Apply toggles after the loop — avoids reborrowing
+            // resources mid-iteration. Each toggle writes to BOTH the
+            // viz registry (live cosim) and ExperimentVisibility
+            // (Fast Run) so the user picks once.
+            for (name, on) in toggles {
+                if let Some(mut reg) =
+                    world.get_resource_mut::<lunco_viz::VisualizationRegistry>()
+                {
+                    set_signal_plotted(
+                        &mut reg,
+                        lunco_viz::SignalRef::new(entity, name.clone()),
+                        on,
+                    );
+                }
+                if let Some(mut vis) = world
+                    .get_resource_mut::<crate::ui::panels::experiments::ExperimentVisibility>()
+                {
+                    if on {
+                        vis.picked_vars.insert(name);
+                    } else {
+                        vis.picked_vars.remove(&name);
+                    }
+                }
+            }
+            let _ = is_signal_plotted; // re-export available for future UIs
         });
 
         // Auto-Fit button was here but moved to the Graphs panel's own

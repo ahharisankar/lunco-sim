@@ -76,32 +76,66 @@ impl Panel for GraphsPanel {
         // for telemetry readouts, not empty space around one button.
         let mut fit_clicked = false;
         let mut export_csv_clicked = false;
+        let exp_summary = crate::ui::panels::experiments::experiments_plot_summary(world);
+        let has_live = bound_count > 0;
+        let has_exp = exp_summary.series_drawn > 0;
+
+        // Single consolidated header line — live var count + exp run
+        // status + time range + right-aligned controls. Replaces the
+        // previous "0 var" + "Live cosim: …" + "Experiments · …" stack
+        // of dead lines when nothing is selected.
         ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(format!("{bound_count} var"))
-                    .size(10.0)
-                    .color(muted),
-            );
-            if time_min.is_finite() && time_max.is_finite() {
-                ui.separator();
+            // Live cosim summary
+            if has_live {
+                ui.label(
+                    egui::RichText::new(format!("Live: {bound_count} var"))
+                        .size(11.0)
+                        .color(muted),
+                );
+                if time_min.is_finite() && time_max.is_finite() {
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "t: {time_min:.2}→{time_max:.2}s  ({sample_total} samples)"
+                        ))
+                        .size(11.0)
+                        .color(muted),
+                    );
+                }
+            }
+            // Experiments summary (only when there are runs)
+            if exp_summary.total_runs > 0 {
+                if has_live {
+                    ui.separator();
+                }
                 ui.label(
                     egui::RichText::new(format!(
-                        "t: {time_min:.2} → {time_max:.2} s  ({:.2} s window)",
-                        time_max - time_min
+                        "Experiments: {} run, {} visible, {} series",
+                        exp_summary.total_runs,
+                        exp_summary.visible_runs,
+                        exp_summary.series_drawn
                     ))
-                    .size(10.0)
+                    .size(11.0)
                     .color(muted),
                 );
-                ui.separator();
+            }
+            // Empty-state hint on the same line
+            if !has_live && exp_summary.total_runs == 0 {
                 ui.label(
-                    egui::RichText::new(format!("{sample_total} samples"))
-                        .size(10.0)
+                    egui::RichText::new(
+                        "No data yet — pick variables in Telemetry and run a model.",
+                    )
+                    .size(11.0)
+                    .color(muted),
+                );
+            } else if !has_live && exp_summary.picked_vars == 0 {
+                ui.label(
+                    egui::RichText::new("Pick variables in Telemetry to plot.")
+                        .size(11.0)
                         .color(muted),
                 );
             }
 
-            // Right-aligned controls — reserve just enough width for
-            // the icons and push everything else left.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let new_plot = ui
                     .small_button("➕")
@@ -123,9 +157,9 @@ impl Panel for GraphsPanel {
                 let csv = ui
                     .small_button("💾 CSV")
                     .on_hover_text(
-                        "Export CSV — save the plot's signal histories to a CSV file \
-                         (time column + one column per bound signal; forward-filled at \
-                         union timestamps)",
+                        "Export CSV — save the live plot's signal histories to a \
+                         CSV file (time column + one column per bound signal; \
+                         forward-filled at union timestamps)",
                     );
                 if csv.clicked() {
                     export_csv_clicked = true;
@@ -142,19 +176,35 @@ impl Panel for GraphsPanel {
             export_default_graph_to_csv(world);
         }
 
-        if bound_count == 0 {
-            ui.label("No variables selected for plotting.");
-            ui.label("Go to Telemetry and check variables to plot.");
-            return;
+        // Plot area: when both live and experiments have content,
+        // stack them; otherwise whichever has data fills the panel.
+        if has_exp && has_live {
+            // Split available space — experiments first (the user just
+            // ran something) then live below.
+            let avail = ui.available_height();
+            ui.allocate_ui(egui::vec2(ui.available_width(), avail * 0.5), |ui| {
+                crate::ui::panels::experiments::render_experiments_plot(ui, world);
+            });
+            ui.separator();
+            let config = match world.resource::<VisualizationRegistry>().get(DEFAULT_MODELICA_GRAPH) {
+                Some(c) => c.clone(),
+                None => return,
+            };
+            let viz = LinePlot;
+            let mut ctx = Panel2DCtx { ui, world };
+            viz.render_panel_2d(&mut ctx, &config);
+        } else if has_exp {
+            crate::ui::panels::experiments::render_experiments_plot(ui, world);
+        } else if has_live {
+            let config = match world.resource::<VisualizationRegistry>().get(DEFAULT_MODELICA_GRAPH) {
+                Some(c) => c.clone(),
+                None => return,
+            };
+            let viz = LinePlot;
+            let mut ctx = Panel2DCtx { ui, world };
+            viz.render_panel_2d(&mut ctx, &config);
         }
-
-        let config = match world.resource::<VisualizationRegistry>().get(DEFAULT_MODELICA_GRAPH) {
-            Some(c) => c.clone(),
-            None => return,
-        };
-        let viz = LinePlot;
-        let mut ctx = Panel2DCtx { ui, world };
-        viz.render_panel_2d(&mut ctx, &config);
+        // else: header line shows the empty-state hint already.
     }
 }
 
