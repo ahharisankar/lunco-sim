@@ -965,7 +965,7 @@ where
             class: class_name,
             signal: signal_path.to_string(),
         })?;
-    let mut spec = read_plot_node_spec(entry)?;
+    let mut spec = read_plot_node_spec(entry);
     update(&mut spec);
     *entry = parse_graphics_entry(&pretty::lunco_plot_node_inner(&spec))?;
     Ok(())
@@ -991,9 +991,7 @@ fn plot_node_signal_matches(expr: &Expression, target_signal: &str) -> bool {
 /// Default values for any field the Expression doesn't carry — the
 /// canvas's emit path always writes signal+extent+title, so missing
 /// fields only surface for hand-edited annotations.
-fn read_plot_node_spec(
-    expr: &Expression,
-) -> Result<pretty::LunCoPlotNodeSpec, AstMutError> {
+fn read_plot_node_spec(expr: &Expression) -> pretty::LunCoPlotNodeSpec {
     let mut spec = pretty::LunCoPlotNodeSpec {
         x1: 0.0,
         y1: 0.0,
@@ -1030,7 +1028,7 @@ fn read_plot_node_spec(
             }
         }
     }
-    Ok(spec)
+    spec
 }
 
 fn point_pair(e: &Expression) -> Option<(f32, f32)> {
@@ -1154,7 +1152,7 @@ where
         class: class_name,
         index,
     })?;
-    let mut spec = read_text_spec(&arr[i])?;
+    let mut spec = read_text_spec(&arr[i]);
     update(&mut spec);
     arr[i] = parse_graphics_entry(&render_text_spec(&spec))?;
     Ok(())
@@ -1172,7 +1170,7 @@ struct TextSpec {
     text: String,
 }
 
-fn read_text_spec(expr: &Expression) -> Result<TextSpec, AstMutError> {
+fn read_text_spec(expr: &Expression) -> TextSpec {
     let mut spec = TextSpec {
         x1: 0.0,
         y1: 0.0,
@@ -1199,7 +1197,7 @@ fn read_text_spec(expr: &Expression) -> Result<TextSpec, AstMutError> {
             spec.text = s;
         }
     }
-    Ok(spec)
+    spec
 }
 
 fn render_text_spec(spec: &TextSpec) -> String {
