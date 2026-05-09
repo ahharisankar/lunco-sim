@@ -4,7 +4,7 @@
 // (`<workspace>/.cache/rumoca/parsed-files/`). Second indexer runs and
 // the workbench's runtime drill-ins share the same cache entries, so
 // a file parsed here is instant at runtime and vice versa.
-use rumoca_session::parsing::ast::{Causality, ClassDef, ClassType, StoredDefinition, Token, Variability, Annotation, Modification};
+use rumoca_session::parsing::ast::{Causality, ClassDef, ClassType, StoredDefinition, Token, Variability};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -193,41 +193,16 @@ const DEFAULT_WARM_EXAMPLES: &[&str] = &[
 /// This is **not a standard** — it is an observed pattern that produces
 /// sensible schematics for the vast majority of library components.
 ///
-/// Change `PLACEMENT_FALLBACK` below to switch strategy without touching logic.
-#[derive(Clone, Copy)]
-enum PortPlacementFallback {
-    /// inputs → left (-100, 0), outputs → right (+100, 0),
-    /// acausal connectors alternate left/right/top/bottom by insertion order.
-    /// Mirrors informal MSL convention. **Not a Modelica standard.**
-    SideByCausality,
-    /// Every un-annotated port gets center (0, 0).
-    /// Use this when you want missing annotations to be visually obvious
-    /// (ports pile up in the middle, easy to spot).
-    AllCenter,
-    /// All un-annotated ports stacked on the left side, evenly spaced.
-    AllLeft,
-}
-
-/// Active fallback strategy — the only line you need to edit to change behaviour.
-const PLACEMENT_FALLBACK: PortPlacementFallback = PortPlacementFallback::SideByCausality;
-
 fn fallback_port_position(causality: &Causality, port_index: usize) -> (f32, f32) {
-    match PLACEMENT_FALLBACK {
-        PortPlacementFallback::SideByCausality => match causality {
-            Causality::Input(_)  => (-100.0, 0.0),
-            Causality::Output(_) => (100.0, 0.0),
-            _ => match port_index % 4 {
-                0 => (-100.0, 0.0),
-                1 => (100.0, 0.0),
-                2 => (0.0, 100.0),
-                _ => (0.0, -100.0),
-            },
+    match causality {
+        Causality::Input(_) => (-100.0, 0.0),
+        Causality::Output(_) => (100.0, 0.0),
+        _ => match port_index % 4 {
+            0 => (-100.0, 0.0),
+            1 => (100.0, 0.0),
+            2 => (0.0, 100.0),
+            _ => (0.0, -100.0),
         },
-        PortPlacementFallback::AllCenter => (0.0, 0.0),
-        PortPlacementFallback::AllLeft => {
-            let y = 50.0 - port_index as f32 * 20.0;
-            (-100.0, y)
-        }
     }
 }
 
@@ -1327,7 +1302,7 @@ fn main() {
 /// time, so the cost is `n * parse(file)`, ≤ ~10 small files.
 fn scan_bundled_examples() -> Vec<lunco_modelica::visual_diagram::BundledFileTree> {
     use lunco_modelica::models::bundled_models;
-    use lunco_modelica::visual_diagram::{BundledClassTree, BundledFileTree};
+    use lunco_modelica::visual_diagram::BundledFileTree;
 
     // `parse_to_syntax(...).best_effort()` is the same path
     // `SyntaxCache::from_source` uses and is what the workspace

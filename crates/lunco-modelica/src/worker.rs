@@ -8,10 +8,9 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use bevy::prelude::*;
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, Sender};
 use rumoca_sim::{SimStepper, StepperOptions};
 use serde::{Serialize, Deserialize};
 
@@ -19,8 +18,7 @@ use lunco_assets::modelica_dir;
 
 use crate::ast_extract::strip_input_defaults;
 use crate::sim_stream::{SimSnapshot, SimStream};
-use crate::ui::commands::CompileModel;
-use crate::{ModelicaCompiler, SimStreamRegistry};
+use crate::ModelicaCompiler;
 
 /// Channels for communicating with the background simulation worker.
 ///

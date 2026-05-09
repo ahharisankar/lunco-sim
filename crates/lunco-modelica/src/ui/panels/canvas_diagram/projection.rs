@@ -19,7 +19,6 @@ use crate::visual_diagram::{DiagramNodeId, VisualDiagram};
 
 use super::edge::{ConnectionEdgeData, PortDir, port_edge_dir};
 use super::node::IconNodeData;
-use super::paint::wire_color_for;
 use super::port::{
     port_fallback_offset_for_size, port_kind_str, resolve_port_icons,
 };

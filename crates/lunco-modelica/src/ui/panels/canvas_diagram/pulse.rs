@@ -6,10 +6,7 @@
 //! `PulseEntry<T>` records driven by background tickers
 //! (`drive_pending_api_focus`, `drive_pending_api_connections`).
 
-use std::collections::HashMap;
-
 use bevy::prelude::*;
-use bevy_egui::egui;
 
 use super::CanvasDiagramState;
 

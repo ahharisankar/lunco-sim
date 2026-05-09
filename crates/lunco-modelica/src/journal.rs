@@ -169,12 +169,6 @@ pub fn summarize_op(op: &ModelicaOp) -> Value {
             "tolerance": tolerance,
             "interval": interval,
         }),
-        // Forward-compatible: unknown variant gets a debug fallback so
-        // adding a new ModelicaOp doesn't break the journal silently.
-        _ => json!({
-            "kind": "Unknown",
-            "debug": format!("{:?}", op),
-        }),
     }
 }
 

@@ -15,7 +15,7 @@ use super::paint::{
     brighten, dist_point_to_segment, paint_arrowhead, paint_wire_tooltip, segment_dist_sq,
     wire_color_for,
 };
-use super::paint_flow_dots;
+use super::node::paint_flow_dots;
 use super::theme::modelica_icon_palette_from_ctx;
 
 /// Typed payload for `"modelica.connection"` edges. Same purpose as
@@ -38,7 +38,7 @@ pub struct ConnectionEdgeData {
 /// pretty-routing convention. Modelica port placement is in (-100..100)
 /// per axis; we classify by which extreme the port sits closest to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(super) enum PortDir {
+pub enum PortDir {
     Left,
     Right,
     Up,

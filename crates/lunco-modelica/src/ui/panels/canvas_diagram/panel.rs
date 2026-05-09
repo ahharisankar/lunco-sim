@@ -7,28 +7,26 @@
 
 use bevy::prelude::*;
 use bevy_egui::egui;
-use lunco_canvas::{Canvas, NavBarOverlay, Scene};
+use lunco_canvas::Scene;
 use lunco_doc::Document;
 use lunco_workbench::{Panel, PanelId, PanelSlot};
 
 use crate::document::ModelicaOp;
-use crate::ui::state::{ModelicaDocumentRegistry, WorkbenchState};
-use crate::ui::theme::ModelicaThemeExt;
+use crate::ui::state::ModelicaDocumentRegistry;
 
 use super::loads::{DrillInLoads, DuplicateLoads, drill_into_class};
 use super::node::IconNodeData;
 use super::ops::{self, apply_ops_public};
 use super::projection::{
-    self, ProjectionTask, project_scene, projection_relevant_source_hash, recover_edges_from_ast,
+    ProjectionTask, project_scene, projection_relevant_source_hash, recover_edges_from_ast,
 };
-use super::pulse::{EdgePulseLayer, PulseGlowLayer};
 use super::theme::{
     CanvasThemeSnapshot, layer_theme_from, store_canvas_theme, store_modelica_icon_palette,
 };
 use super::{
-    BackgroundDiagramHandle, CANVAS_DIAGRAM_PANEL_ID, CanvasDiagramState, CanvasDocState,
-    CanvasSnapSettings, ContextMenuTarget, DiagramProjectionLimits, ICON_W, PendingContextMenu,
-    active_doc_from_world, build_registry, decorations, menus, overlays, palette, render_target,
+    CANVAS_DIAGRAM_PANEL_ID, CanvasDiagramState, CanvasSnapSettings, ContextMenuTarget,
+    DiagramProjectionLimits, ICON_W, PendingContextMenu, active_doc_from_world, decorations,
+    menus, overlays, render_target,
 };
 
 // Per-event sibling-scene replay (`apply_event_to_sibling_scene`)
@@ -879,7 +877,7 @@ impl CanvasDiagramPanel {
         let trace_phases = std::env::var_os("RENDER_CANVAS_TRACE").is_some();
         let mut phase_t = web_time::Instant::now();
         let mut phase_log: Vec<(&'static str, f64)> = Vec::new();
-        let mut mark = |label: &'static str, t: &mut web_time::Instant, log: &mut Vec<(&'static str, f64)>| {
+        let mark = |label: &'static str, t: &mut web_time::Instant, log: &mut Vec<(&'static str, f64)>| {
             let ms = t.elapsed().as_secs_f64() * 1000.0;
             if ms > 1.0 {
                 log.push((label, ms));

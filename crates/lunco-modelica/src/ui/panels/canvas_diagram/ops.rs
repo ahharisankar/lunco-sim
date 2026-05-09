@@ -10,14 +10,11 @@ use bevy::prelude::*;
 
 use crate::document::ModelicaOp;
 use crate::pretty::{self, Placement};
-use crate::ui::state::{ModelicaDocumentRegistry, WorkbenchState};
+use crate::ui::state::ModelicaDocumentRegistry;
 use crate::visual_diagram::MSLComponentDef;
 
 use super::coords::{ModelicaPos, canvas_to_modelica};
-// B.3: `DrilledInClassNames` reads migrated to
-// `crate::ui::panels::model_view::drilled_class_for_doc`.
-use super::port::{port_fallback_offset_for_size, port_kind_str, resolve_port_icons};
-use super::projection::{project_scene, projection_relevant_source_hash};
+use super::projection::projection_relevant_source_hash;
 use super::{CanvasDiagramState, IconNodeData, active_doc_from_world};
 use crate::ui::panels::model_view::TabRenderContext;
 

@@ -6,9 +6,6 @@
 //! leaving the canvas. Also houses the user-tunable [`PaletteSettings`]
 //! and [`DiagramProjectionLimits`] resources.
 
-use std::cmp::Ordering;
-use std::time::Duration;
-
 use bevy::prelude::*;
 use bevy_egui::egui;
 

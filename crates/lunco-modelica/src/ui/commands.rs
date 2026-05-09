@@ -1465,7 +1465,7 @@ fn on_compile_model(
     trigger: On<CompileModel>,
     mut commands: Commands,
     mut registry: ResMut<ModelicaDocumentRegistry>,
-    mut workbench: ResMut<WorkbenchState>,
+    workbench: ResMut<WorkbenchState>,
     mut compile_states: ResMut<CompileStates>,
     mut console: ResMut<crate::ui::panels::console::ConsoleLog>,
     mut diagnostics: Option<ResMut<crate::ui::panels::diagnostics::DiagnosticsLog>>,
@@ -1563,7 +1563,7 @@ fn on_compile_model(
             }
             None => return,
         };
-    let Some(ast) = ast_for_extract else {
+    let Some(_ast) = ast_for_extract else {
         // Parse failure on this doc (rare — rumoca is
         // error-recovering). Fall back to the source-based
         // extractors, which at least try once; if they also fail,
@@ -1888,7 +1888,7 @@ fn on_duplicate_model_from_read_only(
     // user's drill-in is preserved as a navigation hint via
     // `inner_drill` so the new tab opens on the same inner class
     // they had selected.
-    let (source_full, origin_class_short, origin_fqn, class_byte_range, inner_drill) = {
+    let (source_full, origin_class_short, origin_fqn, _class_byte_range, inner_drill) = {
         let Some(host) = registry.host(source_doc) else {
             console.error("Duplicate failed: source doc not found in registry");
             return;
@@ -2252,7 +2252,6 @@ fn spawn_duplicate_class_task(world: &mut World, qualified: String, name_hint: S
         } else {
             format!("within {origin_pkg};\n{renamed}")
         };
-        let rewrite_ms = rewrite_only_ms + collect_ms + inject_ms;
         // 5. Build doc lazily — no parse on the bg thread. The engine
         //    async sync (drive_engine_sync drain step) parses this
         //    on the next idle tick and backfills the doc's syntax
@@ -3199,7 +3198,6 @@ fn update_status_bar(
     // B.3 phase 6: derive from registry directly.
     let model_name = active_doc
         .and_then(|d| {
-            use lunco_doc::Document as _;
             registry.host(d).and_then(|h| {
                 let document = h.document();
                 document
