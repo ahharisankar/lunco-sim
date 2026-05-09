@@ -208,6 +208,13 @@ impl Panel for CanvasDiagramPanel {
         };
 
         if let Some((doc_id, gen)) = project_now {
+            // Set inside the spawn block when we actually spawn;
+            // consumed *after* the `CanvasDiagramState` borrow ends
+            // to attach a `BusyHandle` from `StatusBus`. Two-step
+            // because the spawn site holds `&mut state` (line ~297)
+            // and we can't borrow the bus through `world` while that
+            // is live.
+            let mut spawned_busy_label: Option<(String, Option<String>)> = None;
             // Spawn a background task (or reuse an in-flight one
             // for the same doc+gen) that runs edge-recovery and
             // builds a `Scene` from the document's already-parsed
@@ -465,6 +472,13 @@ impl Panel for CanvasDiagramPanel {
                         );
                         scene
                     });
+                    spawned_busy_label = Some((
+                        match &target_class_snapshot {
+                            Some(t) => format!("Projecting {t}"),
+                            None => "Projecting…".to_string(),
+                        },
+                        target_class_snapshot.clone(),
+                    ));
                     docstate.projection_task = Some(ProjectionTask {
                         gen_at_spawn: gen,
                         target_at_spawn: target_class_snapshot.clone(),
@@ -473,6 +487,7 @@ impl Panel for CanvasDiagramPanel {
                         cancel,
                         task,
                         source_hash: source_hash_at_spawn,
+                        _busy: None,
                     });
                 }
             }
@@ -480,7 +495,40 @@ impl Panel for CanvasDiagramPanel {
             // task completes and the scene is actually swapped in.
             // Otherwise the `project_now` check on later frames
             // would think we're up-to-date and never swap.
-            let _ = state;
+            drop(state);
+
+            // Attach a `BusyHandle` to the projection task we just
+            // spawned (if any). Deferred two-step because the spawn
+            // block above held `&mut CanvasDiagramState`; the bus and
+            // state are disjoint resources but Rust can't see that
+            // through `world`. The handle drops with the task on
+            // completion / supersede / timeout.
+            if let Some((label, target_after_spawn)) = spawned_busy_label {
+                let handle = world
+                    .resource_mut::<lunco_workbench::status_bus::StatusBus>()
+                    .begin(
+                        lunco_workbench::status_bus::BusyScope::Document(doc_id.0),
+                        "projection",
+                        label,
+                    );
+                let mut state = world.resource_mut::<CanvasDiagramState>();
+                let docstate = match render_tab_id {
+                    Some(t) => state.get_mut_for_tab(t, doc_id),
+                    None => state.get_mut(Some(doc_id)),
+                };
+                // Only attach if the task we spawned is still the
+                // current one (it could have been superseded between
+                // the spawn block exit and here, though unlikely on
+                // the synchronous frame). `target_at_spawn` matches
+                // when it's the same task we just made.
+                if let Some(task) = docstate.projection_task.as_mut() {
+                    if task._busy.is_none()
+                        && task.target_at_spawn == target_after_spawn
+                    {
+                        task._busy = Some(handle);
+                    }
+                }
+            }
         }
 
         // Poll the in-flight projection task for the ACTIVE doc.

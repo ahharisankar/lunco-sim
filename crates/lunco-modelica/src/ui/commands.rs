@@ -1870,6 +1870,7 @@ fn on_duplicate_model_from_read_only(
     mut duplicate_loads: ResMut<
         crate::ui::panels::canvas_diagram::DuplicateLoads,
     >,
+    mut bus: ResMut<lunco_workbench::status_bus::StatusBus>,
     mut console: ResMut<crate::ui::panels::console::ConsoleLog>,
     mut commands: Commands,
     mut egui_q: Query<&mut bevy_egui::EguiContext>,
@@ -2050,6 +2051,11 @@ fn on_duplicate_model_from_read_only(
         )
     });
 
+    let busy = bus.begin(
+        lunco_workbench::status_bus::BusyScope::Document(doc_id.0),
+        "duplicate",
+        format!("Duplicating {origin_class_short} → {name}"),
+    );
     duplicate_loads.insert(
         doc_id,
         crate::ui::panels::canvas_diagram::DuplicateBinding {
@@ -2058,6 +2064,7 @@ fn on_duplicate_model_from_read_only(
             inner_drill: inner_drill.clone(),
             started: web_time::Instant::now(),
             task,
+            _busy: busy,
         },
     );
     console.info(format!(
@@ -2277,6 +2284,13 @@ fn spawn_duplicate_class_task(world: &mut World, qualified: String, name_hint: S
         doc
     });
 
+    let busy = world
+        .resource_mut::<lunco_workbench::status_bus::StatusBus>()
+        .begin(
+            lunco_workbench::status_bus::BusyScope::Document(doc_id.0),
+            "duplicate",
+            format!("Opening {qualified} → {name}"),
+        );
     world
         .resource_mut::<crate::ui::panels::canvas_diagram::DuplicateLoads>()
         .insert(
@@ -2290,6 +2304,7 @@ fn spawn_duplicate_class_task(world: &mut World, qualified: String, name_hint: S
                 inner_drill: None,
                 started: web_time::Instant::now(),
                 task,
+                _busy: busy,
             },
         );
     world

@@ -64,6 +64,13 @@ pub struct DrillInBinding {
     /// containing file the engine session has already parsed
     /// installs in milliseconds. Driven by [`drive_drill_in_loads`].
     pub task: bevy::tasks::Task<Result<crate::document::ModelicaDocument, String>>,
+    /// RAII guard registered with [`lunco_workbench::status_bus::StatusBus`].
+    /// Dropped together with the binding (on install or on document
+    /// removal) — the bus then clears the
+    /// `(BusyScope::Document, "drill-in")` slot via `drain_busy_drops`.
+    /// Kept as a field so any future work that wants to query
+    /// "is this document loading?" goes through the bus.
+    pub _busy: lunco_workbench::status_bus::BusyHandle,
 }
 
 /// Tab-to-task binding for duplicate-to-workspace operations whose
@@ -99,6 +106,10 @@ pub struct DuplicateBinding {
     pub inner_drill: Option<String>,
     pub started: web_time::Instant,
     pub task: bevy::tasks::Task<crate::document::ModelicaDocument>,
+    /// RAII guard registered with [`lunco_workbench::status_bus::StatusBus`].
+    /// Same lifecycle as [`DrillInBinding::_busy`] — clears the
+    /// `(BusyScope::Document, "duplicate")` slot on Drop.
+    pub _busy: lunco_workbench::status_bus::BusyHandle,
 }
 
 impl DuplicateLoads {
@@ -508,6 +519,15 @@ fn open_drill_in_tab(
                 &qualified_for_task,
             )
         });
+        let busy = {
+            let mut bus =
+                world.resource_mut::<lunco_workbench::status_bus::StatusBus>();
+            bus.begin(
+                lunco_workbench::status_bus::BusyScope::Document(doc_id.0),
+                "drill-in",
+                format!("Loading {qualified}"),
+            )
+        };
         let mut loads = world.resource_mut::<DrillInLoads>();
         loads.pending.insert(
             doc_id,
@@ -515,6 +535,7 @@ fn open_drill_in_tab(
                 qualified: qualified.to_string(),
                 started: web_time::Instant::now(),
                 task,
+                _busy: busy,
             },
         );
     }

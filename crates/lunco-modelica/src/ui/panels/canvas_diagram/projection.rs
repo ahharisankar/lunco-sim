@@ -607,5 +607,13 @@ pub struct ProjectionTask {
     /// task completes — used by the next gen-bump check to skip
     /// reprojection on no-op edits (whitespace, comments).
     pub source_hash: u64,
+    /// RAII guard registered with [`lunco_workbench::status_bus::StatusBus`]
+    /// when the task is spawned. Drops together with the task — on
+    /// completion, on stale-supersede (`projection_task = None`) or on
+    /// timeout. Held in an `Option` so the spawning code can attach
+    /// the handle after the `CanvasDiagramState` borrow scope closes
+    /// (the bus and state are disjoint resources, but the spawn site
+    /// holds `&mut state` and can't grab the bus simultaneously).
+    pub _busy: Option<lunco_workbench::status_bus::BusyHandle>,
 }
 
