@@ -46,7 +46,6 @@ use bevy::math::DVec3;
 use avian3d::prelude::*;
 use avian3d::physics_transform::{Position, Rotation};
 pub use lunco_usd_bevy::{UsdPrimPath, UsdStageAsset};
-use lunco_terrain::TerrainTile;
 use openusd::sdf::{AbstractData, Path as SdfPath, Value};
 use openusd::usda::TextReader;
 

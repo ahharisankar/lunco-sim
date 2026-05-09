@@ -42,7 +42,6 @@ pub mod theme {
 }
 
 pub mod helpers;
-pub use helpers::*;
 
 pub mod diagrams;
 pub use diagrams::*;
