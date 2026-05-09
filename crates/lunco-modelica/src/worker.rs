@@ -218,6 +218,44 @@ fn result_ok(entity: Entity, session_id: u64) -> ModelicaResult {
     }
 }
 
+/// Apply parsed input defaults to a stepper at init time, logging any
+/// mismatch between the rumoca-detected names and the stepper's actual
+/// input slots. The mismatch case is a rumoca-vs-flatten disagreement —
+/// rare, but silent failure here would mean a user-set default never
+/// reaches the simulator. Logged once per init, not per-call.
+fn apply_input_defaults_validated(
+    stepper: &mut SimStepper,
+    input_defaults: &HashMap<String, f64>,
+    ctx: &str,
+) {
+    if input_defaults.is_empty() {
+        return;
+    }
+    let known: std::collections::HashSet<String> =
+        stepper.input_names().iter().cloned().collect();
+    let unknown: Vec<&str> = input_defaults
+        .keys()
+        .filter(|n| !known.contains(*n))
+        .map(String::as_str)
+        .collect();
+    if !unknown.is_empty() {
+        bevy::log::warn!(
+            "[{ctx}] {} parsed input default(s) not in stepper.input_names(): {:?} (known: {:?})",
+            unknown.len(),
+            unknown,
+            known,
+        );
+    }
+    for (name, val) in input_defaults {
+        if !known.contains(name) {
+            continue;
+        }
+        if let Err(e) = stepper.set_input(name, *val) {
+            bevy::log::warn!("[{ctx}] set_input({name}) failed: {e:?}");
+        }
+    }
+}
+
 /// The background worker that owns the !Send SimSteppers and cached DAEs.
 pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>) {
     let mut steppers: HashMap<Entity, (u64, String, SimStepper)> = HashMap::default();
@@ -292,9 +330,7 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                                 Ok(comp_res) => {
                                     match SimStepper::new(&comp_res.dae, opts) {
                                         Ok(mut stepper) => {
-                                            for (name, val) in &input_defaults {
-                                                let _ = stepper.set_input(name, *val);
-                                            }
+                                            apply_input_defaults_validated(&mut stepper, &input_defaults, "Init");
                                             let input_names: Vec<String> = stepper.input_names().to_vec();
                                             let symbols = collect_stepper_observables(&stepper);
                                             steppers.insert(entity, (session_id, cached.model_name.clone(), stepper));
@@ -358,9 +394,7 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                                 opts.atol = 1e-1; opts.rtol = 1e-1;
                                 match SimStepper::new(&comp_res.dae, opts) {
                                     Ok(mut stepper) => {
-                                        for (name, val) in &input_defaults {
-                                            let _ = stepper.set_input(name, *val);
-                                        }
+                                        apply_input_defaults_validated(&mut stepper, &input_defaults, "Compile");
                                         let input_names: Vec<String> = stepper.input_names().to_vec();
                                         let symbols = collect_stepper_observables(&stepper);
                                         cached_models.insert(entity, CachedModel {
@@ -461,9 +495,7 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                                 match SimStepper::new(&comp_res.dae, opts) {
                                     Ok(mut stepper) => {
                                         // Set input defaults via set_input so they're runtime-changeable
-                                        for (name, val) in &input_defaults {
-                                            let _ = stepper.set_input(name, *val);
-                                        }
+                                        apply_input_defaults_validated(&mut stepper, &input_defaults, "Compile");
                                         let input_names: Vec<String> = stepper.input_names().to_vec();
                                         let symbols = collect_stepper_observables(&stepper);
                                         let temp_dir = modelica_dir().join(format!("{}_{}", entity.index(), entity.generation()));
@@ -533,10 +565,7 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                                         let mut opts = StepperOptions::default();
                                         opts.atol = 1e-1; opts.rtol = 1e-1;
                                         if let Ok(mut s) = SimStepper::new(&comp_res.dae, opts) {
-                                            // Set input defaults first
-                                            for (name, val) in &input_defaults {
-                                                let _ = s.set_input(name, *val);
-                                            }
+                                            apply_input_defaults_validated(&mut s, &input_defaults, "Compile");
                                             // Then apply any user-provided input overrides
                                             for (name, val) in &inputs {
                                                 let _ = s.set_input(name, *val);
@@ -854,7 +883,7 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                             let mut opts = StepperOptions::default();
                             opts.atol = 1e-1; opts.rtol = 1e-1;
                             if let Ok(mut s) = SimStepper::new(&comp_res.dae, opts) {
-                                for (name, val) in &input_defaults { let _ = s.set_input(name, *val); }
+                                apply_input_defaults_validated(&mut s, &input_defaults, "Compile");
                                 for (name, val) in &inputs { let _ = s.set_input(name, *val); }
                                 w.steppers.insert(entity, (session_id, model_name.clone(), s));
                             }
@@ -945,7 +974,7 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                     let exp_solver = comp_res.experiment_solver.clone();
                     match SimStepper::new(&comp_res.dae, opts) {
                         Ok(mut stepper) => {
-                            for (name, val) in &input_defaults { let _ = stepper.set_input(name, *val); }
+                            apply_input_defaults_validated(&mut stepper, &input_defaults, "Compile");
                             let input_names: Vec<String> = stepper.input_names().to_vec();
                             let symbols = collect_stepper_observables(&stepper);
                             w.cached_models.insert(entity, CachedModel {
@@ -1003,7 +1032,7 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                 match compiler.compile_str(&cached.model_name, &stripped_source, "model.mo") {
                     Ok(comp_res) => {
                         if let Ok(mut stepper) = SimStepper::new(&comp_res.dae, opts) {
-                            for (name, val) in &input_defaults { let _ = stepper.set_input(name, *val); }
+                            apply_input_defaults_validated(&mut stepper, &input_defaults, "Compile");
                             let input_names: Vec<String> = stepper.input_names().to_vec();
                             let symbols = collect_stepper_observables(&stepper);
                             w.steppers.insert(entity, (session_id, cached.model_name.clone(), stepper));
@@ -1069,7 +1098,7 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                 Ok(comp_res) => {
                     match SimStepper::new(&comp_res.dae, opts) {
                         Ok(mut stepper) => {
-                            for (name, val) in &input_defaults { let _ = stepper.set_input(name, *val); }
+                            apply_input_defaults_validated(&mut stepper, &input_defaults, "Compile");
                             let input_names: Vec<String> = stepper.input_names().to_vec();
                             let symbols = collect_stepper_observables(&stepper);
                             w.cached_models.insert(entity, CachedModel {

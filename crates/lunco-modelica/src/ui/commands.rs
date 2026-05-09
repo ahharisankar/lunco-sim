@@ -3114,7 +3114,9 @@ fn on_format_document(trigger: On<FormatDocument>, mut commands: Commands) {
         // edit.
         let mut registry = world.resource_mut::<crate::ui::state::ModelicaDocumentRegistry>();
         if let Some(host) = registry.host_mut(doc) {
-            let _ = host.apply(ModelicaOp::ReplaceSource { new: formatted });
+            if let Err(e) = host.apply(ModelicaOp::ReplaceSource { new: formatted }) {
+                bevy::log::warn!("[FormatDocument] apply failed: {e:?}");
+            }
         }
     });
 }
