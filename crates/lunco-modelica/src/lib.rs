@@ -737,6 +737,8 @@ fn build_modelica_core(app: &mut App) {
         std::sync::Arc::new(experiments_runner::ModelicaRunner::new()),
     ));
     app.init_resource::<experiments_runner::PendingHandles>();
+    app.init_resource::<experiments_runner::ExperimentDrafts>();
+    app.init_resource::<experiments_runner::ExperimentSources>();
     app.add_systems(Update, experiments_runner::drain_pending_handles);
 
     app.configure_sets(

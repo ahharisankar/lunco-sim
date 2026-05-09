@@ -86,6 +86,7 @@ fn synth_panic_result(entity: bevy::prelude::Entity, session_id: u64, msg: &str)
         is_parameter_update: false,
         is_reset: false,
         detected_input_names: Vec::new(),
+        ..Default::default()
     }
 }
 use wasm_bindgen::closure::Closure;

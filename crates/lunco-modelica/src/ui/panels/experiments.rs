@@ -10,6 +10,8 @@
 //! Color picker, inline rename, click-to-load-draft are TODOs left
 //! for the v1 polish pass.
 
+use std::collections::BTreeMap;
+
 use bevy::prelude::*;
 use bevy_egui::egui;
 use egui_plot::{Legend, Line, Plot, PlotPoints};
@@ -66,6 +68,12 @@ impl Panel for ExperimentsPanel {
         // v1 single-twin scope. Multi-twin filter lands when the twin
         // browser plumbs an active TwinId through the workspace.
         let twin = TwinId("default".into());
+
+        // Override editor for the currently active model. Rendered
+        // collapsed by default; opens when the user wants to tweak
+        // parameters before the next Fast Run.
+        self.render_override_editor(ui, world);
+        ui.separator();
 
         // Snapshot for rendering — avoids holding the registry borrow
         // across egui calls.
@@ -316,6 +324,239 @@ impl ExperimentsPanel {
                     plot_ui.line(line);
                 }
             });
+    }
+
+    /// Override + bounds editor for the currently active document's
+    /// top-level model. Detects literal `parameter` declarations in
+    /// the source and shows them as an editable table; non-literal
+    /// params appear greyed with a tooltip.
+    fn render_override_editor(&self, ui: &mut egui::Ui, world: &mut World) {
+        let Some(doc) = world
+            .get_resource::<lunco_workbench::WorkspaceResource>()
+            .and_then(|ws| ws.active_document)
+        else {
+            return;
+        };
+        let registry = match world.get_resource::<crate::ui::state::ModelicaDocumentRegistry>() {
+            Some(r) => r,
+            None => return,
+        };
+        let host = match registry.host(doc) {
+            Some(h) => h,
+            None => return,
+        };
+        let document = host.document();
+        let source = document.source().to_string();
+
+        // Resolve the model class — first non-package top-level class.
+        let model_name = document
+            .strict_ast()
+            .and_then(|ast| {
+                ast.classes
+                    .iter()
+                    .find(|(_, c)| {
+                        !matches!(
+                            c.class_type,
+                            rumoca_session::parsing::ast::ClassType::Package
+                        )
+                    })
+                    .map(|(n, _)| n.clone())
+            })
+            .unwrap_or_default();
+        if model_name.is_empty() {
+            return;
+        }
+        let model_ref = lunco_experiments::ModelRef(model_name.clone());
+
+        let detected =
+            crate::experiments_runner::detect_top_level_literal_parameters(&source);
+        if detected.is_empty() {
+            return;
+        }
+
+        egui::CollapsingHeader::new(format!("⚙ Overrides + Bounds — {}", model_name))
+            .default_open(false)
+            .show(ui, |ui| {
+                use lunco_experiments::{ParamPath, ParamValue};
+
+                // Bounds editor
+                let mut bounds = world
+                    .get_resource::<crate::experiments_runner::ExperimentDrafts>()
+                    .and_then(|d| {
+                        d.get(&model_ref)
+                            .and_then(|dr| dr.bounds_override.clone())
+                    })
+                    .unwrap_or(lunco_experiments::RunBounds {
+                        t_start: 0.0,
+                        t_end: 1.0,
+                        dt: None,
+                        tolerance: None,
+                        solver: None,
+                    });
+                let mut bounds_changed = false;
+                ui.horizontal(|ui| {
+                    ui.label("t_start");
+                    if ui.add(egui::DragValue::new(&mut bounds.t_start).speed(0.1)).changed() {
+                        bounds_changed = true;
+                    }
+                    ui.label("t_end");
+                    if ui.add(egui::DragValue::new(&mut bounds.t_end).speed(0.1)).changed() {
+                        bounds_changed = true;
+                    }
+                    let mut dt_v = bounds.dt.unwrap_or(0.0);
+                    let mut adaptive = bounds.dt.is_none();
+                    if ui.checkbox(&mut adaptive, "adaptive dt").changed() {
+                        bounds.dt = if adaptive { None } else { Some(0.01) };
+                        bounds_changed = true;
+                    }
+                    if !adaptive
+                        && ui
+                            .add(
+                                egui::DragValue::new(&mut dt_v)
+                                    .speed(0.001)
+                                    .range(1e-6..=10.0),
+                            )
+                            .changed()
+                    {
+                        bounds.dt = Some(dt_v);
+                        bounds_changed = true;
+                    }
+                });
+                if bounds_changed {
+                    if let Some(mut drafts) = world
+                        .get_resource_mut::<crate::experiments_runner::ExperimentDrafts>()
+                    {
+                        drafts.entry(model_ref.clone()).bounds_override = Some(bounds);
+                    }
+                }
+
+                ui.separator();
+
+                // Parameter overrides
+                let current_overrides: BTreeMap<ParamPath, ParamValue> = world
+                    .get_resource::<crate::experiments_runner::ExperimentDrafts>()
+                    .and_then(|d| d.get(&model_ref).map(|dr| dr.overrides.clone()))
+                    .unwrap_or_default();
+
+                let mut updates: Vec<(ParamPath, Option<ParamValue>)> = Vec::new();
+
+                egui::Grid::new("override_grid")
+                    .num_columns(4)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.weak("Type");
+                        ui.weak("Name");
+                        ui.weak("Default");
+                        ui.weak("Override");
+                        ui.end_row();
+
+                        for p in &detected {
+                            ui.label(&p.type_name);
+                            ui.label(&p.name);
+                            ui.label(p.default_literal.as_deref().unwrap_or("—"));
+                            let path = ParamPath(p.name.clone());
+                            if !p.supportable {
+                                ui.add_enabled(
+                                    false,
+                                    egui::TextEdit::singleline(&mut String::from("—"))
+                                        .desired_width(80.0),
+                                )
+                                .on_hover_text(
+                                    p.reason
+                                        .clone()
+                                        .unwrap_or_else(|| "unsupported".into()),
+                                );
+                            } else {
+                                let existing = current_overrides.get(&path).cloned();
+                                let mut text = match &existing {
+                                    Some(ParamValue::Real(x)) => format!("{x}"),
+                                    Some(ParamValue::Int(x)) => format!("{x}"),
+                                    Some(ParamValue::Bool(b)) => {
+                                        if *b { "true".into() } else { "false".into() }
+                                    }
+                                    Some(ParamValue::String(s)) => s.clone(),
+                                    Some(ParamValue::Enum(s)) => s.clone(),
+                                    Some(ParamValue::RealArray(_)) => "(array)".into(),
+                                    None => p.default_literal.clone().unwrap_or_default(),
+                                };
+                                let resp = ui.add(
+                                    egui::TextEdit::singleline(&mut text).desired_width(80.0),
+                                );
+                                if resp.lost_focus()
+                                    || resp.ctx.input(|i| i.key_pressed(egui::Key::Enter))
+                                        && resp.has_focus()
+                                {
+                                    if let Some(v) = parse_override(&p.type_name, &text) {
+                                        updates.push((path.clone(), Some(v)));
+                                    } else if text.trim().is_empty() {
+                                        updates.push((path.clone(), None));
+                                    }
+                                }
+                                if existing.is_some() {
+                                    if ui
+                                        .small_button("×")
+                                        .on_hover_text("Clear override")
+                                        .clicked()
+                                    {
+                                        updates.push((path, None));
+                                    }
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+
+                if !updates.is_empty() {
+                    if let Some(mut drafts) = world
+                        .get_resource_mut::<crate::experiments_runner::ExperimentDrafts>()
+                    {
+                        let entry = drafts.entry(model_ref);
+                        for (path, v) in updates {
+                            match v {
+                                Some(value) => {
+                                    entry.overrides.insert(path, value);
+                                }
+                                None => {
+                                    entry.overrides.remove(&path);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+    }
+}
+
+fn parse_override(type_name: &str, text: &str) -> Option<lunco_experiments::ParamValue> {
+    use lunco_experiments::ParamValue;
+    let s = text.trim();
+    if s.is_empty() {
+        return None;
+    }
+    match type_name {
+        "Real" => s.parse::<f64>().ok().map(ParamValue::Real),
+        "Integer" | "Int" => s.parse::<i64>().ok().map(ParamValue::Int),
+        "Boolean" | "Bool" => match s {
+            "true" => Some(ParamValue::Bool(true)),
+            "false" => Some(ParamValue::Bool(false)),
+            _ => None,
+        },
+        "String" => {
+            if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+                Some(ParamValue::String(s[1..s.len() - 1].to_string()))
+            } else {
+                Some(ParamValue::String(s.to_string()))
+            }
+        }
+        _ => {
+            // Best-effort fallback: if it parses as a number, keep it
+            // as Real. Otherwise treat as Enum literal name.
+            if let Ok(x) = s.parse::<f64>() {
+                Some(ParamValue::Real(x))
+            } else {
+                Some(ParamValue::Enum(s.to_string()))
+            }
+        }
     }
 }
 

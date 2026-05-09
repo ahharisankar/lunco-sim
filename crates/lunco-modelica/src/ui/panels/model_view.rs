@@ -1249,7 +1249,11 @@ fn render_unified_toolbar(
         // read-only Example is a valid (and common) workflow. Save
         // stays gated on writable; Compile only waits for an
         // in-flight compile to settle.
-        let compile_enabled = !matches!(compile_state, CompileState::Compiling);
+        let runner_busy = world
+            .get_resource::<crate::ModelicaRunnerResource>()
+            .map(|r| r.0.is_busy())
+            .unwrap_or(false);
+        let compile_enabled = !matches!(compile_state, CompileState::Compiling) && !runner_busy;
         compile_clicked = ui
             .add_enabled(
                 compile_enabled,
@@ -1263,15 +1267,11 @@ fn render_unified_toolbar(
         // Interactive stepping. Bounds come from the model's
         // `experiment(...)` annotation; fallback 0..1.
         // See docs/architecture/25-experiments.md.
-        let runner_busy = world
-            .get_resource::<crate::ModelicaRunnerResource>()
-            .map(|r| r.0.is_busy())
-            .unwrap_or(false);
-        let fast_enabled = compile_enabled && !runner_busy;
+        let fast_enabled = !matches!(compile_state, CompileState::Compiling) && !runner_busy;
         let fast_label = if compact {
             "⏩".to_string()
         } else if runner_busy {
-            "⏩ Fast (busy)".to_string()
+            "⏩ Running…".to_string()
         } else {
             "⏩ Fast".to_string()
         };
@@ -1284,6 +1284,74 @@ fn render_unified_toolbar(
                  annotation.",
             )
             .clicked();
+
+        // Inline bounds + class readout — surfaces what Fast Run will
+        // do without forcing the user to open the Experiments panel.
+        // Reads the same draft + runner-default chain that
+        // FastRunActiveModel uses, so what's shown is what runs.
+        let drilled_class = world
+            .get_resource::<crate::ui::panels::model_view::ModelTabs>()
+            .and_then(|t| t.drilled_class_for_doc(doc));
+        let model_ref_for_readout: Option<lunco_experiments::ModelRef> = drilled_class
+            .clone()
+            .or_else(|| {
+                world
+                    .get_resource::<crate::ui::state::ModelicaDocumentRegistry>()
+                    .and_then(|r| r.host(doc))
+                    .and_then(|h| {
+                        h.document()
+                            .index()
+                            .classes
+                            .values()
+                            .find(|c| !matches!(c.kind, crate::index::ClassKind::Package))
+                            .map(|c| c.name.clone())
+                    })
+            })
+            .map(lunco_experiments::ModelRef);
+        if let Some(model_ref) = model_ref_for_readout {
+            let drafted = world
+                .get_resource::<crate::experiments_runner::ExperimentDrafts>()
+                .and_then(|d| d.get(&model_ref).and_then(|dr| dr.bounds_override.clone()));
+            let bounds = drafted.unwrap_or_else(|| {
+                world
+                    .get_resource::<crate::ModelicaRunnerResource>()
+                    .and_then(|r| {
+                        use lunco_experiments::ExperimentRunner;
+                        r.0.default_bounds(&model_ref)
+                    })
+                    .unwrap_or(lunco_experiments::RunBounds {
+                        t_start: 0.0,
+                        t_end: 1.0,
+                        dt: None,
+                        tolerance: None,
+                        solver: None,
+                    })
+            });
+            if !compact {
+                let dt_text = match bounds.dt {
+                    Some(d) => format!("dt={d:.3}"),
+                    None => "dt=auto".into(),
+                };
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{:.2}→{:.2}s {}",
+                        bounds.t_start, bounds.t_end, dt_text
+                    ))
+                    .monospace()
+                    .size(11.0)
+                    .color(tokens.text_subdued),
+                )
+                .on_hover_text("Fast Run bounds — edit in 🧪 Experiments → ⚙ Overrides + Bounds");
+                if let Some(class) = &drilled_class {
+                    ui.label(
+                        egui::RichText::new(format!("· {}", class))
+                            .size(11.0)
+                            .color(tokens.text_subdued),
+                    )
+                    .on_hover_text("Class that Fast Run will simulate");
+                }
+            }
+        }
 
         // Run-control group. Only meaningful once a stepper exists
         // (i.e. the model compiled and linked a ModelicaModel
@@ -1398,9 +1466,69 @@ fn render_unified_toolbar(
             .trigger(crate::ui::commands::AutoArrangeDiagram { doc });
     }
     if fast_run_clicked {
-        world
-            .commands()
-            .trigger(crate::ui::commands::FastRunActiveModel { doc });
+        // Open the Simulation Setup dialog instead of dispatching
+        // directly. The dialog confirms bounds (prefilled from
+        // annotation defaults / existing draft), then dispatches
+        // FastRunActiveModel on Run.
+        let model_ref = world
+            .get_resource::<crate::ui::panels::model_view::ModelTabs>()
+            .and_then(|t| t.drilled_class_for_doc(doc))
+            .or_else(|| {
+                world
+                    .get_resource::<crate::ui::state::ModelicaDocumentRegistry>()
+                    .and_then(|r| r.host(doc))
+                    .and_then(|h| {
+                        h.document()
+                            .index()
+                            .classes
+                            .values()
+                            .find(|c| !matches!(c.kind, crate::index::ClassKind::Package))
+                            .map(|c| c.name.clone())
+                    })
+            })
+            .map(lunco_experiments::ModelRef);
+        if let Some(model_ref) = model_ref {
+            // Bounds: existing draft override > runner annotation
+            // default > 0..1 fallback.
+            let drafted_bounds = world
+                .get_resource::<crate::experiments_runner::ExperimentDrafts>()
+                .and_then(|d| d.get(&model_ref).and_then(|dr| dr.bounds_override.clone()));
+            let bounds = drafted_bounds.unwrap_or_else(|| {
+                world
+                    .get_resource::<crate::ModelicaRunnerResource>()
+                    .and_then(|r| {
+                        use lunco_experiments::ExperimentRunner;
+                        r.0.default_bounds(&model_ref)
+                    })
+                    .unwrap_or(lunco_experiments::RunBounds {
+                        t_start: 0.0,
+                        t_end: 1.0,
+                        dt: None,
+                        tolerance: None,
+                        solver: None,
+                    })
+            });
+            let overrides_count = world
+                .get_resource::<crate::experiments_runner::ExperimentDrafts>()
+                .and_then(|d| d.get(&model_ref).map(|dr| dr.overrides.len()))
+                .unwrap_or(0);
+            if let Some(mut setup) = world
+                .get_resource_mut::<crate::ui::commands::FastRunSetupState>()
+            {
+                setup.0 = Some(crate::ui::commands::FastRunSetupEntry {
+                    doc,
+                    model_ref,
+                    bounds,
+                    overrides_count,
+                });
+            }
+        } else {
+            // Resolution fallback — dispatch directly so the existing
+            // class-picker (or "no class" warning) fires.
+            world
+                .commands()
+                .trigger(crate::ui::commands::FastRunActiveModel { doc });
+        }
     }
     if compile_clicked {
         match new_view_mode {

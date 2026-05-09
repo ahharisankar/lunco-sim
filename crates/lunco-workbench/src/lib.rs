@@ -559,6 +559,92 @@ impl WorkbenchLayout {
     ///
     /// We always pick the fraction so the panel we just added gets a
     /// small share (20% side, 22% right, 30% bottom).
+    /// Insert a panel into the live dock without rebuilding from
+    /// scratch. Used by the View menu's panel checkbox so toggling
+    /// one tab doesn't wipe instance tabs (model views, etc.) that
+    /// the perspective preset doesn't track. Picks a leaf based on
+    /// the panel's default slot; falls back to the focused leaf.
+    /// Returns true if the panel was inserted.
+    pub(crate) fn insert_panel_into_dock(&mut self, id: PanelId, slot: PanelSlot) -> bool {
+        let tab = TabId::Singleton(id);
+        // Already there? No-op.
+        if self.dock.iter_all_tabs().any(|(_, t)| *t == tab) {
+            return false;
+        }
+        let main = self.dock.main_surface_mut();
+        // Find an existing tab in the same slot to drop next to.
+        let neighbour: Option<PanelId> = match slot {
+            PanelSlot::SideBrowser => self.side_browser.first().copied(),
+            PanelSlot::Center => self.center.first().copied(),
+            PanelSlot::RightInspector => self.right_inspector.first().copied(),
+            PanelSlot::Bottom => self.bottom.first().copied(),
+            PanelSlot::Floating => None,
+        };
+        let target_node: Option<NodeIndex> = neighbour.and_then(|nid| {
+            let target_tab = TabId::Singleton(nid);
+            // Walk all nodes; egui_dock's NodeIndex is opaque so we
+            // probe by index until we find the leaf containing the
+            // sibling tab.
+            let mut found = None;
+            for i in 0..256 {
+                let node = NodeIndex(i);
+                if let Some(node_ref) = main.iter().nth(i) {
+                    if let egui_dock::Node::Leaf(leaf) = node_ref {
+                        if leaf.tabs.iter().any(|t| *t == target_tab) {
+                            found = Some(node);
+                            break;
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+            found
+        });
+        if let Some(node) = target_node {
+            main.set_focused_node(node);
+            main.push_to_focused_leaf(tab);
+        } else {
+            // Last resort: append to focused leaf (whatever the user
+            // had focus on). Better than wiping the dock.
+            main.push_to_focused_leaf(tab);
+        }
+        true
+    }
+
+    /// Remove a panel from the live dock without rebuilding from
+    /// scratch. Companion to [`insert_panel_into_dock`].
+    pub(crate) fn remove_panel_from_dock(&mut self, id: PanelId) -> bool {
+        let tab = TabId::Singleton(id);
+        let mut removed = false;
+        let main = self.dock.main_surface_mut();
+        // Collect node indices to mutate.
+        let mut hits: Vec<(NodeIndex, usize)> = Vec::new();
+        for i in 0..256 {
+            let node = NodeIndex(i);
+            match main.iter().nth(i) {
+                Some(egui_dock::Node::Leaf(leaf)) => {
+                    for (idx, t) in leaf.tabs.iter().enumerate() {
+                        if *t == tab {
+                            hits.push((node, idx));
+                        }
+                    }
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        for (node, idx) in hits.into_iter().rev() {
+            if let Some(egui_dock::Node::Leaf(leaf)) = main.iter_mut().nth(node.0) {
+                if idx < leaf.tabs.len() {
+                    leaf.tabs.remove(idx);
+                    removed = true;
+                }
+            }
+        }
+        removed
+    }
+
     pub(crate) fn rebuild_dock(&mut self) {
         // Filter slot intent down to panels actually registered in this
         // app, so perspective presets can optimistically list panels that
@@ -1299,7 +1385,11 @@ fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut 
                     let mut checked = is_open;
                     if ui.checkbox(&mut checked, title).clicked() {
                         if checked && !is_open {
-                            // Re-dock into the panel's default slot.
+                            // Track in the slot list so persistence /
+                            // perspective queries see it. Insert into
+                            // the *live* dock without a full rebuild
+                            // — rebuild_dock would wipe instance tabs
+                            // (model views) the user has open.
                             match slot {
                                 PanelSlot::SideBrowser => {
                                     if !layout.side_browser.contains(&id) {
@@ -1323,15 +1413,16 @@ fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut 
                                 }
                                 PanelSlot::Floating => {}
                             }
-                            layout.rebuild_dock();
+                            layout.insert_panel_into_dock(id, slot);
                         } else if !checked && is_open {
-                            // Closing via this checkbox: remove from
-                            // every slot AND from the live dock tree.
+                            // Untrack from slot lists.
                             layout.side_browser.retain(|p| *p != id);
                             layout.center.retain(|p| *p != id);
                             layout.right_inspector.retain(|p| *p != id);
                             layout.bottom.retain(|p| *p != id);
-                            layout.rebuild_dock();
+                            // In-place removal — preserves instance
+                            // tabs and any user dock customisations.
+                            layout.remove_panel_from_dock(id);
                         }
                         ui.close();
                     }

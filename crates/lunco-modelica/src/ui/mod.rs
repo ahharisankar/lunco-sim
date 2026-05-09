@@ -523,6 +523,7 @@ impl Perspective for AnalyzePerspective {
         // default active tab).
         layout.set_bottom_tabs(vec![
             PanelId("modelica_graphs"),
+            PanelId("modelica_experiments"),
             PanelId("modelica_diagnostics"),
             PanelId("modelica_console"),
             PanelId("modelica_journal"),
