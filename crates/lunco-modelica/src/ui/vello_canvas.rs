@@ -51,7 +51,6 @@ struct TabTarget {
     scene: Entity,
     /// Last allocated texture size. Future resize pass compares
     /// against the panel's current rect.
-    #[allow(dead_code)]
     size: (u32, u32),
     /// Per-frame buffer: text labels the diagram wants drawn this
     /// frame. The drawing system fills this; the sync system

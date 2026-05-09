@@ -1161,11 +1161,6 @@ fn err_doc_not_found(doc_id: DocumentId) -> ApiResponse {
     )
 }
 
-#[allow(dead_code)] // available for providers that want to surface validation errors
-fn err_invalid_params(msg: impl Into<String>) -> ApiResponse {
-    ApiResponse::error(ApiErrorCode::DeserializationError, msg)
-}
-
 /// Stable string label for a [`DocumentKind`]. Matches the file-extension
 /// taxonomy in [`lunco_twin::file_kind`]. The `Other(s)` escape hatch
 /// passes the inner string through unchanged so future domain crates can

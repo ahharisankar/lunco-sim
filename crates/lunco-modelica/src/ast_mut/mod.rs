@@ -787,27 +787,6 @@ fn append_graphic_to_section(
     Ok(())
 }
 
-/// Parse a single named-annotation fragment (`Foo(x = 1)`) by wrapping
-/// it in a stub class annotation and lifting `class.annotation[0]`.
-/// Returns an `Expression::ClassModification`.
-#[allow(dead_code)]
-fn parse_named_annotation_fragment(text: &str) -> Result<Expression, AstMutError> {
-    let stub = format!(
-        "model __LunCoFragment\nannotation({text});\nend __LunCoFragment;\n"
-    );
-    let parsed = parse_stub_cached(&stub)
-        .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })?;
-    let class = parsed
-        .classes
-        .get("__LunCoFragment")
-        .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })?;
-    class
-        .annotation
-        .first()
-        .cloned()
-        .ok_or(AstMutError::ValueParseFailed { value: text.to_string() })
-}
-
 /// Parse a fragment destined for a graphics array (`{Foo(...), Bar(...)}`)
 /// by wrapping it inside a `Diagram(graphics={text})` annotation and
 /// lifting the array's first element. Returns an
@@ -1628,9 +1607,6 @@ fn ends_with_newline(source: &str, byte_end: usize) -> bool {
 /// (e.g. modifications added by the canvas). Token-number / token-type
 /// stay zero — name resolution and the typechecker re-run after every
 /// mutation, so synthesised tokens get repopulated downstream.
-#[allow(dead_code)] // wired in batch 2 (set_placement) — kept here so the
-                   // construction policy lives next to the helpers that
-                   // need it.
 pub(crate) fn synth_token(text: impl Into<Arc<str>>) -> Token {
     Token {
         text: text.into(),

@@ -160,7 +160,6 @@ fn build_registry() -> VisualRegistry {
             is_causal,
             source_path: d.source_path.clone(),
             target_path: d.target_path.clone(),
-            kind: d.kind,
             flow_vars: d.flow_vars.clone(),
             connector_leaf: leaf,
         }

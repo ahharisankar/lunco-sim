@@ -106,7 +106,6 @@ pub struct InMemoryEntry {
     /// Kept for direct lookups (close-entry, duplicate, etc.); the
     /// re-open path currently resolves via `find_by_path(id)` and
     /// doesn't strictly need this field.
-    #[allow(dead_code)]
     pub doc: DocumentId,
 }
 

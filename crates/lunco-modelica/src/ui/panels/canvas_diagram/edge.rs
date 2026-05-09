@@ -99,8 +99,6 @@ pub(super) struct OrthogonalEdgeVisual {
     pub(super) is_causal: bool,
     pub(super) source_path: String,
     pub(super) target_path: String,
-    #[allow(dead_code)]
-    pub(super) kind: crate::visual_diagram::PortKind,
     pub(super) flow_vars: Vec<crate::visual_diagram::FlowVarMeta>,
     pub(super) connector_leaf: String,
 }
@@ -115,7 +113,6 @@ impl Default for OrthogonalEdgeVisual {
             is_causal: false,
             source_path: String::new(),
             target_path: String::new(),
-            kind: crate::visual_diagram::PortKind::Acausal,
             flow_vars: Vec::new(),
             connector_leaf: String::new(),
         }
