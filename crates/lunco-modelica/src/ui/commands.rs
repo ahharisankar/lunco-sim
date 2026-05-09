@@ -3770,7 +3770,7 @@ fn on_new_plot_panel(trigger: On<NewPlotPanel>, mut commands: Commands) {
             style: serde_json::Value::Null,
         });
         world.commands().trigger(lunco_workbench::OpenTab {
-            kind: lunco_viz::VIZ_PANEL_KIND,
+            kind: crate::ui::panels::graphs::MODELICA_PLOT_KIND,
             instance: id.0,
         });
         bevy::log::info!("[NewPlotPanel] opened `{}` (id={})", title, id.0);

@@ -521,13 +521,22 @@ impl Perspective for AnalyzePerspective {
         // click away for compile / save / error output (VS Code's
         // Terminal/Output/Problems pattern, just with a different
         // default active tab).
+        // Modelica plot is now a multi-instance kind; the first
+        // instance is opened here, pinned to the well-known
+        // `DEFAULT_MODELICA_GRAPH` VizId, and lands in the Bottom
+        // slot alongside these singletons. Telemetry-panel checkboxes
+        // bind to that same default VizId, preserving the historical
+        // behaviour of "tick a variable → it appears in the Graphs tab".
         layout.set_bottom_tabs(vec![
-            PanelId("modelica_graphs"),
             PanelId("modelica_experiments"),
             PanelId("modelica_diagnostics"),
             PanelId("modelica_console"),
             PanelId("modelica_journal"),
         ]);
+        layout.open_instance(
+            crate::ui::panels::graphs::MODELICA_PLOT_KIND,
+            crate::ui::viz::DEFAULT_MODELICA_GRAPH.0,
+        );
     }
 }
 
@@ -706,7 +715,7 @@ impl Plugin for ModelicaUiPlugin {
             .register_panel(lunco_workbench::FilesPanel)
             .register_panel(panels::welcome::WelcomePanel)
             .register_panel(panels::telemetry::TelemetryPanel)
-            .register_panel(panels::graphs::GraphsPanel)
+            .register_instance_panel(panels::graphs::ModelicaPlotPanel)
             .register_panel(panels::console::ConsolePanel)
             .register_panel(panels::diagnostics::DiagnosticsPanel)
             .register_panel(panels::journal::JournalPanel)

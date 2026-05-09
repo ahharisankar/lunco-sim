@@ -1261,6 +1261,7 @@ pub fn render_experiments_plot(ui: &mut egui::Ui, world: &mut World) -> ExpPlotS
     let mut toggle_var: Option<String> = None;
     let mut reset_clicked = false;
     let mut fit_clicked = false;
+    let mut new_plot_clicked = false;
     let scrub_time = world
         .get_resource::<ExperimentVisibility>()
         .and_then(|v| v.scrub_time);
@@ -1311,6 +1312,12 @@ pub fn render_experiments_plot(ui: &mut egui::Ui, world: &mut World) -> ExpPlotS
                     }
                 });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("➕")
+                    .on_hover_text("New plot panel — opens a fresh tab.")
+                    .clicked()
+                {
+                    new_plot_clicked = true;
+                }
                 if ui.small_button("📐 Fit").on_hover_text("Auto-fit axes to data").clicked() {
                     fit_clicked = true;
                 }
@@ -1341,6 +1348,11 @@ pub fn render_experiments_plot(ui: &mut egui::Ui, world: &mut World) -> ExpPlotS
         if let Some(mut vis) = world.get_resource_mut::<ExperimentVisibility>() {
             vis.toggle_var(v);
         }
+    }
+    if new_plot_clicked {
+        world
+            .commands()
+            .trigger(crate::ui::commands::NewPlotPanel::default());
     }
 
     // Plot frame always renders. x-axis label dropped: time is
@@ -1607,6 +1619,7 @@ fn active_doc_units(world: &World) -> std::collections::HashMap<String, String> 
 /// Aggregate counters returned by [`render_experiments_plot`] so the
 /// Graphs panel can fold them into its single header line instead of
 /// rendering its own status text.
+#[derive(Default)]
 pub struct ExpPlotSummary {
     pub total_runs: usize,
     pub visible_runs: usize,
