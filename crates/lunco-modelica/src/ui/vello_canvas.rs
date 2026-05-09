@@ -43,14 +43,10 @@ pub struct VelloCanvasTargets {
 }
 
 struct TabTarget {
-    /// The image vello renders into.
-    image: Handle<Image>,
     /// Cached egui-side handle for `egui::Image::from_texture`.
     /// Captured at creation time — touching `EguiUserTextures`
     /// per-frame conflicts with bevy_egui's own borrow.
     texture_id: egui::TextureId,
-    /// The Camera entity carrying `VelloView` + `RenderTarget::Image`.
-    camera: Entity,
     /// The `VelloScene2d` entity we re-fill each frame.
     scene: Entity,
     /// Last allocated texture size. Future resize pass compares
@@ -144,24 +140,17 @@ fn ensure_targets_for_open_tabs(
             &mut images,
             &mut egui_user_textures,
         );
-        let camera = commands
-            .spawn((
-                Camera2d,
-                Camera::default(),
-                RenderTarget::Image(image.clone().into()),
-                VelloView,
-                VelloCanvasFor(doc),
-            ))
-            .id();
-        let scene = commands
-            .spawn((VelloScene2d::default(), VelloCanvasFor(doc)))
-            .id();
+        commands.spawn((
+            Camera2d,
+            Camera::default(),
+            RenderTarget::Image(image.clone().into()),
+            VelloView,
+        ));
+        let scene = commands.spawn(VelloScene2d::default()).id();
         targets.by_doc.insert(
             doc,
             TabTarget {
-                image,
                 texture_id,
-                camera,
                 scene,
                 size: (DEFAULT_TEX_W, DEFAULT_TEX_H),
                 pending_texts: Vec::new(),
@@ -175,11 +164,6 @@ fn ensure_targets_for_open_tabs(
     // Suppress unused-warning churn while the field is still settling.
     let _ = (commands, targets);
 }
-
-/// Marker so we can later despawn the camera + scene tied to a
-/// closed tab. Phase 1.5 wiring; not consulted yet.
-#[derive(Component)]
-struct VelloCanvasFor(DocumentId);
 
 /// Marker on every text-label entity owned by a per-tab vello render.
 /// Carries the doc id + a compact identity key so the per-frame

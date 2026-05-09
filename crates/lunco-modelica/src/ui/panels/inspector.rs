@@ -374,7 +374,7 @@ fn render_plot_node_editor(
         return;
     }
 
-    let max_h = ui.ctx().screen_rect().height() * 0.6;
+    let max_h = ui.ctx().content_rect().height() * 0.6;
     egui::ScrollArea::vertical()
         .max_height(max_h)
         .auto_shrink([false, true])

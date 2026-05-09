@@ -25,14 +25,9 @@ use crate::annotations::{
     GraphicItem, Line, LinePattern, Point, Polygon, Rectangle, Text,
 };
 
-/// Palette used by the active `paint_graphics_*` call.
-///
-/// Modelica icon rendering happens on the main (egui) thread. We keep
-/// the active `ModelicaIconPalette` in a thread-local so the leaf
-/// helpers (`color_or_default`, `stroke_for`, `effective_fill_color`)
-/// can apply theme remap without re-plumbing every internal signature.
-/// `Option::None` ⇒ identity (no remap), which is the right default
-/// for callers that haven't installed a palette yet.
+// Palette used by the active `paint_graphics_*` call. Kept in a
+// thread-local so the leaf helpers can apply theme remap without
+// re-plumbing every internal signature. `None` ⇒ identity (no remap).
 thread_local! {
     static ACTIVE_PALETTE: std::cell::RefCell<Option<lunco_theme::ModelicaIconPalette>> =
         const { std::cell::RefCell::new(None) };

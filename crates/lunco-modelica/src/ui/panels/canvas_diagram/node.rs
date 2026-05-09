@@ -107,10 +107,6 @@ pub(super) struct IconNodeVisual {
     /// classes show their authored graphics instead of falling back
     /// to a generic placeholder.
     pub(super) icon_graphics: Option<crate::annotations::Icon>,
-    /// `Diagram(...)` graphics for connector instances rendered at
-    /// top-level on a parent diagram. Preferred over `icon_graphics`
-    /// when present.
-    pub(super) diagram_graphics: Option<crate::annotations::Diagram>,
     /// Conditional component flag — render dimmed.
     pub(super) is_conditional: bool,
     /// Pre-formatted `(parameter_name, value)` pairs for `%paramName`
@@ -627,7 +623,7 @@ pub(super) fn paint_hover_card(
 
     // Anchor card to the right of the cursor with a small offset;
     // flip to the left if we'd run off the screen edge.
-    let screen = ui.ctx().screen_rect();
+    let screen = ui.ctx().content_rect();
     let mut origin =
         egui::pos2(cursor.x + 14.0, cursor.y + 14.0);
     if origin.x + card_w > screen.max.x {

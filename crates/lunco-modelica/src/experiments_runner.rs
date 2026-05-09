@@ -889,7 +889,7 @@ pub fn drain_pending_handles(
                     );
                     // Auto-visible: a run that just completed is what
                     // the user is looking at, no checkbox needed.
-                    if let Some(mut vis) = visibility.as_mut() {
+                    if let Some(vis) = visibility.as_mut() {
                         vis.visible.insert(handle.run_id);
                     }
                     if let Some(c) = console.as_mut() {

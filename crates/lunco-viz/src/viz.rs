@@ -99,10 +99,10 @@ mod color_opt {
     use bevy_egui::egui::Color32;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    pub fn serialize<S: Serializer>(c: &Option<Color32>, s: S) -> Result<S::Ok, S::Error> {
+    pub(super) fn serialize<S: Serializer>(c: &Option<Color32>, s: S) -> Result<S::Ok, S::Error> {
         c.map(|c| [c.r(), c.g(), c.b()]).serialize(s)
     }
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Color32>, D::Error> {
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Color32>, D::Error> {
         let opt: Option<[u8; 3]> = Option::deserialize(d)?;
         Ok(opt.map(|[r, g, b]| Color32::from_rgb(r, g, b)))
     }

@@ -34,10 +34,7 @@
 use bevy_egui::egui;
 use lunco_doc::DocumentId;
 use lunco_workbench::{BrowserAction, BrowserCtx, BrowserSection};
-use rumoca_session::parsing::ast::ClassDef;
 use rumoca_session::parsing::ClassType;
-
-use crate::document::SyntaxCache;
 
 // `DrilledInClassNames` reads migrated to
 // `crate::ui::panels::model_view::drilled_class_for_doc` (B.3).
@@ -52,8 +49,6 @@ struct ClassEntry {
     qualified_path: String,
     /// Modelica class kind — drives the row's letter badge.
     kind: ClassType,
-    /// Description string (the `"…"` after the class header), if present.
-    description: Option<String>,
     /// Children — nested classes inside a package / model.
     children: Vec<ClassEntry>,
 }
@@ -271,11 +266,6 @@ fn classes_from_index(index: &crate::index::ModelicaIndex) -> (Vec<ClassEntry>, 
             .next()
             .unwrap_or(&entry.name)
             .to_string();
-        let description = if entry.description.is_empty() {
-            None
-        } else {
-            Some(entry.description.clone())
-        };
         let mut children: Vec<ClassEntry> = entry
             .children
             .iter()
@@ -286,7 +276,6 @@ fn classes_from_index(index: &crate::index::ModelicaIndex) -> (Vec<ClassEntry>, 
             short_name: short,
             qualified_path: entry.name.clone(),
             kind: map_kind(entry.kind),
-            description,
             children,
         })
     }
@@ -538,7 +527,7 @@ mod tests {
     fn parses_top_level_models() {
         let src = r#"
 model A end A;
-model B "with description" end B;
+model B end B;
 "#;
         let (cs, errors) = parse_classes(src);
         assert!(!errors);
@@ -546,7 +535,7 @@ model B "with description" end B;
         assert_eq!(cs[0].short_name, "A");
         assert_eq!(cs[0].qualified_path, "A");
         assert!(matches!(cs[0].kind, ClassType::Model));
-        assert_eq!(cs[1].description.as_deref(), Some("with description"));
+        assert_eq!(cs[1].short_name, "B");
     }
 
     #[test]

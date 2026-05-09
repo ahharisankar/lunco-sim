@@ -1073,7 +1073,7 @@ fn register_local_class(
         // walk dropped (typical when MSL bases haven't been ingested
         // yet). Empty engine icons are explicit "no inheritance
         // contribution"; the local annotation fills the gap.
-        (Some(eng), local) if !eng.graphics.is_empty() => Some(eng),
+        (Some(eng), _local) if !eng.graphics.is_empty() => Some(eng),
         (_, Some(local)) => Some(local),
         (Some(eng), None) => Some(eng),
         (None, None) => None,

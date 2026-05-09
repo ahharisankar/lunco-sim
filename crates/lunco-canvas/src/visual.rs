@@ -31,7 +31,6 @@
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use bevy_egui::egui;
 use serde::{Deserialize, Serialize};

@@ -576,7 +576,7 @@ pub fn drive_engine_sync(
 /// negligible.
 pub fn drain_worker_parse_results(
     handle: Res<ModelicaEngineHandle>,
-    mut registry: ResMut<crate::ui::state::ModelicaDocumentRegistry>,
+    registry: ResMut<crate::ui::state::ModelicaDocumentRegistry>,
 ) {
     #[cfg(target_arch = "wasm32")]
     {

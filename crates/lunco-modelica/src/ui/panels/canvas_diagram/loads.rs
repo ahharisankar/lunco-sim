@@ -10,9 +10,6 @@
 //! pending tasks.
 
 use bevy::prelude::*;
-use bevy::tasks::Task;
-use lunco_doc::DocumentId;
-use std::collections::HashMap;
 use crate::ui::state::ModelicaDocumentRegistry;
 
 /// Tab-to-class binding for drill-in tabs whose document hasn't

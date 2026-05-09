@@ -33,25 +33,8 @@
 
 use bevy::prelude::*;
 use bevy_egui::egui;
-use lunco_canvas::{
-    Canvas, DrawCtx, Edge as CanvasEdge, EdgeVisual, NavBarOverlay, Node as CanvasNode,
-    NodeId as CanvasNodeId, NodeVisual, Pos as CanvasPos, Port as CanvasPort,
-    PortId as CanvasPortId, PortRef, Rect as CanvasRect, Scene, VisualRegistry,
-};
-use lunco_workbench::{Panel, PanelId, PanelSlot};
-use serde_json::Value as JsonValue;
-use std::collections::HashMap;
-
-use crate::ui::state::{ModelicaDocumentRegistry, WorkbenchState};
-use crate::ui::theme::ModelicaThemeExt;
-use crate::visual_diagram::{DiagramNodeId, MSLComponentDef, VisualDiagram};
-// `Document` is the trait that exposes `.generation()` on
-// `ModelicaDocument`; `DocumentHost::document()` returns a bare `&D`
-// so we need the trait in scope to call generation on it.
-use lunco_doc::Document;
-// Modelica op set + pretty-printer types for constructing payloads.
-use crate::document::ModelicaOp;
-use crate::pretty::{self, Placement};
+use lunco_canvas::{Canvas, NavBarOverlay, VisualRegistry};
+use lunco_workbench::PanelId;
 
 pub const CANVAS_DIAGRAM_PANEL_ID: PanelId = PanelId("modelica_canvas_diagram");
 
@@ -87,19 +70,9 @@ pub use edge::ConnectionEdgeData;
 pub use node::IconNodeData;
 pub use projection::ProjectionTask;
 
-use node::{IconNodeVisual, paint_flow_dots, paint_hover_card};
-use projection::{project_scene, projection_relevant_source_hash, recover_edges_from_ast};
-
-use paint::{wire_color_for, dist_point_to_segment, paint_wire_tooltip, paint_arrowhead, brighten, paint_dashed_rect, segment_dist_sq};
-use port::{
-    PortShape, paint_input_control_widget, paint_port_shape, port_fallback_offset_for_size,
-    port_kind_str, resolve_port_icons,
-};
-use edge::{OrthogonalEdgeVisual, PortDir, edge_hover_text, port_edge_dir, route_orthogonal};
-use theme::{
-    canvas_theme_from_ctx, layer_theme_from, modelica_icon_palette_from_ctx,
-    store_canvas_theme, store_modelica_icon_palette,
-};
+use node::IconNodeVisual;
+use paint::wire_color_for;
+use edge::OrthogonalEdgeVisual;
 
 
 
@@ -144,7 +117,6 @@ fn build_registry() -> VisualRegistry {
             icon_only: d.icon_only,
             expandable_connector: d.expandable_connector,
             icon_graphics: d.icon_graphics.clone(),
-            diagram_graphics: d.diagram_graphics.clone(),
             parameters: d.parameters.clone(),
             rotation_deg: d.rotation_deg,
             mirror_x: d.mirror_x,
@@ -272,9 +244,6 @@ pub mod coords {
         ))
     }
 }
-
-use coords::{canvas_to_modelica, ModelicaPos};
-
 
 
 

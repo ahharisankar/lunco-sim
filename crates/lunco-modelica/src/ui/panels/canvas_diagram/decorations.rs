@@ -7,8 +7,6 @@
 //! and produces the layer's primitives via `paint_graphics` /
 //! text-node materialisation.
 
-use bevy_egui::egui;
-
 use super::BackgroundDiagramHandle;
 
 /// Paints the target class's `Diagram(graphics={...})` annotation as

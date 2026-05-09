@@ -7,28 +7,26 @@
 
 use bevy::prelude::*;
 use bevy_egui::egui;
-use lunco_canvas::{Canvas, NavBarOverlay, Scene};
+use lunco_canvas::Scene;
 use lunco_doc::Document;
 use lunco_workbench::{Panel, PanelId, PanelSlot};
 
 use crate::document::ModelicaOp;
-use crate::ui::state::{ModelicaDocumentRegistry, WorkbenchState};
-use crate::ui::theme::ModelicaThemeExt;
+use crate::ui::state::ModelicaDocumentRegistry;
 
 use super::loads::{DrillInLoads, DuplicateLoads, drill_into_class};
 use super::node::IconNodeData;
 use super::ops::{self, apply_ops_public};
 use super::projection::{
-    self, ProjectionTask, project_scene, projection_relevant_source_hash, recover_edges_from_ast,
+    ProjectionTask, project_scene, projection_relevant_source_hash, recover_edges_from_ast,
 };
-use super::pulse::{EdgePulseLayer, PulseGlowLayer};
 use super::theme::{
     CanvasThemeSnapshot, layer_theme_from, store_canvas_theme, store_modelica_icon_palette,
 };
 use super::{
-    BackgroundDiagramHandle, CANVAS_DIAGRAM_PANEL_ID, CanvasDiagramState, CanvasDocState,
-    CanvasSnapSettings, ContextMenuTarget, DiagramProjectionLimits, ICON_W, PendingContextMenu,
-    active_doc_from_world, build_registry, decorations, menus, overlays, palette, render_target,
+    CANVAS_DIAGRAM_PANEL_ID, CanvasDiagramState, CanvasSnapSettings, ContextMenuTarget,
+    DiagramProjectionLimits, ICON_W, PendingContextMenu, active_doc_from_world, decorations,
+    menus, overlays, render_target,
 };
 
 // Per-event sibling-scene replay (`apply_event_to_sibling_scene`)
@@ -189,8 +187,6 @@ impl Panel for CanvasDiagramPanel {
                     if new_hash == docstate.last_seen_source_hash {
                         // Mark the gen as seen so the render loop
                         // doesn't keep re-checking every frame.
-                        // Drop the read-only borrow first.
-                        drop(state);
                         let mut state =
                             world.resource_mut::<CanvasDiagramState>();
                         let docstate = match render_tab_id { Some(t) => state.get_mut_for_tab(t, doc_id), None => state.get_mut(Some(doc_id)) };
@@ -233,7 +229,6 @@ impl Panel for CanvasDiagramPanel {
                     // Panel::render are careful to do this; this one
                     // forgot — without the call below the entire
                     // bg-parse window paints nothing.
-                    drop(registry);
                     self.render_canvas(ui, world);
                     return;
                 };
@@ -253,7 +248,6 @@ impl Panel for CanvasDiagramPanel {
                 // the loading overlay and retry next tick. Mirrors
                 // the host-not-found branch above.
                 let Some(ast) = doc.strict_ast() else {
-                    drop(registry);
                     self.render_canvas(ui, world);
                     return;
                 };
@@ -927,7 +921,7 @@ impl CanvasDiagramPanel {
         let trace_phases = std::env::var_os("RENDER_CANVAS_TRACE").is_some();
         let mut phase_t = web_time::Instant::now();
         let mut phase_log: Vec<(&'static str, f64)> = Vec::new();
-        let mut mark = |label: &'static str, t: &mut web_time::Instant, log: &mut Vec<(&'static str, f64)>| {
+        let mark = |label: &'static str, t: &mut web_time::Instant, log: &mut Vec<(&'static str, f64)>| {
             let ms = t.elapsed().as_secs_f64() * 1000.0;
             if ms > 1.0 {
                 log.push((label, ms));
@@ -1521,7 +1515,7 @@ impl CanvasDiagramPanel {
         // showing right now" — more reliable than our own cache
         // sync, because `context_menu` may open/close between frames
         // without going through our code path.
-        let popup_was_open_before = ui.ctx().memory(|m| m.any_popup_open());
+        let popup_was_open_before = egui::Popup::is_any_open(ui.ctx());
 
         // Track whether this frame wants to dismiss (second-right-
         // click to close). If so, we SKIP `response.context_menu()`
@@ -1543,7 +1537,7 @@ impl CanvasDiagramPanel {
                 .context_menu
                 .is_some();
             if our_menu_cached {
-                ui.ctx().memory_mut(|m| m.close_all_popups());
+                egui::Popup::close_all(ui.ctx());
                 world
                     .resource_mut::<CanvasDiagramState>()
                     .get_mut(active_doc)
@@ -1576,7 +1570,7 @@ impl CanvasDiagramPanel {
                         .resource_mut::<CanvasDiagramState>()
                         .get_mut(active_doc)
                         .context_menu = None;
-                    ui.ctx().memory_mut(|m| m.close_all_popups());
+                    egui::Popup::close_all(ui.ctx());
                     suppress_menu = true;
                 } else {
                     // If egui still thinks a popup is open (from a
@@ -1585,7 +1579,7 @@ impl CanvasDiagramPanel {
                     // one without egui deduping against the stale
                     // popup id.
                     if popup_was_open_before {
-                        ui.ctx().memory_mut(|m| m.close_all_popups());
+                        egui::Popup::close_all(ui.ctx());
                     }
                     // Fresh right-click: capture world position +
                     // hit-test origin while `press_origin` still
@@ -1680,7 +1674,7 @@ impl CanvasDiagramPanel {
         // an entry) and we still have a cache, drop the cache.
         // Running this *after* keeps us from clearing the cache we
         // just populated on a fresh right-click.
-        let popup_open_now = ui.ctx().memory(|m| m.any_popup_open());
+        let popup_open_now = egui::Popup::is_any_open(ui.ctx());
         if !popup_open_now
             && world
                 .resource::<CanvasDiagramState>()

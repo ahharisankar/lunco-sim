@@ -8,7 +8,7 @@
 use bevy::prelude::*;
 use bevy_egui::egui;
 
-use crate::ui::state::{ModelicaDocumentRegistry, WorkbenchState};
+use crate::ui::state::ModelicaDocumentRegistry;
 use crate::ui::theme::ModelicaThemeExt;
 
 use super::active_doc_from_world;

@@ -2183,11 +2183,11 @@ fn first_quoted(s: &str) -> Option<String> {
 /// Native: walks the `<cache>/msl/Modelica/` filesystem.
 /// Wasm: walks the in-memory bundle's HashMap keys (microseconds).
 fn resolve_msl_path_to_file(rel_path: &str) -> Option<std::path::PathBuf> {
-    use std::path::PathBuf;
     let parts: Vec<&str> = rel_path.split('.').collect();
 
     #[cfg(target_arch = "wasm32")]
     {
+        use std::path::PathBuf;
         let bundle = match lunco_assets::msl::global_msl_source()? {
             lunco_assets::msl::MslAssetSource::InMemory(b) => b.clone(),
             _ => return None,

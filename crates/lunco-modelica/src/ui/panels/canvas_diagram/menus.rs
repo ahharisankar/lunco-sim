@@ -160,7 +160,7 @@ pub(super) fn render_plot_node_menu(
             );
             return;
         }
-        let max_h = ui.ctx().screen_rect().height() * 0.7;
+        let max_h = ui.ctx().content_rect().height() * 0.7;
         egui::ScrollArea::vertical()
             .max_height(max_h)
             .auto_shrink([false, true])
@@ -291,7 +291,7 @@ pub(super) fn render_empty_menu(
         // mirror that simpler structure (probably means dropping
         // the ScrollArea wrapper too).
         const ROW_PX: f32 = 18.0;
-        let max_h = (ui.ctx().screen_rect().height() * 0.7).max(180.0);
+        let max_h = (ui.ctx().content_rect().height() * 0.7).max(180.0);
         let wanted = ((sigs.len() + 3) as f32 * ROW_PX).min(max_h);
         ui.set_min_height(wanted);
         if ui.button("Empty plot (bind later)").clicked() {
@@ -312,7 +312,7 @@ pub(super) fn render_empty_menu(
         // for height — the popup itself only grows as tall as it
         // needs. `false` for width so long names don't trigger a
         // horizontal scrollbar.
-        let max_h = ui.ctx().screen_rect().height() * 0.8;
+        let max_h = ui.ctx().content_rect().height() * 0.8;
         egui::ScrollArea::vertical()
             .max_height(max_h)
             .auto_shrink([false, true])

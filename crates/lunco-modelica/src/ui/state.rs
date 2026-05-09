@@ -23,8 +23,6 @@ use lunco_doc::{DocumentHost, DocumentId, DocumentOrigin};
 #[cfg(target_arch = "wasm32")]
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use std::sync::Arc;
-
 use crate::document::{ModelicaDocument, ModelicaOp};
 
 // ---------------------------------------------------------------------------
@@ -274,16 +272,14 @@ impl CompileStates {
 /// `open_model.detected_name`. Returns `None` when the doc has no
 /// AST yet (parse pending) or when no model declaration exists.
 pub fn detected_name_for(world: &bevy::prelude::World, doc: DocumentId) -> Option<String> {
-    use lunco_doc::Document as _;
-    let host = world.resource::<ModelicaDocumentRegistry>().host(doc)?;
+let host = world.resource::<ModelicaDocumentRegistry>().host(doc)?;
     let ast = host.document().strict_ast()?;
     crate::ast_extract::extract_model_name_from_ast(&ast)
 }
 
 /// Read-only flag for `doc`. Replaces `open_model.read_only`.
 pub fn read_only_for(world: &bevy::prelude::World, doc: DocumentId) -> bool {
-    use lunco_doc::Document as _;
-    world
+world
         .resource::<ModelicaDocumentRegistry>()
         .host(doc)
         .map(|h| h.document().is_read_only())
@@ -292,8 +288,7 @@ pub fn read_only_for(world: &bevy::prelude::World, doc: DocumentId) -> bool {
 
 /// Display name for `doc`. Replaces `open_model.display_name`.
 pub fn display_name_for(world: &bevy::prelude::World, doc: DocumentId) -> Option<String> {
-    use lunco_doc::Document as _;
-    world
+world
         .resource::<ModelicaDocumentRegistry>()
         .host(doc)
         .map(|h| h.document().origin().display_name().to_string())
