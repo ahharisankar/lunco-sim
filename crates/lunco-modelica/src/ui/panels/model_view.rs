@@ -161,6 +161,15 @@ pub fn drilled_class_for_doc(
 pub struct ModelTabs {
     tabs: HashMap<TabId, ModelTabState>,
     next_id: u64,
+    /// VS Code-style preview-tab slot. Holds the TabId that gets
+    /// **evicted** when [`Self::ensure_preview_for`] allocates a new
+    /// preview. Cleared by [`Self::pin`] and [`Self::close_tab`].
+    ///
+    /// Invariant: TabId → `(doc, drilled_class)` is immutable for the
+    /// tab's lifetime. Preview reuse is eviction-then-allocation, not
+    /// silent rebind — keeps per-tab state (CanvasDocState etc.)
+    /// consistent for as long as the TabId exists.
+    preview_slot: Option<TabId>,
 }
 
 impl ModelTabs {
@@ -226,11 +235,16 @@ impl ModelTabs {
     /// Browser-click entry point with VS Code preview-tab semantics:
     ///
     /// 1. If a tab already matches `(doc, drilled_class)` → focus it
-    ///    (no churn, no duplication).
-    /// 2. Else if an *unpinned* preview tab exists → repurpose it
-    ///    (mutate its `doc`/`drilled_class` in place, keep `view_mode`)
-    ///    so casual click-around doesn't pile up dozens of tabs.
-    /// 3. Else → allocate a fresh **unpinned** tab.
+    ///    (returns `(id, None)`).
+    /// 2. Else allocate a fresh **unpinned** tab as the new preview.
+    ///    If a preview tab was already in the slot, return its TabId
+    ///    in the second element so the caller closes it. Returns
+    ///    `(new_id, Some(old_preview_id))` in that case, or
+    ///    `(new_id, None)` if no prior preview existed.
+    ///
+    /// Invariant: never mutates an existing tab's `(doc, drilled_class)`
+    /// binding. Preview reuse is eviction-then-allocation, not silent
+    /// rebind.
     ///
     /// Pinning happens automatically on the first edit / drill-in
     /// (see [`pin`]) or explicitly via the tab's right-click menu.
@@ -238,16 +252,11 @@ impl ModelTabs {
         &mut self,
         doc: DocumentId,
         drilled_class: Option<String>,
-    ) -> TabId {
+    ) -> (TabId, Option<TabId>) {
         if let Some((id, _)) = self.tabs.iter().find(|(_, s)| {
             s.doc == doc && s.drilled_class.as_deref() == drilled_class.as_deref()
         }) {
-            return *id;
-        }
-        if let Some((id, state)) = self.tabs.iter_mut().find(|(_, s)| !s.pinned) {
-            state.doc = doc;
-            state.drilled_class = drilled_class;
-            return *id;
+            return (*id, None);
         }
         let id = self.allocate_id();
         self.tabs.insert(
@@ -260,7 +269,10 @@ impl ModelTabs {
                 load_error: None,
             },
         );
-        id
+        // The new tab takes the preview slot; the previous occupant
+        // (if any) is returned for the caller to close.
+        let evict = self.preview_slot.replace(id);
+        (id, evict)
     }
 
     /// Always allocate a fresh tab for `(doc, drilled_class)` even
@@ -286,11 +298,15 @@ impl ModelTabs {
         id
     }
 
-    /// Mark `tab_id` as pinned (no-op if already pinned). Called
-    /// from edit hooks and the tab's right-click "Pin" action.
+    /// Mark `tab_id` as pinned (no-op if already pinned). Called from
+    /// edit hooks and the tab's right-click "Pin" action. Also clears
+    /// the preview slot if the pinned tab was occupying it.
     pub fn pin(&mut self, tab_id: TabId) {
         if let Some(state) = self.tabs.get_mut(&tab_id) {
             state.pinned = true;
+        }
+        if self.preview_slot == Some(tab_id) {
+            self.preview_slot = None;
         }
     }
 
@@ -298,10 +314,17 @@ impl ModelTabs {
     /// edit-side hook that promotes a preview tab to persistent
     /// the moment the user makes any structural change.
     pub fn pin_all_for_doc(&mut self, doc: DocumentId) {
-        for state in self.tabs.values_mut() {
+        let mut clear_preview = false;
+        for (id, state) in self.tabs.iter_mut() {
             if state.doc == doc {
                 state.pinned = true;
+                if self.preview_slot == Some(*id) {
+                    clear_preview = true;
+                }
             }
+        }
+        if clear_preview {
+            self.preview_slot = None;
         }
     }
 
@@ -309,7 +332,11 @@ impl ModelTabs {
     // use `ensure_for(doc, None)` directly.
 
     /// Close the specific tab. Returns the tab state if it existed.
+    /// Also clears the preview slot if the closed tab was occupying it.
     pub fn close_tab(&mut self, tab_id: TabId) -> Option<ModelTabState> {
+        if self.preview_slot == Some(tab_id) {
+            self.preview_slot = None;
+        }
         self.tabs.remove(&tab_id)
     }
 

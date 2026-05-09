@@ -878,7 +878,7 @@ pub fn handle_package_loading_tasks(
     mut workbench: ResMut<WorkbenchState>,
     mut registry: ResMut<ModelicaDocumentRegistry>,
     mut model_tabs: ResMut<crate::ui::panels::model_view::ModelTabs>,
-    mut layout: ResMut<lunco_workbench::WorkbenchLayout>,
+    _layout: ResMut<lunco_workbench::WorkbenchLayout>,
     // `egui_ctx` was used to shape the bg-precomputed galley for
     // `OpenModel.cached_galley` (B.3 phase 6, retired). Param kept
     // for now since other handlers may need it; prefix `_` silences
@@ -992,12 +992,10 @@ pub fn handle_package_loading_tasks(
         // Sync active document into the Workspace session.
         workspace.active_document = Some(doc_id);
 
-        // Open (or focus) the multi-instance tab for this document.
-        let tab_id = model_tabs.ensure_for(doc_id, None);
-        layout.open_instance(
-            crate::ui::panels::model_view::MODEL_VIEW_KIND,
-            tab_id,
-        );
+        // The tab was already opened synchronously by `open_model`
+        // with the drilled scope from `PendingDrillIns`. Re-opening
+        // here with `ensure_for(doc, None)` would allocate a second
+        // (undrilled) tab — TabId bindings are immutable.
     }
 }
 
@@ -2402,15 +2400,37 @@ pub(crate) fn open_model(
         .resource::<ModelicaDocumentRegistry>()
         .find_by_path(&path_buf);
     // Closure picks `ensure_for` (pinned, persistent) vs
-    // `ensure_preview_for` (replaces the unpinned preview slot).
+    // `ensure_preview_for` (slot-eviction preview semantics). When the
+    // preview path evicts an existing preview tab, this closure
+    // performs the eviction inline so the caller just sees a TabId.
     let acquire_tab = |world: &mut World, doc: lunco_doc::DocumentId| {
-        let mut tabs = world
-            .resource_mut::<crate::ui::panels::model_view::ModelTabs>();
-        if pinned {
-            tabs.ensure_for(doc, target_class.clone())
-        } else {
-            tabs.ensure_preview_for(doc, target_class.clone())
+        let (tab_id, evict) = {
+            let mut tabs = world
+                .resource_mut::<crate::ui::panels::model_view::ModelTabs>();
+            if pinned {
+                (tabs.ensure_for(doc, target_class.clone()), None)
+            } else {
+                tabs.ensure_preview_for(doc, target_class.clone())
+            }
+        };
+        if let Some(old_id) = evict {
+            // Evict the previous preview. Layout mutation goes through
+            // the deferred CloseTab trigger because WorkbenchLayout is
+            // removed from the World for the duration of rendering.
+            world.commands().trigger(lunco_workbench::CloseTab {
+                kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
+                instance: old_id,
+            });
+            world
+                .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
+                .close_tab(old_id);
+            if let Some(mut state) = world
+                .get_resource_mut::<crate::ui::panels::canvas_diagram::CanvasDiagramState>()
+            {
+                state.drop_tab(old_id);
+            }
         }
+        tab_id
     };
     if let Some(doc) = already_open {
         // B.3 phase 3: drilled scope flows through `acquire_tab`'s

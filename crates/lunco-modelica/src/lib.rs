@@ -627,6 +627,7 @@ impl Plugin for ModelicaPlugin {
     fn build(&self, app: &mut App) {
         build_modelica_core(app);
         app.add_plugins(ui::ModelicaUiPlugin);
+        app.add_plugins(lunco_doc_bevy::ViewSyncPlugin);
         // Self-register with the workbench's plugin-driven document-
         // kind registry so File→New, the file picker, the library
         // browser, and `twin.toml` parsers all see Modelica without

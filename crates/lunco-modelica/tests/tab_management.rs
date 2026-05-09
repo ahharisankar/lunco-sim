@@ -53,23 +53,33 @@ fn ensure_for_pins_new_tabs_by_default() {
 #[test]
 fn ensure_preview_for_new_doc_creates_unpinned() {
     let mut tabs = ModelTabs::default();
-    let id = tabs.ensure_preview_for(doc(1), None);
+    let (id, evict) = tabs.ensure_preview_for(doc(1), None);
+    assert!(evict.is_none(), "no prior preview to evict");
     let state = tabs.get(id).expect("tab present");
     assert!(!state.pinned, "preview tabs must NOT be pinned on first open");
 }
 
 #[test]
-fn ensure_preview_for_repurposes_existing_preview() {
-    // Browser click on doc(1), then click on doc(2) — should reuse
-    // the preview slot, not allocate a second tab. Mirrors VS Code
-    // single-click navigation.
+fn ensure_preview_for_evicts_old_preview_and_allocates_new() {
+    // Browser click on doc(1), then click on doc(2). Architectural
+    // invariant: TabId → (doc, drilled) is immutable. So instead of
+    // mutating the existing preview's binding, ensure_preview_for
+    // returns the OLD preview's id for the caller to close, and
+    // allocates a NEW TabId for the second click. Per-tab state
+    // keyed on TabId never gets stranded.
     let mut tabs = ModelTabs::default();
-    let preview = tabs.ensure_preview_for(doc(1), None);
-    let preview_2 = tabs.ensure_preview_for(doc(2), None);
-    assert_eq!(preview, preview_2, "preview slot must be reused");
-    let state = tabs.get(preview_2).expect("tab present");
-    assert_eq!(state.doc, doc(2), "preview slot now holds doc(2)");
-    assert!(!state.pinned, "still unpinned after reuse");
+    let (preview_a, evict_a) = tabs.ensure_preview_for(doc(1), None);
+    assert!(evict_a.is_none(), "no prior preview");
+    let (preview_b, evict_b) = tabs.ensure_preview_for(doc(2), None);
+    assert_eq!(evict_b, Some(preview_a), "old preview returned for eviction");
+    assert_ne!(preview_a, preview_b, "new TabId allocated, not reused");
+    // The caller is expected to close `evict_b` (preview_a). Simulate
+    // that here so the post-state matches "after eviction".
+    tabs.close_tab(preview_a);
+    assert!(tabs.get(preview_a).is_none(), "old preview gone");
+    let state_b = tabs.get(preview_b).expect("new preview present");
+    assert_eq!(state_b.doc, doc(2));
+    assert!(!state_b.pinned, "still unpinned");
 }
 
 #[test]
@@ -78,8 +88,9 @@ fn ensure_preview_for_focuses_existing_match() {
     // touch the preview slot. Independent of pinned state.
     let mut tabs = ModelTabs::default();
     let pinned_id = tabs.ensure_for(doc(1), None);
-    let focused = tabs.ensure_preview_for(doc(1), None);
+    let (focused, evict) = tabs.ensure_preview_for(doc(1), None);
     assert_eq!(focused, pinned_id, "must focus existing pinned tab, not allocate");
+    assert!(evict.is_none(), "no eviction when matching existing tab");
     assert_eq!(tabs.count_for_doc(doc(1)), 1, "no duplicate created");
 }
 
@@ -87,43 +98,51 @@ fn ensure_preview_for_focuses_existing_match() {
 fn ensure_preview_for_does_not_steal_pinned_tab() {
     // Browser-click on a different doc with no preview slot
     // available (only pinned tabs exist) → allocate a fresh
-    // unpinned tab. Pinned tabs must NEVER be repurposed.
+    // unpinned tab. Pinned tabs are never even considered — the
+    // architectural invariant (TabId binding immutable) makes the
+    // "steal" case structurally impossible regardless of pinned state.
     let mut tabs = ModelTabs::default();
     let pinned = tabs.ensure_for(doc(1), None);
-    let preview = tabs.ensure_preview_for(doc(2), None);
+    let (preview, evict) = tabs.ensure_preview_for(doc(2), None);
     assert_ne!(pinned, preview);
+    assert!(evict.is_none(), "no prior preview slot occupant");
     assert!(tabs.get(pinned).unwrap().pinned, "pinned tab unchanged");
     assert!(!tabs.get(preview).unwrap().pinned, "new preview unpinned");
+    assert_eq!(tabs.get(pinned).unwrap().doc, doc(1), "pinned still on doc(1)");
 }
 
 #[test]
-fn pin_promotes_preview_to_pinned() {
+fn pin_promotes_preview_to_pinned_and_clears_slot() {
     let mut tabs = ModelTabs::default();
-    let id = tabs.ensure_preview_for(doc(1), None);
+    let (id, _) = tabs.ensure_preview_for(doc(1), None);
     assert!(!tabs.get(id).unwrap().pinned);
     tabs.pin(id);
     assert!(tabs.get(id).unwrap().pinned, "pin must promote");
+    // After pinning the preview slot must be cleared — the next
+    // `ensure_preview_for` on a different doc should allocate fresh
+    // without evicting the now-pinned tab.
+    let (other, evict) = tabs.ensure_preview_for(doc(2), None);
+    assert!(evict.is_none(), "pinned tab is no longer in preview slot");
+    assert_ne!(other, id, "fresh tab for the new preview");
+    assert!(tabs.get(id).unwrap().pinned, "previously-pinned tab still alive");
 }
 
 #[test]
 fn pin_all_for_doc_promotes_every_matching_tab() {
-    // Build the layout in order so the unpinned preview slot doesn't
-    // get repurposed: pin doc(1)'s preview *before* asking for
-    // doc(2)'s preview, otherwise `ensure_preview_for(doc(2))`
-    // mutates tab `a` to point at doc(2) (preview-slot reuse — the
-    // exact behaviour `ensure_preview_for_repurposes_existing_preview`
-    // pins).
     let mut tabs = ModelTabs::default();
-    let a = tabs.ensure_preview_for(doc(1), None);
+    let (a, _) = tabs.ensure_preview_for(doc(1), None);
     let b = tabs.open_new(doc(1), Some("Inner".into()));
-    let c = tabs.ensure_preview_for(doc(2), None);
-    // After this dance: a → doc(2) (preview slot was repurposed),
-    // b → doc(1) (open_new is pinned), c == a → doc(2). So
-    // pin_all_for_doc(1) only touches b.
+    // After pin_all_for_doc(1), `a` is promoted (it views doc(1)) and
+    // the preview slot is cleared. Asking for doc(2)'s preview now
+    // allocates fresh (no eviction) — the architectural invariant
+    // keeps `a` and `b` both alive on doc(1).
     tabs.pin_all_for_doc(doc(1));
-    assert_eq!(c, a, "preview slot was reused for doc(2)");
-    assert!(tabs.get(b).unwrap().pinned, "doc(1) split still pinned");
-    assert!(!tabs.get(a).unwrap().pinned, "doc(2) preview untouched");
+    assert!(tabs.get(a).unwrap().pinned, "preview a promoted");
+    assert!(tabs.get(b).unwrap().pinned, "split b still pinned");
+    let (c, evict) = tabs.ensure_preview_for(doc(2), None);
+    assert!(evict.is_none(), "preview slot cleared by pin_all_for_doc");
+    assert_ne!(c, a, "fresh tab allocated");
+    assert_eq!(tabs.get(a).unwrap().doc, doc(1), "a still on doc(1)");
 }
 
 // ─────────────────────────────────────────────────────────────────────

@@ -153,6 +153,7 @@ pub fn drive_duplicate_loads(
     mut probe: Option<bevy::prelude::ResMut<crate::FrameTimeProbe>>,
     mut egui_q: bevy::prelude::Query<&mut bevy_egui::EguiContext>,
     mut tabs: bevy::prelude::ResMut<crate::ui::panels::model_view::ModelTabs>,
+    mut commands: bevy::prelude::Commands,
 ) {
     use bevy::prelude::*;
     // While any duplicate is in-flight, ping egui every tick so the
@@ -212,15 +213,31 @@ pub fn drive_duplicate_loads(
                     .find(|c| !matches!(c.kind, crate::index::ClassKind::Package))
                     .map(|c| c.name.clone()),
             };
-            // B.3 phase 3: write the drilled scope onto the tab
-            // (now authoritative) instead of the legacy
-            // `DrilledInClassNames` cache. The duplicate flow opened
-            // the tab with `drilled_class = None`; once the inner
-            // class resolves we update every tab on this doc.
+            // Replace the `(doc, None)` placeholder with a fresh tab
+            // bound to `(doc, Some(qualified))`. TabId bindings are
+            // immutable; mutating drilled_class in place would collapse
+            // distinct tabs into duplicate `(doc, drilled)` keys.
             if let Some(q) = qualified {
-                for (_, state) in tabs.iter_mut_for_doc(doc_id) {
-                    state.drilled_class = Some(q.clone());
+                let placeholder = tabs
+                    .iter_mut_for_doc(doc_id)
+                    .find(|(_, s)| s.drilled_class.is_none())
+                    .map(|(id, _)| id);
+                if let Some(old_id) = placeholder {
+                    commands.trigger(lunco_workbench::CloseTab {
+                        kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
+                        instance: old_id,
+                    });
+                    tabs.close_tab(old_id);
                 }
+                let new_id = tabs.ensure_for(doc_id, Some(q));
+                if let Some(tab) = tabs.get_mut(new_id) {
+                    tab.view_mode =
+                        crate::ui::panels::model_view::ModelViewMode::Canvas;
+                }
+                commands.trigger(lunco_workbench::OpenTab {
+                    kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
+                    instance: new_id,
+                });
             }
         }
         // Pre-warm the MSL inheritance chain on a dedicated thread so

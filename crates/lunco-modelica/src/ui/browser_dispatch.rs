@@ -155,17 +155,33 @@ pub fn drain_browser_actions(world: &mut World) {
                 // Some(qualified_path))` writes the drilled scope
                 // onto the tab — the tab table is now authoritative,
                 // legacy `DrilledInClassNames` cache mirror removed.
-                let tab_id = {
+                let (tab_id, evict) = {
                     let mut model_tabs = world
                         .resource_mut::<crate::ui::panels::model_view::ModelTabs>();
                     model_tabs.ensure_preview_for(doc, Some(qualified_path))
                 };
-                world
-                    .resource_mut::<lunco_workbench::WorkbenchLayout>()
-                    .open_instance(
-                        crate::ui::panels::model_view::MODEL_VIEW_KIND,
-                        tab_id,
-                    );
+                // ensure_preview_for never rebinds TabIds; an evicted
+                // previous preview is closed here. Layout mutation goes
+                // through CloseTab/OpenTab triggers because WorkbenchLayout
+                // is removed from the World for the duration of rendering.
+                if let Some(old_id) = evict {
+                    world.commands().trigger(lunco_workbench::CloseTab {
+                        kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
+                        instance: old_id,
+                    });
+                    world
+                        .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
+                        .close_tab(old_id);
+                    if let Some(mut state) = world
+                        .get_resource_mut::<crate::ui::panels::canvas_diagram::CanvasDiagramState>()
+                    {
+                        state.drop_tab(old_id);
+                    }
+                }
+                world.commands().trigger(lunco_workbench::OpenTab {
+                    kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
+                    instance: tab_id,
+                });
                 // Make this doc the active workspace doc so the
                 // canvas (which reads `WorkspaceResource::active_document`
                 // to decide what to render) follows the click. Without

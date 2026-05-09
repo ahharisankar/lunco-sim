@@ -440,8 +440,13 @@ register_commands!(
 /// `render_close_dialogs` system draws a modal per entry.
 #[derive(Resource, Default)]
 pub struct CloseDialogState {
-    /// Docs with an open close-confirmation modal.
-    pub pending: Vec<DocumentId>,
+    /// Docs with an open close-confirmation modal, paired with the
+    /// **originating tab id** that triggered the close. Tracking the
+    /// tab id (not just the doc id) is what stops "Don't save" from
+    /// closing every tab on the doc — only the tab the user clicked
+    /// × on goes away. The doc itself drops only when its last tab
+    /// closes (`ModelTabs::count_for_doc(doc) == 0`).
+    pub pending: Vec<(DocumentId, u64)>,
 }
 
 /// Drain `PendingTabCloses` from `lunco_workbench`. Clean docs close
@@ -454,15 +459,22 @@ pub struct CloseDialogState {
 /// matching VS Code's behaviour.
 #[derive(Resource, Default)]
 pub struct PendingCloseAfterSave {
-    docs: std::collections::HashSet<DocumentId>,
+    /// Per-doc list of TAB ids whose close was deferred until the doc's
+    /// save lands. Multiple tabs on the same doc can each be queued
+    /// independently — they close one by one as the user dismisses
+    /// dialogs, and the doc drops only when its last tab is gone.
+    docs: std::collections::HashMap<DocumentId, Vec<u64>>,
 }
 
 impl PendingCloseAfterSave {
-    fn queue(&mut self, doc: DocumentId) {
-        self.docs.insert(doc);
+    fn queue(&mut self, doc: DocumentId, tab: u64) {
+        self.docs.entry(doc).or_default().push(tab);
     }
-    fn take(&mut self, doc: DocumentId) -> bool {
-        self.docs.remove(&doc)
+    /// Remove and return all tab ids queued against this doc. The
+    /// caller closes each tab and then closes the doc only if its
+    /// last tab is gone.
+    fn take(&mut self, doc: DocumentId) -> Vec<u64> {
+        self.docs.remove(&doc).unwrap_or_default()
     }
 }
 
@@ -475,25 +487,41 @@ fn finish_close_after_save(
 ) {
     let Some(mut pending) = pending else { return };
     let doc = trigger.event().doc;
-    if pending.take(doc) {
-        // Multiple tabs may view the same doc (e.g. user opened
-        // sibling drill-ins or a future Text+Canvas split). Close
-        // every tab on this doc, then drop the doc.
-        commands.queue(move |world: &mut World| {
-            let tab_ids: Vec<u64> = world
-                .resource::<crate::ui::panels::model_view::ModelTabs>()
-                .iter()
-                .filter_map(|(id, s)| (s.doc == doc).then_some(id))
-                .collect();
-            for tab_id in tab_ids {
-                world.commands().trigger(lunco_workbench::CloseTab {
-                    kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
-                    instance: tab_id,
-                });
-            }
-            world.commands().trigger(CloseDocument { doc });
-        });
+    let tab_ids = pending.take(doc);
+    if tab_ids.is_empty() {
+        return;
     }
+    // Close ONLY the tabs whose × button triggered this dialog. Other
+    // tabs viewing the same doc (split-view, sibling drill-ins, or a
+    // VS Code-style preview tab that got repurposed) survive — they
+    // each have their own × button. The doc itself drops only when
+    // its last tab is gone (handled below).
+    commands.queue(move |world: &mut World| {
+        for tab_id in tab_ids {
+            world.commands().trigger(lunco_workbench::CloseTab {
+                kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
+                instance: tab_id,
+            });
+            if let Some(mut tabs) = world
+                .get_resource_mut::<crate::ui::panels::model_view::ModelTabs>()
+            {
+                tabs.close_tab(tab_id);
+            }
+            // Per-tab canvas state dies with the tab.
+            if let Some(mut state) = world
+                .get_resource_mut::<crate::ui::panels::canvas_diagram::CanvasDiagramState>()
+            {
+                state.drop_tab(tab_id);
+            }
+        }
+        let last_gone = world
+            .resource::<crate::ui::panels::model_view::ModelTabs>()
+            .count_for_doc(doc)
+            == 0;
+        if last_gone {
+            world.commands().trigger(CloseDocument { doc });
+        }
+    });
 }
 
 /// Runs on `Update`, so it picks up both the tab × button (queued by
@@ -547,8 +575,11 @@ fn drain_pending_tab_closes(
         // have nothing to save — the dialog's Save button is disabled
         // for them anyway. Skip the prompt entirely and close.
         if is_dirty && !is_read_only {
-            if !dialogs.pending.contains(&doc) {
-                dialogs.pending.push(doc);
+            // Track the originating tab id so the dialog's outcomes
+            // (Save / Don't Save) can close THIS tab specifically,
+            // not every tab sharing the doc.
+            if !dialogs.pending.iter().any(|(d, t)| *d == doc && *t == instance) {
+                dialogs.pending.push((doc, instance));
             }
         } else {
             // Drop just this tab; only close the document when its
@@ -598,7 +629,7 @@ fn render_close_dialogs(
     // without fighting the Vec during iteration.
     let pending = std::mem::take(&mut dialogs.pending);
     let mut survivors = Vec::with_capacity(pending.len());
-    for doc in pending {
+    for (doc, originating_tab) in pending {
         let Some(host) = registry.host(doc) else {
             // Doc vanished (another system closed it). Drop the dialog.
             continue;
@@ -677,7 +708,7 @@ fn render_close_dialogs(
 
         match action {
             DialogAction::None => {
-                survivors.push(doc);
+                survivors.push((doc, originating_tab));
             }
             DialogAction::Save => {
                 // Queue the close to run *after* the save completes —
@@ -686,28 +717,40 @@ fn render_close_dialogs(
                 // proceed. `finish_close_after_save` observer fires
                 // CloseTab+CloseDocument when DocumentSaved lands.
                 if let Some(q) = pending_save_close.as_mut() {
-                    q.queue(doc);
+                    q.queue(doc, originating_tab);
                 }
                 commands.trigger(SaveDocument { doc });
             }
             DialogAction::DontSave => {
-                // Close every tab pointing at this doc, then drop
-                // the doc. Multi-tab on a single doc (drill-in
-                // siblings, split-view) must all go together — the
-                // doc is what's being abandoned.
+                // Close ONLY the tab whose × button triggered this
+                // dialog. Sibling tabs viewing the same doc (drill-in
+                // siblings, split-view, repurposed preview tabs) keep
+                // living — each has its own × and its own discard
+                // decision. The doc itself drops only when its last
+                // tab is gone.
+                let tab = originating_tab;
                 commands.queue(move |world: &mut World| {
-                    let tab_ids: Vec<u64> = world
-                        .resource::<crate::ui::panels::model_view::ModelTabs>()
-                        .iter()
-                        .filter_map(|(id, s)| (s.doc == doc).then_some(id))
-                        .collect();
-                    for tab_id in tab_ids {
-                        world.commands().trigger(lunco_workbench::CloseTab {
-                            kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
-                            instance: tab_id,
-                        });
+                    world.commands().trigger(lunco_workbench::CloseTab {
+                        kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
+                        instance: tab,
+                    });
+                    if let Some(mut tabs) = world
+                        .get_resource_mut::<crate::ui::panels::model_view::ModelTabs>()
+                    {
+                        tabs.close_tab(tab);
                     }
-                    world.commands().trigger(CloseDocument { doc });
+                    if let Some(mut state) = world
+                        .get_resource_mut::<crate::ui::panels::canvas_diagram::CanvasDiagramState>()
+                    {
+                        state.drop_tab(tab);
+                    }
+                    let last_gone = world
+                        .resource::<crate::ui::panels::model_view::ModelTabs>()
+                        .count_for_doc(doc)
+                        == 0;
+                    if last_gone {
+                        world.commands().trigger(CloseDocument { doc });
+                    }
                 });
             }
             DialogAction::Cancel => { /* drop from pending */ }

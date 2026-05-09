@@ -452,6 +452,36 @@ impl Plugin for EditorIntentPlugin {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// View sync — wake every panel on every document change
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `egui_dock` only paints the focused tab per pane, so background tabs
+// viewing the same doc don't observe gen bumps until clicked. There's no
+// per-doc subscriber registry; instead we exploit the fact that any egui
+// context with a queued repaint paints at least one more frame. One
+// observer requests a repaint on every context whenever a document
+// changes; panels' existing per-render gates then re-derive if stale.
+// Coalesced within a frame, so the per-mutation cost stays at microseconds.
+
+/// Registers the [`view_sync_fanout`] observer. Add once per app.
+pub struct ViewSyncPlugin;
+
+impl Plugin for ViewSyncPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_observer(view_sync_fanout);
+    }
+}
+
+fn view_sync_fanout(
+    _trigger: On<DocumentChanged>,
+    mut egui_q: Query<&mut bevy_egui::EguiContext>,
+) {
+    for mut ctx in egui_q.iter_mut() {
+        ctx.get_mut().request_repaint();
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Presence — placeholder for multi-user collaboration
 // ─────────────────────────────────────────────────────────────────────────────
 //
