@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 openusd = "0.2.0"
-anyhow = "1.0"
+anyhow = { workspace = true }
 
 [lints]
 workspace = true

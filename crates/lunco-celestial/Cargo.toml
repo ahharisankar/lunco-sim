@@ -20,9 +20,9 @@ chrono = { workspace = true }
 lunco-controller = { path = "../lunco-controller" }
 bevy_asset = "0.18.1"
 futures-lite = { workspace = true }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-uuid = { version = "1", features = ["v4"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
 lunco-materials = { path = "../lunco-materials" }
 lunco-terrain = { path = "../lunco-terrain" }
 

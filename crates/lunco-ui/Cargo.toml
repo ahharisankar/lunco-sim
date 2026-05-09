@@ -13,7 +13,7 @@ lunco-core = { path = "../lunco-core" }
 lunco-celestial = { path = "../lunco-celestial" }
 lunco-avatar = { path = "../lunco-avatar" }
 chrono = { workspace = true }
-egui_plot = "0.34"
+egui_plot = { workspace = true }
 
 [lints]
 workspace = true

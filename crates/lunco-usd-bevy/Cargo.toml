@@ -8,7 +8,7 @@ bevy = { workspace = true, features = ["bevy_pbr", "bevy_gltf", "bevy_scene", "b
 openusd = { workspace = true }
 lunco-usd-composer = { path = "../lunco-usd-composer" }
 big_space = { workspace = true }
-anyhow = "1.0"
+anyhow = { workspace = true }
 
 
 [lints]

@@ -5,9 +5,9 @@ edition = "2021"
 description = "Backend-agnostic experiment / batch-run registry. Models a single Fast Run as a first-class artifact (params, bounds, trajectory). The simulation backend is plugged in by another crate via the ExperimentRunner trait."
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
-uuid = { version = "1", features = ["v4", "serde"] }
-crossbeam-channel = "0.5"
+serde = { workspace = true }
+uuid = { workspace = true }
+crossbeam-channel = { workspace = true }
 # Optional — exposes ExperimentRegistry as a Bevy Resource and ships
 # events. Off by default so headless callers (CLI sweeps, tests) stay
 # Bevy-free.

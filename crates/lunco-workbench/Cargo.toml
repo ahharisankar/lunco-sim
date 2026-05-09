@@ -27,8 +27,8 @@ lunco-workspace = { path = "../lunco-workspace" }
 lunco-storage = { path = "../lunco-storage" }
 # Used for the recents-changed fingerprint in `WorkspacePlugin` —
 # stable serialisation lets us skip writes when nothing changed.
-serde_json = "1.0"
-serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
+serde = { workspace = true }
 # `user_config_dir()` for cross-platform `~/.lunco/recents.json`
 # (Windows: `C:\Users\<user>\.lunco\`, etc.).
 lunco-assets = { path = "../lunco-assets" }
@@ -36,7 +36,7 @@ lunco-settings = { path = "../lunco-settings" }
 # Native file dialogs. The web backend will use `wasm-bindgen`
 # directly against the File-System-Access API behind a `cfg`-gated
 # branch — no separate crate needed.
-rfd = "0.15"
+rfd = { workspace = true }
 # `Instant::now()` panics on wasm32-unknown-unknown. The status bus
 # stamps every event with a wall-clock instant, so we use the wasm-safe
 # replacement on every target.

@@ -21,7 +21,7 @@ bevy_reflect = "0.18"
 # future network sync, lunco-api command payloads. Public lunco-doc
 # types derive Serialize/Deserialize so consumers don't hand-roll u64
 # shims at the boundary.
-serde = { version = "1", features = ["derive"] }
+serde = { workspace = true }
 
 [dev-dependencies]
 # Only for tests. The toy TextDocument needs no external crates.

@@ -9,9 +9,9 @@ description = "I/O abstraction for LunCoSim — Storage trait + backends (FileSt
 # picker (`lunco-workbench::picker`); kept here too because
 # `FileStorage::pick_open` / `pick_save` / `pick_folder` retain a
 # blocking native fallback for non-Bevy callers (CLI tools, tests).
-rfd = "0.15"
-thiserror = "1"
-serde = { version = "1", features = ["derive"] }
+rfd = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
 
 [features]
 # Empty stubs that unlock the corresponding `StorageHandle` variants.

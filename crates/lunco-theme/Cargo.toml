@@ -9,7 +9,7 @@ bevy = { workspace = true }
 bevy_egui = { workspace = true }
 catppuccin-egui = { workspace = true }
 lunco-assets = { workspace = true }
-serde = { version = "1.0", features = ["derive"] }
+serde = { workspace = true }
 
 # Wasm-only: fetch DejaVu Sans TTF over HTTP at runtime (the font is
 # served at `/fonts/DejaVuSans.ttf` by the page bundle — see the copy
