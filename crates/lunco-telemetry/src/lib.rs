@@ -20,7 +20,6 @@
 //! necessary for automated validation and Flight Software (FSW) telemetry sinks.
 
 use bevy::prelude::*;
-use lunco_core::telemetry::{Parameter, TelemetryEvent, Severity, TelemetryValue};
 
 /// Manages the registration and execution of the automated telemetry sampling loop.
 pub struct LunCoTelemetryPlugin;

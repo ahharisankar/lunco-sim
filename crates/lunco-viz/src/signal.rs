@@ -50,10 +50,10 @@ mod entity_as_u64 {
     use bevy::prelude::Entity;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    pub fn serialize<S: Serializer>(e: &Entity, s: S) -> Result<S::Ok, S::Error> {
+    pub(super) fn serialize<S: Serializer>(e: &Entity, s: S) -> Result<S::Ok, S::Error> {
         e.to_bits().serialize(s)
     }
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Entity, D::Error> {
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Entity, D::Error> {
         let bits = u64::deserialize(d)?;
         Ok(Entity::from_bits(bits))
     }

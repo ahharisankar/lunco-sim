@@ -41,9 +41,7 @@
 
 use std::collections::HashMap;
 
-use crate::event::{
-    ContextTarget, InputEvent, MouseButton, SceneEvent,
-};
+use crate::event::{InputEvent, MouseButton, SceneEvent};
 use crate::scene::{NodeHitKind, NodeId, PortRef, Pos, Rect, Scene};
 use crate::selection::{SelectItem, Selection};
 use crate::viewport::Viewport;
