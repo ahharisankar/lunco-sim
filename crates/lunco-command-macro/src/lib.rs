@@ -62,6 +62,11 @@ use syn::{
 ///   pub struct OpenFile { pub path: String, pub doc: DocumentId }
 ///   ```
 #[proc_macro_attribute]
+// Why: PascalCase mimics `#[derive(Trait)]` syntax at the call site
+// (`#[Command]` reads as "make this struct a Command"). Renaming to
+// `command` would compile but lose the visual cue that `#[Command]`
+// produces a Command type — the same convention bevy uses for `#[derive(Event)]`.
+#[allow(non_snake_case)]
 pub fn Command(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
     let name = &input.ident;
