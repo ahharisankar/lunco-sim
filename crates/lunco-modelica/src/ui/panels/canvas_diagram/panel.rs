@@ -187,8 +187,6 @@ impl Panel for CanvasDiagramPanel {
                     if new_hash == docstate.last_seen_source_hash {
                         // Mark the gen as seen so the render loop
                         // doesn't keep re-checking every frame.
-                        // Drop the read-only borrow first.
-                        drop(state);
                         let mut state =
                             world.resource_mut::<CanvasDiagramState>();
                         let docstate = match render_tab_id { Some(t) => state.get_mut_for_tab(t, doc_id), None => state.get_mut(Some(doc_id)) };
@@ -224,7 +222,6 @@ impl Panel for CanvasDiagramPanel {
                     // Panel::render are careful to do this; this one
                     // forgot — without the call below the entire
                     // bg-parse window paints nothing.
-                    drop(registry);
                     self.render_canvas(ui, world);
                     return;
                 };
@@ -244,7 +241,6 @@ impl Panel for CanvasDiagramPanel {
                 // the loading overlay and retry next tick. Mirrors
                 // the host-not-found branch above.
                 let Some(ast) = doc.strict_ast() else {
-                    drop(registry);
                     self.render_canvas(ui, world);
                     return;
                 };

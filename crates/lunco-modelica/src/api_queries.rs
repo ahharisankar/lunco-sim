@@ -464,7 +464,6 @@ impl ApiQueryProvider for CompileStatusProvider {
             }
             None => return err_doc_not_found(doc_id),
         };
-        drop(registry);
         // `picker_pending` is meaningful only when the doc is in the
         // `idle` state — i.e. nothing is compiling yet and a *future*
         // compile with no `class` argument would open the GUI picker.
@@ -523,7 +522,6 @@ impl ApiQueryProvider for GetDocumentSourceProvider {
         // dispatch is centralised.
         let ws = world.resource::<WorkspaceResource>();
         let entry = ws.document(doc_id).cloned();
-        drop(ws);
         let Some(entry) = entry else {
             return err_doc_not_found(doc_id);
         };
@@ -791,7 +789,6 @@ impl ApiQueryProvider for SnapshotVariablesProvider {
             return err_doc_not_found(doc_id);
         }
         let entities = registry.entities_linked_to(doc_id);
-        drop(registry);
         let Some(entity) = entities.first().copied() else {
             return ApiResponse::ok(serde_json::json!({
                 "doc_id": doc_id.raw(),

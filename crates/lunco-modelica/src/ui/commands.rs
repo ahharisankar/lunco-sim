@@ -4053,7 +4053,6 @@ fn focus_in_memory_doc(world: &mut World, name: &str) {
         .iter()
         .find(|e| e.id == target_id)
         .map(|e| e.doc);
-    drop(cache);
     let Some(doc_id) = entry else {
         bevy::log::warn!(
             "[OpenFile] no Untitled doc named `{}` (mem:// requires an existing tab)",
@@ -4234,7 +4233,6 @@ pub fn apply_set_model_input(
     };
     let registry = world.resource::<crate::ui::state::ModelicaDocumentRegistry>();
     let entities = registry.entities_linked_to(doc);
-    drop(registry);
     let Some(entity) = entities.first().copied() else {
         return Err(SetModelInputError::NoLinkedEntity { doc: doc.raw() });
     };
