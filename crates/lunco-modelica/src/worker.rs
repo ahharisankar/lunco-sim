@@ -1167,7 +1167,7 @@ pub struct ModelicaModel {
     /// All other observable variables (Real soc, etc)
     pub variables: HashMap<String, f64>,
     /// Canonical id of the Modelica source document backing this entity,
-    /// looked up in [`ui::ModelicaDocumentRegistry`]. `DocumentId::default()`
+    /// looked up in [`crate::ui::state::ModelicaDocumentRegistry`]. `DocumentId::default()`
     /// (`0`) means "no document assigned yet"; systems should treat it as
     /// a miss. Not reflected — ids are session-local allocations, not
     /// scene-serializable.

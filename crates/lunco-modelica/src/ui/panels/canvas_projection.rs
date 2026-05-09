@@ -10,7 +10,7 @@
 //! Major surface:
 //! - [`DiagramAutoLayoutSettings`] — grid spacing for un-annotated nodes
 //! - [`DEFAULT_MAX_DIAGRAM_NODES`] — projection sanity cap
-//! - [`import_model_to_diagram`] / [`import_model_to_diagram_from_ast`] — the
+//! - [`crate::ui::panels::canvas_projection::import_model_to_diagram`] / [`import_model_to_diagram_from_ast`] — the
 //!   AST → VisualDiagram converters
 
 use bevy::prelude::*;
@@ -244,7 +244,7 @@ fn build_visual_diagram_from_scan(
 ///
 /// Overridable at call time via the `max_nodes` parameter on
 /// [`import_model_to_diagram_from_ast`] or the
-/// [`DiagramProjectionLimits`] resource the Canvas projection
+/// [`crate::ui::panels::canvas_diagram::DiagramProjectionLimits`] resource the Canvas projection
 /// reads. Power users editing a `Magnetic.FundamentalWave` gizmo
 /// with 500 components should bump this in Settings, not get a
 /// blank canvas.

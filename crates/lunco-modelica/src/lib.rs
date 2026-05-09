@@ -59,7 +59,7 @@ pub mod ast_mut;
 pub mod document;
 
 /// Shared parse + I/O cache for Modelica classes, built on
-/// [`lunco_cache`]. Drill-in, AddComponent preload, and (later)
+/// `lunco_cache`. Drill-in, AddComponent preload, and (later)
 /// compile dep-walk all funnel through here so every class file is
 /// read once, parsed once, and shared as `Arc<AstCache>` across tabs
 /// and compile jobs.
@@ -395,7 +395,7 @@ impl ModelicaCompiler {
         self.compile_loaded(model_name)
     }
 
-    /// Like [`compile_str`], but seats additional `(filename, source)`
+    /// Like `compile_str`, but seats additional `(filename, source)`
     /// pairs into the rumoca session before compiling so the resolver
     /// can satisfy cross-doc class references (e.g. a fresh untitled
     /// `RocketStage` referencing `AnnotatedRocketStage.Tank` from a

@@ -257,7 +257,7 @@ pub struct BundledFileTree {
     pub top: BundledClassTree,
 }
 
-/// Recursive class node inside a [`BundledFileTree`]. Mirrors what
+/// Recursive class node inside a [`crate::visual_diagram::BundledFileTree`]. Mirrors what
 /// `package_browser::class_def_to_node` produces from a live AST,
 /// minus filesystem paths.
 #[derive(Debug, Clone, Serialize, Deserialize)]

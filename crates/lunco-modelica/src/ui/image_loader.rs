@@ -16,7 +16,7 @@
 //!
 //! Non-`modelica://` URIs are left to the other loaders installed by
 //! [`egui_extras::install_image_loaders`] — this one returns
-//! [`LoadError::NotSupported`] for anything it doesn't handle.
+//! `LoadError::NotSupported` for anything it doesn't handle.
 //!
 //! # TODO: web target
 //!
@@ -37,7 +37,7 @@
 //!    text, skip the raster.
 //!
 //! The `cfg(not(target_arch = "wasm32"))` gate on the body of
-//! [`ModelicaImageLoader::load`] is the obvious place to branch
+//! [`crate::ui::image_loader::ModelicaImageLoader::load`] is the obvious place to branch
 //! once we pick an approach. For now the loader is native-only; on
 //! wasm it'll silently return `NotSupported` for every
 //! `modelica://` URI, yielding the alt-text fallback (option 3).

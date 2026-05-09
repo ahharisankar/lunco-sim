@@ -26,7 +26,7 @@
 //!
 //! ## Scope today
 //!
-//! Batch 1 of A.2: [`set_parameter`]. Smallest blast radius — modifies
+//! Batch 1 of A.2: `set_parameter`. Smallest blast radius — modifies
 //! one entry in one component's `modifications: IndexMap<String,
 //! Expression>`. No topology change, no equation reordering. The
 //! pattern established here generalises to the rest of the helpers in
@@ -310,7 +310,7 @@ pub fn set_parameter(
 /// Mirrors `ModelicaOp::AddComponent`. The new component is constructed
 /// by rendering `decl` into a stub-class source fragment via
 /// `pretty::component_decl` and parsing it back to AST — same trick as
-/// [`set_parameter`]'s `parse_value_fragment`. Errors out if a
+/// `set_parameter`'s `parse_value_fragment`. Errors out if a
 /// component with the same name already exists; replacing in place is
 /// a different operation (`SetParameter` for individual modifications,
 /// remove-then-add for type changes).
@@ -1294,7 +1294,7 @@ fn parse_experiment_expression(
 /// **How the new `Expression` is built:** rumoca's parser only consumes
 /// whole files, so we wrap the rendered `Placement(...)` text in a
 /// stub class and extract `comp.annotation[0]`. Same trick as
-/// [`set_parameter`]'s `parse_value_fragment`. The placement payload
+/// `set_parameter`'s `parse_value_fragment`. The placement payload
 /// always parses cleanly because `pretty::placement_inner` produces
 /// canonical text from typed numeric fields — no user-supplied
 /// strings cross this boundary.

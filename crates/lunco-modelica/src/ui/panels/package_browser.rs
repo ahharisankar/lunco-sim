@@ -94,7 +94,7 @@ pub struct FileLoadResult {
 }
 
 /// Tracks one in-memory ("scratch") model the user has created this
-/// session. The document itself lives in [`ModelicaDocumentRegistry`];
+/// session. The document itself lives in [`crate::ui::state::ModelicaDocumentRegistry`];
 /// this is the Package Browser's view of it (display name + id).
 #[derive(Debug, Clone)]
 pub struct InMemoryEntry {
@@ -2677,7 +2677,7 @@ pub(crate) fn open_model(
 // `ui::commands` picks the next free `UntitledN` name, allocates the
 // doc, and opens a tab. Rename is deferred to Save-As.
 
-/// Render one named root from [`PackageTreeCache::roots`] inline at
+/// Render one named root from [`crate::ui::panels::package_browser::PackageTreeCache::roots`] inline at
 /// the caller's egui cursor. Used by the Twin panel's per-domain
 /// `BrowserSection`s (today: `ModelicaSection`'s MSL and Bundled
 /// sub-groups) to surface the package tree without duplicating the

@@ -1,6 +1,6 @@
 //! Modelica-to-diagram graph builder.
 //!
-//! Converts a parsed Modelica AST (`StoredDefinition`) into a [`ComponentGraph`]
+//! Converts a parsed Modelica AST (`StoredDefinition`) into a `ComponentGraph`
 //! that can be rendered by any diagram viewer.
 //!
 //! ## Supported diagram types
@@ -41,7 +41,7 @@ pub enum DiagramType {
     PackageHierarchy,
 }
 
-/// Builder that converts a Modelica AST into a [`ComponentGraph`].
+/// Builder that converts a Modelica AST into a `ComponentGraph`.
 pub struct ModelicaComponentBuilder {
     /// Shared reference to the parsed AST. Using `Arc` here instead
     /// of an owned `StoredDefinition` is load-bearing: MSL package

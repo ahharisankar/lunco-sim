@@ -10,7 +10,7 @@
 //! [`SaveDocument`] /
 //! [`CloseDocument`]) carry a
 //! [`lunco_doc::DocumentId`] without naming a domain. Each observer here checks
-//! whether [`ModelicaDocumentRegistry`] owns the id and acts or
+//! whether [`crate::ui::state::ModelicaDocumentRegistry`] owns the id and acts or
 //! no-ops — USD, scripting, SysML can install parallel observers that
 //! handle *their* ids with no coordination needed.
 //!
@@ -78,8 +78,8 @@ pub struct DuplicateModelFromReadOnly {
 /// buffer is expected to have been flushed by the caller via
 /// [`ModelicaDocumentRegistry::checkpoint_source`] before firing), parses
 /// parameters / inputs, spawns or updates the [`ModelicaModel`] entity
-/// linked to the document, marks the [`CompileState`] as
-/// [`CompileState::Compiling`], and sends a
+/// linked to the document, marks the [`crate::ui::state::CompileState`] as
+/// [`crate::ui::state::CompileState::Compiling`], and sends a
 /// [`ModelicaCommand::Compile`] to the worker.
 ///
 /// Unknown / foreign ids are no-ops.
@@ -478,7 +478,7 @@ pub(crate) fn render_fast_run_setup(
 /// Render the compile-class picker modal when
 /// [`CompileClassPickerState`] is populated. Confirming re-dispatches
 /// `CompileModel` with the chosen class stamped into
-/// [`DrilledInClassNames`] so downstream observers see the user's
+/// `DrilledInClassNames` so downstream observers see the user's
 /// pick exactly as they would've after a manual drill-in. Cancel
 /// just clears the state.
 pub(crate) fn render_compile_class_picker(
@@ -1064,7 +1064,7 @@ fn on_document_closed_cleanup(
 /// command(s) it maps to, targeting the currently-active document.
 ///
 /// **Ownership-aware**: only resolves when the active document is
-/// owned by [`ModelicaDocumentRegistry`]. If another domain (USD,
+/// owned by [`crate::ui::state::ModelicaDocumentRegistry`]. If another domain (USD,
 /// scripting, SysML) owns the active doc, its own resolver handles
 /// the intent and this observer no-ops — both resolvers fire on
 /// every intent and each picks the ones that belong to it.

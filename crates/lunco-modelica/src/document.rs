@@ -8,14 +8,14 @@
 //! depend on.
 //!
 //! Alongside the text, the Document caches a **parsed AST**
-//! ([`AstCache`]). The cache is refreshed eagerly after every mutation so
+//! ([`crate::engine::AstCache`]). The cache is refreshed eagerly after every mutation so
 //! panels that need structural access (diagram, parameter inspector,
 //! placement extractor) can read `doc.ast()` without reparsing. Parse
-//! failures are observable via [`AstCache::result`] — the cache is always
+//! failures are observable via [`crate::engine::AstCache::result`] — the cache is always
 //! present, but it may hold an error.
 //!
 //! Documents are keyed by [`lunco_doc::DocumentId`] inside
-//! [`ui::ModelicaDocumentRegistry`]. Every place that spawns a
+//! [`crate::ui::state::ModelicaDocumentRegistry`]. Every place that spawns a
 //! `ModelicaModel` entity allocates a document in the registry and writes
 //! its id into [`crate::ModelicaModel::document`].
 //!
@@ -270,7 +270,7 @@ impl SyntaxCache {
 ///
 /// Owns the source text + a [`lunco_doc::DocumentOrigin`] describing where it
 /// came from (which drives save behavior, tab title, read-only
-/// badge) + a parsed-AST cache ([`AstCache`]) refreshed eagerly after
+/// badge) + a parsed-AST cache ([`crate::engine::AstCache`]) refreshed eagerly after
 /// every mutation.
 #[derive(Debug, Clone)]
 pub struct ModelicaDocument {
@@ -661,7 +661,7 @@ impl ModelicaDocument {
     ///
     /// Replaces the previous `doc.ast().result.as_ref().ok().cloned()`
     /// pattern. The strict `Arc<StoredDefinition>` no longer lives in
-    /// [`AstCache`] — engine + lenient cache are the canonical
+    /// [`crate::engine::AstCache`] — engine + lenient cache are the canonical
     /// storage.
     pub fn strict_ast(&self) -> Option<Arc<StoredDefinition>> {
         if !self.syntax.has_errors() {

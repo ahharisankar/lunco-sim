@@ -109,7 +109,7 @@ impl Plugin for CoSimPlugin {
     }
 }
 
-/// Observer: auto-adds [`crate::AvianSim`] to any entity that gets a [`RigidBody`].
+/// Observer: auto-adds [`crate::AvianSim`] to any entity that gets a [`avian3d::prelude::RigidBody`].
 ///
 /// This makes Avian available as a co-simulation model alongside
 /// any other model (Modelica, FMU, GMAT) on the same entity.
@@ -126,7 +126,7 @@ pub fn on_add_rigid_body(
     commands.entity(entity).try_insert(avian);
 }
 
-/// Observer: auto-adds [`Forces`] to any entity that gets a [`RigidBody`].
+/// Observer: auto-adds [`Forces`] to any entity that gets a [`avian3d::prelude::RigidBody`].
 ///
 /// This is required for [`apply_sim_forces`] to work — Avian only creates the
 /// `Forces` component lazily on first access, but the co-simulation bridge

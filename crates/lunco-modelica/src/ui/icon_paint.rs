@@ -405,7 +405,7 @@ impl CoordXform {
     /// Apply a graphic primitive's local origin + rotation, then
     /// project to screen. `origin` is in Modelica coords, `rotation`
     /// is degrees CCW (matches MLS Annex D). Per-instance orientation
-    /// (rotation + mirror) gets applied by [`to_screen`] downstream.
+    /// (rotation + mirror) gets applied by [`crate::ui::icon_paint::to_screen`] downstream.
     pub fn to_screen_rotated(
         &self,
         p: Point,

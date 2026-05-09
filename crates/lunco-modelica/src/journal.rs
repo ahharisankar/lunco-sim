@@ -25,7 +25,7 @@
 //!
 //! Author defaults to [`AuthorTag::local_user`]. Future entry points
 //! (HTTP API observers, agent scripts) construct their own
-//! [`AuthorTag::for_tool`] before calling [`record_op_summary`].
+//! [`AuthorTag::for_tool`] before calling `record_op_summary`.
 
 use serde_json::{json, Value};
 

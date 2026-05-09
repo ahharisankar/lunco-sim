@@ -116,7 +116,7 @@ pub struct WorkbenchState {
     /// Render-side **derived projection** of the active document.
     ///
     /// Identity (which doc is active) lives on
-    /// [`lunco_workbench::WorkspaceResource::active_document`]. This
+    /// [`lunco_workbench::WorkspaceResource`]. This
     /// field is a pre-flattened view of the registry's
     /// `host(active).document()` plus a few open-time-only fields
     // All readers migrated to derive from
@@ -146,9 +146,9 @@ pub struct WorkbenchState {
 
 /// Current compile-lifecycle state for a single [`crate::document::ModelicaDocument`].
 ///
-/// Separate from [`ModelicaModel::is_stepping`] (a per-entity simulation
+/// Separate from [`crate::ModelicaModel::is_stepping`] (a per-entity simulation
 /// tick guard) and from error *content* (which lives in
-/// [`WorkbenchState::compilation_error`] today). This enum is the
+/// [`crate::ui::state::WorkbenchState`] today). This enum is the
 /// answer to "is a compile in flight for this document?" — UI uses it
 /// to disable the Compile button while the worker is busy and to show
 /// an at-a-glance status chip.

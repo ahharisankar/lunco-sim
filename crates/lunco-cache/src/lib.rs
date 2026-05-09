@@ -105,7 +105,7 @@ impl<L: ResourceLoader> ResourceCache<L> {
     }
 
     /// Non-blocking read of a ready entry. Returns `None` for misses
-    /// AND for in-flight loads — use [`is_loading`] to distinguish.
+    /// AND for in-flight loads — use [`AstCache::is_loading`] to distinguish.
     pub fn peek(&self, key: &L::Key) -> Option<Arc<L::Value>> {
         match self.entries.get(key) {
             Some(ResourceState::Ready(v)) => Some(Arc::clone(v)),
@@ -163,7 +163,7 @@ impl<L: ResourceLoader> ResourceCache<L> {
     /// Drop a ready entry. In-flight loads for the same key are NOT
     /// cancelled — if you evict while a task is running, its result
     /// will install on the next `drive` tick. Callers that care can
-    /// check [`is_loading`] before evicting.
+    /// check [`AstCache::is_loading`] before evicting.
     pub fn evict(&mut self, key: &L::Key) -> bool {
         self.entries.remove(key).is_some()
     }
@@ -181,7 +181,7 @@ impl<L: ResourceLoader> ResourceCache<L> {
     }
 
     /// Access the loader (used by tests and diagnostics). Most code
-    /// should go through [`request`] / [`peek`] instead.
+    /// should go through [`AstCache::request`] / [`AstCache::peek`] instead.
     pub fn loader(&self) -> &L {
         &self.loader
     }

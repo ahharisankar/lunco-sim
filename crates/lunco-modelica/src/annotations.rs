@@ -989,8 +989,8 @@ where
 ///   side. The closure must implement scope-chain resolution and
 ///   handle MSL cross-file lookup itself.
 /// - This variant queries
-///   [`ModelicaEngine::inherited_annotations`] and
-///   [`ModelicaEngine::inherited_members_typed`], which run inside
+///   [`crate::engine::ModelicaEngine::inherited_annotations`] and
+///   [`crate::engine::ModelicaEngine::inherited_members_typed`], which run inside
 ///   rumoca's session — scope-chain resolution, cross-file walks,
 ///   and per-file fingerprint caching all happen there. The lunco
 ///   side just merges the layers it gets back.

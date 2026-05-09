@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 /// Avian physics as a co-simulation model.
 ///
-/// Auto-added to any entity with a [`RigidBody`]. Exposes Avian state
+/// Auto-added to any entity with a [`avian3d::prelude::RigidBody`]. Exposes Avian state
 /// as named outputs and accepts forces as named inputs.
 ///
 /// ## Input Connectors

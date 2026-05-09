@@ -155,7 +155,7 @@ pub fn drilled_class_for_doc(
 /// `drilled_class` slot.
 ///
 /// Closing a tab drops its entry here but *does not* remove the
-/// underlying `ModelicaDocument` from [`ModelicaDocumentRegistry`];
+/// underlying `ModelicaDocument` from [`crate::ui::state::ModelicaDocumentRegistry`];
 /// the registry's lifetime is the union of all tabs viewing it.
 #[derive(Resource, Default)]
 pub struct ModelTabs {
@@ -207,7 +207,7 @@ impl ModelTabs {
     /// allocate a fresh one. The newly-created tab is **pinned** by
     /// default — this entry point is for deliberate opens (drill-in,
     /// New, Open File) that should produce a persistent tab. Browser
-    /// single-clicks should use [`ensure_preview_for`] instead.
+    /// single-clicks should use `ensure_preview_for` instead.
     pub fn ensure_for(
         &mut self,
         doc: DocumentId,
@@ -247,7 +247,7 @@ impl ModelTabs {
     /// rebind.
     ///
     /// Pinning happens automatically on the first edit / drill-in
-    /// (see [`pin`]) or explicitly via the tab's right-click menu.
+    /// (see `pin`) or explicitly via the tab's right-click menu.
     pub fn ensure_preview_for(
         &mut self,
         doc: DocumentId,
@@ -453,7 +453,7 @@ impl ModelTabs {
         })
     }
 
-    /// Mutable variant of [`find_for`].
+    /// Mutable variant of `find_for`.
     pub fn find_for_mut(
         &mut self,
         doc: DocumentId,

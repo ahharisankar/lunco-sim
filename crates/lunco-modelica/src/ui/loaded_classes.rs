@@ -101,7 +101,7 @@ impl LoadedModelicaClasses {
 // ─────────────────────────────────────────────────────────────────────
 
 /// A read-only library whose tree lives in
-/// [`PackageTreeCache::roots`] under a stable id. Rendering
+/// [`crate::ui::panels::package_browser::PackageTreeCache::roots`] under a stable id. Rendering
 /// delegates to the existing
 /// [`render_root_subtree`](crate::ui::panels::package_browser::render_root_subtree)
 /// helper — same lazy disk scan + `render_node` recursion the
@@ -165,7 +165,7 @@ impl LoadedClass for SystemLibraryClass {
 /// `LoadedClass` per document, matching OMEdit's flat layout where
 /// `Untitled1`, `MyBalloon`, etc. each appear as siblings of MSL.
 ///
-/// Reads source-of-truth from [`ModelicaDocumentRegistry`]: name,
+/// Reads source-of-truth from [`crate::ui::state::ModelicaDocumentRegistry`]: name,
 /// AST, current dirty state. Stateless beyond the doc id.
 pub struct WorkspaceClass {
     doc_id: DocumentId,

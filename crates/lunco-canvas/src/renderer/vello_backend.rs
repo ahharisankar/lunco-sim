@@ -1,4 +1,4 @@
-//! Vello implementation of [`crate::ui::renderer::DiagramRenderer`].
+//! Vello implementation of [`crate::renderer::DiagramRenderer`].
 //!
 //! Wraps a `bevy_vello::prelude::VelloScene2d` reference and emits
 //! kurbo paths / peniko fills + strokes per call. Vello renders the

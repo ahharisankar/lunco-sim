@@ -644,7 +644,7 @@ impl MSLIndexer {
     }
 
     /// Parse and index a single `.mo` file. Extracted from the file
-    /// branch of [`scan_dir`] so we can also ingest top-level companion
+    /// branch of `scan_dir` so we can also ingest top-level companion
     /// files (e.g. `Complex.mo`) that live next to `Modelica/` rather
     /// than inside it.
     fn ingest_file(
@@ -1292,7 +1292,7 @@ fn main() {
 }
 
 /// Parse every bundled `.mo` (compiled into `lunco_modelica` via
-/// `include_dir!`) and produce a [`BundledFileTree`] for each. The
+/// `include_dir!`) and produce a [`crate::visual_diagram::BundledFileTree`] for each. The
 /// runtime Package Browser consumes the result so multi-class
 /// bundled files (`AnnotatedRocketStage.mo`'s package + nested
 /// models / connectors) render with the same shape MSL files get.
@@ -1386,7 +1386,7 @@ fn bundled_class_kind(kind: &ClassType) -> &'static str {
 ///   3. If neither (1) nor (2) yielded anything: the built-in
 ///      [`DEFAULT_WARM_EXAMPLES`] list of common MSL examples.
 ///
-/// Each compile is gated by [`ModelicaCompiler::compile_loaded`]'s
+/// Each compile is gated by [`crate::ModelicaCompiler::compile_loaded`]'s
 /// existing 5-second heartbeat (see lib.rs), so even a multi-minute
 /// MSL-heavy compile prints proof-of-life every 5s.
 fn warm_compile_pass(opts: &Options) {

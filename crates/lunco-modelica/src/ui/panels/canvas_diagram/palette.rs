@@ -4,7 +4,7 @@
 //! [`crate::visual_diagram::msl_component_library`] and renders it as
 //! a nested egui submenu so users can pick MSL components without
 //! leaving the canvas. Also houses the user-tunable [`PaletteSettings`]
-//! and [`DiagramProjectionLimits`] resources.
+//! and [`crate::ui::panels::canvas_diagram::DiagramProjectionLimits`] resources.
 
 use bevy::prelude::*;
 use bevy_egui::egui;

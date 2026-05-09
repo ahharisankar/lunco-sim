@@ -193,7 +193,7 @@ pub(super) const ICON_W: f32 = 20.0;
 ///
 /// Conventions:
 ///
-/// - [`ModelicaPos`] — Modelica `.mo` source convention. +Y up.
+/// - [`crate::ui::panels::canvas_diagram::ModelicaPos`] — Modelica `.mo` source convention. +Y up.
 ///   Ranges typically `-100..100` per axis. This is the authored
 ///   coordinate that lands in `annotation(Placement(...))`.
 ///
@@ -263,7 +263,7 @@ pub mod coords {
 /// selection, or a stale projection into a neighbour.
 /// Shared handle to the target class's `Diagram(graphics={...})`
 /// annotation — painted as canvas background by
-/// [`DiagramDecorationLayer`]. Projector updates it each time the
+/// `DiagramDecorationLayer`. Projector updates it each time the
 /// drilled-in class changes.
 pub type BackgroundDiagramHandle = std::sync::Arc<
     std::sync::RwLock<
@@ -278,7 +278,7 @@ pub struct CanvasDocState {
     pub canvas: Canvas,
     pub last_seen_gen: u64,
     /// Generation that the *canvas scene* already reflects, ahead of
-    /// or equal to the AST projection. Bumped by [`apply_ops`] when a
+    /// or equal to the AST projection. Bumped by `apply_ops` when a
     /// canvas-originated edit has already been applied locally
     /// (drag → SetPlacement leaves the scene moved; menu Add → a
     /// synthesised node is inserted into the scene). The project gate
@@ -401,7 +401,7 @@ impl Default for CanvasDocState {
 /// so the panel's `render` can pull it out via `world.resource_mut`.
 ///
 /// State is sharded per-document — each open model tab has its own
-/// [`CanvasDocState`] entry so viewport/selection/projection/context
+/// [`crate::ui::panels::canvas_diagram::CanvasDocState`] entry so viewport/selection/projection/context
 /// menu never bleed between tabs. `fallback` is used only when no
 /// document is bound (startup, every tab closed).
 /// Per-tab key for [`CanvasDiagramState`]. Each tab owns its own
@@ -424,7 +424,7 @@ impl CanvasDiagramState {
     /// `doc`, or the shared fallback when `doc` is `None` /
     /// no tab has been opened yet. Non-render callers (event
     /// observers, ops layer) still use this; the canvas render path
-    /// keys explicitly by [`get_for_tab`].
+    /// keys explicitly by `get_for_tab`.
     pub fn get(&self, doc: Option<lunco_doc::DocumentId>) -> &CanvasDocState {
         match doc.and_then(|d| self.first_tab_for(d)) {
             Some(tab_id) => self.per_tab.get(&tab_id).unwrap_or(&self.fallback),
@@ -435,7 +435,7 @@ impl CanvasDiagramState {
     /// Legacy mutable lookup; routes to the first tab viewing
     /// `doc`. **Does not allocate** on a `None`/missing-doc path —
     /// returns the fallback. Callers that *need* an entry should
-    /// pass an explicit `tab_id` via [`get_mut_for_tab`].
+    /// pass an explicit `tab_id` via `get_mut_for_tab`.
     pub fn get_mut(
         &mut self,
         doc: Option<lunco_doc::DocumentId>,
@@ -495,7 +495,7 @@ impl CanvasDiagramState {
         }
     }
 
-    /// Mutable counterpart of [`get_for_render`]. When both
+    /// Mutable counterpart of `get_for_render`. When both
     /// `render_tab_id` and `doc` are populated, allocates a per-tab
     /// entry; otherwise routes through the legacy first-tab path.
     pub fn get_mut_for_render(

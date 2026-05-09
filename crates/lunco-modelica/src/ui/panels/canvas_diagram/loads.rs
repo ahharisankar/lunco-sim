@@ -18,7 +18,7 @@ use crate::ui::state::ModelicaDocumentRegistry;
 /// waiting on.
 ///
 /// The heavy work (file read + rumoca parse) lives in
-/// [`crate::class_cache::ClassCache`]; this resource only tracks
+/// `crate::class_cache::ClassCache`; this resource only tracks
 /// which tabs care about which class. When the cache resolves,
 /// [`drive_drill_in_loads`] builds a `ModelicaDocument` from the
 /// cached AST + source (no second parse) and installs it into the
@@ -33,7 +33,7 @@ pub struct DrillInLoads {
 
 /// Persistent `DocumentId → qualified class name` map for tabs
 /// opened via drill-in. Lives for the tab's lifetime (cleared by
-/// [`cleanup_removed_documents`]), so downstream systems — canvas
+/// `cleanup_removed_documents`), so downstream systems — canvas
 /// projection, especially — can ask "what class was this tab
 /// drilled into?" after install has already cleared the transient
 /// [`DrillInLoads`] entry.
@@ -136,7 +136,7 @@ impl DrillInLoads {
 }
 
 /// Bevy system: for each pending drill-in binding, check whether
-/// its class has landed in [`ClassCache`]. If yes, build a
+/// its class has landed in [`crate::class_cache::ClassCache`]. If yes, build a
 /// `ModelicaDocument` from the cached parts (no re-parse) and
 /// install it in the registry.
 /// Bevy system: poll pending duplicate bg tasks; `install_prebuilt`
