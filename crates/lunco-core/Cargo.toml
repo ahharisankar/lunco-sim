@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 bevy = { workspace = true }
-smallvec = { workspace = true }
 big_space = { workspace = true }
 leafwing-input-manager.workspace = true
 serde = { version = "1", features = ["derive"] }

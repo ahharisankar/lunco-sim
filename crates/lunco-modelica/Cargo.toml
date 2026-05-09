@@ -50,7 +50,6 @@ lunco-canvas = { path = "../lunco-canvas" }
 lunco-twin = { path = "../lunco-twin", features = ["bevy"] }
 lunco-workspace = { path = "../lunco-workspace" }
 lunco-storage = { path = "../lunco-storage" }
-lunco-cache = { path = "../lunco-cache" }
 egui_plot = "0.34.1"
 # Docs view (ModelViewMode::Docs): HTML → Markdown → egui render.
 # `egui_commonmark` pulls the right `egui` version transitively to
@@ -108,7 +107,6 @@ include_dir = "0.7"
 # actually present in MSL Resources/Images are enabled to keep the
 # compile surface small.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-usvg = { version = "0.45", default-features = false, features = ["text"] }
 # LunCoSim/rumoca fork, `wasm-asset-loader` branch (off `main`).
 # `main` already carries:
 #   - the `instant::Instant` wasm32 fix that `web-fix` was carrying
@@ -152,8 +150,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # OS-native picker (GTK3 on Linux, COM on Windows, Cocoa on macOS)
 # via rfd's default feature set.
 rfd = "0.15"
-# Recursive directory walking for the Twin Explorer scan.
-walkdir = "2.5"
 
 # Native-only: Tracy profiler client. tracy-client-sys requires a C++ compile
 # that doesn't work for wasm32-unknown-unknown (clang++ → TracyClient.cpp fails).
@@ -212,7 +208,6 @@ web-sys = { version = "0.3", features = [
 ] }
 js-sys = "0.3"
 console_error_panic_hook = "0.1"
-getrandom = { version = "0.3", features = ["wasm_js"] }
 # Pure-Rust zstd decoder for the MSL bundle. Smaller than the
 # `zstd` crate (which uses a C dep) and the encoder side already runs
 # on native (see `lunco-assets/src/bin/build_msl_assets.rs`).

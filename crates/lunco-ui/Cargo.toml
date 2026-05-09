@@ -11,8 +11,6 @@ lunco-workbench = { path = "../lunco-workbench" }
 lunco-theme = { path = "../lunco-theme" }
 lunco-core = { path = "../lunco-core" }
 lunco-celestial = { path = "../lunco-celestial" }
-lunco-terrain = { path = "../lunco-terrain" }
 lunco-avatar = { path = "../lunco-avatar" }
-smallvec = { workspace = true }
 chrono = { workspace = true }
 egui_plot = "0.34"

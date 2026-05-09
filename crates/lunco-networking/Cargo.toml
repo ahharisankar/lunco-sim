@@ -6,7 +6,6 @@ description = "Networking layer for LunCoSim — transport abstraction, ECS repl
 
 [dependencies]
 bevy = { workspace = true }
-lunco-core = { path = "../lunco-core" }
 # bevy_renet2 = { version = "..." }       # Transport backend (feature-gated)
 # bevy_replicon = { version = "..." }     # ECS entity/component replication
 # lz4_flex = { version = "..." }          # Optional general-purpose compression

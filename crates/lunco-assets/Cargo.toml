@@ -30,7 +30,6 @@ sha2 = "0.10"
 # (Node.js) is on PATH before shelling out to gltf-transform. Native
 # only — the wasm path doesn't run process steps.
 which = "6"
-chrono = "0.4"
 flate2 = "1.0"
 bzip2 = "0.4"
 tar = "0.4"
