@@ -1512,6 +1512,42 @@ fn render_unified_toolbar(
                 .get_resource::<crate::experiments_runner::ExperimentDrafts>()
                 .and_then(|d| d.get(&model_ref).map(|dr| dr.overrides.len()))
                 .unwrap_or(0);
+
+            // Detect inputs from current source + prefill from draft.
+            let source_text = world
+                .get_resource::<crate::ui::state::ModelicaDocumentRegistry>()
+                .and_then(|r| r.host(doc))
+                .map(|h| h.document().source().to_string())
+                .unwrap_or_default();
+            let detected = crate::experiments_runner::detect_top_level_inputs(&source_text);
+            let prefilled = world
+                .get_resource::<crate::experiments_runner::ExperimentDrafts>()
+                .and_then(|d| d.get(&model_ref).map(|dr| dr.inputs.clone()))
+                .unwrap_or_default();
+            let inputs: Vec<crate::ui::commands::FastRunInput> = detected
+                .into_iter()
+                .map(|d| {
+                    let value_text = prefilled
+                        .get(&lunco_experiments::ParamPath(d.name.clone()))
+                        .map(|v| match v {
+                            lunco_experiments::ParamValue::Real(x) => format!("{x}"),
+                            lunco_experiments::ParamValue::Int(x) => format!("{x}"),
+                            lunco_experiments::ParamValue::Bool(b) => {
+                                if *b { "true".into() } else { "false".into() }
+                            }
+                            lunco_experiments::ParamValue::String(s) => s.clone(),
+                            lunco_experiments::ParamValue::Enum(s) => s.clone(),
+                            lunco_experiments::ParamValue::RealArray(_) => "(array)".into(),
+                        })
+                        .unwrap_or_default();
+                    crate::ui::commands::FastRunInput {
+                        name: d.name,
+                        type_name: d.type_name,
+                        value_text,
+                    }
+                })
+                .collect();
+
             if let Some(mut setup) = world
                 .get_resource_mut::<crate::ui::commands::FastRunSetupState>()
             {
@@ -1520,6 +1556,7 @@ fn render_unified_toolbar(
                     model_ref,
                     bounds,
                     overrides_count,
+                    inputs,
                 });
             }
         } else {

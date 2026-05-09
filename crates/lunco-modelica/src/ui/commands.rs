@@ -254,6 +254,19 @@ pub struct FastRunSetupEntry {
     /// Set when overrides are non-empty so the dialog hint nudges
     /// users toward the Experiments panel for full editing.
     pub overrides_count: usize,
+    /// Detected `input` declarations + their current draft values
+    /// (or empty string if unset). Editable inline in the dialog so
+    /// users don't run a model with all-zero inputs.
+    pub inputs: Vec<FastRunInput>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FastRunInput {
+    pub name: String,
+    pub type_name: String,
+    /// User input as text. Parsed on Run; empty = leave as Modelica
+    /// `input` (default 0) without substitution.
+    pub value_text: String,
 }
 
 pub(crate) fn render_fast_run_setup(
@@ -348,6 +361,35 @@ pub(crate) fn render_fast_run_setup(
                     ui.end_row();
                 });
 
+            // Inputs — substitute input declarations with parameter
+            // values so the simulator sees something other than zero.
+            if !entry.inputs.is_empty() {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("Inputs").strong());
+                egui::Grid::new("fastrun_setup_inputs")
+                    .num_columns(3)
+                    .show(ui, |ui| {
+                        ui.weak("Type");
+                        ui.weak("Name");
+                        ui.weak("Value");
+                        ui.end_row();
+                        for inp in entry.inputs.iter_mut() {
+                            ui.label(&inp.type_name);
+                            ui.label(&inp.name);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut inp.value_text)
+                                    .desired_width(100.0),
+                            )
+                            .on_hover_text(
+                                "Leave empty to use Modelica default (0). \
+                                 The value is substituted into the source as a \
+                                 parameter before compile.",
+                            );
+                            ui.end_row();
+                        }
+                    });
+            }
+
             ui.add_space(6.0);
             if entry.overrides_count > 0 {
                 ui.colored_label(
@@ -391,11 +433,39 @@ pub(crate) fn render_fast_run_setup(
     }
     if confirmed {
         let entry = setup.0.take().unwrap();
-        // Persist edited bounds into the draft so FastRunActiveModel
-        // picks them up. Overrides untouched.
-        drafts
-            .entry(entry.model_ref.clone())
-            .bounds_override = Some(entry.bounds);
+        // Persist edited bounds + inputs into the draft so
+        // FastRunActiveModel picks them up. Overrides untouched.
+        let draft = drafts.entry(entry.model_ref.clone());
+        draft.bounds_override = Some(entry.bounds);
+        // Parse input text → ParamValue. Empty fields are dropped
+        // (= leave as Modelica `input`, default 0).
+        let mut new_inputs: std::collections::BTreeMap<
+            lunco_experiments::ParamPath,
+            lunco_experiments::ParamValue,
+        > = std::collections::BTreeMap::new();
+        for inp in entry.inputs.iter() {
+            let txt = inp.value_text.trim();
+            if txt.is_empty() {
+                continue;
+            }
+            let v = match inp.type_name.as_str() {
+                "Real" => txt.parse::<f64>().ok().map(lunco_experiments::ParamValue::Real),
+                "Integer" | "Int" => txt.parse::<i64>().ok().map(lunco_experiments::ParamValue::Int),
+                "Boolean" | "Bool" => match txt {
+                    "true" => Some(lunco_experiments::ParamValue::Bool(true)),
+                    "false" => Some(lunco_experiments::ParamValue::Bool(false)),
+                    _ => None,
+                },
+                _ => txt
+                    .parse::<f64>()
+                    .ok()
+                    .map(lunco_experiments::ParamValue::Real),
+            };
+            if let Some(v) = v {
+                new_inputs.insert(lunco_experiments::ParamPath(inp.name.clone()), v);
+            }
+        }
+        draft.inputs = new_inputs;
         commands.trigger(FastRunActiveModel { doc: entry.doc });
     } else if cancelled {
         setup.0 = None;
@@ -3388,15 +3458,16 @@ fn on_fast_run_active_model(trigger: On<FastRunActiveModel>, mut commands: Comma
                 solver: None,
             });
 
-        // Pull the override + bounds draft for this model, if any.
-        let (overrides, bounds) = {
+        // Pull the override + inputs + bounds draft for this model.
+        let (overrides, inputs, bounds) = {
             let drafts = world.resource::<crate::experiments_runner::ExperimentDrafts>();
             match drafts.get(&model_ref) {
                 Some(d) => (
                     d.overrides.clone(),
+                    d.inputs.clone(),
                     d.bounds_override.clone().unwrap_or(bounds),
                 ),
-                None => (Default::default(), bounds),
+                None => (Default::default(), Default::default(), bounds),
             }
         };
 
@@ -3404,7 +3475,7 @@ fn on_fast_run_active_model(trigger: On<FastRunActiveModel>, mut commands: Comma
         let twin_id = lunco_experiments::TwinId("default".into());
         let exp_id = {
             let mut reg = world.resource_mut::<lunco_experiments::ExperimentRegistry>();
-            reg.insert_new(twin_id, model_ref, overrides, bounds)
+            reg.insert_new(twin_id, model_ref, overrides, inputs, bounds)
         };
         let exp = world
             .resource::<lunco_experiments::ExperimentRegistry>()

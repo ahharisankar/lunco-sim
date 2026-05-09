@@ -160,6 +160,7 @@ impl ExperimentRunner for ModelicaRunner {
         // Snapshot inputs for the worker thread.
         let model_ref = exp.model_ref.clone();
         let overrides = exp.overrides.clone();
+        let inputs = exp.inputs.clone();
         let bounds = exp.bounds.clone();
         let state = self.state.clone();
         let busy_clear = self.state.clone();
@@ -199,6 +200,7 @@ impl ExperimentRunner for ModelicaRunner {
                         src.filename,
                         src.extras,
                         overrides,
+                        inputs,
                         bounds,
                     );
                     if !dispatched {
@@ -233,7 +235,7 @@ impl ExperimentRunner for ModelicaRunner {
             });
             let _ = run_id;
             std::thread::spawn(move || {
-                run_inner(state, model_ref, overrides, bounds, cancel, tx);
+                run_inner(state, model_ref, overrides, inputs, bounds, cancel, tx);
                 if let Ok(mut s) = busy_clear.lock() {
                     s.busy_with = None;
                 }
@@ -330,6 +332,7 @@ fn run_inner(
     state: Arc<Mutex<RunnerState>>,
     model_ref: ModelRef,
     overrides: BTreeMap<ParamPath, ParamValue>,
+    inputs: BTreeMap<ParamPath, ParamValue>,
     bounds: RunBounds,
     cancel: Arc<AtomicBool>,
     tx: Sender<RunUpdate>,
@@ -357,8 +360,19 @@ fn run_inner(
         }
     };
 
-    // Apply overrides via string injection.
-    let injected = match apply_overrides_to_source(&source.source, &overrides) {
+    // Apply input substitutions first (input → parameter), then
+    // parameter overrides on the rewritten source.
+    let after_inputs = match apply_inputs_to_source(&source.source, &inputs) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = tx.send(RunUpdate::Failed {
+                error: format!("input substitution failed: {e}"),
+                partial: None,
+            });
+            return;
+        }
+    };
+    let injected = match apply_overrides_to_source(&after_inputs, &overrides) {
         Ok(s) => s,
         Err(e) => {
             let _ = tx.send(RunUpdate::Failed {
@@ -502,6 +516,75 @@ pub struct DetectedParam {
     /// Reason override is unsupported, when `!supportable`. Surfaced
     /// in the editor as a tooltip.
     pub reason: Option<String>,
+}
+
+/// One detected top-level `input` declaration. Modelica `input` vars
+/// have no defaults — at runtime the stepper sets them via
+/// `set_input(name, value)`. For batch Fast Run we substitute them
+/// into the source as `parameter <type> <name> = <value>` before
+/// compile so the simulator sees a fixed value instead of zero.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DetectedInput {
+    pub name: String,
+    pub type_name: String,
+}
+
+/// Find top-level `input <Type> <name>;` declarations in a model
+/// source. Used by the Setup dialog to render an Inputs section, and
+/// by the runner to substitute values into the source pre-compile.
+pub fn detect_top_level_inputs(source: &str) -> Vec<DetectedInput> {
+    let re = regex::Regex::new(
+        r"(?m)\binput\b\s+([A-Za-z_][A-Za-z0-9_.\[\]]*)\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+    )
+    .expect("regex");
+    let mut out = Vec::new();
+    for cap in re.captures_iter(source) {
+        let type_name = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let name = cap.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        out.push(DetectedInput { name, type_name });
+    }
+    out
+}
+
+/// Substitute input declarations with parameter declarations so the
+/// batch simulator sees a fixed value. Replaces
+/// `input <Type> <name>` with `parameter <Type> <name> = <value>`.
+/// Only fires for inputs the user actually set; unset inputs stay
+/// as `input` and the simulator defaults them to 0.
+pub fn apply_inputs_to_source(
+    source: &str,
+    inputs: &BTreeMap<ParamPath, ParamValue>,
+) -> Result<String, String> {
+    if inputs.is_empty() {
+        return Ok(source.to_string());
+    }
+    let mut out = source.to_string();
+    for (path, value) in inputs {
+        let leaf = path.0.rsplit('.').next().unwrap_or(&path.0);
+        let escaped = regex::escape(leaf);
+        let re = regex::Regex::new(&format!(
+            r"(?m)\binput\b(\s+[A-Za-z_][A-Za-z0-9_.\[\]]*)\s+{}\b\s*;",
+            escaped
+        ))
+        .map_err(|e| format!("input regex: {e}"))?;
+        let lit = format_literal(value);
+        let replaced = re
+            .replace(
+                &out,
+                format!("parameter$1 {} = {};", leaf, lit).as_str(),
+            )
+            .into_owned();
+        if replaced == out {
+            return Err(format!(
+                "input '{leaf}' not found at the top level of the model source"
+            ));
+        }
+        out = replaced;
+    }
+    Ok(out)
 }
 
 /// Detect top-level `parameter` declarations in a Modelica source
@@ -731,6 +814,10 @@ pub struct ExperimentDrafts {
 #[derive(Clone, Debug, Default)]
 pub struct ExperimentDraft {
     pub overrides: BTreeMap<ParamPath, ParamValue>,
+    /// User-set values for `input` variables. Stored separately from
+    /// parameter overrides because they get a different source-rewrite
+    /// (`input X y` → `parameter X y = value`).
+    pub inputs: BTreeMap<ParamPath, ParamValue>,
     pub bounds_override: Option<RunBounds>,
 }
 
@@ -775,6 +862,7 @@ pub fn drain_pending_handles(
     mut sources: ResMut<ExperimentSources>,
     mut compile_states: Option<ResMut<crate::ui::CompileStates>>,
     mut console: Option<ResMut<crate::ui::panels::console::ConsoleLog>>,
+    mut visibility: Option<ResMut<crate::ui::panels::experiments::ExperimentVisibility>>,
 ) {
     let mut keep: Vec<RunHandle> = Vec::with_capacity(pending.0.len());
     for handle in pending.0.drain(..) {
@@ -799,6 +887,11 @@ pub fn drain_pending_handles(
                         n_vars,
                         wall
                     );
+                    // Auto-visible: a run that just completed is what
+                    // the user is looking at, no checkbox needed.
+                    if let Some(mut vis) = visibility.as_mut() {
+                        vis.visible.insert(handle.run_id);
+                    }
                     if let Some(c) = console.as_mut() {
                         c.info(format!(
                             "✓ Fast Run done: {} samples × {} vars in {} ms",

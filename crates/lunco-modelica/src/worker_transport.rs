@@ -107,6 +107,11 @@ pub enum WireMessage {
             lunco_experiments::ParamPath,
             lunco_experiments::ParamValue,
         >,
+        #[serde(default)]
+        inputs: std::collections::BTreeMap<
+            lunco_experiments::ParamPath,
+            lunco_experiments::ParamValue,
+        >,
         bounds: lunco_experiments::RunBounds,
     },
     /// Best-effort cancel of an in-flight Fast Run. Worker observes
@@ -425,6 +430,10 @@ pub fn dispatch_run_fast(
         lunco_experiments::ParamPath,
         lunco_experiments::ParamValue,
     >,
+    inputs: std::collections::BTreeMap<
+        lunco_experiments::ParamPath,
+        lunco_experiments::ParamValue,
+    >,
     bounds: lunco_experiments::RunBounds,
 ) -> bool {
     if WORKER.get().is_none() {
@@ -437,6 +446,7 @@ pub fn dispatch_run_fast(
         filename,
         extras,
         overrides,
+        inputs,
         bounds,
     };
     if !msl_installed() {

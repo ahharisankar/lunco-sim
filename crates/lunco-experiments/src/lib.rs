@@ -156,6 +156,12 @@ pub struct Experiment {
     /// Display name. Auto-set to `<model> — N` on creation; user-editable.
     pub name: String,
     pub overrides: BTreeMap<ParamPath, ParamValue>,
+    /// Input values for Modelica `input` declarations. Stored
+    /// separately from parameter overrides because the source
+    /// rewrite is different (input declaration → parameter
+    /// declaration with a fixed value).
+    #[serde(default)]
+    pub inputs: BTreeMap<ParamPath, ParamValue>,
     pub bounds: RunBounds,
     pub status: RunStatus,
     pub result: Option<RunResult>,
@@ -196,6 +202,7 @@ impl ExperimentRegistry {
         twin_id: TwinId,
         model_ref: ModelRef,
         overrides: BTreeMap<ParamPath, ParamValue>,
+        inputs: BTreeMap<ParamPath, ParamValue>,
         bounds: RunBounds,
     ) -> ExperimentId {
         let n = self
@@ -203,7 +210,9 @@ impl ExperimentRegistry {
             .entry((twin_id.clone(), model_ref.clone()))
             .and_modify(|c| *c += 1)
             .or_insert(1);
-        let name = format!("{} — {}", model_ref.0, n);
+        // "Run N" is short enough for plot legends; the model class
+        // belongs in row metadata, not every legend entry.
+        let name = format!("Run {}", n);
 
         let color_hint = {
             let c = self.color_counter.entry(twin_id.clone()).or_insert(0);
@@ -218,6 +227,7 @@ impl ExperimentRegistry {
             model_ref,
             name,
             overrides,
+            inputs,
             bounds,
             status: RunStatus::Pending,
             result: None,
@@ -416,11 +426,11 @@ mod tests {
         let mut reg = ExperimentRegistry::new();
         let twin = TwinId("t".into());
         let model = ModelRef("M".into());
-        let id1 = reg.insert_new(twin.clone(), model.clone(), Default::default(), Default::default());
-        let id2 = reg.insert_new(twin.clone(), model.clone(), Default::default(), Default::default());
+        let id1 = reg.insert_new(twin.clone(), model.clone(), Default::default(), Default::default(), Default::default());
+        let id2 = reg.insert_new(twin.clone(), model.clone(), Default::default(), Default::default(), Default::default());
         assert_ne!(id1, id2);
         let names: Vec<_> = reg.list_for_twin(&twin).iter().map(|e| e.name.clone()).collect();
-        assert_eq!(names, vec!["M — 1", "M — 2"]);
+        assert_eq!(names, vec!["Run 1", "Run 2"]);
     }
 
     #[test]
@@ -429,7 +439,7 @@ mod tests {
         let twin = TwinId("t".into());
         let model = ModelRef("M".into());
         for _ in 0..(REGISTRY_CAP_PER_TWIN + 5) {
-            let id = reg.insert_new(twin.clone(), model.clone(), Default::default(), Default::default());
+            let id = reg.insert_new(twin.clone(), model.clone(), Default::default(), Default::default(), Default::default());
             reg.set_status(id, RunStatus::Done { wall_time_ms: 0 });
         }
         assert_eq!(reg.list_for_twin(&twin).len(), REGISTRY_CAP_PER_TWIN);
@@ -442,15 +452,15 @@ mod tests {
         let model = ModelRef("M".into());
         // Fill with terminal first
         for _ in 0..REGISTRY_CAP_PER_TWIN {
-            let id = reg.insert_new(twin.clone(), model.clone(), Default::default(), Default::default());
+            let id = reg.insert_new(twin.clone(), model.clone(), Default::default(), Default::default(), Default::default());
             reg.set_status(id, RunStatus::Done { wall_time_ms: 0 });
         }
         // Now add an in-flight one, which should NOT trigger eviction of itself
-        let live = reg.insert_new(twin.clone(), model.clone(), Default::default(), Default::default());
+        let live = reg.insert_new(twin.clone(), model.clone(), Default::default(), Default::default(), Default::default());
         reg.set_status(live, RunStatus::Running { t_current: 0.0 });
         // Adding more terminal ones should evict from the terminal set
         for _ in 0..3 {
-            let id = reg.insert_new(twin.clone(), model.clone(), Default::default(), Default::default());
+            let id = reg.insert_new(twin.clone(), model.clone(), Default::default(), Default::default(), Default::default());
             reg.set_status(id, RunStatus::Done { wall_time_ms: 0 });
         }
         // Live run still present
@@ -462,7 +472,7 @@ mod tests {
         let mut reg = ExperimentRegistry::new();
         let twin = TwinId("t".into());
         let model = ModelRef("M".into());
-        let id = reg.insert_new(twin, model, Default::default(), Default::default());
+        let id = reg.insert_new(twin, model, Default::default(), Default::default(), Default::default());
         // Pending — refuse delete
         assert!(!reg.delete(id));
         reg.set_status(id, RunStatus::Done { wall_time_ms: 0 });
