@@ -6590,6 +6590,7 @@ dependencies = [
  "lunco-scripting",
  "lunco-usd-bevy",
  "openusd",
+ "rumoca-phase-parse",
  "serde_json",
 ]
 

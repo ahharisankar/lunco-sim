@@ -33,8 +33,7 @@ use lunco_cosim::{SimComponent, SimConnection, SimStatus};
 use lunco_doc::DocumentId;
 use lunco_modelica::{
     extract_inputs_with_defaults_from_ast, extract_model_name_from_ast,
-    extract_parameters_from_ast, parse_source_best_effort, ModelicaChannels,
-    ModelicaCommand, ModelicaModel,
+    extract_parameters_from_ast, ModelicaChannels, ModelicaCommand, ModelicaModel,
 };
 use lunco_scripting::{
     doc::{ScriptDocument, ScriptLanguage, ScriptedModel},
@@ -153,7 +152,14 @@ fn dispatch_modelica(
     // usable name/parameter/input snapshots — same recovery
     // semantics `Session::recovered_file_query` uses on the engine
     // side.
-    let ast = parse_source_best_effort(&source, "cosim-dispatch.mo");
+    // Lenient parse: even a model with a semantic error produces
+    // usable name/parameter/input snapshots. Inlined here (rather than
+    // wrapped in a helper) so the parse cost is visible at the call
+    // site — same principle as the AST-canonical engine surface
+    // (see lunco-doc/domain_engine.rs).
+    let ast = rumoca_phase_parse::parse_to_syntax(&source, "cosim-dispatch.mo")
+        .best_effort()
+        .clone();
     let model_name = extract_model_name_from_ast(&ast).unwrap_or_else(|| "Model".into());
     let parameters = extract_parameters_from_ast(&ast);
     let inputs = extract_inputs_with_defaults_from_ast(&ast).into_iter().collect();

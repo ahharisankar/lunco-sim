@@ -157,6 +157,63 @@ impl std::error::Error for AstMutError {}
 /// `StoredDefinition`. `"Foo"` looks up at the top level; `"Foo.Bar"`
 /// descends into `classes["Foo"].classes["Bar"]`.
 ///
+/// Parse a `__LunCoFragment` stub class and return the resulting
+/// `StoredDefinition`, **memoised by stub text**.
+///
+/// Every fragment-parse helper below (`parse_value_fragment`,
+/// `parse_placement_expression`, `parse_component_fragment`, …) wraps
+/// its input in a stub class and parses the whole thing. Rumoca's
+/// public parser entry is whole-file only; there's no public
+/// expression-fragment entry, so the stub-class trick is the only
+/// portable way to extract a parsed `Expression` / `Component` /
+/// `Equation`.
+///
+/// The same stub text recurs constantly in normal use:
+///   - drag-bursts emit identical `Placement(...)` strings as the
+///     mouse hovers between integer pixel positions,
+///   - palette-drop / AddComponent reuses the same defaults skeleton,
+///   - parameter sliders re-emit identical numeric literals,
+///   - typical scenes have many components with the same `Placement`
+///     extent (only `origin` varies).
+///
+/// Roadmap step 5 of the AST-canonical refactor: don't re-parse the
+/// same stub text on every op. A bounded process-wide cache (capped
+/// at 1024 entries; cleared wholesale when full — eviction policy
+/// doesn't matter much because most hits are within drag bursts on
+/// the same handful of strings) keeps each parse to a hash lookup +
+/// `Arc::clone` after first sight. First-time parses still pay the
+/// full rumoca cost.
+///
+/// Returns `None` if rumoca couldn't parse the stub — callers map this
+/// onto their domain-specific [`AstMutError`] variant. The cache stores
+/// only successes.
+fn parse_stub_cached(stub: &str) -> Option<std::sync::Arc<StoredDefinition>> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static CACHE: OnceLock<Mutex<HashMap<String, std::sync::Arc<StoredDefinition>>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::with_capacity(64)));
+
+    if let Some(hit) = cache.lock().unwrap().get(stub).cloned() {
+        return Some(hit);
+    }
+
+    let parsed = parse_to_ast(stub, "__lunco_fragment.mo").ok()?;
+    let arc = std::sync::Arc::new(parsed);
+
+    let mut g = cache.lock().unwrap();
+    // Bounded cap. We don't need true LRU — fragment populations are
+    // small (~hundreds of unique placements in a real session), and
+    // wholesale clear-on-overflow is cheaper than tracking ages.
+    // Tune the cap if real workloads ever push past it.
+    if g.len() >= 1024 {
+        g.clear();
+    }
+    g.insert(stub.to_string(), arc.clone());
+    Some(arc)
+}
+
 /// Mutable variant — callers hold a clone of the AST and mutate it
 /// before emitting source. Used by every helper in this module that
 /// takes a class path string.
@@ -365,7 +422,7 @@ fn parse_component_fragment(
 ) -> Result<rumoca_session::parsing::ast::Component, AstMutError> {
     let body = pretty::component_decl(decl);
     let stub = format!("model __LunCoFragment\n{body}end __LunCoFragment;\n");
-    let parsed = parse_to_ast(&stub, "__lunco_fragment.mo").map_err(|_| {
+    let parsed = parse_stub_cached(&stub).ok_or_else(|| {
         AstMutError::ValueParseFailed { value: body.clone() }
     })?;
     let class = parsed.classes.get("__LunCoFragment").ok_or_else(|| {
@@ -393,7 +450,7 @@ fn parse_connect_equation_fragment(
     let to_text = render_port_ref(&eq.to);
     let body = format!("  connect({from_text}, {to_text});\n");
     let stub = format!("model __LunCoFragment\nequation\n{body}end __LunCoFragment;\n");
-    let parsed = parse_to_ast(&stub, "__lunco_fragment.mo").map_err(|_| {
+    let parsed = parse_stub_cached(&stub).ok_or_else(|| {
         AstMutError::ValueParseFailed { value: body.clone() }
     })?;
     let class = parsed.classes.get("__LunCoFragment").ok_or_else(|| {
@@ -436,8 +493,8 @@ pub fn add_variable(
     }
     let body = pretty::variable_decl(decl);
     let stub = format!("model __LunCoFragment\n{body}end __LunCoFragment;\n");
-    let parsed = parse_to_ast(&stub, "__lunco_fragment.mo")
-        .map_err(|_| AstMutError::ValueParseFailed { value: body.clone() })?;
+    let parsed = parse_stub_cached(&stub)
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: body.clone() })?;
     let parsed_class = parsed
         .classes
         .get("__LunCoFragment")
@@ -475,8 +532,8 @@ pub fn add_class(
     partial: bool,
 ) -> Result<(), AstMutError> {
     let stub_text = pretty::class_block_empty(name, kind, description, partial);
-    let parsed = parse_to_ast(&stub_text, "__lunco_fragment.mo")
-        .map_err(|_| AstMutError::ValueParseFailed { value: stub_text.clone() })?;
+    let parsed = parse_stub_cached(&stub_text)
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: stub_text.clone() })?;
     let new_class = parsed
         .classes
         .get(name)
@@ -521,8 +578,8 @@ pub fn add_short_class(
     modifications: &[(String, String)],
 ) -> Result<(), AstMutError> {
     let stub_text = pretty::short_class_decl(name, kind, base, prefixes, modifications);
-    let parsed = parse_to_ast(&stub_text, "__lunco_fragment.mo")
-        .map_err(|_| AstMutError::ValueParseFailed { value: stub_text.clone() })?;
+    let parsed = parse_stub_cached(&stub_text)
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: stub_text.clone() })?;
     let new_class = parsed
         .classes
         .get(name)
@@ -564,8 +621,8 @@ pub fn add_equation(
 ) -> Result<(), AstMutError> {
     let body = pretty::equation_decl(eq);
     let stub = format!("model __LunCoFragment\nequation\n{body}end __LunCoFragment;\n");
-    let parsed = parse_to_ast(&stub, "__lunco_fragment.mo")
-        .map_err(|_| AstMutError::ValueParseFailed { value: body.clone() })?;
+    let parsed = parse_stub_cached(&stub)
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: body.clone() })?;
     let parsed_class = parsed
         .classes
         .get("__LunCoFragment")
@@ -738,8 +795,8 @@ fn parse_named_annotation_fragment(text: &str) -> Result<Expression, AstMutError
     let stub = format!(
         "model __LunCoFragment\nannotation({text});\nend __LunCoFragment;\n"
     );
-    let parsed = parse_to_ast(&stub, "__lunco_fragment.mo")
-        .map_err(|_| AstMutError::ValueParseFailed { value: text.to_string() })?;
+    let parsed = parse_stub_cached(&stub)
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })?;
     let class = parsed
         .classes
         .get("__LunCoFragment")
@@ -760,8 +817,8 @@ fn parse_graphics_entry(text: &str) -> Result<Expression, AstMutError> {
     let stub = format!(
         "model __LunCoFragment\nannotation(Diagram(graphics={{{text}}}));\nend __LunCoFragment;\n"
     );
-    let parsed = parse_to_ast(&stub, "__lunco_fragment.mo")
-        .map_err(|_| AstMutError::ValueParseFailed { value: text.to_string() })?;
+    let parsed = parse_stub_cached(&stub)
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })?;
     let class = parsed
         .classes
         .get("__LunCoFragment")
@@ -1236,7 +1293,7 @@ fn parse_experiment_expression(
 ) -> Result<Expression, AstMutError> {
     let inner = pretty::experiment_inner(start_time, stop_time, tolerance, interval);
     let stub = format!("model __LunCoFragment\nannotation({inner});\nend __LunCoFragment;\n");
-    let parsed = parse_to_ast(&stub, "__lunco_fragment.mo").map_err(|_| {
+    let parsed = parse_stub_cached(&stub).ok_or_else(|| {
         AstMutError::ValueParseFailed { value: inner.clone() }
     })?;
     let class = parsed.classes.get("__LunCoFragment").ok_or_else(|| {
@@ -1299,7 +1356,7 @@ fn parse_placement_expression(placement: &pretty::Placement) -> Result<Expressio
     let stub = format!(
         "model __LunCoFragment\n  Real __v annotation({placement_text});\nend __LunCoFragment;\n"
     );
-    let parsed = parse_to_ast(&stub, "__lunco_fragment.mo").map_err(|_| {
+    let parsed = parse_stub_cached(&stub).ok_or_else(|| {
         AstMutError::ValueParseFailed { value: placement_text.clone() }
     })?;
     let class = parsed.classes.get("__LunCoFragment").ok_or_else(|| {
@@ -1344,8 +1401,8 @@ fn is_annotation_entry_named(expr: &Expression, name: &str) -> bool {
 /// only ever lives inside this throwaway parse.
 fn parse_value_fragment(value_text: &str) -> Result<Expression, AstMutError> {
     let stub = format!("model __LunCoFragment\n  Real __v = {value_text};\nend __LunCoFragment;\n");
-    let parsed = parse_to_ast(&stub, "__lunco_fragment.mo")
-        .map_err(|_| AstMutError::ValueParseFailed { value: value_text.to_string() })?;
+    let parsed = parse_stub_cached(&stub)
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: value_text.to_string() })?;
     let class = parsed
         .classes
         .get("__LunCoFragment")

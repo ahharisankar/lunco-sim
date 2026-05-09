@@ -113,47 +113,34 @@ pub struct Diagnostic {
 ///
 /// 1. UI gesture → typed [`Self::Op`].
 /// 2. Engine `apply`s op: optimistically patches the Index, returns inverse.
-/// 3. (Async) engine reparses authoritative source on a debounce, reconciles
-///    Index against the new AST. UI never blocks.
+/// 3. Op-driven path: `apply` mutates engine state directly. **No reparse
+///    on the hot path** — see `FreshAst::Mutated` in lunco-modelica.
+/// 4. Free-form text-edit path (code editor only): a separate driver
+///    parses source off-thread, then hands the resulting
+///    [`Self::ParsedInput`] back to the engine via [`Self::open`] (or
+///    a domain-specific upsert). The engine itself **never accepts raw
+///    source**.
 ///
-/// # TODO: AST-canonical input (roadmap step 4b)
+/// # AST-canonical input
 ///
-/// The current `open(source)` and apply-then-reparse pipeline accepts
-/// **source** as the engine's primary input. The concrete `ModelicaEngine`
-/// has already moved past this — its public surface is
-/// [`upsert_document_with_ast`](../../../lunco_modelica/engine/struct.ModelicaEngine.html#method.upsert_document_with_ast),
-/// not a source-taking method. The source-taking convenience there is
-/// `#[deprecated]`. The principle: **engine input format is AST. To get an
-/// AST you parse explicitly; the parse cost stays visible at the call
-/// site.** See `lunco-modelica/src/document.rs::FreshAst` for the
-/// producer-side encoding of the same invariant.
+/// The trait deliberately has no source-taking method. To install a
+/// document, callers must produce the engine's parsed representation
+/// themselves. This forces the parse cost to be visible at the call
+/// site and makes "skip parse when the AST is already fresh" / "move
+/// parse to a worker" / "reuse a cached AST" decidable per call rather
+/// than baked into the engine.
 ///
-/// When the second [`DomainEngine`] impl arrives (USD, SysML, …), this
-/// trait should be reshaped so source isn't accepted at all:
+/// The [`Self::ParsedInput`] type is what each domain hands the
+/// engine: `Arc<StoredDefinition>` for Modelica, `UsdStage` for USD,
+/// `SyntaxTree` for SysML, etc. Source → ParsedInput parsing is the
+/// caller's responsibility; the engine consumes only the parsed form.
 ///
-/// ```ignore
-/// pub trait DomainEngine {
-///     type Op: DocumentOp;
-///     type Index;
-///     /// Domain-specific parsed-input type — AST/StoredDef for Modelica,
-///     /// Stage for USD, SyntaxTree for SysML.
-///     type ParsedInput;
-///
-///     fn open(&mut self, id: DocumentId, parsed: Self::ParsedInput)
-///         -> Result<(), DomainEngineError>;
-///     // ... apply/index/diagnostics unchanged
-/// }
-/// ```
-///
-/// `open(source: String)` and the "(Async) engine reparses authoritative
-/// source" leg of the pipeline above then move into a separate
-/// `TextEditDriver` that's wired only when a doc is in code-editor /
-/// text-edit mode — exactly mirroring the
-/// `FreshAst::Mutated` / `FreshAst::TextEdit` split on the producer side.
-/// Until that second impl exists, the trait stays source-taking to avoid
-/// API churn for one user, but the principle is documented here so the
-/// next implementer doesn't repeat the source-as-canonical mistake the
-/// Modelica side just unwound.
+/// On the producer side, `lunco-modelica`'s `FreshAst::Mutated` /
+/// `FreshAst::TextEdit` split mirrors this contract: structured ops
+/// produce a fresh AST inline; free-form text edits mark the AST stale
+/// and let an async parse driver land a new tree later. The engine
+/// surface defined here is the consumer half of the same invariant —
+/// neither end accepts raw source on a hot path.
 pub trait DomainEngine: Send + Sync + 'static {
     /// The op type this engine accepts.
     type Op: DocumentOp;
@@ -161,15 +148,25 @@ pub trait DomainEngine: Send + Sync + 'static {
     /// The Index type projected per open document. UI reads this.
     type Index;
 
-    /// Open a document with initial source. After success, [`Self::index`]
-    /// returns Some for this id.
+    /// Domain-specific parsed-input type — what the engine accepts as
+    /// authoritative document content. Modelica:
+    /// `Arc<rumoca_session::parsing::ast::StoredDefinition>`. USD:
+    /// `UsdStage`. SysML: `SyntaxTree`. Etc.
     ///
-    /// **TODO** (roadmap step 4b): replace the `source: String` input
-    /// with a domain-specific `ParsedInput` associated type so the
-    /// engine never accepts un-parsed text. See trait-level docs for
-    /// the migration shape. Today's signature is kept until a second
-    /// engine impl arrives.
-    fn open(&mut self, id: DocumentId, source: String) -> Result<(), DomainEngineError>;
+    /// The parsing step that produces a value of this type is **not**
+    /// part of the engine's public surface — callers parse explicitly
+    /// (see crate-level docs). This keeps parse cost visible at the
+    /// call site and lets producers route around the parse entirely
+    /// when they already have a fresh AST (the structured-op fast path).
+    type ParsedInput;
+
+    /// Open a document with its parsed initial content. After success,
+    /// [`Self::index`] returns Some for this id.
+    ///
+    /// To replace the document's content (e.g. after an off-thread
+    /// reparse from a code-editor edit lands), call `open` again with
+    /// the same id — engines treat re-`open` as a content upsert.
+    fn open(&mut self, id: DocumentId, parsed: Self::ParsedInput) -> Result<(), DomainEngineError>;
 
     /// Close a document. Releases per-doc resources.
     fn close(&mut self, id: DocumentId);

@@ -16,6 +16,7 @@ lunco-controller = { path = "../lunco-controller" }
 lunco-robotics = { path = "../lunco-robotics" }
 lunco-cosim = { path = "../lunco-cosim" }
 lunco-modelica = { path = "../lunco-modelica" }
+rumoca-phase-parse = { path = "../../../rumoca/crates/rumoca-phase-parse" }
 lunco-scripting = { path = "../lunco-scripting" }
 lunco-doc = { path = "../lunco-doc" }
 lunco-api = { path = "../lunco-api" }
