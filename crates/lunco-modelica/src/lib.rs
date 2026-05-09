@@ -34,14 +34,9 @@
 
 use bevy::prelude::*;
 use rumoca_session::{Session, SessionConfig};
-use rumoca_sim::{SimStepper, StepperOptions};
-use std::collections::HashMap;
-use std::path::PathBuf;
-use crossbeam_channel::{unbounded, Sender, Receiver};
+use crossbeam_channel::unbounded;
 use std::thread;
-use lunco_assets::{msl_dir, modelica_dir};
-
-use self::ast_extract::strip_input_defaults;
+use lunco_assets::msl_dir;
 
 /// AST-based extraction functions for Modelica source code.
 ///

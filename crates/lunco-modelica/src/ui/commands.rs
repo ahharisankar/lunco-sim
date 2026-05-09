@@ -33,7 +33,7 @@ use lunco_core::{Command, on_command, register_commands};
 
 use crate::ast_extract::hash_content;
 use crate::ui::panels::code_editor::EditorBufferState;
-use crate::ui::{CompileState, CompileStates, ModelicaDocumentRegistry, WorkbenchState};
+use crate::ui::{CompileStates, ModelicaDocumentRegistry, WorkbenchState};
 use crate::{ModelicaChannels, ModelicaCommand, ModelicaModel};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1232,10 +1232,7 @@ fn apply_undo_or_redo(
     // B.3 phase 6: read read-only from the document directly.
     let workbench_read_only = registry
         .host(doc)
-        .map(|h| {
-            use lunco_doc::Document as _;
-            h.document().is_read_only()
-        })
+        .map(|h| h.document().is_read_only())
         .unwrap_or(false);
     let _ = workbench;
     if workbench_read_only {
