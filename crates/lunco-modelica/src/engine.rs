@@ -160,19 +160,6 @@ impl ModelicaEngine {
         format!("doc-{}.mo", doc_id.raw())
     }
 
-    /// Add or update a document's source in the session.
-    ///
-    /// Both add and update funnel through `Session::add_document` —
-    /// rumoca's fingerprint cache invalidates only the affected
-    /// per-file phases so subsequent edits are cheap.
-    pub fn upsert_document(&mut self, doc_id: DocumentId, source: &str) -> Result<(), String> {
-        let uri = self.uri(doc_id);
-        self.uri_for_doc.entry(doc_id).or_insert_with(|| uri.clone());
-        self.session
-            .add_document(&uri, source)
-            .map_err(|e| e.to_string())
-    }
-
     /// Install a document whose AST has already been parsed elsewhere
     /// (typically by `ModelicaDocument`). Bypasses the parser entirely
     /// via `Session::add_parsed_batch`. Use this in steady-state sync
@@ -360,17 +347,27 @@ impl ModelicaEngine {
 mod tests {
     use super::*;
 
+    /// Test convenience: parse `src` and install the resulting AST into
+    /// `engine` under `id`. The engine surface only accepts pre-parsed
+    /// ASTs (Step 4 of the AST-canonical roadmap); tests opt in to the
+    /// parse cost explicitly via this helper rather than via a
+    /// source-taking method on the engine. Production code does the
+    /// same parse-then-upsert dance directly at its call sites — see
+    /// `document::ModelicaDocument::refresh_ast_now` for the canonical
+    /// pattern.
+    fn upsert_test(engine: &mut ModelicaEngine, id: DocumentId, src: &str) {
+        let ast = rumoca_phase_parse::parse_to_ast(src, "test.mo")
+            .expect("test source must parse");
+        engine.upsert_document_with_ast(id, ast);
+    }
+
     #[test]
     fn inherited_components_walks_extends_across_docs() {
         let mut engine = ModelicaEngine::new();
         let base = "model Base\n  Real x;\n  Real y;\nend Base;\n";
         let derived = "model Derived\n  extends Base;\n  Real z;\nend Derived;\n";
-        engine
-            .upsert_document(DocumentId::new(1), base)
-            .expect("base parses");
-        engine
-            .upsert_document(DocumentId::new(2), derived)
-            .expect("derived parses");
+        upsert_test(&mut engine, DocumentId::new(1), base);
+        upsert_test(&mut engine, DocumentId::new(2), derived);
 
         let members = engine.inherited_components("Derived");
         let names: Vec<&str> = members.iter().map(|(n, _)| n.as_str()).collect();
@@ -386,9 +383,9 @@ mod tests {
         let mut engine = ModelicaEngine::new();
         let v1 = "model M\n  Real a;\nend M;\n";
         let v2 = "model M\n  Real a;\n  Real b;\nend M;\n";
-        engine.upsert_document(DocumentId::new(1), v1).unwrap();
+        upsert_test(&mut engine, DocumentId::new(1), v1);
         let n1 = engine.inherited_components("M").len();
-        engine.upsert_document(DocumentId::new(1), v2).unwrap();
+        upsert_test(&mut engine, DocumentId::new(1), v2);
         let n2 = engine.inherited_components("M").len();
         assert!(n2 > n1, "second upsert should replace v1; n1={n1}, n2={n2}");
     }
@@ -396,9 +393,7 @@ mod tests {
     #[test]
     fn close_document_drops_uri_mapping() {
         let mut engine = ModelicaEngine::new();
-        engine
-            .upsert_document(DocumentId::new(1), "model M\nend M;\n")
-            .unwrap();
+        upsert_test(&mut engine, DocumentId::new(1), "model M\nend M;\n");
         assert!(engine.uri_for_doc.contains_key(&DocumentId::new(1)));
         engine.close_document(DocumentId::new(1));
         assert!(!engine.uri_for_doc.contains_key(&DocumentId::new(1)));
@@ -409,9 +404,7 @@ mod tests {
         let mut engine = ModelicaEngine::new();
         assert!(!engine.has_class("Foo"), "empty session reports no class");
 
-        engine
-            .upsert_document(DocumentId::new(1), "model Foo\nend Foo;\n")
-            .unwrap();
+        upsert_test(&mut engine, DocumentId::new(1), "model Foo\nend Foo;\n");
         assert!(engine.has_class("Foo"), "Foo present after upsert");
 
         engine.close_document(DocumentId::new(1));
@@ -432,12 +425,11 @@ mod tests {
         // A user doc that extends a class from the library — without
         // any explicit upsert wiring it together. Cross-file inheritance
         // walks user + library uniformly through the same session.
-        engine
-            .upsert_document(
-                DocumentId::new(99),
-                "model UserMod\n  extends Base;\n  Real y;\nend UserMod;\n",
-            )
-            .expect("user doc parses");
+        upsert_test(
+            &mut engine,
+            DocumentId::new(99),
+            "model UserMod\n  extends Base;\n  Real y;\nend UserMod;\n",
+        );
 
         let members = engine.inherited_components("UserMod");
         let names: Vec<&str> = members.iter().map(|(n, _)| n.as_str()).collect();
@@ -453,7 +445,7 @@ mod tests {
     fn inherited_annotations_walks_extends_in_order() {
         let mut engine = ModelicaEngine::new();
         let src = "model Base\n  annotation(Icon(graphics={Rectangle(extent={{-10,-10},{10,10}})}));\nend Base;\n\nmodel Mid\n  extends Base;\n  annotation(Icon(graphics={Line(points={{0,0},{5,5}})}));\nend Mid;\n\nmodel Derived\n  extends Mid;\n  annotation(Icon(graphics={Text(extent={{0,0},{10,10}}, textString=\"hi\")}));\nend Derived;\n";
-        engine.upsert_document(DocumentId::new(1), src).unwrap();
+        upsert_test(&mut engine, DocumentId::new(1), src);
 
         let layers = engine.inherited_annotations("Derived");
         // Three classes in the chain: Base, Mid, Derived (in that order).
@@ -476,15 +468,16 @@ mod tests {
     fn close_document_purges_session_state() {
         let mut engine = ModelicaEngine::new();
         // Two docs, where Derived inherits from Base across files.
-        engine
-            .upsert_document(DocumentId::new(1), "model Base\n  Real x;\nend Base;\n")
-            .unwrap();
-        engine
-            .upsert_document(
-                DocumentId::new(2),
-                "model Derived\n  extends Base;\n  Real y;\nend Derived;\n",
-            )
-            .unwrap();
+        upsert_test(
+            &mut engine,
+            DocumentId::new(1),
+            "model Base\n  Real x;\nend Base;\n",
+        );
+        upsert_test(
+            &mut engine,
+            DocumentId::new(2),
+            "model Derived\n  extends Base;\n  Real y;\nend Derived;\n",
+        );
         // Sanity: inheritance resolves while Base is still open.
         let before = engine.inherited_components("Derived");
         assert!(
@@ -507,7 +500,7 @@ mod tests {
     fn inherited_members_typed_preserves_variability_and_causality() {
         let mut engine = ModelicaEngine::new();
         let src = "model Base\n  parameter Real k = 1;\n  input Real u;\n  output Real y;\nend Base;\n\nmodel Derived\n  extends Base;\n  Real x;\nend Derived;\n";
-        engine.upsert_document(DocumentId::new(1), src).unwrap();
+        upsert_test(&mut engine, DocumentId::new(1), src);
 
         let members = engine.inherited_members_typed("Derived");
         let by_name: HashMap<&str, &InheritedMember> =
@@ -540,7 +533,7 @@ mod tests {
     fn inherited_members_typed_carries_default_values() {
         let mut engine = ModelicaEngine::new();
         let src = "model Base\n  parameter Real R = 100;\n  parameter Real C = 0.001;\n  Real free;\nend Base;\n\nmodel Derived\n  extends Base;\n  parameter Real extra = 42;\nend Derived;\n";
-        engine.upsert_document(DocumentId::new(1), src).unwrap();
+        upsert_test(&mut engine, DocumentId::new(1), src);
 
         let members = engine.inherited_members_typed("Derived");
         let by_name: HashMap<&str, &InheritedMember> =

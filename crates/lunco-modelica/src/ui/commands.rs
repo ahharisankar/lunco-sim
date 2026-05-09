@@ -3193,7 +3193,7 @@ fn on_fast_run_active_model(trigger: On<FastRunActiveModel>, mut commands: Comma
         let twin_id = lunco_experiments::TwinId("default".into());
         let exp_id = {
             let mut reg = world.resource_mut::<lunco_experiments::ExperimentRegistry>();
-            reg.insert_new(twin_id, model_ref, Default::default(), Default::default(), bounds)
+            reg.insert_new(twin_id, model_ref, Default::default(), bounds)
         };
         let exp = world
             .resource::<lunco_experiments::ExperimentRegistry>()

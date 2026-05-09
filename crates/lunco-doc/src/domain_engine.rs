@@ -115,6 +115,45 @@ pub struct Diagnostic {
 /// 2. Engine `apply`s op: optimistically patches the Index, returns inverse.
 /// 3. (Async) engine reparses authoritative source on a debounce, reconciles
 ///    Index against the new AST. UI never blocks.
+///
+/// # TODO: AST-canonical input (roadmap step 4b)
+///
+/// The current `open(source)` and apply-then-reparse pipeline accepts
+/// **source** as the engine's primary input. The concrete `ModelicaEngine`
+/// has already moved past this — its public surface is
+/// [`upsert_document_with_ast`](../../../lunco_modelica/engine/struct.ModelicaEngine.html#method.upsert_document_with_ast),
+/// not a source-taking method. The source-taking convenience there is
+/// `#[deprecated]`. The principle: **engine input format is AST. To get an
+/// AST you parse explicitly; the parse cost stays visible at the call
+/// site.** See `lunco-modelica/src/document.rs::FreshAst` for the
+/// producer-side encoding of the same invariant.
+///
+/// When the second [`DomainEngine`] impl arrives (USD, SysML, …), this
+/// trait should be reshaped so source isn't accepted at all:
+///
+/// ```ignore
+/// pub trait DomainEngine {
+///     type Op: DocumentOp;
+///     type Index;
+///     /// Domain-specific parsed-input type — AST/StoredDef for Modelica,
+///     /// Stage for USD, SyntaxTree for SysML.
+///     type ParsedInput;
+///
+///     fn open(&mut self, id: DocumentId, parsed: Self::ParsedInput)
+///         -> Result<(), DomainEngineError>;
+///     // ... apply/index/diagnostics unchanged
+/// }
+/// ```
+///
+/// `open(source: String)` and the "(Async) engine reparses authoritative
+/// source" leg of the pipeline above then move into a separate
+/// `TextEditDriver` that's wired only when a doc is in code-editor /
+/// text-edit mode — exactly mirroring the
+/// `FreshAst::Mutated` / `FreshAst::TextEdit` split on the producer side.
+/// Until that second impl exists, the trait stays source-taking to avoid
+/// API churn for one user, but the principle is documented here so the
+/// next implementer doesn't repeat the source-as-canonical mistake the
+/// Modelica side just unwound.
 pub trait DomainEngine: Send + Sync + 'static {
     /// The op type this engine accepts.
     type Op: DocumentOp;
@@ -124,6 +163,12 @@ pub trait DomainEngine: Send + Sync + 'static {
 
     /// Open a document with initial source. After success, [`Self::index`]
     /// returns Some for this id.
+    ///
+    /// **TODO** (roadmap step 4b): replace the `source: String` input
+    /// with a domain-specific `ParsedInput` associated type so the
+    /// engine never accepts un-parsed text. See trait-level docs for
+    /// the migration shape. Today's signature is kept until a second
+    /// engine impl arrives.
     fn open(&mut self, id: DocumentId, source: String) -> Result<(), DomainEngineError>;
 
     /// Close a document. Releases per-doc resources.
