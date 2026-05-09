@@ -135,6 +135,16 @@ impl Panel for ExperimentsPanel {
                         .as_ref()
                         .map(|r| r.series.len())
                         .unwrap_or(0),
+                    progress: match &e.status {
+                        RunStatus::Running { t_current } => {
+                            let span = (e.bounds.t_end - e.bounds.t_start).max(1e-9);
+                            Some(
+                                (((t_current - e.bounds.t_start) / span)
+                                    .clamp(0.0, 1.0)) as f32,
+                            )
+                        }
+                        _ => None,
+                    },
                 })
                 .collect(),
             None => Vec::new(),
@@ -308,7 +318,18 @@ impl Panel for ExperimentsPanel {
                             Some(c) => egui::RichText::new(&row.status).color(c),
                             None => egui::RichText::new(&row.status),
                         };
-                        let status_widget = ui.label(status_text);
+                        let status_widget = ui.horizontal(|ui| {
+                            let r = ui.label(status_text);
+                            if let Some(p) = row.progress {
+                                ui.add(
+                                    egui::ProgressBar::new(p)
+                                        .desired_width(60.0)
+                                        .desired_height(8.0),
+                                )
+                                .on_hover_text(format!("{:.0}%", p * 100.0));
+                            }
+                            r
+                        }).inner;
                         if let Some(err) = &row.error {
                             status_widget.on_hover_text(err);
                         }
@@ -1466,6 +1487,11 @@ struct Row {
     color_hint: u8,
     sample_count: usize,
     var_count: usize,
+    /// Progress fraction in `[0, 1]` while a run is in flight.
+    /// `None` for terminal/pending rows. Drives the progress bar in
+    /// the Status column so users get "how far along" without doing
+    /// arithmetic against the bounds string.
+    progress: Option<f32>,
 }
 
 fn status_label(s: &RunStatus) -> String {
