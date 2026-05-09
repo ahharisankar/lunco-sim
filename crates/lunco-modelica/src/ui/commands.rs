@@ -432,7 +432,10 @@ pub(crate) fn render_fast_run_setup(
         cancelled = true;
     }
     if confirmed {
-        let entry = setup.0.take().unwrap();
+        let Some(entry) = setup.0.take() else {
+            bevy::log::warn!("[FastRunSettings] confirmed without an entry — modal closed concurrently");
+            return;
+        };
         // Persist edited bounds + inputs into the draft so
         // FastRunActiveModel picks them up. Overrides untouched.
         let draft = drafts.entry(entry.model_ref.clone());
