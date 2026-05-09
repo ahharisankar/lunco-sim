@@ -346,7 +346,7 @@ impl Canvas {
         }
 
         if response.double_clicked() {
-            if let Some(p) = response.interact_pointer_pos().or(response.hover_pos()) {
+            if let Some(p) = response.interact_pointer_pos().or_else(|| response.hover_pos()) {
                 let screen = Pos::new(p.x, p.y);
                 let world = self.viewport.screen_to_world(screen, screen_rect);
                 input_events.push(InputEvent::DoubleClick {

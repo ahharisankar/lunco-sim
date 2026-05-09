@@ -286,8 +286,7 @@ fn main() {
     // stable for the whole run, even if the stepper's reported set
     // varies frame-to-frame (rumoca occasionally drops a NaN'd var).
     let initial_state: Vec<(String, f64)> = {
-        let raw: Vec<(String, f64)> = stepper.state().values.into_iter().collect();
-        raw.into_iter()
+        stepper.state().values.into_iter()
             .filter(|(name, val)| val.is_finite() && name != "time")
             .collect()
     };
@@ -359,9 +358,7 @@ fn main() {
 
         // Sample current state and write to CSV.
         if let Some(w) = csv_writer.as_mut() {
-            let raw: Vec<(String, f64)> = stepper.state().values.into_iter().collect();
-            let state: Vec<(String, f64)> = raw
-                .into_iter()
+            let state: Vec<(String, f64)> = stepper.state().values.into_iter()
                 .filter(|(_, v): &(String, f64)| v.is_finite())
                 .collect();
             let map: HashMap<&str, f64> = state

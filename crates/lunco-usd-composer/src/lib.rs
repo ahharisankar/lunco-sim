@@ -173,7 +173,7 @@ impl UsdComposer {
                     };
 
                     let sub_reader = TextReader::read(&ref_path)?;
-                    let ref_current_dir = ref_path.parent().unwrap_or(Path::new("."));
+                    let ref_current_dir = ref_path.parent().unwrap_or_else(|| Path::new("."));
                     let mut sub_data: HashMap<sdf::Path, sdf::Spec> = sub_reader.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
                     // Only recurse into referenced file's own refs if not already processed

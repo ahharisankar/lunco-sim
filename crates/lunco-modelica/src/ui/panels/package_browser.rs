@@ -1797,7 +1797,7 @@ pub fn render_twin_node(
             if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 let new_name = rename.buffer.trim().to_string();
                 if !new_name.is_empty() && new_name != node.name {
-                    let parent = node.path.parent().unwrap_or(std::path::Path::new(""));
+                    let parent = node.path.parent().unwrap_or_else(|| std::path::Path::new(""));
                     let new_path = parent.join(&new_name);
                     action.commit_rename = Some((node.path.clone(), new_path));
                 } else {

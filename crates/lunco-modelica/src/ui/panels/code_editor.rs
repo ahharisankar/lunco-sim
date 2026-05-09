@@ -881,7 +881,7 @@ impl Panel for CodeEditorPanel {
                     let cur = egui::TextEdit::load_state(ui.ctx(), text_edit_id)
                         .and_then(|s| s.cursor.char_range())
                         .map(|r| r.primary.index)
-                        .unwrap_or(text.chars().count());
+                        .unwrap_or_else(|| text.chars().count());
                     (cur, cur)
                 });
                 let total = text.chars().count();

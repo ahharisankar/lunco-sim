@@ -827,7 +827,7 @@ fn parse_graphics_entry(text: &str) -> Result<Expression, AstMutError> {
     elements
         .first()
         .cloned()
-        .ok_or(AstMutError::ValueParseFailed { value: text.to_string() })
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })
 }
 
 /// True when `expr` is a graphics-array entry whose head identifier
@@ -961,7 +961,7 @@ where
     let entry = arr
         .iter_mut()
         .find(|e| plot_node_signal_matches(e, signal_path))
-        .ok_or(AstMutError::PlotNodeNotFound {
+        .ok_or_else(|| AstMutError::PlotNodeNotFound {
             class: class_name,
             signal: signal_path.to_string(),
         })?;
