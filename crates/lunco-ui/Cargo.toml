@@ -16,3 +16,4 @@ lunco-avatar = { path = "../lunco-avatar" }
 smallvec = { workspace = true }
 chrono = { workspace = true }
 egui_plot = "0.34"
+web-time = { workspace = true }

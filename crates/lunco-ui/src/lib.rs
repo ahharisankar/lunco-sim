@@ -53,6 +53,9 @@ pub use mission_control::*;
 pub mod telemetry;
 pub use telemetry::*;
 
+pub mod busy;
+pub mod modal;
+
 /// Common exports. Use `use lunco_ui::prelude::*;`
 pub mod prelude {
     pub use bevy_egui::egui;
@@ -76,5 +79,11 @@ pub struct LuncoUiPlugin;
 impl Plugin for LuncoUiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<UiSelection>();
+        // Modal host: single-source-of-truth for dialogs. Panels never
+        // call `egui::Window::show` directly; they push to ModalQueue
+        // and the host renders the head with `egui::Modal`. Runs in
+        // `Update` so it paints on the next frame after a request.
+        app.init_resource::<modal::ModalQueue>()
+            .add_systems(Update, modal::host::render_modal_host);
     }
 }
