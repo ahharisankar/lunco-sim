@@ -29,7 +29,7 @@ use crate::document::{ModelicaDocument, ModelicaOp};
 // Model File Tracking
 // ---------------------------------------------------------------------------
 
-// `OpenModel` retired in B.3 phase 6 (2026-05-08). The cache held
+// `OpenModel` retired (2026-05-08). The cache held
 // fields all derivable from the document host:
 //   - `source` / `line_starts` → `host.document().source()` + Index.
 //   - `display_name` → `host.document().origin().display_name()`.
@@ -119,7 +119,6 @@ pub struct WorkbenchState {
     /// [`lunco_workbench::WorkspaceResource::active_document`]. This
     /// field is a pre-flattened view of the registry's
     /// `host(active).document()` plus a few open-time-only fields
-    // B.3 phase 6 (2026-05-08): `open_model` field retired.
     // All readers migrated to derive from
     // `ModelicaDocumentRegistry::host(doc).document()` directly.
     /// Flag to signal the diagram panel should rebuild from registry source.
@@ -289,7 +288,7 @@ pub fn display_name_for(world: &bevy::prelude::World, doc: DocumentId) -> Option
 world
         .resource::<ModelicaDocumentRegistry>()
         .host(doc)
-        .map(|h| h.document().origin().display_name().to_string())
+        .map(|h| h.document().origin().display_name())
 }
 
 // ---------------------------------------------------------------------------
@@ -643,7 +642,7 @@ impl Default for WorkbenchState {
     }
 }
 
-// `mirror_active_open_model` deleted in B.3 phase 6 (2026-05-08).
+// `mirror_active_open_model` deleted (2026-05-08).
 // The `WorkbenchState::open_model` cache it kept fresh is gone;
 // readers derive source/metadata from
 // `ModelicaDocumentRegistry::host(doc).document()` directly.

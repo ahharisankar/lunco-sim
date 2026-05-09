@@ -89,7 +89,7 @@ pub fn process_texture(
             // as `cache_dir`'s fallback walk. Falls back to a CWD-relative
             // `assets/` if the manifest dir isn't useful.
             let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let mut current = Some(manifest.clone());
+            let mut current = Some(manifest);
             let mut ws_root = None;
             for _ in 0..10 {
                 if let Some(dir) = &current {

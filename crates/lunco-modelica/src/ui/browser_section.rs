@@ -37,7 +37,7 @@ use lunco_workbench::{BrowserAction, BrowserCtx, BrowserSection};
 use rumoca_session::parsing::ClassType;
 
 // `DrilledInClassNames` reads migrated to
-// `crate::ui::panels::model_view::drilled_class_for_doc` (B.3).
+// `crate::ui::panels::model_view::drilled_class_for_doc`.
 use crate::ui::state::ModelicaDocumentRegistry;
 
 /// One Modelica class entry rendered in the tree.

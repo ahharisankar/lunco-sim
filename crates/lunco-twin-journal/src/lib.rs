@@ -484,7 +484,7 @@ impl Journal {
             parent_streams: Vec::new(),
             created_at_ms: now_ms(),
             created_by: AuthorTag {
-                user: local_author.0.clone(),
+                user: local_author.0,
                 tool: "system".to_string(),
             },
         };
@@ -671,7 +671,7 @@ impl Journal {
         self.branches
             .entry("main".to_string())
             .and_modify(|b| b.head = head.clone())
-            .or_insert(Branch {
+            .or_insert_with(|| Branch {
                 name: "main".to_string(),
                 stream: StreamId::main(),
                 head,

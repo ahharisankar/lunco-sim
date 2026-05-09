@@ -446,14 +446,14 @@ fn process_usd_sim_prims(
             if let Some(joint_path_str) = joint_targets.get(&key).cloned() {
                 let joint_sdf = SdfPath::new(&joint_path_str).ok();
                 setup_physical_wheel(
-                    &mut commands, entity, &prim_path, &existing_tf,
+                    &mut commands, entity, prim_path, &existing_tf,
                     maybe_mesh, maybe_mat, maybe_child_of,
                     radius, p_drive,
                     &mut reader, joint_sdf.as_ref(),
                 );
             } else {
                 setup_raycast_wheel(
-                    &mut commands, entity, &prim_path, &existing_tf,
+                    &mut commands, entity, prim_path, &existing_tf,
                     maybe_mesh, maybe_mat, maybe_child_of,
                     radius, index, rest_length, spring_k, damping_c,
                     p_drive, p_steer,

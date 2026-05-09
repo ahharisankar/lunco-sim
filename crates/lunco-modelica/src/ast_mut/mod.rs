@@ -441,7 +441,7 @@ fn parse_component_fragment(
 /// through `pretty::connect_equation`, which always emits
 /// `component.port` and produces an invalid `a.` fragment when `port`
 /// is empty (used for top-level connector instances). When `pretty/`
-/// is deleted in A.4 this becomes the only emitter for connect
+/// is deleted this becomes the only emitter for connect
 /// equations.
 fn parse_connect_equation_fragment(
     eq: &pretty::ConnectEquation,

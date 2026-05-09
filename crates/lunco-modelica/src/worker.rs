@@ -365,7 +365,7 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                                         let symbols = collect_stepper_observables(&stepper);
                                         cached_models.insert(entity, CachedModel {
                                             model_name: model_name.clone(),
-                                            source: Arc::from(source.clone()),
+                                            source: Arc::from(source),
                                         });
                                         steppers.insert(entity, (session_id, model_name.clone(), stepper));
                                         let _ = tx_inner.send(ModelicaResult {
@@ -473,7 +473,7 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
 
                                         cached_models.insert(entity, CachedModel {
                                             model_name: model_name.clone(),
-                                            source: Arc::from(source.clone()),
+                                            source: Arc::from(source),
                                         });
                                         steppers.insert(entity, (session_id, model_name.clone(), stepper));
                                         let _ = tx_inner.send(ModelicaResult {

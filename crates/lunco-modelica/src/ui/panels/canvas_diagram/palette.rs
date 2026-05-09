@@ -242,7 +242,7 @@ pub(super) fn render_msl_package_menu(
                     )
                 };
                 // Optimistic scene synthesis (`synthesize_msl_node`) was
-                // removed in A.4. Now: emit the op, gen bumps in
+                // removed. Now: emit the op, gen bumps in
                 // `apply_patch`, the next frame's projection re-derives
                 // the scene from the new AST. Same-frame visual
                 // response since the projection system runs each tick.

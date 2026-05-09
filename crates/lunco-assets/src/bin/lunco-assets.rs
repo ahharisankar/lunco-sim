@@ -89,10 +89,10 @@ fn main() {
             if let Some(name) = crate_name {
                 let crate_dir = ws_root.join(format!("crates/{}", name));
                 process_all_for_crate(&crate_dir)
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| e)
             } else {
                 process_all_workspace(&ws_root)
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| e)
             }
         }
         "list" => {
@@ -103,7 +103,7 @@ fn main() {
             } else {
                 // List all
                 list_all_workspace(&ws_root)
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| e)
             }
         }
         _ => unreachable!(),

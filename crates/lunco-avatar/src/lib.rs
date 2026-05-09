@@ -703,7 +703,7 @@ fn freeflight_system(
 
             // In surface mode, apply yaw/pitch as incremental rotations.
             let yaw_q = Quat::from_axis_angle(up_v, ff.yaw);
-            let right: Vec3 = (*tf.right()).into();
+            let right: Vec3 = *tf.right();
             let right_after_yaw = yaw_q.mul_vec3(right);
             let pitch_q = Quat::from_axis_angle(right_after_yaw, ff.pitch);
             let new_rot = (pitch_q * yaw_q * tf.rotation).normalize();
@@ -933,7 +933,7 @@ fn avatar_behavior_input_system(
                     } else { Vec3::Y }
                 } else { Vec3::Y };
                 let yaw_q = Quat::from_axis_angle(up_v, delta_yaw);
-                let right: Vec3 = (*tf.right()).into();
+                let right: Vec3 = *tf.right();
                 let right_yawed = yaw_q.mul_vec3(right);
                 let pitch_q = Quat::from_axis_angle(right_yawed, delta_pitch);
                 tf.rotation = pitch_q * yaw_q * tf.rotation;

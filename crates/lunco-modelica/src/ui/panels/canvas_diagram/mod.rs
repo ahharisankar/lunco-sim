@@ -502,7 +502,7 @@ impl CanvasDiagramState {
     }
 
     // `get_for(doc, drilled)` / `get_mut_for(doc, drilled)` migration
-    // shims deleted in B.4. The `drilled` argument was always ignored
+    // shims deleted. The `drilled` argument was always ignored
     // (drilled scopes are independent tabs since the Phase-1 tab
     // refactor) and no callers remained outside test code. Use
     // `get_for_render` / `get_mut_for_render` for tab-aware lookups
@@ -564,7 +564,7 @@ impl CanvasDiagramState {
         self.first_tab_for(doc).is_some()
     }
 
-    // `has_entry_for(doc, drilled)` migration shim deleted in B.4.
+    // `has_entry_for(doc, drilled)` migration shim deleted.
     // No callers; use `has_entry(doc)` directly.
 
     /// Has *this specific tab* ever been projected? Renders the

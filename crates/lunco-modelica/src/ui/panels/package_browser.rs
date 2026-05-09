@@ -205,7 +205,7 @@ impl PackageTreeCache {
     /// load. Used by R1's loading-overlay reader to derive the
     /// "is anything still loading?" boolean per doc, without going
     /// through the retired `WorkbenchState.is_loading` singleton
-    /// (B.3 phase 5).
+    ///.
     pub fn is_loading(&self, doc: lunco_doc::DocumentId) -> bool {
         self.loading_ids.values().any(|d| *d == doc)
     }
@@ -1313,7 +1313,7 @@ enum PackageAction {
     /// click opens pinned (a permanent tab that won't be replaced
     /// by the next browser click).
     Open(String, String, ModelLibrary, bool),
-    // `Instantiate` variant deleted in B.4. Drag-and-drop is the
+    // `Instantiate` variant deleted. Drag-and-drop is the
     // canonical instantiate gesture; if a future right-click "Add to
     // canvas" path needs it back, restore it from history.
     /// User started dragging a class row — stash a
@@ -1586,7 +1586,7 @@ fn render_node(
                     ModelLibrary::User => "📁 User model — writable",
                     ModelLibrary::InMemory => "💾 In-memory — writable",
                 };
-                let qualified = msl_path.clone();
+                let qualified = msl_path;
                 let display_name = name.clone();
                 resp.on_hover_ui(move |ui| {
                     ui.strong(display_name);
@@ -1639,7 +1639,7 @@ fn commit_current_model_edits(world: &mut World) {
         let detected = document
             .strict_ast()
             .and_then(|ast| crate::ast_extract::extract_model_name_from_ast(&ast))
-            .unwrap_or_else(|| document.origin().display_name().to_string());
+            .unwrap_or_else(|| document.origin().display_name());
         (document.is_read_only(), detected)
     };
     if is_read_only {
@@ -2433,7 +2433,6 @@ pub(crate) fn open_model(
             kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
             instance: tab_id,
         });
-        // B.3 phase 5: `state.is_loading` retired; per-doc loading
         // derives from `PackageTreeCache::is_loading(doc)` etc.
         return;
     }
@@ -2447,7 +2446,6 @@ pub(crate) fn open_model(
             kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
             instance: tab_id,
         });
-        // B.3 phase 5: `state.is_loading` retired; per-doc loading
         // derives from `PackageTreeCache::is_loading(doc)` etc.
         return;
     }
@@ -2477,11 +2475,11 @@ pub(crate) fn open_model(
         writable,
     };
     let pool = AsyncComputeTaskPool::get();
-    let id_clone = id.clone();
-    let dedup_key_clone = dedup_key.clone();
+    let id_clone = id;
+    let dedup_key_clone = dedup_key;
     let name_clone = name.clone();
-    let name_result = name.clone();
-    let lib_clone = library.clone();
+    let name_result = name;
+    let lib_clone = library;
 
     let task = pool.spawn(async move {
         let source_text = if id_clone.starts_with("bundled://") {

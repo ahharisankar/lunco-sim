@@ -11,7 +11,7 @@
 //! This is the Phase-1 milestone from
 //! `docs/architecture/canvas-vello.md` (TBD). The egui-based custom
 //! draw path stays in place during the migration so the workbench
-//! never breaks; we'll retire it in Phase 3.
+//! never breaks; we'll retire it.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;

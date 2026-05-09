@@ -536,7 +536,7 @@ impl ExperimentsPanel {
             if let Some(mut drafts) = world
                 .get_resource_mut::<crate::experiments_runner::ExperimentDrafts>()
             {
-                drafts.entry(model_ref.clone()).inputs = map;
+                drafts.entry(model_ref).inputs = map;
             }
         }
         if run_clicked {
@@ -1060,15 +1060,12 @@ fn load_run_into_draft(world: &mut World, id: ExperimentId) {
             Some(r) => r,
             None => return,
         };
-        match registry.get(id) {
-            Some(e) => Some((
+        registry.get(id).map(|e| (
                 e.model_ref.clone(),
                 e.bounds.clone(),
                 e.inputs.clone(),
                 e.overrides.clone(),
-            )),
-            None => None,
-        }
+            ))
     };
     let Some((model_ref, bounds, inputs, overrides)) = snapshot else {
         return;

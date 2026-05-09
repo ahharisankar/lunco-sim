@@ -663,11 +663,7 @@ pub fn import_model_to_diagram_from_ast(
         let type_name = node.meta.get("type_name").map(|s| s.as_str()).unwrap_or("");
         let resolved_path: Option<String> = if type_name.contains('.') {
             Some(type_name.to_string())
-        } else if let Some(full) = imports_by_short.get(type_name) {
-            Some(full.clone())
-        } else {
-            None
-        };
+        } else { imports_by_short.get(type_name).map(|full| full.clone()) };
         let mut component_def: Option<MSLComponentDef> = resolved_path
             .as_deref()
             .and_then(|p| msl_lookup_by_path.get(p).map(|d| (*d).clone()))

@@ -82,7 +82,7 @@ const PALETTE: &[egui::Color32] = &[
 pub struct LinePlot;
 
 impl Visualization for LinePlot {
-    fn kind_id(&self) -> VizKindId { LINE_PLOT_KIND.clone() }
+    fn kind_id(&self) -> VizKindId { LINE_PLOT_KIND }
     fn display_name(&self) -> &'static str { "Line plot (time-series)" }
     fn role_schema(&self) -> &'static [RoleSpec] { &[ROLE_Y] }
     fn compatible_views(&self) -> &'static [ViewKind] { &[ViewKind::Panel2D] }
@@ -218,7 +218,7 @@ impl Visualization for LinePlot {
             None => "time (s)".to_string(),
             Some(xs) => xs.path.clone(),
         });
-        let y_label = style.y_label.clone().unwrap_or_else(|| {
+        let y_label = style.y_label.unwrap_or_else(|| {
             if y_bindings.len() == 1 {
                 y_bindings[0].source.path.clone()
             } else {

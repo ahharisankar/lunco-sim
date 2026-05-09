@@ -781,7 +781,6 @@ pub(super) fn apply_ops(
             )
         });
     if let Some((src, new_gen)) = fresh {
-        // B.3 phase 6: in-place open_model.source mirror retired —
         // readers go through the registry directly. `src` is still
         // used for the projection-relevant hash below.
         // Canvas-originated edits have *already* mutated the scene

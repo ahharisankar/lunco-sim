@@ -141,7 +141,7 @@ pub fn cache_dir() -> PathBuf {
         // 2. Walk up from this crate's manifest to find .cache/msl
         //    CARGO_MANIFEST_DIR = .../modelica/crates/lunco-assets
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let mut current = Some(manifest.clone());
+        let mut current = Some(manifest);
         for _ in 0..10 {
             if let Some(dir) = &current {
                 let candidate = dir.join(".cache");

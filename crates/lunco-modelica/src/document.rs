@@ -808,7 +808,7 @@ impl ModelicaDocument {
         if !self.ast_is_stale() && !self.syntax_is_stale() {
             return;
         }
-        // Engine is the only AST source after Phase 4. If it isn't
+        // Engine is the only AST source. If it isn't
         // installed (early boot, headless test that didn't add the
         // plugin) the doc stays at its current cache and the caller
         // sees stale data — `ModelicaEnginePlugin::build` runs
@@ -1835,7 +1835,7 @@ fn op_to_patch(
             })
             .map_err(ast_mut_to_doc_error)?;
             let qualified = if parent.is_empty() {
-                name.clone()
+                name
             } else {
                 format!("{}.{}", parent, name)
             };
@@ -1860,7 +1860,7 @@ fn op_to_patch(
             })
             .map_err(ast_mut_to_doc_error)?;
             let qualified = if parent.is_empty() {
-                name.clone()
+                name
             } else {
                 format!("{}.{}", parent, name)
             };
@@ -1950,7 +1950,7 @@ fn op_to_patch(
 }
 
 // ---------------------------------------------------------------------------
-// (deleted in A.4) Legacy `compute_*_patch` text-splice helpers used to live
+// (deleted) Legacy `compute_*_patch` text-splice helpers used to live
 // here — ~1800 lines that turned each AST-shaped op into a `(byte_range,
 // replacement)` patch by hand-walking the source via `find_annotation_span`,
 // `find_placement_span`, `find_named_call_span`, `find_statement_terminator`,

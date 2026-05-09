@@ -328,7 +328,7 @@ impl ModelTabs {
         }
     }
 
-    // `ensure(doc)` migration shim deleted in B.4. All callers now
+    // `ensure(doc)` migration shim deleted. All callers now
     // use `ensure_for(doc, None)` directly.
 
     /// Close the specific tab. Returns the tab state if it existed.
@@ -780,7 +780,7 @@ impl InstancePanel for ModelViewPanel {
         {
             let new_id = world
                 .resource_mut::<ModelTabs>()
-                .open_new(doc, drilled.clone());
+                .open_new(doc, drilled);
             world.commands().trigger(lunco_workbench::OpenTab {
                 kind: MODEL_VIEW_KIND,
                 instance: new_id,
@@ -874,7 +874,6 @@ pub(crate) fn sync_active_tab_to_doc(
     doc: DocumentId,
     drilled_class: Option<&str>,
 ) {
-    // B.3 phase 3: legacy `DrilledInClassNames` cache mirror
     // removed. `ModelTabState.drilled_class` is now authoritative
     // and readers go through
     // `crate::ui::panels::model_view::drilled_class_for_doc`.
@@ -1062,7 +1061,7 @@ pub(crate) fn sync_active_tab_to_doc(
         buf.text = source;
         buf.line_starts = line_starts.into();
         buf.detected_name = detected_name;
-        buf.model_path = path_str.clone();
+        buf.model_path = path_str;
         buf.bound_doc = Some(doc);
     }
 
@@ -1103,7 +1102,7 @@ fn render_unified_toolbar(
     let tokens = world
         .get_resource::<lunco_theme::Theme>()
         .map(|t| t.tokens.clone())
-        .unwrap_or_else(|| lunco_theme::Theme::dark().tokens.clone());
+        .unwrap_or_else(|| lunco_theme::Theme::dark().tokens);
     // Snapshot everything we need before the closure so we don't
     // fight the borrow checker mid-layout.
     let display_name = crate::ui::state::display_name_for(world, doc)
@@ -2039,7 +2038,7 @@ fn render_icon_view(ui: &mut egui::Ui, world: &mut World) {
         // `model_path` no longer exists outside the cache. Use the
         // origin's display name + canonical_path heuristic to
         // reconstruct the `msl://` prefix when applicable.
-        let display = document.origin().display_name().to_string();
+        let display = document.origin().display_name();
         let from_path = display
             .strip_prefix("msl://")
             .map(|s| s.to_string());

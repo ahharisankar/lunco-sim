@@ -209,7 +209,7 @@ pub(super) fn paint_port_shape(
                 center.y - oy * R * 0.4 - py * R * 0.9,
             );
             let pts = vec![tip, b1, b2];
-            painter.add(egui::Shape::convex_polygon(pts.clone(), fill, stroke));
+            painter.add(egui::Shape::convex_polygon(pts, fill, stroke));
         }
         PortShape::AcausalCircle => {
             painter.circle_filled(center, R - 1.0, fill);

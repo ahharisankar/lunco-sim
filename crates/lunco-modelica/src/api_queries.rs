@@ -28,7 +28,7 @@ use lunco_workbench::WorkspaceResource;
 use crate::ast_extract;
 use crate::models::bundled_models;
 // `DrilledInClassNames` reads migrated to
-// `crate::ui::panels::model_view::drilled_class_for_doc` (B.3).
+// `crate::ui::panels::model_view::drilled_class_for_doc`.
 use crate::ui::state::{CompileState, CompileStates, ModelicaDocumentRegistry};
 use crate::visual_diagram::{msl_component_library, MSLComponentDef};
 use lunco_doc::DocumentId;

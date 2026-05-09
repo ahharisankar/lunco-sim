@@ -241,7 +241,7 @@ fn close_drilled_tabs_on_class_removed(
     watermark.0.insert(doc, highest_gen);
 }
 
-// `mirror_open_model_on_doc_changed` deleted in B.3 phase 6 cleanup.
+// `mirror_open_model_on_doc_changed` deleted cleanup.
 
 fn sync_workspace_on_doc_opened(
     trigger: On<lunco_doc_bevy::DocumentOpened>,
@@ -962,7 +962,7 @@ fn install_image_loaders_once(
     // Custom loader for `modelica://Package/Resources/…` URIs used
     // throughout MSL Documentation blocks.
     let loader = std::sync::Arc::new(image_loader::ModelicaImageLoader::new());
-    ctx.add_bytes_loader(loader.clone());
+    ctx.add_bytes_loader(loader);
     bevy::log::info!(
         "[ModelicaImageLoader] installed egui_extras loaders + modelica:// loader"
     );

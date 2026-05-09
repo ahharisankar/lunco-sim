@@ -588,7 +588,7 @@ fn on_connect_components(
                         from_component: eq.from.component.clone(),
                         from_port: eq.from.port.clone(),
                         to_component: eq.to.component.clone(),
-                        to_port: eq.to.port.clone(),
+                        to_port: eq.to.port,
                         queued_at: web_time::Instant::now(),
                         animation_ms: anim_ms,
                     });

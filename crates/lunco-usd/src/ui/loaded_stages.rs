@@ -326,7 +326,7 @@ fn render_prim(
     let type_name = prim_type_name(reader, path);
     let label = match &type_name {
         Some(ty) => format!("{} ({})", name, ty),
-        None => name.clone(),
+        None => name,
     };
     let children = reader.prim_children(path);
     let header_id = ui.make_persistent_id((salt, path.to_string()));

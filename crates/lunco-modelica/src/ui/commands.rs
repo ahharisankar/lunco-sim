@@ -1387,7 +1387,7 @@ fn on_save_as_document(
             // Attach `.mo` if the user hasn't already chosen a full
             // filename (Untitled<N> is the common case).
             if raw.ends_with(".mo") {
-                raw.to_string()
+                raw
             } else {
                 format!("{raw}.mo")
             }
@@ -1626,7 +1626,7 @@ fn on_compile_model(
             if picker.0.as_ref().map(|p| p.doc) != Some(doc) {
                 picker.0 = Some(CompileClassPickerEntry {
                     doc,
-                    candidates: candidate_classes.clone(),
+                    candidates: candidate_classes,
                     preselected: 0,
                     purpose: PickerPurpose::Compile,
                 });
@@ -1660,7 +1660,7 @@ fn on_compile_model(
             model.is_stepping = true;
             model.is_compiling = true;
             model.model_name = model_name.clone();
-            model.parameters = params.clone();
+            model.parameters = params;
             model.inputs.clear();
             for (name, val) in &inputs_with_defaults {
                 let existing = old_inputs.get(name).copied();
@@ -1831,8 +1831,8 @@ fn on_create_new_scratch_model(
     cache
         .in_memory_models
         .push(crate::ui::panels::package_browser::InMemoryEntry {
-            display_name: name.clone(),
-            id: mem_id.clone(),
+            display_name: name,
+            id: mem_id,
             doc: doc_id,
         });
 
@@ -1978,7 +1978,7 @@ fn on_duplicate_model_from_read_only(
     // only; no world access from the task.
     let origin_short_for_task = origin_class_short.clone();
     let name_for_task = name.clone();
-    let origin_fqn_for_task = origin_fqn.clone();
+    let origin_fqn_for_task = origin_fqn;
     let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
         // We always duplicate the file-level *top* class (see the
         // `top_short` derivation above). For a single-file package
@@ -2045,7 +2045,7 @@ fn on_duplicate_model_from_read_only(
         crate::ui::panels::canvas_diagram::DuplicateBinding {
             display_name: name.clone(),
             origin_short: origin_class_short.clone(),
-            inner_drill: inner_drill.clone(),
+            inner_drill: inner_drill,
             started: web_time::Instant::now(),
             task,
         },
@@ -2191,7 +2191,7 @@ fn spawn_duplicate_class_task(world: &mut World, qualified: String, name_hint: S
         .filter(|s| s.full_start < s.full_end && s.full_end <= source_full.len());
         let class_src = match spans_opt.as_ref() {
             Some(s) => source_full[s.full_start..s.full_end].to_string(),
-            None => source_full.clone(),
+            None => source_full,
         };
         let extract_ms = t_extract.elapsed().as_secs_f64() * 1000.0;
         // 4 + 4b. Single-pass rewrite: parse class_src once, then
@@ -2272,7 +2272,7 @@ fn spawn_duplicate_class_task(world: &mut World, qualified: String, name_hint: S
             doc_id,
             crate::ui::panels::canvas_diagram::DuplicateBinding {
                 display_name: name.clone(),
-                origin_short: origin_short.clone(),
+                origin_short: origin_short,
                 // Duplicate flow operates on a single named class
                 // (`qualified` is already the leaf the user clicked) —
                 // there's no inner-drill to preserve.
@@ -3194,7 +3194,7 @@ fn update_status_bar(
                 document
                     .strict_ast()
                     .and_then(|ast| crate::ast_extract::extract_model_name_from_ast(&ast))
-                    .or_else(|| Some(document.origin().display_name().to_string()))
+                    .or_else(|| Some(document.origin().display_name()))
             })
         })
         .unwrap_or_else(|| "(untitled)".to_string());
@@ -3433,7 +3433,7 @@ fn on_fast_run_active_model(trigger: On<FastRunActiveModel>, mut commands: Comma
             };
             let document = host.document();
             let source = document.source().to_string();
-            let filename = document.origin().display_name().to_string();
+            let filename = document.origin().display_name();
             let index = document.index();
             let candidates: Vec<String> = index
                 .classes
@@ -3748,7 +3748,7 @@ fn on_new_plot_panel(trigger: On<NewPlotPanel>, mut commands: Commands) {
         registry.insert(VisualizationConfig {
             id,
             title: title.clone(),
-            kind: LINE_PLOT_KIND.clone(),
+            kind: LINE_PLOT_KIND,
             view: ViewTarget::Panel2D,
             inputs,
             style: serde_json::Value::Null,
@@ -3973,7 +3973,7 @@ fn on_open_file(trigger: On<OpenFile>, mut commands: Commands) {
         let mut registry =
             world.resource_mut::<crate::ui::state::ModelicaDocumentRegistry>();
         let doc_id = registry.allocate_with_origin(
-            source.clone(),
+            source,
             lunco_doc::DocumentOrigin::File {
                 path: path_buf,
                 writable: true,
@@ -4339,7 +4339,7 @@ fn on_move_component(trigger: On<MoveComponent>, mut commands: Commands) {
                 .unwrap_or((20.0, 20.0))
         };
         let op = ModelicaOp::SetPlacement {
-            class: class.clone(),
+            class: class,
             name: ev.name.clone(),
             placement: Placement {
                 x: ev.x,

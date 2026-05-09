@@ -528,7 +528,7 @@ fn paint_polygon(painter: &egui::Painter, xf: &CoordXform, p: &Polygon) {
     // polygons this draws the visible "X" of the crossing, even though
     // the X-quadrants aren't filled. Matches OMEdit's stroke behaviour.
     if stroke.width > 0.0 {
-        let mut closed = pts.clone();
+        let mut closed = pts;
         if closed.first() != closed.last() {
             closed.push(closed[0]);
         }

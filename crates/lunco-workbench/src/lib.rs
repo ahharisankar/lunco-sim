@@ -686,7 +686,7 @@ impl WorkbenchLayout {
         // and bottom spans the central column's width (sandwiched between
         // them). Each subsequent split at NodeIndex::root() wraps the
         // previous tree, so the outermost splits dominate the layout.
-        let mut dock = DockState::new(center_tabs.clone());
+        let mut dock = DockState::new(center_tabs);
         let mut central = NodeIndex::root();
 
         if !bottom_tabs.is_empty() {
