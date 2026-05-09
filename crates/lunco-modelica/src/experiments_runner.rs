@@ -892,10 +892,13 @@ pub fn drain_pending_handles(
                     if let Some(vis) = visibility.as_mut() {
                         vis.visible.insert(handle.run_id);
                     }
+                    let run_name = registry
+                        .get(handle.run_id)
+                        .map(|e| e.name.clone())
+                        .unwrap_or_else(|| "Run".into());
                     if let Some(c) = console.as_mut() {
                         c.info(format!(
-                            "✓ Fast Run done: {} samples × {} vars in {} ms",
-                            n_samples, n_vars, wall
+                            "✓ {run_name} done: {n_samples} samples × {n_vars} vars in {wall} ms"
                         ));
                     }
                     registry.set_result(handle.run_id, result);
@@ -913,8 +916,12 @@ pub fn drain_pending_handles(
                         "[experiments] run {:?} failed: {error}",
                         handle.run_id
                     );
+                    let run_name = registry
+                        .get(handle.run_id)
+                        .map(|e| e.name.clone())
+                        .unwrap_or_else(|| "Fast Run".into());
                     if let Some(c) = console.as_mut() {
-                        c.error(format!("⏹ Fast Run FAILED: {error}"));
+                        c.error(format!("⚠ {run_name} FAILED: {error}"));
                     }
                     if let Some(doc) = sources.0.get(&handle.run_id).copied() {
                         if let Some(cs) = compile_states.as_mut() {
@@ -939,6 +946,13 @@ pub fn drain_pending_handles(
                     terminal = true;
                 }
                 RunUpdate::Cancelled => {
+                    let run_name = registry
+                        .get(handle.run_id)
+                        .map(|e| e.name.clone())
+                        .unwrap_or_else(|| "Fast Run".into());
+                    if let Some(c) = console.as_mut() {
+                        c.info(format!("⊘ {run_name} cancelled"));
+                    }
                     registry.set_status(handle.run_id, RunStatus::Cancelled);
                     ev_cancelled.write(RunCancelled {
                         experiment_id: handle.run_id,

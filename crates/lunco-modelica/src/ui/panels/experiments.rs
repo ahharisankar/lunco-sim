@@ -41,6 +41,11 @@ pub struct ExperimentVisibility {
     /// Set by clicking on the experiments plot; cleared via the
     /// "↻ Reset" button.
     pub scrub_time: Option<f64>,
+    /// Inline-rename state. `Some((id, draft_text))` → row `id`
+    /// renders a `TextEdit` instead of a `Label`; `None` → all rows
+    /// show their name as a plain label. Committed on Enter or
+    /// focus-loss.
+    pub editing_name: Option<(ExperimentId, String)>,
 }
 
 impl ExperimentVisibility {
@@ -130,6 +135,16 @@ impl Panel for ExperimentsPanel {
                         .as_ref()
                         .map(|r| r.series.len())
                         .unwrap_or(0),
+                    progress: match &e.status {
+                        RunStatus::Running { t_current } => {
+                            let span = (e.bounds.t_end - e.bounds.t_start).max(1e-9);
+                            Some(
+                                (((t_current - e.bounds.t_start) / span)
+                                    .clamp(0.0, 1.0)) as f32,
+                            )
+                        }
+                        _ => None,
+                    },
                 })
                 .collect(),
             None => Vec::new(),
@@ -138,8 +153,20 @@ impl Panel for ExperimentsPanel {
         if rows.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(16.0);
-                ui.weak("No experiments yet.");
-                ui.weak("Press the ⏩ Fast button on a model to start one.");
+                ui.label(
+                    egui::RichText::new("No experiments yet")
+                        .size(13.0)
+                        .strong(),
+                );
+                ui.add_space(4.0);
+                ui.weak(
+                    "▶ Press ⏩ Run above (or the ⏩ Fast button on the model toolbar)",
+                );
+                ui.weak("to start your first experiment.");
+                ui.add_space(4.0);
+                ui.weak(
+                    "Pick variables in the Telemetry panel — they appear in the plot.",
+                );
             });
             return;
         }
@@ -158,6 +185,14 @@ impl Panel for ExperimentsPanel {
         let mut load_into_draft: Option<ExperimentId> = None;
         let mut rerun: Option<ExperimentId> = None;
         let mut export_csv: Option<ExperimentId> = None;
+        // Inline rename state changes batched after Grid::show to
+        // avoid double-borrow of ExperimentVisibility.
+        let mut start_rename: Option<(ExperimentId, String)> = None;
+        let mut commit_rename: Option<(ExperimentId, String)> = None;
+        let mut cancel_rename = false;
+        let editing_now = world
+            .get_resource::<ExperimentVisibility>()
+            .and_then(|v| v.editing_name.clone());
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             egui::Grid::new("experiments_table")
@@ -188,68 +223,128 @@ impl Panel for ExperimentsPanel {
                             egui::Color32::from_rgb(r, g, b),
                             "■",
                         );
-                        // Name as a clickable row entry — primary
-                        // click loads the run's setup into the draft;
-                        // right-click opens a context menu (Re-run /
-                        // Duplicate / Delete). Hover hint nudges the
-                        // user toward those actions.
-                        let name_label = egui::Label::new(&row.name)
-                            .sense(egui::Sense::click());
-                        let name_resp = ui
-                            .add(name_label)
-                            .on_hover_text(
-                                "Click: load this run's bounds / inputs / \
-                                 overrides into the Setup draft. \
-                                 Right-click: Re-run / Duplicate / Delete.",
+                        // Name cell — either a TextEdit (inline rename
+                        // active for this row) or a clickable Label.
+                        // Click loads draft; right-click opens context
+                        // menu including ✏ Rename.
+                        let is_editing = matches!(&editing_now, Some((eid, _)) if *eid == row.id);
+                        if is_editing {
+                            let mut buf = match &editing_now {
+                                Some((_, t)) => t.clone(),
+                                None => row.name.clone(),
+                            };
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut buf)
+                                    .desired_width(140.0),
                             );
-                        if name_resp.clicked() && row.is_terminal {
-                            load_into_draft = Some(row.id);
-                        }
-                        name_resp.context_menu(|ui| {
-                            if row.is_terminal {
-                                if ui.button("▶ Re-run with same setup").clicked() {
-                                    rerun = Some(row.id);
-                                    ui.close();
+                            resp.request_focus();
+                            let enter = resp.lost_focus()
+                                && resp.ctx.input(|i| i.key_pressed(egui::Key::Enter));
+                            let escape = resp.ctx.input(|i| i.key_pressed(egui::Key::Escape));
+                            if enter || (resp.lost_focus() && !escape) {
+                                let trimmed = buf.trim().to_string();
+                                if !trimmed.is_empty() {
+                                    commit_rename = Some((row.id, trimmed));
+                                } else {
+                                    cancel_rename = true;
                                 }
-                                if ui.button("📋 Duplicate into Setup").clicked() {
-                                    load_into_draft = Some(row.id);
-                                    ui.close();
-                                }
-                                if ui
-                                    .button("💾 Export CSV…")
-                                    .on_hover_text(
-                                        "Save this run's full trajectory \
-                                         (time + every recorded variable) \
-                                         to a CSV file.",
-                                    )
-                                    .clicked()
-                                {
-                                    export_csv = Some(row.id);
+                            } else if escape {
+                                cancel_rename = true;
+                            } else {
+                                start_rename = Some((row.id, buf));
+                            }
+                        } else {
+                            let name_label = egui::Label::new(&row.name)
+                                .sense(egui::Sense::click());
+                            let name_resp = ui
+                                .add(name_label)
+                                .on_hover_text(
+                                    "Click: load this run's setup into the draft. \
+                                     Double-click or right-click → Rename. \
+                                     Right-click: Re-run / Duplicate / Delete.",
+                                );
+                            if name_resp.double_clicked() {
+                                start_rename = Some((row.id, row.name.clone()));
+                            } else if name_resp.clicked() && row.is_terminal {
+                                load_into_draft = Some(row.id);
+                            }
+                            name_resp.context_menu(|ui| {
+                                if ui.button("✏ Rename").clicked() {
+                                    start_rename = Some((row.id, row.name.clone()));
                                     ui.close();
                                 }
                                 ui.separator();
-                                if ui.button("✕ Delete").clicked() {
-                                    delete = Some(row.id);
+                                if row.is_terminal {
+                                    if ui.button("▶ Re-run with same setup").clicked() {
+                                        rerun = Some(row.id);
+                                        ui.close();
+                                    }
+                                    if ui.button("📋 Duplicate into Setup").clicked() {
+                                        load_into_draft = Some(row.id);
+                                        ui.close();
+                                    }
+                                    if ui
+                                        .button("💾 Export CSV…")
+                                        .on_hover_text(
+                                            "Save this run's full trajectory \
+                                             (time + every recorded variable) \
+                                             to a CSV file.",
+                                        )
+                                        .clicked()
+                                    {
+                                        export_csv = Some(row.id);
+                                        ui.close();
+                                    }
+                                    ui.separator();
+                                    if ui.button("✕ Delete").clicked() {
+                                        delete = Some(row.id);
+                                        ui.close();
+                                    }
+                                } else if ui.button("⊘ Cancel run").clicked() {
+                                    cancel = Some(row.id);
                                     ui.close();
                                 }
-                            } else if ui.button("⊘ Cancel run").clicked() {
-                                cancel = Some(row.id);
-                                ui.close();
-                            }
-                        });
+                            });
+                        }
                         ui.label(&row.bounds);
-                        let status_widget = ui.label(&row.status);
+                        // Color-code status: failed → red, cancelled →
+                        // muted, running → amber, done → default.
+                        let status_color = match (&row.error, row.is_terminal, row.duration_ms) {
+                            (Some(_), _, _) => Some(egui::Color32::from_rgb(219, 68, 55)),
+                            (None, false, None) => Some(egui::Color32::from_rgb(244, 180, 0)),
+                            _ => None,
+                        };
+                        let status_text = match status_color {
+                            Some(c) => egui::RichText::new(&row.status).color(c),
+                            None => egui::RichText::new(&row.status),
+                        };
+                        let status_widget = ui.horizontal(|ui| {
+                            let r = ui.label(status_text);
+                            if let Some(p) = row.progress {
+                                ui.add(
+                                    egui::ProgressBar::new(p)
+                                        .desired_width(60.0)
+                                        .desired_height(8.0),
+                                )
+                                .on_hover_text(format!("{:.0}%", p * 100.0));
+                            }
+                            r
+                        }).inner;
                         if let Some(err) = &row.error {
                             status_widget.on_hover_text(err);
                         }
                         let sample_text = if row.var_count > 0 {
                             format!("{}×{}", row.sample_count, row.var_count)
-                        } else if let Some(ms) = row.duration_ms {
-                            format!("{} ms", ms)
                         } else {
                             String::new()
                         };
-                        ui.label(sample_text);
+                        let sample_resp = ui.label(&sample_text);
+                        if row.var_count > 0 {
+                            sample_resp.on_hover_text(format!(
+                                "{} samples × {} variables",
+                                row.sample_count, row.var_count
+                            ));
+                        }
                         if row.is_terminal {
                             if ui.small_button("✕").on_hover_text("Delete").clicked() {
                                 delete = Some(row.id);
@@ -267,6 +362,28 @@ impl Panel for ExperimentsPanel {
                     }
                 });
         });
+
+        // Apply rename state transitions in priority order: commit
+        // wins over cancel wins over start. Avoids flicker when a
+        // single frame sees both an Enter (commit) and a focus-loss.
+        if let Some((id, new_name)) = commit_rename {
+            if let Some(mut reg) = world.get_resource_mut::<ExperimentRegistry>() {
+                if let Some(exp) = reg.get_mut(id) {
+                    exp.name = new_name;
+                }
+            }
+            if let Some(mut v) = world.get_resource_mut::<ExperimentVisibility>() {
+                v.editing_name = None;
+            }
+        } else if cancel_rename {
+            if let Some(mut v) = world.get_resource_mut::<ExperimentVisibility>() {
+                v.editing_name = None;
+            }
+        } else if let Some(state) = start_rename {
+            if let Some(mut v) = world.get_resource_mut::<ExperimentVisibility>() {
+                v.editing_name = Some(state);
+            }
+        }
 
         if let Some(id) = toggle {
             if let Some(mut v) = world.get_resource_mut::<ExperimentVisibility>() {
@@ -442,11 +559,31 @@ impl ExperimentsPanel {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let label = if runner_busy { "⏩ Running…" } else { "⏩ Run" };
                 let valid = bounds.t_end > bounds.t_start;
-                if ui.add_enabled(valid && !runner_busy, egui::Button::new(label)).clicked() {
+                let btn = ui.add_enabled(valid && !runner_busy, egui::Button::new(label));
+                let btn = if runner_busy {
+                    btn.on_disabled_hover_text(
+                        "A run is already in progress. Cancel it from the row \
+                         below or wait for it to finish.",
+                    )
+                } else if !valid {
+                    btn.on_disabled_hover_text(
+                        "Bounds invalid — t_end must be greater than t_start.",
+                    )
+                } else {
+                    btn.on_hover_text("Compile + simulate this model from t_start to t_end.")
+                };
+                if btn.clicked() {
                     run_clicked = true;
                 }
             });
         });
+        if bounds.t_end <= bounds.t_start {
+            ui.label(
+                egui::RichText::new("⚠ t_end must be greater than t_start")
+                    .color(egui::Color32::from_rgb(219, 68, 55))
+                    .size(11.0),
+            );
+        }
 
         // Compact bounds row.
         ui.horizontal(|ui| {
@@ -487,13 +624,47 @@ impl ExperimentsPanel {
                 .id_salt("setup_inputs_scroll")
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.weak("Inputs:");
-                        for (name, _ty, value_text) in input_edits.iter_mut() {
-                            ui.label(name.as_str());
-                            let resp = ui.add(
-                                egui::TextEdit::singleline(value_text)
-                                    .desired_width(70.0),
+                        ui.weak("Inputs:")
+                            .on_hover_text(
+                                "Values bound to top-level `input` declarations \
+                                 before the run. Real → number; Boolean → \
+                                 true/false; Integer → number. Empty cells use \
+                                 the model's default.",
                             );
+                        for (name, ty, value_text) in input_edits.iter_mut() {
+                            ui.label(name.as_str());
+                            let s_trim = value_text.trim();
+                            let parses = if s_trim.is_empty() {
+                                true
+                            } else {
+                                match ty.as_str() {
+                                    "Real" => s_trim.parse::<f64>().is_ok(),
+                                    "Integer" | "Int" => s_trim.parse::<i64>().is_ok(),
+                                    "Boolean" | "Bool" => {
+                                        matches!(s_trim, "true" | "false")
+                                    }
+                                    _ => s_trim.parse::<f64>().is_ok(),
+                                }
+                            };
+                            let mut edit = egui::TextEdit::singleline(value_text)
+                                .desired_width(70.0);
+                            if !parses {
+                                edit = edit.text_color(egui::Color32::from_rgb(219, 68, 55));
+                            }
+                            let resp = ui.add(edit);
+                            let resp = if !parses {
+                                resp.on_hover_text(format!(
+                                    "Cannot parse as {ty}. Expected: {}",
+                                    match ty.as_str() {
+                                        "Real" => "decimal number, e.g. 1.5",
+                                        "Integer" | "Int" => "integer, e.g. 42",
+                                        "Boolean" | "Bool" => "true or false",
+                                        _ => "decimal number",
+                                    }
+                                ))
+                            } else {
+                                resp
+                            };
                             if resp.changed() || resp.lost_focus() {
                                 inputs_changed = true;
                             }
@@ -951,7 +1122,12 @@ pub fn render_experiments_plot(ui: &mut egui::Ui, world: &mut World) -> ExpPlotS
     let mut new_scrub: Option<Option<f64>> = None;
 
     if !series.is_empty() {
-        // Compact toolbar above the chart: scrub-time readout + reset.
+        // Compact toolbar above the chart: scrub-time readout + reset
+        // + mixed-units indicator. The mixed-units note matters when
+        // the user ticks variables with different physical units
+        // (e.g. force in N + altitude in m); in that case the y-axis
+        // label is intentionally suppressed and the units appear in
+        // each legend entry instead.
         let mut reset_clicked = false;
         ui.horizontal(|ui| {
             match scrub_time {
@@ -970,8 +1146,20 @@ pub fn render_experiments_plot(ui: &mut egui::Ui, world: &mut World) -> ExpPlotS
                     }
                 }
                 None => {
-                    ui.weak("Click the plot to scrub time — canvas overlays follow the cursor.");
+                    ui.weak("Click plot to scrub time. Click legend item to hide a series.");
                 }
+            }
+            if shared_unit.is_none() && series.len() > 1 {
+                ui.separator();
+                ui.label(
+                    egui::RichText::new("⚠ mixed units")
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(244, 180, 0)),
+                )
+                .on_hover_text(
+                    "Picked variables have different units; y-axis label is \
+                     suppressed. Units are shown per-series in the legend.",
+                );
             }
         });
         if reset_clicked {
@@ -1083,9 +1271,17 @@ fn export_experiment_csv(world: &mut World, id: ExperimentId) {
             }
             text.push('\n');
         }
-        // Filename suggestion: model+run-id-suffix sanitised.
-        let safe_name: String = exp
-            .name
+        // Filename suggestion: <model>_<run>_<unix_ts>. Unix seconds
+        // is unambiguous across timezones and easy to glob; the run
+        // name is included for readability when filing multiple
+        // exports of the same model.
+        let model_short = exp.model_ref.0.rsplit('.').next().unwrap_or(&exp.model_ref.0);
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let raw = format!("{model_short}_{}_{ts}", exp.name);
+        let safe_name: String = raw
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
             .collect();
@@ -1291,6 +1487,11 @@ struct Row {
     color_hint: u8,
     sample_count: usize,
     var_count: usize,
+    /// Progress fraction in `[0, 1]` while a run is in flight.
+    /// `None` for terminal/pending rows. Drives the progress bar in
+    /// the Status column so users get "how far along" without doing
+    /// arithmetic against the bounds string.
+    progress: Option<f32>,
 }
 
 fn status_label(s: &RunStatus) -> String {

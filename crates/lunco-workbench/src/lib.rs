@@ -46,6 +46,7 @@ use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
 use egui_dock::{
     widgets::tab_viewer::OnCloseResponse, DockArea, DockState, NodeIndex, Style, TabViewer,
 };
+use lunco_core::{Command, on_command, register_commands};
 use std::collections::HashMap;
 
 mod panel;
@@ -111,6 +112,53 @@ fn on_close_tab(trigger: On<CloseTab>, mut layout: ResMut<WorkbenchLayout>) {
     let ev = *trigger.event();
     layout.close_instance(ev.kind, ev.instance);
 }
+
+/// Bring a registered singleton panel forward in the dock.
+///
+/// `id` is matched against [`Panel::id`]'s static string (e.g.
+/// `"modelica_experiments"`, `"modelica_telemetry"`). No-op when the
+/// panel isn't currently in the dock — callers that need to *open*
+/// a closed panel should use the View-menu route or fire the
+/// existing perspective preset.
+///
+/// Exposed as a typed command so HTTP automation can deterministically
+/// reach a tab before screenshotting / driving it.
+#[Command(default)]
+pub struct FocusPanel {
+    /// The singleton panel's [`PanelId`] string (e.g.
+    /// `"modelica_experiments"`).
+    pub id: String,
+}
+
+#[on_command(FocusPanel)]
+fn on_focus_panel(
+    trigger: On<FocusPanel>,
+    mut layout: ResMut<WorkbenchLayout>,
+) {
+    let want = trigger.event().id.as_str();
+    // PanelId wraps `&'static str`; we can't construct one from a
+    // runtime String, so probe each tab in the dock and match by
+    // value.
+    let mut hit: Option<PanelId> = None;
+    for (_, t) in layout.dock.iter_all_tabs() {
+        if let TabId::Singleton(pid) = t {
+            if pid.0 == want {
+                hit = Some(*pid);
+                break;
+            }
+        }
+    }
+    if let Some(pid) = hit {
+        layout.focus_singleton(pid);
+    } else {
+        bevy::log::warn!(
+            "FocusPanel: no singleton tab with id {:?} found in dock",
+            want
+        );
+    }
+}
+
+register_commands!(on_focus_panel,);
 pub use perspective::{Perspective, PerspectiveId};
 pub use session::{
     DocumentClosed, DocumentOpened, RegisterDocument, TwinAdded, TwinClosed,
@@ -610,6 +658,25 @@ impl WorkbenchLayout {
             main.push_to_focused_leaf(tab);
         }
         true
+    }
+
+    /// Activate (foreground) a singleton panel tab if it's already
+    /// present in the dock. Returns `true` when the panel was found
+    /// and focused, `false` when no leaf contains it. Idempotent —
+    /// calling on the already-active tab is a no-op success.
+    ///
+    /// Used by the [`FocusPanel`] typed command so HTTP / scripting
+    /// callers can deterministically bring a panel forward (e.g.
+    /// activating Experiments before screenshotting it).
+    pub fn focus_singleton(&mut self, id: PanelId) -> bool {
+        let tab = TabId::Singleton(id);
+        if let Some(pos) = self.dock.find_tab(&tab) {
+            self.dock.set_focused_node_and_surface((pos.0, pos.1));
+            self.dock.set_active_tab(pos);
+            true
+        } else {
+            false
+        }
     }
 
     /// Remove a panel from the live dock without rebuilding from
