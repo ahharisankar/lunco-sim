@@ -882,8 +882,16 @@ fn drain_pending_tab_closes(
     }
 }
 
+/// Button labels — single source of truth for both the request side
+/// (constructing [`ModalButton`]) and the resolve side (matching on
+/// [`ModalOutcome`]). Drift between the two used to silently fall
+/// through to `Cancel` and was a maintainability hazard.
+const SAVE_LABEL: &str = "Save";
+const DONT_SAVE_LABEL: &str = "Don't save";
+const CANCEL_LABEL: &str = "Cancel";
+
 /// Render one modal per entry in [`CloseDialogState`]. Three choices:
-/// **Save** (disabled for Untitled until Save-As lands), **Don't save**,
+/// **Save** (hidden for read-only library classes), **Don't save**,
 /// **Cancel**. The Save path fires `SaveDocument` + full close; Don't
 /// save fires the close directly; Cancel dismisses the dialog.
 fn render_close_dialogs(
@@ -955,10 +963,10 @@ fn render_close_dialogs(
 
                 let mut buttons = Vec::new();
                 if can_save {
-                    buttons.push(ModalButton::Confirm("Save".into()));
+                    buttons.push(ModalButton::Confirm(SAVE_LABEL.into()));
                 }
-                buttons.push(ModalButton::Destructive("Don't save".into()));
-                buttons.push(ModalButton::Cancel("Cancel".into()));
+                buttons.push(ModalButton::Destructive(DONT_SAVE_LABEL.into()));
+                buttons.push(ModalButton::Cancel(CANCEL_LABEL.into()));
 
                 let id = modals.request(ModalRequest {
                     title: format!("Save changes to '{display_name}'?"),
@@ -976,8 +984,8 @@ fn render_close_dialogs(
 
         let action = match modals.poll(modal_id) {
             None => DialogAction::None,
-            Some(ModalOutcome::Confirmed(label)) if label == "Save" => DialogAction::Save,
-            Some(ModalOutcome::Destructive(label)) if label == "Don't save" => {
+            Some(ModalOutcome::Confirmed(label)) if label == SAVE_LABEL => DialogAction::Save,
+            Some(ModalOutcome::Destructive(label)) if label == DONT_SAVE_LABEL => {
                 DialogAction::DontSave
             }
             Some(_) => DialogAction::Cancel,
@@ -1037,6 +1045,25 @@ fn render_close_dialogs(
             }
             DialogAction::Cancel => { /* drop from pending */ }
         }
+    }
+    // Reconcile `requested` against the surviving pending set. Any
+    // outstanding ModalId whose `(doc, tab)` is no longer pending
+    // belongs to a dialog whose context vanished without going
+    // through the resolution loop above (e.g. the document was
+    // closed by another path while the prompt was queued behind a
+    // different modal). Cancel those requests in the queue too,
+    // otherwise they'd surface later as ghost dialogs.
+    let alive: std::collections::HashSet<(DocumentId, u64)> =
+        survivors.iter().copied().collect();
+    let stale: Vec<((DocumentId, u64), lunco_ui::modal::ModalId)> = dialogs
+        .requested
+        .iter()
+        .filter(|(k, _)| !alive.contains(k))
+        .map(|(k, id)| (*k, *id))
+        .collect();
+    for (key, id) in stale {
+        modals.cancel(id);
+        dialogs.requested.remove(&key);
     }
     dialogs.pending = survivors;
 }

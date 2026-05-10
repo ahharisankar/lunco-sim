@@ -89,6 +89,17 @@ impl ModalQueue {
         self.results.remove(&id)
     }
 
+    /// Withdraw a modal request whose owner has lost interest — e.g.
+    /// the document the dialog targeted was closed via another path
+    /// before the user acted on it. Removes the request from the
+    /// pending queue *and* any unpolled outcome from `results`, so it
+    /// can never surface as a ghost dialog after its context is gone.
+    /// No-op when `id` was already polled or never existed.
+    pub fn cancel(&mut self, id: ModalId) {
+        self.pending.retain(|(qid, _)| *qid != id);
+        self.results.remove(&id);
+    }
+
     /// `true` if any modal is currently displayed or queued.
     pub fn is_active(&self) -> bool {
         !self.pending.is_empty() || !self.results.is_empty()
