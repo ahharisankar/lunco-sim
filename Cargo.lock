@@ -6124,6 +6124,7 @@ dependencies = [
  "lunco-theme",
  "lunco-twin",
  "lunco-twin-journal",
+ "lunco-ui",
  "lunco-viz",
  "lunco-workbench",
  "lunco-workspace",

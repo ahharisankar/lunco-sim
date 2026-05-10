@@ -718,6 +718,12 @@ pub struct CloseDialogState {
     /// × on goes away. The doc itself drops only when its last tab
     /// closes (`ModelTabs::count_for_doc(doc) == 0`).
     pub pending: Vec<(DocumentId, u64)>,
+    /// `(doc, tab) → ModalId` for entries that have already been
+    /// pushed to the workbench [`ModalQueue`]. Without this, every
+    /// frame would re-request the same modal. Cleared together with
+    /// the matching `pending` entry when the user resolves the
+    /// dialog.
+    pub requested: std::collections::HashMap<(DocumentId, u64), lunco_ui::modal::ModalId>,
 }
 
 /// Drain `PendingTabCloses` from `lunco_workbench`. Clean docs close
@@ -881,9 +887,9 @@ fn drain_pending_tab_closes(
 /// **Cancel**. The Save path fires `SaveDocument` + full close; Don't
 /// save fires the close directly; Cancel dismisses the dialog.
 fn render_close_dialogs(
-    mut egui_ctx: bevy_egui::EguiContexts,
     registry: Res<ModelicaDocumentRegistry>,
     mut dialogs: ResMut<CloseDialogState>,
+    mut modals: ResMut<lunco_ui::modal::ModalQueue>,
     // `Option<ResMut>` rather than `ResMut` — the system is registered
     // in one of the `EguiPrimaryContextPass` passes which, in Bevy
     // 0.18, can be polled before plugin-level `init_resource`s have
@@ -893,90 +899,95 @@ fn render_close_dialogs(
     mut pending_save_close: Option<ResMut<PendingCloseAfterSave>>,
     mut commands: Commands,
 ) {
-    let Ok(ctx) = egui_ctx.ctx_mut() else {
-        return;
-    };
+    use lunco_ui::modal::{ModalBody, ModalButton, ModalOutcome, ModalRequest};
+    use std::sync::Arc;
+
     // Drain-and-reinsert pattern so we can mutate individual entries
     // without fighting the Vec during iteration.
     let pending = std::mem::take(&mut dialogs.pending);
     let mut survivors = Vec::with_capacity(pending.len());
     for (doc, originating_tab) in pending {
         let Some(host) = registry.host(doc) else {
-            // Doc vanished (another system closed it). Drop the dialog.
+            // Doc vanished (another system closed it). Drop any
+            // outstanding modal and the dialog entry.
+            dialogs.requested.remove(&(doc, originating_tab));
             continue;
         };
-        let document = host.document();
-        let display_name = document.origin().display_name();
-        let is_untitled = document.origin().is_untitled();
-        let is_read_only = document.is_read_only();
-        // Read-only library classes can't be saved at all; the user's
-        // only honest options are Don't Save or Cancel. Untitled docs
-        // route their Save through Save-As → the picker.
-        let can_save = !is_read_only;
 
+        // Three-way outcome decoded from `ModalOutcome`:
+        //   Confirmed("Save")          → Save
+        //   Destructive("Don't save")  → DontSave (discards user work,
+        //                                 hence Destructive variant)
+        //   Cancelled (button / Esc)   → Cancel
         enum DialogAction {
             None,
             Save,
             DontSave,
             Cancel,
         }
-        let mut action = DialogAction::None;
 
-        let window_id = egui::Id::new(("unsaved_close_prompt", doc.raw()));
-        let mut open = true;
-        egui::Window::new(format!("Save changes to '{}'?", display_name))
-            .id(window_id)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .open(&mut open)
-            .show(ctx, |ui| {
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(
-                        "Your changes will be lost if you don't save them.",
-                    )
-                    .size(12.0),
-                );
-                if is_untitled {
-                    ui.add_space(4.0);
-                    ui.colored_label(
-                        egui::Color32::from_rgb(180, 180, 200),
-                        "This model has never been saved — picking Save \
-                         will open a Save-As dialog to bind it to a file.",
-                    );
+        let key = (doc, originating_tab);
+        let modal_id = match dialogs.requested.get(&key).copied() {
+            Some(id) => id,
+            None => {
+                // First frame for this entry — push the request.
+                let document = host.document();
+                let display_name = document.origin().display_name().to_string();
+                let is_untitled = document.origin().is_untitled();
+                let is_read_only = document.is_read_only();
+                // Read-only library classes can't be saved at all; the
+                // user's only honest options are Don't save or Cancel.
+                let can_save = !is_read_only;
+
+                let body_text = if is_untitled {
+                    "Your changes will be lost if you don't save them.\n\n\
+                     This model has never been saved — picking Save will \
+                     open a Save-As dialog to bind it to a file."
+                        .to_string()
+                } else if is_read_only {
+                    "Your changes will be lost if you don't save them.\n\n\
+                     This is a read-only library class; Save is unavailable. \
+                     Use Duplicate to Workspace if you want to keep your edits."
+                        .to_string()
+                } else {
+                    "Your changes will be lost if you don't save them.".to_string()
+                };
+
+                let mut buttons = Vec::new();
+                if can_save {
+                    buttons.push(ModalButton::Confirm("Save".into()));
                 }
-                if is_read_only {
-                    ui.add_space(4.0);
-                    ui.colored_label(
-                        egui::Color32::from_rgb(200, 150, 50),
-                        "This is a read-only library class; Save is \
-                         unavailable. Use Duplicate to Workspace if you \
-                         want to keep your edits.",
-                    );
-                }
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    let save_btn = ui.add_enabled(
-                        can_save,
-                        egui::Button::new(egui::RichText::new("Save").strong()),
-                    );
-                    if save_btn.clicked() {
-                        action = DialogAction::Save;
-                    }
-                    if ui.button("Don't save").clicked() {
-                        action = DialogAction::DontSave;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        action = DialogAction::Cancel;
-                    }
+                buttons.push(ModalButton::Destructive("Don't save".into()));
+                buttons.push(ModalButton::Cancel("Cancel".into()));
+
+                let id = modals.request(ModalRequest {
+                    title: format!("Save changes to '{display_name}'?"),
+                    body: ModalBody::Custom(Arc::new(move |ui| {
+                        ui.label(egui::RichText::new(&body_text).size(12.0));
+                    })),
+                    buttons,
+                    dismiss_on_esc: true,
                 });
-            });
-        // Close via the title-bar X also dismisses — treat as Cancel.
-        if !open {
-            action = DialogAction::Cancel;
-        }
+                dialogs.requested.insert(key, id);
+                survivors.push((doc, originating_tab));
+                continue;
+            }
+        };
 
+        let action = match modals.poll(modal_id) {
+            None => DialogAction::None,
+            Some(ModalOutcome::Confirmed(label)) if label == "Save" => DialogAction::Save,
+            Some(ModalOutcome::Destructive(label)) if label == "Don't save" => {
+                DialogAction::DontSave
+            }
+            Some(_) => DialogAction::Cancel,
+        };
+
+        // Resolved outcomes drop the requested entry; only `None`
+        // (modal still in flight) keeps it alive in both maps.
+        if !matches!(action, DialogAction::None) {
+            dialogs.requested.remove(&key);
+        }
         match action {
             DialogAction::None => {
                 survivors.push((doc, originating_tab));

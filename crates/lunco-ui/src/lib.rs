@@ -80,9 +80,13 @@ impl Plugin for LuncoUiPlugin {
         app.init_resource::<UiSelection>();
         // Modal host: single-source-of-truth for dialogs. Panels never
         // call `egui::Window::show` directly; they push to ModalQueue
-        // and the host renders the head with `egui::Modal`. Runs in
-        // `Update` so it paints on the next frame after a request.
+        // and the host renders the head with `egui::Modal`. Registered
+        // in `EguiPrimaryContextPass` because the host pulls
+        // `EguiContexts` to paint on the active egui context.
         app.init_resource::<modal::ModalQueue>()
-            .add_systems(Update, modal::host::render_modal_host);
+            .add_systems(
+                bevy_egui::EguiPrimaryContextPass,
+                modal::host::render_modal_host,
+            );
     }
 }

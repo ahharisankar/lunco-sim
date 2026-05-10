@@ -388,13 +388,18 @@ impl StatusBus {
         self.active_progress.values()
     }
 
-    /// Latest event to *display* — the most recent active progress
-    /// entry if any, else the most recent discrete history entry.
-    /// What renderers should show in a single-line status strip.
+    /// Event the status bar should show in its single-line strip.
+    /// When work is in flight, picks the *longest-running* active
+    /// entry rather than the most recently started — the latter
+    /// flickered as concurrent drill-in / duplicate / projection
+    /// tasks rotated through `at`. The longest-running entry stays
+    /// pinned until it completes, then the next-oldest takes over.
+    /// Falls back to the most recent discrete history event when no
+    /// progress is active.
     pub fn display_latest(&self) -> Option<&StatusEvent> {
         self.active_progress
             .values()
-            .max_by_key(|e| e.at)
+            .min_by_key(|e| e.at)
             .or_else(|| self.history.back())
     }
 
