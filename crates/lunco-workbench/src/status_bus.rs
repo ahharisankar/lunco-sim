@@ -147,6 +147,14 @@ pub struct StatusEvent {
     /// Opaque id when this event is the active progress for a [`BusyHandle`].
     /// `None` for discrete events and for legacy [`StatusBus::push_progress`].
     pub busy_id: Option<BusyId>,
+    /// Optional cancellation flag shared with the originating task.
+    /// Indicators rendered for an entry whose `cancel` is `Some` show
+    /// a `[✕]` button that flips the inner `AtomicBool` to `true`;
+    /// the task's cooperative-cancel checkpoints (e.g. projection's
+    /// `should_stop`) then short-circuit. Dropping the handle alone
+    /// is *not* enough for tasks that run to completion in the
+    /// pool — the flag is what stops the work.
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl StatusEvent {
@@ -228,6 +236,7 @@ impl StatusBus {
             progress: None,
             at: Instant::now(),
             busy_id: None,
+            cancel: None,
         };
         if self.history.len() >= STATUS_HISTORY_CAPACITY {
             self.history.pop_front();
@@ -254,6 +263,7 @@ impl StatusBus {
             progress: Some((done, total)),
             at: Instant::now(),
             busy_id: None,
+            cancel: None,
         };
         self.active_progress.insert((BusyScope::Global, source), ev);
         self.seq = self.seq.wrapping_add(1);
@@ -301,6 +311,7 @@ impl StatusBus {
             progress: None,
             at: Instant::now(),
             busy_id: Some(id),
+            cancel: None,
         };
         self.active_progress.insert((scope, source), ev);
         self.by_id.insert(id, (scope, source));
@@ -309,6 +320,26 @@ impl StatusBus {
             id,
             drop_tx: self.drop_tx.clone(),
         }
+    }
+
+    /// [`Self::begin`] variant that records a cancellation flag the
+    /// indicator widget can flip from a `[✕]` button. The originating
+    /// task is responsible for honouring the flag at its cooperative
+    /// checkpoints — flipping it does not abort a `bevy::tasks::Task`
+    /// in the pool, only signals the body to short-circuit.
+    pub fn begin_cancellable(
+        &mut self,
+        scope: BusyScope,
+        source: &'static str,
+        label: impl Into<String>,
+        token: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> BusyHandle {
+        let handle = self.begin(scope, source, label);
+        // `begin` just inserted the entry — we know the slot exists.
+        if let Some(ev) = self.active_progress.get_mut(&(scope, source)) {
+            ev.cancel = Some(token);
+        }
+        handle
     }
 
     /// Update the progress tick for an outstanding [`BusyHandle`].
@@ -411,9 +442,30 @@ impl StatusBus {
     }
 }
 
+/// Dev-only knob that delays the cleanup of busy entries — every
+/// `BusyHandle::Drop` lands in the channel as usual, but
+/// [`drain_busy_drops`] holds the entry alive in `active_progress`
+/// until `entry.at + min_duration` has passed. Set to a nonzero
+/// `Duration` to exercise indicator render paths that fast tasks
+/// would otherwise skip (the [`SHOW_AFTER`] / [`ELAPSED_AFTER`]
+/// thresholds, the elapsed-time read-out, the cancel button).
+///
+/// Default is zero — production runs are unaffected.
+///
+/// [`SHOW_AFTER`]: crate::status_bus::StatusBus
+/// [`ELAPSED_AFTER`]: crate::status_bus::StatusBus
+#[derive(Resource, Default, Clone, Copy)]
+pub struct BusyDebug {
+    pub min_duration: std::time::Duration,
+}
+
 /// Drains [`BusyHandle`] drop notifications and clears the corresponding
 /// active-progress entries. Runs every frame as part of [`StatusBusPlugin`].
-pub fn drain_busy_drops(mut bus: ResMut<StatusBus>) {
+pub fn drain_busy_drops(
+    mut bus: ResMut<StatusBus>,
+    debug: Option<Res<BusyDebug>>,
+) {
+    let min = debug.map(|d| d.min_duration).unwrap_or_default();
     // Pull all pending ids out under the mutex first so we can release
     // it before mutating self via `clear_by_id`.
     let mut drops: Vec<BusyId> = Vec::new();
@@ -422,8 +474,29 @@ pub fn drain_busy_drops(mut bus: ResMut<StatusBus>) {
             drops.push(id);
         }
     }
+    if min.is_zero() {
+        for id in drops {
+            bus.clear_by_id(id);
+        }
+        return;
+    }
+    // Slow-path harness: only clear entries whose `started_at` is
+    // older than `min`. Re-queue younger drops by sending the id
+    // back into the channel so a future frame retries.
+    let now = Instant::now();
+    let tx = bus.drop_tx.clone();
     for id in drops {
-        bus.clear_by_id(id);
+        let still_young = bus
+            .by_id
+            .get(&id)
+            .and_then(|key| bus.active_progress.get(key))
+            .map(|ev| now.saturating_duration_since(ev.at) < min)
+            .unwrap_or(false);
+        if still_young {
+            let _ = tx.send(id);
+        } else {
+            bus.clear_by_id(id);
+        }
     }
 }
 

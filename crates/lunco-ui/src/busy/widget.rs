@@ -49,43 +49,119 @@ impl LoadingIndicator {
     }
 
     /// Centred card painted over `rect` — the canvas-overlay flavour.
-    /// No-op when the scope is not busy.
+    /// Visually matches the pre-existing canvas drill-in / projection
+    /// overlays: spinner left, "{verb}…" header (with elapsed once
+    /// past [`ELAPSED_AFTER`]), monospace detail line below.
+    /// No-op when the scope is not busy or hasn't crossed [`SHOW_AFTER`].
     pub fn overlay_on(self, ui: &mut egui::Ui, rect: Rect, bus: &StatusBus, theme: &Theme) {
         let Some(ev) = self.pick(bus) else { return };
-        let painter = ui.painter_at(rect);
+        // Clip to the host ui's rect intersected with `rect` so a
+        // small canvas pane can't paint the card over its neighbour
+        // panes.
+        let painter = ui
+            .painter()
+            .clone()
+            .with_clip_rect(ui.clip_rect().intersect(rect));
 
-        let card_size = Vec2::new(220.0, 90.0);
+        let card_size = Vec2::new(340.0, 84.0);
         let card_rect = Rect::from_center_size(rect.center(), card_size);
-        let scrim = Color32::from_rgba_unmultiplied(0, 0, 0, 110);
-        painter.rect_filled(rect, 0.0, scrim);
-        painter.rect_filled(card_rect, 8.0, theme.colors.surface0);
 
-        let dots_centre = card_rect.center() - Vec2::new(0.0, 14.0);
-        // Repaint on the host ui (painter_at clips repaint requests).
-        paint_three_dot(ui, dots_centre, theme.colors.text);
-
-        let label = if !ev.message.is_empty() {
-            ev.message.as_str()
-        } else {
-            "Loading…"
+        // Drop shadow tinted from the theme base so it reads on both
+        // light and dark themes.
+        let shadow = {
+            let b = theme.colors.base;
+            Color32::from_rgba_unmultiplied(b.r(), b.g(), b.b(), 100)
         };
-        painter.text(
-            card_rect.center() + Vec2::new(0.0, 18.0),
-            Align2::CENTER_CENTER,
-            label,
-            FontId::proportional(13.0),
-            theme.colors.text,
+        painter.rect_filled(card_rect.translate(Vec2::new(0.0, 3.0)), 8.0, shadow);
+        painter.rect_filled(card_rect, 8.0, theme.tokens.surface_raised);
+        painter.rect_stroke(
+            card_rect,
+            8.0,
+            egui::Stroke::new(1.0, theme.tokens.surface_raised_border),
+            egui::StrokeKind::Outside,
         );
 
+        // Spinner left-aligned inside the card.
+        let dots_centre =
+            egui::pos2(card_rect.min.x + 28.0, card_rect.center().y);
+        paint_three_dot(ui, dots_centre, theme.tokens.accent);
+
+        // Header verb picked from the bus event's `source` so the
+        // message stays meaningful regardless of which subsystem
+        // registered the work. Falls back to "Loading" for unknown
+        // sources.
         let elapsed = Instant::now().saturating_duration_since(ev.at);
-        if elapsed >= ELAPSED_AFTER {
+        let kind = match ev.source {
+            "drill-in" | "duplicate" => "Loading resource",
+            "projection" => "Projecting",
+            "compile" => "Compiling",
+            "save" => "Saving",
+            _ => "Loading",
+        };
+        let header = if elapsed < ELAPSED_AFTER {
+            format!("{kind}…")
+        } else if elapsed.as_secs_f32() < 10.0 {
+            format!("{kind}… {:.1}s", elapsed.as_secs_f32())
+        } else {
+            format!("{kind}… {}s", elapsed.as_secs())
+        };
+        painter.text(
+            egui::pos2(card_rect.min.x + 60.0, card_rect.center().y - 8.0),
+            Align2::LEFT_CENTER,
+            header,
+            FontId::proportional(13.0),
+            theme.tokens.text,
+        );
+
+        // Detail line — the bus event's message. Long qualified
+        // names left-trimmed with an ellipsis so the leaf stays
+        // visible.
+        if !ev.message.is_empty() {
+            let detail = if ev.message.len() > 40 {
+                format!("…{}", &ev.message[ev.message.len() - 39..])
+            } else {
+                ev.message.clone()
+            };
             painter.text(
-                card_rect.center_bottom() - Vec2::new(0.0, 10.0),
-                Align2::CENTER_CENTER,
-                format!("{:.1}s", elapsed.as_secs_f32()),
-                FontId::proportional(11.0),
-                theme.colors.subtext0,
+                egui::pos2(card_rect.min.x + 60.0, card_rect.center().y + 10.0),
+                Align2::LEFT_CENTER,
+                detail,
+                FontId::monospace(11.0),
+                theme.tokens.text_subdued,
             );
+        }
+
+        // Cancel affordance — only when the originating task
+        // registered a cancel flag via `StatusBus::begin_cancellable`.
+        // Click flips the `AtomicBool` to `true`; the task's body
+        // checks it at its cooperative checkpoints and short-circuits.
+        if let Some(cancel) = ev.cancel.clone() {
+            let btn_size = Vec2::new(20.0, 20.0);
+            let btn_rect = Rect::from_min_size(
+                egui::pos2(card_rect.max.x - btn_size.x - 8.0, card_rect.min.y + 8.0),
+                btn_size,
+            );
+            // Use a fresh ui scoped to the button rect so we get an
+            // egui-managed Response (hover, click, focus) rather than
+            // hand-rolling hit-testing on the painter.
+            let id = ui.id().with(("busy_cancel", ev.busy_id));
+            let resp = ui.interact(btn_rect, id, egui::Sense::click());
+            let bg = if resp.hovered() {
+                theme.colors.surface1
+            } else {
+                theme.tokens.surface_raised
+            };
+            painter.rect_filled(btn_rect, 4.0, bg);
+            painter.text(
+                btn_rect.center(),
+                Align2::CENTER_CENTER,
+                "✕",
+                FontId::proportional(13.0),
+                theme.tokens.text_subdued,
+            );
+            if resp.clicked() {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
 

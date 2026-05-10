@@ -284,14 +284,19 @@ pub(crate) fn render_fast_run_setup(
 
     let mut confirmed = false;
     let mut cancelled = false;
-    let mut window_open = true;
-    egui::Window::new("Simulation Setup — Fast Run")
-        .id(egui::Id::new(("fast_run_setup", entry.doc.raw())))
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut window_open)
-        .show(ctx, |ui| {
+    // `egui::Modal` (not `egui::Window`) provides the scrim,
+    // pointer-event blocking, Esc-to-close, and focus trap that the
+    // prior `Window` rendering missed. Live-state form bodies stay
+    // in this system — `lunco_ui::modal::ModalQueue` is for
+    // outcome-based dialogs (request once, poll outcome), not
+    // forms that mutate a `ResMut` on every keystroke.
+    let modal_response = egui::Modal::new(egui::Id::new((
+        "fast_run_setup",
+        entry.doc.raw(),
+    )))
+    .show(ctx, |ui| {
+        ui.heading("Simulation Setup — Fast Run");
+        ui.separator();
             ui.label(
                 egui::RichText::new(format!("Class: {}", entry.model_ref.0))
                     .strong(),
@@ -428,7 +433,8 @@ pub(crate) fn render_fast_run_setup(
             });
         });
 
-    if !window_open {
+    // Esc / scrim click also dismisses with Cancel semantics.
+    if modal_response.should_close() {
         cancelled = true;
     }
     if confirmed {
@@ -496,19 +502,22 @@ pub(crate) fn render_compile_class_picker(
 
     let mut confirmed: Option<String> = None;
     let mut cancelled = false;
-    let mut window_open = true;
     let title = match entry.purpose {
         PickerPurpose::Compile => "Which class should Compile run?",
         PickerPurpose::FastRun => "Which class should Fast Run simulate?",
     };
-    egui::Window::new(title)
-        .id(egui::Id::new(("compile_class_picker", entry.doc.raw())))
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut window_open)
-        .show(ctx, |ui| {
-            ui.add_space(4.0);
+    // Live-state radio-button list — body owns mutable
+    // `entry.preselected` across frames, so this dialog stays in
+    // its own system and uses `egui::Modal` directly for scrim /
+    // Esc / focus trap. (Stateful forms aren't a fit for the
+    // outcome-based `ModalQueue`.)
+    let modal_response = egui::Modal::new(egui::Id::new((
+        "compile_class_picker",
+        entry.doc.raw(),
+    )))
+    .show(ctx, |ui| {
+            ui.heading(title);
+            ui.separator();
             ui.label(
                 egui::RichText::new(
                     "This file is a package with more than one model. Pick \
@@ -549,7 +558,7 @@ pub(crate) fn render_compile_class_picker(
                 );
             });
         });
-    if !window_open {
+    if modal_response.should_close() {
         cancelled = true;
     }
     if let Some(qualified) = confirmed {

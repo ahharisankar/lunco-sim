@@ -14,95 +14,12 @@ use crate::ui::theme::ModelicaThemeExt;
 use super::active_doc_from_world;
 // `crate::ui::panels::model_view::drilled_class_for_doc`.
 
-/// Rendered while a background file-read (and subsequent
-/// `ReplaceSource` re-parse) is running for a drill-in target.
-/// Named class, animated dots — same visual language as the
-/// projection overlay but a different message so the user knows
-/// it's a fresh load, not a re-project.
-pub(super) fn render_drill_in_loading_overlay(
-    ui: &mut egui::Ui,
-    canvas_rect: egui::Rect,
-    class_name: &str,
-    elapsed_secs: f32,
-    theme: &lunco_theme::Theme,
-) {
-    let card_w = 340.0;
-    let card_h = 84.0;
-    let card_rect = egui::Rect::from_center_size(
-        canvas_rect.center(),
-        egui::vec2(card_w, card_h),
-    );
-    // Clip the overlay to the canvas rect so a small canvas pane
-    // can't paint the loading card over its neighbour panes.
-    // Use the ui's tightened clip rather than the canvas's full
-    // allocated rect — the rect can extend past the visible pane
-    // and clipping to it would still leak into neighbour panes.
-    let painter = ui.painter().clone().with_clip_rect(ui.clip_rect().intersect(canvas_rect));
-    let painter = &painter;
-    let shadow = {
-        let b = theme.colors.base;
-        egui::Color32::from_rgba_unmultiplied(b.r(), b.g(), b.b(), 100)
-    };
-    painter.rect_filled(
-        card_rect.translate(egui::vec2(0.0, 3.0)),
-        8.0,
-        shadow,
-    );
-    painter.rect_filled(card_rect, 8.0, theme.tokens.surface_raised);
-    painter.rect_stroke(
-        card_rect,
-        8.0,
-        egui::Stroke::new(1.0, theme.tokens.surface_raised_border),
-        egui::StrokeKind::Outside,
-    );
-    let t = ui.ctx().input(|i| i.time) as f32;
-    let spinner_center = egui::pos2(card_rect.min.x + 28.0, card_rect.center().y);
-    let accent = theme.tokens.accent;
-    for i in 0..3 {
-        let phase = (t * 2.5 - i as f32 * 0.4).rem_euclid(std::f32::consts::TAU);
-        let alpha = ((phase.sin() * 0.5 + 0.5) * 255.0) as u8;
-        let col = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), alpha);
-        painter.circle_filled(
-            spinner_center + egui::vec2(i as f32 * 9.0 - 9.0, 0.0),
-            3.5,
-            col,
-        );
-    }
-    // Header line: "Loading resource… 12s" — the elapsed counter
-    // reassures the user during slow rumoca parses (large package
-    // files can take tens of seconds). Hidden in the first 0.5s to
-    // avoid flicker on fast loads.
-    let header = if elapsed_secs < 0.5 {
-        "Loading resource…".to_string()
-    } else if elapsed_secs < 10.0 {
-        format!("Loading resource… {:.1}s", elapsed_secs)
-    } else {
-        format!("Loading resource… {}s", elapsed_secs.round() as u32)
-    };
-    painter.text(
-        egui::pos2(card_rect.min.x + 60.0, card_rect.center().y - 8.0),
-        egui::Align2::LEFT_CENTER,
-        header,
-        egui::FontId::proportional(13.0),
-        theme.tokens.text,
-    );
-    // Trim long qualified names with ellipsis on the left so the
-    // short class name stays visible.
-    let display = if class_name.len() > 40 {
-        format!("…{}", &class_name[class_name.len() - 39..])
-    } else {
-        class_name.to_string()
-    };
-    painter.text(
-        egui::pos2(card_rect.min.x + 60.0, card_rect.center().y + 10.0),
-        egui::Align2::LEFT_CENTER,
-        display,
-        egui::FontId::monospace(11.0),
-        theme.tokens.text_subdued,
-    );
-    // Animating — request repaint so the spinner moves smoothly.
-    ui.ctx().request_repaint();
-}
+// `render_drill_in_loading_overlay` and `render_projecting_overlay`
+// retired — replaced by
+// `lunco_ui::busy::LoadingIndicator::for_scope(BusyScope::Document(d))
+//     .overlay_on(ui, rect, &bus, &theme)`. Drill-in / duplicate /
+// projection all push to `StatusBus`; the widget picks the
+// longest-running entry and renders the per-source verb.
 
 /// Painted when a drill-in / duplicate load failed (e.g. MSL bundle
 /// not yet ready, class missing, parse error). Replaces the spinner
@@ -175,63 +92,6 @@ pub(super) fn render_drill_in_error_overlay(
     );
 }
 
-// ─── Loading / projection overlay ──────────────────────────────────
-
-/// Small "Projecting…" card centred on the canvas while an
-/// `AsyncComputeTaskPool` projection task is in flight. Includes
-/// a rotating dot so users can see the UI is responsive.
-pub(super) fn render_projecting_overlay(ui: &mut egui::Ui, canvas_rect: egui::Rect, theme: &lunco_theme::Theme) {
-    let card_w = 260.0;
-    let card_h = 72.0;
-    let card_rect = egui::Rect::from_center_size(
-        canvas_rect.center(),
-        egui::vec2(card_w, card_h),
-    );
-    // Use the ui's tightened clip rather than the canvas's full
-    // allocated rect — the rect can extend past the visible pane
-    // and clipping to it would still leak into neighbour panes.
-    let painter = ui.painter().clone().with_clip_rect(ui.clip_rect().intersect(canvas_rect));
-    let painter = &painter;
-    let shadow = {
-        let b = theme.colors.base;
-        egui::Color32::from_rgba_unmultiplied(b.r(), b.g(), b.b(), 90)
-    };
-    painter.rect_filled(
-        card_rect.translate(egui::vec2(0.0, 3.0)),
-        8.0,
-        shadow,
-    );
-    painter.rect_filled(card_rect, 8.0, theme.tokens.surface_raised);
-    painter.rect_stroke(
-        card_rect,
-        8.0,
-        egui::Stroke::new(1.0, theme.tokens.surface_raised_border),
-        egui::StrokeKind::Outside,
-    );
-
-    // Animated spinner — three dots pulsing in sequence via
-    // `ctx.input(|i| i.time)`. Frame-rate independent.
-    let t = ui.ctx().input(|i| i.time) as f32;
-    let spinner_center = egui::pos2(card_rect.min.x + 28.0, card_rect.center().y);
-    let accent = theme.tokens.accent;
-    for i in 0..3 {
-        let phase = (t * 2.5 - i as f32 * 0.4).rem_euclid(std::f32::consts::TAU);
-        let alpha = ((phase.sin() * 0.5 + 0.5) * 255.0) as u8;
-        let col = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), alpha);
-        painter.circle_filled(
-            spinner_center + egui::vec2(i as f32 * 9.0 - 9.0, 0.0),
-            3.0,
-            col,
-        );
-    }
-    painter.text(
-        egui::pos2(card_rect.min.x + 60.0, card_rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        "Loading resource…",
-        egui::FontId::proportional(13.0),
-        theme.tokens.text,
-    );
-}
 
 // ─── Empty-diagram summary ──────────────────────────────────────────
 

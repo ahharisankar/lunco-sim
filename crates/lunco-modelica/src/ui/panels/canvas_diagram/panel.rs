@@ -209,7 +209,16 @@ impl Panel for CanvasDiagramPanel {
             // because the spawn site holds `&mut state` (line ~297)
             // and we can't borrow the bus through `world` while that
             // is live.
-            let mut spawned_busy_label: Option<(String, Option<String>)> = None;
+            // `(label, target_at_spawn, cancel_token)` — third element
+            // lets the deferred-attach hand the projection's
+            // cooperative-cancel `Arc<AtomicBool>` to the bus, so the
+            // indicator's `[✕]` button can flip the same flag the
+            // task body checks.
+            let mut spawned_busy_label: Option<(
+                String,
+                Option<String>,
+                std::sync::Arc<std::sync::atomic::AtomicBool>,
+            )> = None;
             // Spawn a background task (or reuse an in-flight one
             // for the same doc+gen) that runs edge-recovery and
             // builds a `Scene` from the document's already-parsed
@@ -471,6 +480,7 @@ impl Panel for CanvasDiagramPanel {
                             None => "Projecting…".to_string(),
                         },
                         target_class_snapshot.clone(),
+                        std::sync::Arc::clone(&cancel),
                     ));
                     docstate.projection_task = Some(ProjectionTask {
                         gen_at_spawn: gen,
@@ -496,13 +506,14 @@ impl Panel for CanvasDiagramPanel {
             // state are disjoint resources but Rust can't see that
             // through `world`. The handle drops with the task on
             // completion / supersede / timeout.
-            if let Some((label, target_after_spawn)) = spawned_busy_label {
+            if let Some((label, target_after_spawn, cancel_token)) = spawned_busy_label {
                 let handle = world
                     .resource_mut::<lunco_workbench::status_bus::StatusBus>()
-                    .begin(
+                    .begin_cancellable(
                         lunco_workbench::status_bus::BusyScope::Document(doc_id.0),
                         "projection",
                         label,
+                        cancel_token,
                     );
                 let mut state = world.resource_mut::<CanvasDiagramState>();
                 let docstate = match render_tab_id {
@@ -1477,20 +1488,32 @@ impl CanvasDiagramPanel {
             .unwrap_or_else(lunco_theme::Theme::dark);
         if let Some((class, err)) = load_error {
             overlays::render_drill_in_error_overlay(ui, response.rect, &class, &err, &theme_snapshot_for_overlay);
-        } else if let Some((class, secs)) = loading_info {
-            if !scene_has_content {
-                overlays::render_drill_in_loading_overlay(ui, response.rect, &class, secs, &theme_snapshot_for_overlay);
+        } else if !scene_has_content && (loading_info.is_some() || parse_pending || projecting) {
+            // Single bus-driven indicator covers all three "scene
+            // not yet ready" reasons: drill-in / duplicate document
+            // load (`loading_info`), worker parse pending
+            // (`parse_pending`), and in-flight projection task
+            // (`projecting`). All three subsystems push to the
+            // [`StatusBus`] under [`BusyScope::Document`]; the
+            // widget picks the longest-running entry and renders
+            // the per-source verb (Loading resource / Projecting /
+            // …) with elapsed-time read-out past 3 s. Replaces the
+            // bespoke `render_drill_in_loading_overlay` /
+            // `render_projecting_overlay` painters that used to
+            // duplicate spinner + card chrome.
+            let bus = world.resource::<lunco_workbench::status_bus::StatusBus>();
+            if let Some(doc_id) = active_doc {
+                lunco_ui::busy::LoadingIndicator::for_scope(
+                    lunco_workbench::status_bus::BusyScope::Document(doc_id.0),
+                )
+                .overlay_on(ui, response.rect, bus, &theme_snapshot_for_overlay);
             }
-        } else if parse_pending && !scene_has_content {
-            // Worker parse hasn't landed yet — show the same spinner
-            // the projecting state uses. Without this branch the
-            // user sees the "no diagram" empty card during the brief
-            // gap between tab open and worker parse completion,
-            // which reads as broken.
-            overlays::render_projecting_overlay(ui, response.rect, &theme_snapshot_for_overlay);
+            // Keep the canvas repainting while the indicator is
+            // live — the widget requests its own repaint internally
+            // for the spinner, but parse_pending / projecting
+            // states without an active bus entry would otherwise
+            // sit silent. Cheap on idle.
             ui.ctx().request_repaint();
-        } else if projecting && !scene_has_content {
-            overlays::render_projecting_overlay(ui, response.rect, &theme_snapshot_for_overlay);
         } else if show_empty_overlay {
             overlays::render_empty_diagram_overlay(ui, response.rect, world);
         }
