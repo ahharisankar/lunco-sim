@@ -496,35 +496,15 @@ pub fn apply_ops_as(
     apply_ops(world, doc_id, ops, author);
 }
 
-/// Apply a single op through `host.apply` AND record the (forward,
-/// inverse) pair to the canonical Twin journal in one funnel.
-///
-/// Replaces the direct-`host.apply` pattern that several API command
-/// observers used to bypass the journal-recording path. Returns the
-/// `host.apply` result so callers can branch on success/failure
-/// exactly as before.
-///
-/// Side effects on success:
-/// - `waive_ast_debounce()` (so the next AST refresh tick reparses
-///   immediately, matching the canvas batch path).
-/// - `registry.mark_changed(doc)` (queues a `DocumentChanged` event;
-///   the previous direct-`host.apply` callers silently skipped this).
-/// - One canonical journal entry recorded with the supplied `author`.
-pub fn apply_one_op_as(
-    world: &mut World,
-    doc_id: lunco_doc::DocumentId,
-    op: ModelicaOp,
-    author: lunco_twin_journal::AuthorTag,
-) -> Result<lunco_doc::Ack, lunco_doc::Reject> {
-    use crate::ui::state::ModelicaDocumentRegistry;
-
-    let forward = crate::journal::summarize_op(&op);
-    // Layer 2 / structural ops can resolve a class that a previous
-    // op in the same UI batch just created. Mirror the canvas batch
-    // path's pre-apply AST refresh for those op kinds so direct
-    // single-op API calls don't see a stale snapshot either.
-    let needs_fresh_ast = matches!(
-        &op,
+/// Whether `op` mutates the source in a way that requires the host's
+/// AST to be reparsed *before* the op can be applied — `ReplaceSource`
+/// is a text-edit op (no inline AST mutation), so the next op needs a
+/// fresh parse to look up the class it just renamed/replaced. Same
+/// list applies to single-op and batch paths because both are reading
+/// the same syntax cache.
+fn op_needs_fresh_ast_pre_apply(op: &ModelicaOp) -> bool {
+    matches!(
+        op,
         ModelicaOp::AddClass { .. }
             | ModelicaOp::RemoveClass { .. }
             | ModelicaOp::AddShortClass { .. }
@@ -535,9 +515,101 @@ pub fn apply_one_op_as(
             | ModelicaOp::AddDiagramGraphic { .. }
             | ModelicaOp::SetExperimentAnnotation { .. }
             | ModelicaOp::ReplaceSource { .. }
-    );
+    )
+}
 
-    let (result, backward_summary) = {
+/// Single-op kernel: pre-op AST refresh → `host.apply(op)` → on
+/// success, waive the AST debounce *and* force a synchronous reparse
+/// so the *next* call (in this batch or via a separate API call) sees
+/// the new AST.
+///
+/// This is the **only** place in the module that decides what
+/// "applying one op consistently" means. Both [`apply_one_op_as`] and
+/// [`apply_ops`] funnel through here so the AST-freshness contract
+/// can't drift between the single-op and batch paths.
+///
+/// Returns `(host.apply result, optional (forward, backward) journal
+/// summaries)`. Caller is responsible for journal-record + mark_changed
+/// on the registry — keeping those out of the kernel keeps the kernel
+/// borrow-scope tight (`&mut DocumentHost`) and lets the batch path
+/// amortise the journal write across many ops.
+fn apply_one_op_kernel(
+    host: &mut lunco_doc::DocumentHost<crate::document::ModelicaDocument>,
+    op: ModelicaOp,
+) -> (
+    Result<lunco_doc::Ack, lunco_doc::Reject>,
+    Option<(serde_json::Value, serde_json::Value)>,
+) {
+    let forward = crate::journal::summarize_op(&op);
+    if op_needs_fresh_ast_pre_apply(&op) {
+        host.document_mut().refresh_ast_now();
+    }
+    let result = host.apply(op);
+    let pair = if result.is_ok() {
+        host.document_mut().waive_ast_debounce();
+        // Post-apply reparse: closes the inter-call race where a
+        // `ReplaceSource`-class op (e.g. `RenameModelicaClass`) flips
+        // the source text but leaves the syntax cache stale, so the
+        // next API call's class lookup fails with "class not found"
+        // even though the source clearly has it. Doing this in the
+        // kernel — not at any one call site — is what stops the bug
+        // from re-emerging when a new entry point is added.
+        host.document_mut().refresh_ast_now();
+        host.last_applied_inverse()
+            .map(crate::journal::summarize_op)
+            .map(|backward| (forward, backward))
+    } else {
+        None
+    };
+    (result, pair)
+}
+
+/// Record one (forward, inverse) op pair into the canonical Twin
+/// journal. Caller drops the registry borrow before invoking — the
+/// journal resource lives on `&World`, not `&mut`. Single source of
+/// truth so the recording shape doesn't drift between single-op and
+/// batch paths either.
+fn record_journal_entry(
+    world: &World,
+    doc_id: lunco_doc::DocumentId,
+    author: lunco_twin_journal::AuthorTag,
+    forward: serde_json::Value,
+    backward: serde_json::Value,
+) {
+    if let Some(journal) = world.get_resource::<lunco_doc_bevy::JournalResource>() {
+        journal.with_write(|j| {
+            j.record_op_value(
+                author,
+                doc_id,
+                lunco_twin_journal::DomainKind::Modelica,
+                forward,
+                backward,
+                None,
+            );
+        });
+    }
+}
+
+/// Apply a single op through `host.apply` AND record the (forward,
+/// inverse) pair to the canonical Twin journal in one funnel.
+///
+/// Replaces the direct-`host.apply` pattern that several API command
+/// observers used to bypass the journal-recording path. Returns the
+/// `host.apply` result so callers can branch on success/failure
+/// exactly as before.
+///
+/// Side effects on success — guaranteed by [`apply_one_op_kernel`]:
+/// - `waive_ast_debounce()` + `refresh_ast_now()` so the next call
+///   sees a fresh AST.
+/// - `registry.mark_changed(doc)` (queues a `DocumentChanged` event).
+/// - One canonical journal entry recorded with the supplied `author`.
+pub fn apply_one_op_as(
+    world: &mut World,
+    doc_id: lunco_doc::DocumentId,
+    op: ModelicaOp,
+    author: lunco_twin_journal::AuthorTag,
+) -> Result<lunco_doc::Ack, lunco_doc::Reject> {
+    let (result, pair) = {
         let Some(mut registry) = world.get_resource_mut::<ModelicaDocumentRegistry>() else {
             return Err(lunco_doc::Reject::InvalidOp(
                 "ModelicaDocumentRegistry resource missing".into(),
@@ -548,44 +620,15 @@ pub fn apply_one_op_as(
                 "doc {doc_id:?} not in registry"
             )));
         };
-        if needs_fresh_ast {
-            host.document_mut().refresh_ast_now();
-        }
-        let result = host.apply(op);
-        let backward = if result.is_ok() {
-            host.document_mut().waive_ast_debounce();
-            // Force a synchronous reparse so a *subsequent* API call
-            // sees the new AST. Without this, a `RenameModelicaClass`
-            // followed immediately by `AddModelicaComponent` rejects
-            // with "class not found" because the rename's
-            // `ReplaceSource` is a `FreshAst::TextEdit` (no inline
-            // AST update) and the next call's lookup hits the stale
-            // syntax cache. Mirrors the matching post-batch reparse
-            // in `apply_ops` further down.
-            host.document_mut().refresh_ast_now();
-            host.last_applied_inverse().map(crate::journal::summarize_op)
-        } else {
-            None
-        };
+        let (result, pair) = apply_one_op_kernel(host, op);
         if result.is_ok() {
             registry.mark_changed(doc_id);
         }
-        (result, backward)
+        (result, pair)
     };
 
-    if let (Ok(_), Some(backward)) = (&result, backward_summary) {
-        if let Some(journal) = world.get_resource::<lunco_doc_bevy::JournalResource>() {
-            journal.with_write(|j| {
-                j.record_op_value(
-                    author,
-                    doc_id,
-                    lunco_twin_journal::DomainKind::Modelica,
-                    forward,
-                    backward,
-                    None,
-                );
-            });
-        }
+    if let Some((forward, backward)) = pair {
+        record_journal_entry(world, doc_id, author, forward, backward);
     }
     result
 }
@@ -663,46 +706,13 @@ pub(super) fn apply_ops(
         };
         for op in ops {
             bevy::log::info!("[CanvasDiagram] applying {:?}", op);
-            // Snapshot the forward summary BEFORE host.apply consumes the
-            // op, so the journal records what the user intended even if
-            // apply fails. (Failure paths drop the snapshot below.)
-            let forward = crate::journal::summarize_op(&op);
-            // Layer 2 authoring ops can resolve a class that a previous
-            // op in the same batch just created. The AST cache is
-            // debounced (refresh deferred until idle), so the resolver
-            // would see a stale snapshot and reject the second op.
-            // Force a synchronous reparse for the structural ops where
-            // a stale AST means a wrong insertion point or a spurious
-            // "class not found" error. Cheap on small docs (a few ms);
-            // canvas-driven AddComponent batches don't trip this branch.
-            let needs_fresh_ast = matches!(
-                &op,
-                ModelicaOp::AddClass { .. }
-                    | ModelicaOp::RemoveClass { .. }
-                    | ModelicaOp::AddShortClass { .. }
-                    | ModelicaOp::AddVariable { .. }
-                    | ModelicaOp::RemoveVariable { .. }
-                    | ModelicaOp::AddEquation { .. }
-                    | ModelicaOp::AddIconGraphic { .. }
-                    | ModelicaOp::AddDiagramGraphic { .. }
-                    | ModelicaOp::SetExperimentAnnotation { .. }
-                    | ModelicaOp::ReplaceSource { .. }
-            );
-            if needs_fresh_ast {
-                host.document_mut().refresh_ast_now();
-            }
-            match host.apply(op) {
+            let (result, pair) = apply_one_op_kernel(host, op);
+            match result {
                 Ok(_) => {
                     any_applied = true;
-                    // Inverse was just pushed onto the undo stack by
-                    // DocumentHost::apply — read it and pair with the
-                    // forward summary for the journal. Skipped on
-                    // failure paths (forward summary is dropped).
-                    let backward = host
-                        .last_applied_inverse()
-                        .map(crate::journal::summarize_op)
-                        .unwrap_or(serde_json::Value::Null);
-                    journal_pairs.push((forward, backward));
+                    if let Some(p) = pair {
+                        journal_pairs.push(p);
+                    }
                 }
                 Err(lunco_doc::Reject::ReadOnly) => {
                     // Document layer rejects mutations on read-only
@@ -714,27 +724,18 @@ pub(super) fn apply_ops(
                 Err(e) => bevy::log::warn!("[CanvasDiagram] op failed: {}", e),
             }
         }
-        // Structured edit batch is one discrete commit — bypass the
-        // typing-debounce so the next ast_refresh tick reparses
-        // immediately. Otherwise canvas/diagnostics lag 2.5 s behind
-        // every API-driven or canvas-drag mutation.
-        //
-        // Then **also** force a synchronous reparse here, not just the
-        // pre-op refresh inside the loop. The pre-op pass parses the
-        // *old* source (before the op runs). After a structural op
-        // mutates the source — `ReplaceSource` from
-        // `RenameModelicaClass`, `AddClass`, `AddVariable`, etc. — the
-        // host's index is stale until the next `ast_refresh` tick
-        // fires. A *subsequent* API call (e.g. `AddModelicaComponent`
-        // immediately after `RenameModelicaClass`) goes through its
-        // own `apply_one_op_as`, looks up the target class via the
-        // stale index, and rejects with "class not found: …" even
-        // though the source clearly has it. Reparsing post-batch
-        // closes that race for free — the cost is one extra parse
-        // per non-empty batch (a few ms on small docs).
+        // `apply_one_op_kernel` already does waive_ast_debounce +
+        // refresh_ast_now per successful op. No batch-end refresh
+        // needed — the AST is fresh after the last successful op.
         if any_applied {
-            host.document_mut().waive_ast_debounce();
-            host.document_mut().refresh_ast_now();
+            // Mirror `apply_one_op_as`: queue one
+            // `DocumentChanged` notification for the batch (drained
+            // each frame, deduped by `drain_pending_changes`). Without
+            // this, downstream observers (canvas reproject, dirty-dot,
+            // diagnostics) rely on incidental dirty signals and can
+            // miss batch edits. One mark_changed per batch suffices —
+            // the drainer dedupes anyway.
+            registry.mark_changed(doc_id);
         }
     }
     let apply_ms = t_apply_start.elapsed().as_secs_f64() * 1000.0;
