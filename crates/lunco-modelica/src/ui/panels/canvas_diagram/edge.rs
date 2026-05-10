@@ -159,55 +159,106 @@ impl EdgeVisual for OrthogonalEdgeVisual {
         let stroke = egui::Stroke::new(width, col);
         let painter = ctx.ui.painter();
 
-        if !self.waypoints_world.is_empty() {
-            let from_screen = egui::pos2(from.x, from.y);
-            let to_screen = egui::pos2(to.x, to.y);
-            let way_screen: Vec<egui::Pos2> = self
-                .waypoints_world
-                .iter()
-                .map(|p| {
-                    let s = ctx
-                        .viewport
-                        .world_to_screen(*p, ctx.screen_rect);
-                    egui::pos2(s.x, s.y)
-                })
-                .collect();
-            const ALIGN_TOL: f32 = 1.0;
-            let first_far = way_screen
-                .first()
-                .map(|p| {
-                    (p.x - from_screen.x).abs() > ALIGN_TOL
-                        && (p.y - from_screen.y).abs() > ALIGN_TOL
-                })
-                .unwrap_or(false);
-            let last_far = way_screen
-                .last()
-                .map(|p| {
-                    (p.x - to_screen.x).abs() > ALIGN_TOL
-                        && (p.y - to_screen.y).abs() > ALIGN_TOL
-                })
-                .unwrap_or(false);
-            if !(first_far || last_far) {
-                let mut pts = Vec::with_capacity(way_screen.len() + 2);
-                pts.push(from_screen);
-                pts.extend(way_screen.iter().copied());
-                pts.push(to_screen);
-                for w in pts.windows(2) {
-                    painter.line_segment([w[0], w[1]], stroke);
+        // Resolve the wire's polyline (authored waypoints when sane,
+        // otherwise the orthogonal router). We bind it to a single
+        // `polyline` variable so the API-pulse overlay below can
+        // reuse the *same* path the wire was just drawn on, instead
+        // of inventing a straight from→to line that ignores stubs
+        // and waypoints.
+        let polyline: Vec<egui::Pos2> = 'route: {
+            if !self.waypoints_world.is_empty() {
+                let from_screen = egui::pos2(from.x, from.y);
+                let to_screen = egui::pos2(to.x, to.y);
+                let way_screen: Vec<egui::Pos2> = self
+                    .waypoints_world
+                    .iter()
+                    .map(|p| {
+                        let s = ctx
+                            .viewport
+                            .world_to_screen(*p, ctx.screen_rect);
+                        egui::pos2(s.x, s.y)
+                    })
+                    .collect();
+                const ALIGN_TOL: f32 = 1.0;
+                let first_far = way_screen
+                    .first()
+                    .map(|p| {
+                        (p.x - from_screen.x).abs() > ALIGN_TOL
+                            && (p.y - from_screen.y).abs() > ALIGN_TOL
+                    })
+                    .unwrap_or(false);
+                let last_far = way_screen
+                    .last()
+                    .map(|p| {
+                        (p.x - to_screen.x).abs() > ALIGN_TOL
+                            && (p.y - to_screen.y).abs() > ALIGN_TOL
+                    })
+                    .unwrap_or(false);
+                if !(first_far || last_far) {
+                    let mut pts = Vec::with_capacity(way_screen.len() + 2);
+                    pts.push(from_screen);
+                    pts.extend(way_screen.iter().copied());
+                    pts.push(to_screen);
+                    break 'route pts;
                 }
-                return;
             }
-        }
-
-        let polyline = route_orthogonal(
-            egui::pos2(from.x, from.y),
-            self.from_dir,
-            egui::pos2(to.x, to.y),
-            self.to_dir,
-            STUB_PX * scale,
-        );
+            route_orthogonal(
+                egui::pos2(from.x, from.y),
+                self.from_dir,
+                egui::pos2(to.x, to.y),
+                self.to_dir,
+                STUB_PX * scale,
+            )
+        };
         for w in polyline.windows(2) {
             painter.line_segment([w[0], w[1]], stroke);
+        }
+
+        // ── API edge-add pulse overlay ──────────────────────────────
+        // Read the live alpha map published by `EdgePulseLayer` and
+        // overlay a warm yellow-orange highlight along the *same*
+        // polyline at the same zoom scale, so the flash follows the
+        // wire's stubs/waypoints and tracks zoom instead of being a
+        // straight, fixed-pixel-width screen-space line.
+        let pulse_alpha: Option<f32> = {
+            let id = egui::Id::new(
+                super::pulse::EDGE_PULSE_DATA_ID,
+            );
+            ctx.ui.ctx().data(|d| {
+                d.get_temp::<super::pulse::EdgePulseAlphaMap>(id)
+                    .and_then(|m| {
+                        m.get(&(self.source_path.clone(), self.target_path.clone()))
+                            .or_else(|| {
+                                m.get(&(self.target_path.clone(), self.source_path.clone()))
+                            })
+                            .copied()
+                    })
+            })
+        };
+        if let Some(alpha) = pulse_alpha {
+            let base = egui::Color32::from_rgb(255, 196, 60);
+            let halo_w = (base_width * scale * 4.5).max(2.0);
+            let line_w = (base_width * scale * 1.6).max(1.0);
+            let halo_a = (alpha * 0.55 * 255.0).clamp(0.0, 255.0) as u8;
+            let line_a = (alpha * 0.95 * 255.0).clamp(0.0, 255.0) as u8;
+            let halo = egui::Stroke::new(
+                halo_w,
+                egui::Color32::from_rgba_unmultiplied(
+                    base.r(), base.g(), base.b(), halo_a,
+                ),
+            );
+            let core = egui::Stroke::new(
+                line_w,
+                egui::Color32::from_rgba_unmultiplied(
+                    base.r(), base.g(), base.b(), line_a,
+                ),
+            );
+            for w in polyline.windows(2) {
+                painter.line_segment([w[0], w[1]], halo);
+            }
+            for w in polyline.windows(2) {
+                painter.line_segment([w[0], w[1]], core);
+            }
         }
 
         if false && self.is_causal && polyline.len() >= 2 {
