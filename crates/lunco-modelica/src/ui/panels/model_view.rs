@@ -1701,14 +1701,27 @@ fn render_docs_view(ui: &mut egui::Ui, world: &mut World) {
                 .host(doc)
                 .and_then(|h| {
                     let index = h.document().index();
-                    let entry = if let Some(q) = drilled.as_deref() {
-                        index.classes.get(q)
-                    } else {
+                    // Drilled name is the workspace-qualified path
+                    // (e.g. `Modelica.Blocks.Continuous.LimPID`). When
+                    // the doc was extracted as a single read-only class
+                    // its index keys by the leaf name only, so the
+                    // qualified lookup misses — fall back to the leaf,
+                    // then to the first non-package class in the doc.
+                    let by_leaf = |q: &str| -> Option<&crate::index::ClassEntry> {
+                        let leaf = q.rsplit('.').next().unwrap_or(q);
+                        index.classes.get(leaf)
+                    };
+                    let fallback = || {
                         index
                             .classes
                             .values()
                             .find(|c| !matches!(c.kind, crate::index::ClassKind::Package))
                             .or_else(|| index.classes.values().next())
+                    };
+                    let entry = if let Some(q) = drilled.as_deref() {
+                        index.classes.get(q).or_else(|| by_leaf(q)).or_else(fallback)
+                    } else {
+                        fallback()
                     }?;
                     let desc = if entry.description.is_empty() {
                         None

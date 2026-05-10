@@ -547,6 +547,14 @@ pub struct ModelicaUiPlugin;
 
 impl Plugin for ModelicaUiPlugin {
     fn build(&self, app: &mut App) {
+        // ModalQueue + modal host live in lunco-ui. `render_close_dialogs`
+        // (added below by ModelicaCommandsPlugin) consumes ModalQueue, so
+        // LuncoUiPlugin must be present whenever Modelica UI is mounted —
+        // not just in the 3D `lunco-client` binary that originally added it.
+        if !app.is_plugin_added::<lunco_ui::LuncoUiPlugin>() {
+            app.add_plugins(lunco_ui::LuncoUiPlugin);
+        }
+
         // Twin-level change journal subscribes to the generic document
         // lifecycle events this plugin fires. One journal per App —
         // adding the plugin multiple times is a no-op on `init_resource`.
