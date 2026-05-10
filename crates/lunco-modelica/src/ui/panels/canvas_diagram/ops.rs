@@ -554,6 +554,15 @@ pub fn apply_one_op_as(
         let result = host.apply(op);
         let backward = if result.is_ok() {
             host.document_mut().waive_ast_debounce();
+            // Force a synchronous reparse so a *subsequent* API call
+            // sees the new AST. Without this, a `RenameModelicaClass`
+            // followed immediately by `AddModelicaComponent` rejects
+            // with "class not found" because the rename's
+            // `ReplaceSource` is a `FreshAst::TextEdit` (no inline
+            // AST update) and the next call's lookup hits the stale
+            // syntax cache. Mirrors the matching post-batch reparse
+            // in `apply_ops` further down.
+            host.document_mut().refresh_ast_now();
             host.last_applied_inverse().map(crate::journal::summarize_op)
         } else {
             None
@@ -709,8 +718,23 @@ pub(super) fn apply_ops(
         // typing-debounce so the next ast_refresh tick reparses
         // immediately. Otherwise canvas/diagnostics lag 2.5 s behind
         // every API-driven or canvas-drag mutation.
+        //
+        // Then **also** force a synchronous reparse here, not just the
+        // pre-op refresh inside the loop. The pre-op pass parses the
+        // *old* source (before the op runs). After a structural op
+        // mutates the source — `ReplaceSource` from
+        // `RenameModelicaClass`, `AddClass`, `AddVariable`, etc. — the
+        // host's index is stale until the next `ast_refresh` tick
+        // fires. A *subsequent* API call (e.g. `AddModelicaComponent`
+        // immediately after `RenameModelicaClass`) goes through its
+        // own `apply_one_op_as`, looks up the target class via the
+        // stale index, and rejects with "class not found: …" even
+        // though the source clearly has it. Reparsing post-batch
+        // closes that race for free — the cost is one extra parse
+        // per non-empty batch (a few ms on small docs).
         if any_applied {
             host.document_mut().waive_ast_debounce();
+            host.document_mut().refresh_ast_now();
         }
     }
     let apply_ms = t_apply_start.elapsed().as_secs_f64() * 1000.0;

@@ -92,13 +92,27 @@ impl PendingApiConnectionQueue {
     }
 }
 
-/// Outer-glow render layer for newly-added edges. Re-uses the
-/// `PulseGlowLayer`'s decay curve and theme colour, but draws an
-/// additional thicker stroke ON TOP of the edge so the wire visibly
-/// flashes — see `docs/architecture/20-domain-modelica.md` § 9c.4.
+/// Edge-pulse coordinator layer. Drawing happens inside
+/// `OrthogonalEdgeVisual::draw` so the highlight follows the wire's
+/// actual routed polyline (orthogonal stubs + waypoints) and tracks
+/// the canvas zoom, instead of being a straight, fixed-pixel-width
+/// stroke from port to port. This layer prunes expired entries and
+/// publishes the live `(from_path, to_path) → alpha` map into egui
+/// ctx data under [`EDGE_PULSE_DATA_ID`] for the visual to consume.
 pub(super) struct EdgePulseLayer {
     pub(super) data: EdgePulseHandle,
 }
+
+/// `egui::Id` under which the per-edge pulse alphas are published for
+/// `OrthogonalEdgeVisual::draw` to read. The stored value is a
+/// `HashMap<(String,String), f32>` keyed by the wire's
+/// `(source_path, target_path)` paths (e.g. `"solar_pulse.y" →
+/// "solar_in.Q_flow"`).
+pub(crate) const EDGE_PULSE_DATA_ID: &str = "lunco_modelica_edge_pulse_alphas";
+
+/// Live pulse map type stashed in egui ctx data per frame.
+pub(crate) type EdgePulseAlphaMap =
+    std::collections::HashMap<(String, String), f32>;
 
 impl lunco_canvas::Layer for EdgePulseLayer {
     fn name(&self) -> &'static str {
@@ -108,10 +122,10 @@ impl lunco_canvas::Layer for EdgePulseLayer {
     fn draw(
         &mut self,
         ctx: &mut lunco_canvas::visual::DrawCtx,
-        scene: &lunco_canvas::Scene,
+        _scene: &lunco_canvas::Scene,
         _selection: &lunco_canvas::Selection,
     ) {
-        let live: Vec<(lunco_canvas::EdgeId, f32)> = {
+        let alphas: EdgePulseAlphaMap = {
             let Ok(mut guard) = self.data.write() else {
                 return;
             };
@@ -122,7 +136,7 @@ impl lunco_canvas::Layer for EdgePulseLayer {
             });
             guard
                 .iter()
-                .map(|e| {
+                .filter_map(|e| {
                     let alpha = match now.checked_duration_since(e.started) {
                         None => 0.0,
                         Some(elapsed) => {
@@ -132,106 +146,38 @@ impl lunco_canvas::Layer for EdgePulseLayer {
                             1.0 - t.powi(4)
                         }
                     };
-                    (e.id, alpha)
+                    if alpha > 0.001 {
+                        Some(((e.from_path.clone(), e.to_path.clone()), alpha))
+                    } else {
+                        None
+                    }
                 })
-                .filter(|(_, a)| *a > 0.001)
                 .collect()
         };
-        if live.is_empty() {
-            return;
-        }
-        let painter = ctx.ui.painter();
-        let _theme = lunco_canvas::theme::current(ctx.ui.ctx());
-        // Warm yellow-orange — distinct from the wire's blue so the
-        // flash reads as a *highlight*, not a thicker wire. Picked
-        // for high contrast against both light and dark themes.
-        // (`theme.selection_outline` matched too closely to the wire
-        // colour and the user reported the flash didn't register.)
-        let base = bevy_egui::egui::Color32::from_rgb(255, 196, 60);
-        for (edge_id, alpha) in live {
-            let Some(edge) = scene.edge(edge_id) else {
-                continue;
-            };
-            // Look up the two endpoints' world positions via their
-            // owning nodes' rects + the port's local offset. If
-            // either endpoint is missing (race during projection),
-            // skip silently.
-            let Some(from_node) = scene.node(edge.from.node) else {
-                continue;
-            };
-            let Some(to_node) = scene.node(edge.to.node) else {
-                continue;
-            };
-            let from_world = port_world_pos(from_node, &edge.from.port);
-            let to_world = port_world_pos(to_node, &edge.to.port);
-            let Some(from_world) = from_world else { continue };
-            let Some(to_world) = to_world else { continue };
-            let from_screen = ctx
-                .viewport
-                .world_to_screen(from_world, ctx.screen_rect);
-            let to_screen = ctx.viewport.world_to_screen(to_world, ctx.screen_rect);
-
-            // Two stacked strokes — fat outer halo + tighter bright
-            // inner line. Distinct yellow-orange so the highlight
-            // reads against the wire's blue body.
-            let halo_a = (alpha * 0.7 * 255.0) as u8;
-            let line_a = (alpha * 0.95 * 255.0) as u8;
-            painter.line_segment(
-                [
-                    bevy_egui::egui::pos2(from_screen.x, from_screen.y),
-                    bevy_egui::egui::pos2(to_screen.x, to_screen.y),
-                ],
-                bevy_egui::egui::Stroke::new(
-                    18.0,
-                    bevy_egui::egui::Color32::from_rgba_unmultiplied(
-                        base.r(),
-                        base.g(),
-                        base.b(),
-                        halo_a,
-                    ),
-                ),
-            );
-            painter.line_segment(
-                [
-                    bevy_egui::egui::pos2(from_screen.x, from_screen.y),
-                    bevy_egui::egui::pos2(to_screen.x, to_screen.y),
-                ],
-                bevy_egui::egui::Stroke::new(
-                    5.0,
-                    bevy_egui::egui::Color32::from_rgba_unmultiplied(
-                        base.r(),
-                        base.g(),
-                        base.b(),
-                        line_a,
-                    ),
-                ),
-            );
+        // Always publish (even when empty) so a stale value from the
+        // previous frame doesn't keep ghost-flashing forever.
+        ctx.ui.ctx().data_mut(|d| {
+            d.insert_temp(bevy_egui::egui::Id::new(EDGE_PULSE_DATA_ID), alphas);
+        });
+        // Repaint while pulses are alive so the decay curve advances.
+        if self
+            .data
+            .read()
+            .map(|g| !g.is_empty())
+            .unwrap_or(false)
+        {
+            ctx.ui.ctx().request_repaint();
         }
     }
 }
 
-/// Resolve a port's world-space position via its owning node's rect
-/// + the port's `local_offset`. Canvas convention (see
-/// `lunco-canvas::layer::EdgesLayer::draw`): `local_offset` is
-/// relative to `rect.min` (top-left), NOT the centre. Falls back to
-/// the rect centre when the port id isn't on the node — same fallback
-/// the edges layer uses for connector-only nodes.
-pub(super) fn port_world_pos(
-    node: &lunco_canvas::Node,
-    port_id: &lunco_canvas::PortId,
-) -> Option<lunco_canvas::Pos> {
-    let port = node.ports.iter().find(|p| &p.id == port_id)?;
-    Some(lunco_canvas::Pos::new(
-        node.rect.min.x + port.local_offset.x,
-        node.rect.min.y + port.local_offset.y,
-    ))
-}
-
-/// Per-frame driver for connection adds: like
-/// `drive_pending_api_focus`, but matches the queue against scene
-/// edges and pushes flashes into the edge-pulse handle. No camera
-/// move — connections appear in the existing camera frame; their
-/// flash is the signal.
+/// Per-frame driver for connection adds. The match-by-edge-id dance
+/// is gone: pulses are now keyed by the wire's `(from_path, to_path)`
+/// dot-form, so the per-edge visual matches itself when it draws.
+/// We just push one record per (doc, edge) into every tab viewing
+/// the doc. `OrthogonalEdgeVisual::draw` reads the live alpha map
+/// published by [`EdgePulseLayer`] and overlays the highlight along
+/// its already-routed polyline.
 pub fn drive_pending_api_connections(
     mut queue: ResMut<PendingApiConnectionQueue>,
     mut state: ResMut<CanvasDiagramState>,
@@ -240,80 +186,30 @@ pub fn drive_pending_api_connections(
         return;
     }
     let now = web_time::Instant::now();
-    let mut still_pending: Vec<PendingApiConnection> = Vec::new();
     for entry in queue.0.drain(..) {
         if now.duration_since(entry.queued_at) > FOCUS_TIMEOUT {
             continue;
         }
         let anim_ms = entry.animation_ms;
-        // Fan out to *every* tab viewing this doc, not just the
-        // first. Edge ids are scene-local — each tab projects its own
-        // scene with its own ids — so we re-find the edge per tab
-        // using the same component+port predicate and push a pulse
-        // into each tab that contains a match. Fixes the valve-glow
-        // regression where split-view tabs only saw pulses on the
-        // first tab.
-        let mut any_pulsed = false;
+        if anim_ms == 0 {
+            continue;
+        }
+        let from_path = format!("{}.{}", entry.from_component, entry.from_port);
+        let to_path = format!("{}.{}", entry.to_component, entry.to_port);
         for (_, d, ds) in state.iter_mut() {
             if d != entry.doc {
                 continue;
             }
-            // Match by node `origin` (component name) + port id
-            // (port name). The canvas projection puts the port's
-            // name in `Port.id`'s string form via SmolStr; matching
-            // by id works because the projector keys ports by
-            // simple name.
-            let hit_id = {
-                let scene = &ds.canvas.scene;
-                scene
-                    .edges()
-                    .find(|(_, e)| {
-                        let from_node = scene.node(e.from.node);
-                        let to_node = scene.node(e.to.node);
-                        let from_match = from_node
-                            .map(|n| {
-                                n.origin.as_deref()
-                                    == Some(entry.from_component.as_str())
-                                    && n.ports.iter().any(|p| {
-                                        p.id == e.from.port
-                                            && p.id.as_str()
-                                                == entry.from_port.as_str()
-                                    })
-                            })
-                            .unwrap_or(false);
-                        let to_match = to_node
-                            .map(|n| {
-                                n.origin.as_deref()
-                                    == Some(entry.to_component.as_str())
-                                    && n.ports.iter().any(|p| {
-                                        p.id == e.to.port
-                                            && p.id.as_str()
-                                                == entry.to_port.as_str()
-                                    })
-                            })
-                            .unwrap_or(false);
-                        from_match && to_match
-                    })
-                    .map(|(eid, _)| *eid)
-            };
-            if let Some(edge_id) = hit_id {
-                if anim_ms > 0 {
-                    if let Ok(mut guard) = ds.edge_pulse_handle.write() {
-                        guard.push(PulseEntry {
-                            id: edge_id,
-                            started: web_time::Instant::now(),
-                            duration_ms: anim_ms,
-                        });
-                    }
-                }
-                any_pulsed = true;
+            if let Ok(mut guard) = ds.edge_pulse_handle.write() {
+                guard.push(EdgePulseRecord {
+                    from_path: from_path.clone(),
+                    to_path: to_path.clone(),
+                    started: web_time::Instant::now(),
+                    duration_ms: anim_ms,
+                });
             }
         }
-        if !any_pulsed {
-            still_pending.push(entry);
-        }
     }
-    queue.0 = still_pending;
 }
 
 // ─── Cinematic camera ──────────────────────────────────────────────────
@@ -362,11 +258,23 @@ pub struct PulseEntry<T> {
 pub type PulseHandle =
     std::sync::Arc<std::sync::RwLock<Vec<PulseEntry<lunco_canvas::NodeId>>>>;
 
-/// Edge-pulse registry: same shape as `PulseHandle` but keyed by edge
-/// id. Drives the wire-flash animation when `ConnectComponents` fires
-/// from an API caller.
+/// One live edge-pulse, keyed by the wire's `(from_path, to_path)`
+/// dot-form so the per-edge visual can match without a scene-edge id
+/// (whose value depends on projection ordering and is invalidated by
+/// every reproject).
+#[derive(Debug, Clone)]
+pub struct EdgePulseRecord {
+    pub from_path: String,
+    pub to_path: String,
+    pub started: web_time::Instant,
+    pub duration_ms: u32,
+}
+
+/// Edge-pulse registry. Pushed into by
+/// [`drive_pending_api_connections`] when a `ConnectComponents` call
+/// lands; drained-by-decay by [`EdgePulseLayer`].
 pub type EdgePulseHandle =
-    std::sync::Arc<std::sync::RwLock<Vec<PulseEntry<lunco_canvas::EdgeId>>>>;
+    std::sync::Arc<std::sync::RwLock<Vec<EdgePulseRecord>>>;
 
 /// Outer-glow render layer: paints a soft ring around each
 /// recently-added node, alpha decaying linearly to 0 over
