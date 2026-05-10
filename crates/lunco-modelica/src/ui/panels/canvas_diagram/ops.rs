@@ -518,21 +518,26 @@ fn op_needs_fresh_ast_pre_apply(op: &ModelicaOp) -> bool {
     )
 }
 
-/// Single-op kernel: pre-op AST refresh → `host.apply(op)` → on
-/// success, waive the AST debounce *and* force a synchronous reparse
-/// so the *next* call (in this batch or via a separate API call) sees
-/// the new AST.
+/// Single-op kernel: pre-op AST refresh (when the op needs one) →
+/// `host.apply(op)` → on success, waive the AST debounce *and* force
+/// a synchronous reparse so the *next* call (in this batch or via a
+/// separate API call) sees a fresh AST.
 ///
-/// This is the **only** place in the module that decides what
-/// "applying one op consistently" means. Both [`apply_one_op_as`] and
-/// [`apply_ops`] funnel through here so the AST-freshness contract
-/// can't drift between the single-op and batch paths.
+/// `refresh_ast_now` early-returns when the syntax cache is already
+/// at the current generation — and structured ops install a fresh
+/// AST inline via `FreshAst::Mutated`, so the post-apply refresh is
+/// effectively only a real reparse after `ReplaceSource`-class
+/// (`FreshAst::TextEdit`) ops. Cheap to leave it in the kernel; this
+/// is the one place the AST-freshness invariant is enforced.
+///
+/// Both [`apply_one_op_as`] and [`apply_ops`] funnel through here so
+/// the pre-apply AST contract, post-apply refresh, and journal-pair
+/// shape can't drift between the single-op and batch paths.
 ///
 /// Returns `(host.apply result, optional (forward, backward) journal
-/// summaries)`. Caller is responsible for journal-record + mark_changed
-/// on the registry — keeping those out of the kernel keeps the kernel
-/// borrow-scope tight (`&mut DocumentHost`) and lets the batch path
-/// amortise the journal write across many ops.
+/// summaries)`. Caller is responsible for journal-record +
+/// `mark_changed` on the registry — those need access to the
+/// registry / world that the kernel doesn't hold.
 fn apply_one_op_kernel(
     host: &mut lunco_doc::DocumentHost<crate::document::ModelicaDocument>,
     op: ModelicaOp,
@@ -547,13 +552,6 @@ fn apply_one_op_kernel(
     let result = host.apply(op);
     let pair = if result.is_ok() {
         host.document_mut().waive_ast_debounce();
-        // Post-apply reparse: closes the inter-call race where a
-        // `ReplaceSource`-class op (e.g. `RenameModelicaClass`) flips
-        // the source text but leaves the syntax cache stale, so the
-        // next API call's class lookup fails with "class not found"
-        // even though the source clearly has it. Doing this in the
-        // kernel — not at any one call site — is what stops the bug
-        // from re-emerging when a new entry point is added.
         host.document_mut().refresh_ast_now();
         host.last_applied_inverse()
             .map(crate::journal::summarize_op)
@@ -724,17 +722,15 @@ pub(super) fn apply_ops(
                 Err(e) => bevy::log::warn!("[CanvasDiagram] op failed: {}", e),
             }
         }
-        // `apply_one_op_kernel` already does waive_ast_debounce +
-        // refresh_ast_now per successful op. No batch-end refresh
-        // needed — the AST is fresh after the last successful op.
+        // Kernel already does waive_ast_debounce + refresh_ast_now
+        // per successful op (refresh is no-op when AST is fresh, so
+        // the only real cost is the post-`ReplaceSource` reparse).
         if any_applied {
-            // Mirror `apply_one_op_as`: queue one
-            // `DocumentChanged` notification for the batch (drained
-            // each frame, deduped by `drain_pending_changes`). Without
-            // this, downstream observers (canvas reproject, dirty-dot,
-            // diagnostics) rely on incidental dirty signals and can
-            // miss batch edits. One mark_changed per batch suffices —
-            // the drainer dedupes anyway.
+            // Queue one `DocumentChanged` notification for the batch
+            // (drained each frame, deduped by `drain_pending_changes`).
+            // Without this, downstream observers (canvas reproject,
+            // dirty-dot, diagnostics) rely on incidental dirty signals
+            // and can miss batch edits.
             registry.mark_changed(doc_id);
         }
     }
