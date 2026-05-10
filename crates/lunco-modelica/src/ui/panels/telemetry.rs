@@ -304,6 +304,68 @@ impl Panel for TelemetryPanel {
         }
         let filter_lower = filter_text.to_ascii_lowercase();
 
+        // "Plot in" router — pins Telemetry checkboxes to a specific
+        // plot tab. Default (None) = active plot (Dymola "current
+        // window" behaviour). Snapshot the open plots up front; the
+        // dropdown re-resolves on next frame after target changes.
+        let plot_options: Vec<(lunco_viz::viz::VizId, String)> = {
+            let mut opts: Vec<_> = world
+                .get_resource::<lunco_viz::VisualizationRegistry>()
+                .map(|r| {
+                    r.iter()
+                        .map(|(id, cfg)| (*id, cfg.title.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            opts.sort_by_key(|(id, _)| id.0);
+            opts
+        };
+        let pinned = world
+            .get_resource::<crate::ui::panels::experiments::ExperimentVisibility>()
+            .and_then(|v| v.target_plot);
+        let mut new_target: Option<Option<lunco_viz::viz::VizId>> = None;
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("→").size(11.0).color(muted));
+            let label = match pinned {
+                None => "Active plot".to_string(),
+                Some(id) => plot_options
+                    .iter()
+                    .find(|(i, _)| *i == id)
+                    .map(|(_, t)| t.clone())
+                    .unwrap_or_else(|| format!("Plot #{}", id.0)),
+            };
+            egui::ComboBox::from_id_salt("telem_target_plot")
+                .selected_text(label)
+                .width(140.0)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(pinned.is_none(), "Active plot")
+                        .on_hover_text(
+                            "Route to whichever plot tab was last focused.",
+                        )
+                        .clicked()
+                    {
+                        new_target = Some(None);
+                    }
+                    for (id, title) in &plot_options {
+                        let label = format!("{title}  (#{})", id.0);
+                        if ui
+                            .selectable_label(pinned == Some(*id), label)
+                            .clicked()
+                        {
+                            new_target = Some(Some(*id));
+                        }
+                    }
+                });
+        });
+        if let Some(t) = new_target {
+            if let Some(mut vis) = world
+                .get_resource_mut::<crate::ui::panels::experiments::ExperimentVisibility>()
+            {
+                vis.target_plot = t;
+            }
+        }
+
         egui::ScrollArea::vertical().id_salt("telemetry_scroll").show(ui, |ui| {
             let (model_vars, model_inputs) = if let Some(m) = world.get::<ModelicaModel>(entity) {
                 (m.variables.keys().cloned().collect::<Vec<_>>(),
@@ -323,10 +385,19 @@ impl Panel for TelemetryPanel {
                     .collect())
                 .unwrap_or_default();
 
-            // Picked-for-experiments set, snapshotted once.
+            // Picked-for-experiments set, snapshotted once. Routes
+            // through the "Plot in" target — pinned plot if set,
+            // else the active plot. Same VizId used for the toggle
+            // writes below so reads and writes always agree.
+            let active_plot = world
+                .get_resource::<crate::ui::panels::experiments::ActivePlot>()
+                .copied()
+                .unwrap_or_default()
+                .or_default();
+            let target_plot = pinned.unwrap_or(active_plot);
             let picked_exp: std::collections::BTreeSet<String> = world
-                .get_resource::<crate::ui::panels::experiments::ExperimentVisibility>()
-                .map(|v| v.picked_vars.clone())
+                .get_resource::<crate::ui::panels::experiments::PlotPanelStates>()
+                .map(|s| s.picked(target_plot))
                 .unwrap_or_default();
 
             // Variables sourced from completed experiments — surface
@@ -439,14 +510,10 @@ impl Panel for TelemetryPanel {
                         on,
                     );
                 }
-                if let Some(mut vis) = world
-                    .get_resource_mut::<crate::ui::panels::experiments::ExperimentVisibility>()
+                if let Some(mut states) = world
+                    .get_resource_mut::<crate::ui::panels::experiments::PlotPanelStates>()
                 {
-                    if on {
-                        vis.picked_vars.insert(name);
-                    } else {
-                        vis.picked_vars.remove(&name);
-                    }
+                    states.set_var(target_plot, name, on);
                 }
             }
             let _ = is_signal_plotted; // re-export available for future UIs
@@ -611,13 +678,200 @@ fn render_selected_components_inspector(
 /// `ModelicaOp::SetParameter { component, param: "", value }` — the
 /// `""` sentinel routes the value into the component's primary
 /// binding.
+/// One row in the flattened parameter view. `chain` is the component
+/// instance hierarchy from the active class down — `[]` for a direct
+/// parameter, `["tank"]` for `tank.volume`, `["engine","combustor"]`
+/// for `engine.combustor.eta`. `value` already accounts for
+/// modification overrides on the parent's component declaration.
+struct FlatParam {
+    chain: Vec<String>,
+    leaf: String,
+    value: String,
+}
+
+impl FlatParam {
+    fn path(&self) -> String {
+        if self.chain.is_empty() {
+            self.leaf.clone()
+        } else {
+            format!("{}.{}", self.chain.join("."), self.leaf)
+        }
+    }
+    fn depth(&self) -> usize {
+        self.chain.len()
+    }
+}
+
+/// Recursively flatten a class's parameters using only the local
+/// [`ModelicaIndex`] — no engine session, no async lookup. Always
+/// synchronous with the latest parse, never lags behind an edit,
+/// never depends on the rumoca-session bookkeeping for the active
+/// document.
+///
+/// Walk order per class:
+/// 1. Each `extends` base (resolved against `index.classes`) is
+///    flattened first; its rows merge into the deriving class's set
+///    so inherited parameters surface alongside locally-declared ones.
+/// 2. Then the class's own components: Parameter/Constant declarations
+///    emit rows; component instances recurse into their type's class
+///    entry. Modifications on the parent's component declaration
+///    (`Tank tank(volume = 4000)`) shadow the type's declared default.
+///
+/// Type / base resolution: try the name verbatim against
+/// `index.classes`, then qualified by `index.within_path` if any.
+/// Names that don't resolve in this document's index are silently
+/// skipped — typically MSL or other-doc types. Those rows are absent
+/// rather than misleadingly empty; user can drill into the component
+/// via the canvas to see its params.
+///
+/// Cycle / fanout safety: bounded by `MAX_DEPTH` and a `visited` set
+/// on class qualified-names that guards both the component-recursion
+/// path and the extends-recursion path. Dedupe-by-leaf within a class
+/// so an `extends` and a direct declaration of the same param don't
+/// double-emit (deriving class wins, Modelica-correct).
+fn flatten_class_parameters(
+    index: &crate::index::ModelicaIndex,
+    class: &str,
+) -> Vec<FlatParam> {
+    const MAX_DEPTH: usize = 4;
+
+    /// Modelica-style class lookup, scope-walked. Tries the type
+    /// name verbatim first, then walks up the enclosing-package chain
+    /// of `scope` (e.g. `AnnotatedRocketStage.RocketStage` →
+    /// `AnnotatedRocketStage.Tank` resolves `Tank` to its sibling),
+    /// then falls back to `within_path` if any.
+    fn resolve_class<'a>(
+        index: &'a crate::index::ModelicaIndex,
+        scope: &str,
+        type_name: &str,
+    ) -> Option<&'a String> {
+        if let Some((k, _)) = index.classes.get_key_value(type_name) {
+            return Some(k);
+        }
+        let mut cur = scope;
+        loop {
+            let candidate = if cur.is_empty() {
+                type_name.to_string()
+            } else {
+                format!("{cur}.{type_name}")
+            };
+            if let Some((k, _)) = index.classes.get_key_value(&candidate) {
+                return Some(k);
+            }
+            if cur.is_empty() {
+                break;
+            }
+            cur = cur.rsplit_once('.').map(|(h, _)| h).unwrap_or("");
+        }
+        if let Some(w) = index.within_path.as_ref() {
+            let q = format!("{w}.{type_name}");
+            if let Some((k, _)) = index.classes.get_key_value(&q) {
+                return Some(k);
+            }
+        }
+        None
+    }
+
+    fn walk(
+        index: &crate::index::ModelicaIndex,
+        owner_class: &str,
+        type_path: &str,
+        chain: &mut Vec<String>,
+        visited: &mut std::collections::HashSet<String>,
+        out: &mut Vec<FlatParam>,
+    ) {
+        if chain.len() > MAX_DEPTH || !visited.insert(type_path.to_string()) {
+            return;
+        }
+
+        // Snapshot the count before this class's recursion so we can
+        // dedupe new entries by leaf name against this class's own
+        // contributions (and inherited entries from earlier in the
+        // walk). Modelica resolution is "deriving class wins"; we
+        // achieve that by emitting `extends` first and skipping any
+        // later entry whose leaf name already appeared.
+        let pre_len = out.len();
+
+        // 1) Inherited members from extends bases. Each base is
+        // resolved like a component type. Recurse with the same chain
+        // (no new prefix — extends is "as if declared here").
+        if let Some(class_entry) = index.classes.get(type_path) {
+            for base in &class_entry.extends {
+                if let Some(base_path) = resolve_class(index, type_path, base) {
+                    walk(index, owner_class, base_path, chain, visited, out);
+                }
+            }
+        }
+
+        // 2) Direct components on this class.
+        let Some(keys) = index.components_by_class.get(type_path) else {
+            visited.remove(type_path);
+            return;
+        };
+        for key in keys {
+            let Some(comp) = index.components.get(key.0 as usize) else { continue };
+            match comp.variability {
+                crate::index::Variability::Parameter | crate::index::Variability::Constant => {
+                    // Modification override on the parent's component
+                    // declaration shadows this class's declared default.
+                    // For depth 0 (the root call) chain.last() is None,
+                    // so no override applies — value is the binding text.
+                    let override_value = chain.last().and_then(|parent_comp| {
+                        index
+                            .find_component(owner_class, parent_comp)
+                            .and_then(|c| c.modifications.get(&comp.name).cloned())
+                    });
+                    let value = override_value
+                        .or_else(|| comp.binding.clone())
+                        .unwrap_or_default();
+                    // Dedupe-by-leaf within this class's contribution so
+                    // an inherited param is not re-emitted by a direct
+                    // declaration of the same name.
+                    let already_seen = out[pre_len..]
+                        .iter()
+                        .any(|fp| fp.chain == *chain && fp.leaf == comp.name);
+                    if !already_seen {
+                        out.push(FlatParam {
+                            chain: chain.clone(),
+                            leaf: comp.name.clone(),
+                            value,
+                        });
+                    }
+                }
+                _ => {
+                    // Component instance — recurse into its type with
+                    // an extended chain. Parent for override lookup at
+                    // the next level is THIS class, since modifications
+                    // live on the parent's declaration.
+                    let Some(child_type) = resolve_class(index, type_path, &comp.type_name)
+                    else {
+                        // Unresolvable type (MSL / cross-doc) — skip.
+                        continue;
+                    };
+                    chain.push(comp.name.clone());
+                    walk(index, type_path, child_type, chain, visited, out);
+                    chain.pop();
+                }
+            }
+        }
+
+        visited.remove(type_path);
+    }
+
+    let mut out = Vec::new();
+    let mut chain: Vec<String> = Vec::new();
+    let mut visited: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    walk(index, class, class, &mut chain, &mut visited, &mut out);
+    out
+}
+
 fn render_active_class_parameters(
     ui: &mut egui::Ui,
     world: &mut World,
     muted: egui::Color32,
 ) {
     use crate::document::ModelicaOp;
-    use crate::index::Variability;
     use crate::ui::panels::canvas_diagram::{
         active_class_for_doc, active_doc_from_world, apply_ops_public,
     };
@@ -625,26 +879,15 @@ fn render_active_class_parameters(
     let Some(doc_id) = active_doc_from_world(world) else { return };
     let Some(active) = active_class_for_doc(world, doc_id) else { return };
 
-    // Snapshot rows from the index up front so we can release the
-    // registry borrow before issuing apply_ops_public mutations.
-    struct Row { name: String, value: String }
-    let rows: Vec<Row> = {
+    // Flatten using only the local AST index — synchronous with the
+    // latest parse, no engine session dependency, no async lag.
+    let rows: Vec<FlatParam> = {
         let Some(registry) = world.get_resource::<crate::ui::ModelicaDocumentRegistry>() else {
             return;
         };
         let Some(host) = registry.host(doc_id) else { return };
         let index = host.document().index();
-        let Some(keys) = index.components_by_class.get(&active) else {
-            return;
-        };
-        keys.iter()
-            .filter_map(|k| index.components.get(k.0 as usize))
-            .filter(|e| matches!(e.variability, Variability::Parameter | Variability::Constant))
-            .map(|e| Row {
-                name: e.name.clone(),
-                value: e.binding.clone().unwrap_or_default(),
-            })
-            .collect()
+        flatten_class_parameters(index, &active)
     };
     if rows.is_empty() {
         return;
@@ -654,34 +897,85 @@ fn render_active_class_parameters(
         .id_salt("active_class_parameters")
         .default_open(true)
         .show(ui, |ui| {
-            // Two-pass: gather edits, apply after the immutable borrow
-            // on `rows` is released.
-            let mut edits: Vec<(String, String)> = Vec::new();
+            // Editable rows are depth ≤ 1 — direct parameters of the
+            // active class (`SetParameter { component, param: "" }`)
+            // and one-level component modifications
+            // (`SetParameter { component, param }`). `ast_mut::set_parameter`
+            // doesn't yet walk dotted component paths, so deeper rows
+            // render read-only with the muted style. Two-pass: collect
+            // edits, apply after the borrow on `rows` is released.
+            let mut edits: Vec<(String, String, String)> = Vec::new(); // (component, param, value)
             for row in &rows {
-                let mut buf = row.value.clone();
+                let editable = row.depth() <= 1;
+                let path = row.path();
                 ui.horizontal(|ui| {
-                    ui.label(format!("{:14}", row.name));
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(&mut buf).desired_width(120.0),
-                    );
-                    let commit = (resp.lost_focus()
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                        || (resp.lost_focus() && buf != row.value);
-                    if commit && buf != row.value {
-                        edits.push((row.name.clone(), buf.clone()));
+                    if editable {
+                        ui.label(format!("{:18}", path));
+                        // Persist the edit buffer in egui memory keyed
+                        // by the row's path. The naive `let mut buf =
+                        // row.value.clone()` resets keystrokes every
+                        // frame because `row.value` comes from
+                        // rumoca-session's cache, which only refreshes
+                        // ~1.5s after the source patch. While the field
+                        // has focus we keep the user's draft; on focus
+                        // loss we drop the draft so the next frame
+                        // syncs to whatever the AST now says.
+                        let edit_id = egui::Id::new(("telem_flat_param", path.as_str()));
+                        let mut buf = ui
+                            .data_mut(|d| d.get_temp::<String>(edit_id))
+                            .unwrap_or_else(|| row.value.clone());
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut buf)
+                                .id(edit_id)
+                                .desired_width(120.0),
+                        );
+                        if resp.has_focus() {
+                            ui.data_mut(|d| d.insert_temp(edit_id, buf.clone()));
+                        }
+                        let commit = resp.lost_focus()
+                            && (ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                || buf != row.value);
+                        if resp.lost_focus() {
+                            ui.data_mut(|d| d.remove::<String>(edit_id));
+                        }
+                        if commit && buf != row.value {
+                            let (component, param) = if row.depth() == 0 {
+                                (row.leaf.clone(), String::new())
+                            } else {
+                                (row.chain[0].clone(), row.leaf.clone())
+                            };
+                            bevy::log::info!(
+                                "[Telemetry] commit param edit: class='{}' component='{}' param='{}' value='{}' (was '{}')",
+                                active, component, param, buf, row.value
+                            );
+                            edits.push((component, param, buf.clone()));
+                        }
+                    } else {
+                        // Deeper than one level — read-only label. Edit
+                        // by drilling into the component's class via
+                        // the canvas, then editing there.
+                        ui.label(
+                            egui::RichText::new(format!("{:18}", path))
+                                .color(muted)
+                                .size(11.0),
+                        );
+                        ui.label(
+                            egui::RichText::new(&row.value)
+                                .monospace()
+                                .size(11.0),
+                        );
                     }
                 });
             }
             if edits.is_empty() {
-                let _ = muted;
                 return;
             }
             let ops: Vec<ModelicaOp> = edits
                 .into_iter()
-                .map(|(component, value)| ModelicaOp::SetParameter {
+                .map(|(component, param, value)| ModelicaOp::SetParameter {
                     class: active.clone(),
                     component,
-                    param: String::new(),
+                    param,
                     value,
                 })
                 .collect();

@@ -292,7 +292,20 @@ pub fn set_parameter(
     let expr = parse_value_fragment(value_text)?;
     match param {
         "" => {
-            comp.binding = Some(expr);
+            // Primary binding (`parameter Real g = 9.81`). Rumoca's
+            // `Component::to_modelica` formatter (rumoca-ir-ast/
+            // src/modelica.rs around line 294) emits `= {self.start}`
+            // when `has_explicit_binding` is true — it reads from
+            // `start`, NOT from `binding`. The `binding` field exists
+            // for query consumers but is ignored on round-trip. Write
+            // both fields so any consumer reads the same value, but
+            // `start` + `has_explicit_binding` is what re-emits.
+            // Clear `start_is_modification` so the formatter doesn't
+            // ALSO emit `(start = …)` alongside the `= …` binding.
+            comp.binding = Some(expr.clone());
+            comp.start = expr;
+            comp.has_explicit_binding = true;
+            comp.start_is_modification = false;
         }
         "start" => {
             comp.start = expr;

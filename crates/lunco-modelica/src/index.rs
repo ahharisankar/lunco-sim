@@ -640,10 +640,16 @@ fn insert_class_recursive(idx: &mut ModelicaIndex, qualified: String, class_def:
             placement,
             causality: map_causality(&comp.causality),
             variability: map_variability(&comp.variability),
-            binding: comp.binding.as_ref().map(|_| String::new()),
-            // ^ Placeholder: rumoca's `binding: Option<Expression>` —
-            //   reprinting expressions to source text is the printer's
-            //   job; until then we just record presence.
+            binding: if comp.has_explicit_binding {
+                // Source `parameter Real g = 9.81;` — rumoca puts the
+                // value in `comp.start` and sets `has_explicit_binding`.
+                // `comp.binding` is only `Some` for the rare case where
+                // both an inline binding *and* a separate start modifier
+                // coexist on the same declaration.
+                Some(format!("{}", comp.start))
+            } else {
+                comp.binding.as_ref().map(|e| format!("{e}"))
+            },
         };
         idx.component_by_qualified
             .insert((qualified.clone(), name.to_string()), key);

@@ -1197,7 +1197,10 @@ fn api_op_to_internal(op: &ApiOp) -> Option<ModelicaOp> {
             param,
             value,
         } => {
-            if class.is_empty() || component.is_empty() || param.is_empty() {
+            // `param == ""` is the documented sentinel meaning "the
+            // component's primary binding" (e.g. `parameter Real g = 9.81`).
+            // Don't reject it.
+            if class.is_empty() || component.is_empty() {
                 return None;
             }
             Some(ModelicaOp::SetParameter {

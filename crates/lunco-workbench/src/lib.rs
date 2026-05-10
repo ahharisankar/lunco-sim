@@ -149,11 +149,19 @@ fn on_focus_panel(
         }
     }
     if let Some(pid) = hit {
-        layout.focus_singleton(pid);
+        let ok = layout.focus_singleton(pid);
+        bevy::log::info!(
+            "[FocusPanel] id={:?} focus_singleton -> {}",
+            want, ok
+        );
     } else {
         bevy::log::warn!(
-            "FocusPanel: no singleton tab with id {:?} found in dock",
-            want
+            "FocusPanel: no singleton tab with id {:?} found in dock; available={:?}",
+            want,
+            layout.dock.iter_all_tabs().filter_map(|(_, t)| match t {
+                TabId::Singleton(p) => Some(p.0),
+                _ => None,
+            }).collect::<Vec<_>>()
         );
     }
 }
@@ -251,7 +259,9 @@ impl Plugin for WorkbenchPlugin {
             // its own handler on build. See `uri.rs` for the trait.
             .init_resource::<UriRegistry>()
             .add_observer(on_open_tab)
-            .add_observer(on_close_tab)
+            .add_observer(on_close_tab);
+        register_all_commands(app);
+        app
             .add_systems(EguiPrimaryContextPass, render_workbench);
 
         // Built-in Files section ships with the workbench so apps get
