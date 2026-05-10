@@ -159,7 +159,7 @@ fn main() {
             // `.disable::<...>()` panics in release because the plugin
             // isn't in the group, so we gate the disable on the same cfg.
             let group = BigSpaceDefaultPlugins.build();
-            #[cfg(any(debug_assertions, feature = "debug"))]
+            #[cfg(debug_assertions)]
             let group = group.disable::<big_space::validation::BigSpaceValidationPlugin>();
             group
         })

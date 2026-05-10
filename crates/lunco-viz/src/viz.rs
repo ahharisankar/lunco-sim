@@ -1,10 +1,10 @@
 //! Visualization trait + config.
 //!
-//! A [`Visualization`] is the data-to-geometry transform. It declares
+//! A [`crate::viz::Visualization`] is the data-to-geometry transform. It declares
 //! which signals it consumes (via typed roles), which view targets it
 //! can render into, and the actual rendering logic.
 //!
-//! A [`VisualizationConfig`] is the serializable description of *one*
+//! A [`crate::viz::VisualizationConfig`] is the serializable description of *one*
 //! bound viz instance — "plot `thrust` on the main time-series" is a
 //! config with kind `line_plot`, view `Panel2D(…)`, and a list of
 //! `SignalBinding`s.

@@ -13,7 +13,7 @@
 //! Every verb is a typed `#[Command]` per `AGENTS.md` § 4.2 — UI
 //! clicks, menu items, keybinds, HTTP API calls, MCP tools, and AI
 //! agents dispatch the same shape. Empty-string path fields fire the
-//! native picker via [`picker::PickHandle`]; non-empty paths skip the
+//! native picker via [`crate::picker::PickHandle`]; non-empty paths skip the
 //! dialog (recents, drag-drop, automation).
 //!
 //! ## What this module ships
@@ -21,7 +21,7 @@
 //! - The verbs ([`OpenFile`], [`OpenFolder`], [`OpenTwin`],
 //!   [`SaveAll`], [`SaveAsTwin`]) as typed commands.
 //! - The picker-resolution router ([`on_pick_resolved`]) that turns
-//!   a [`picker::PickResolved`] event into the matching typed verb
+//!   a [`crate::picker::PickResolved`] event into the matching typed verb
 //!   with the chosen path filled in.
 //! - [`FileOpsPlugin`] which registers the above.
 //!
@@ -66,7 +66,7 @@ pub struct NewDocument {
 /// Open a file at `path` into a new tab.
 ///
 /// Empty `path` triggers a native Open-File picker (via
-/// [`picker::PickHandle`]) and re-fires this command with the chosen
+/// [`crate::picker::PickHandle`]) and re-fires this command with the chosen
 /// path on success. A non-empty `path` skips the dialog — that's how
 /// HTTP automation, recents, and drag-drop reach the same code path.
 ///

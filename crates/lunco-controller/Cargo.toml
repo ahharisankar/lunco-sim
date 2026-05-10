@@ -5,7 +5,9 @@ edition = "2021"
 
 [dependencies]
 bevy = { workspace = true }
-smallvec = { workspace = true }
 leafwing-input-manager = { workspace = true }
 lunco-core = { path = "../lunco-core" }
 lunco-mobility = { path = "../lunco-mobility" }
+
+[lints]
+workspace = true

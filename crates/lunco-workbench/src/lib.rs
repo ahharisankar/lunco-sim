@@ -1,7 +1,7 @@
 //! # lunco-workbench
 //!
 //! LunCoSim's own workbench shell. Renders the standard engineering-IDE
-//! layout documented in [`docs/architecture/11-workbench.md`]:
+//! layout documented in `docs/architecture/11-workbench.md`:
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────┐
@@ -553,6 +553,8 @@ impl WorkbenchLayout {
         self.edit_menu.push(Box::new(callback));
     }
 
+    /// Register a perspective (named workbench layout). The first one
+    /// registered becomes the active default.
     pub fn register_perspective<W: Perspective + 'static>(&mut self, perspective: W) {
         let id = perspective.id();
         let first = self.perspectives.is_empty();
@@ -753,7 +755,7 @@ impl WorkbenchLayout {
         // and bottom spans the central column's width (sandwiched between
         // them). Each subsequent split at NodeIndex::root() wraps the
         // previous tree, so the outermost splits dominate the layout.
-        let mut dock = DockState::new(center_tabs.clone());
+        let mut dock = DockState::new(center_tabs);
         let mut central = NodeIndex::root();
 
         if !bottom_tabs.is_empty() {

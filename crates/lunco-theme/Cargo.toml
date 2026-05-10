@@ -7,10 +7,9 @@ description = "Core design tokens and theming system for LunCoSim"
 [dependencies]
 bevy = { workspace = true }
 bevy_egui = { workspace = true }
-egui_colors = { workspace = true }
 catppuccin-egui = { workspace = true }
 lunco-assets = { workspace = true }
-serde = { version = "1.0", features = ["derive"] }
+serde = { workspace = true }
 
 # Wasm-only: fetch DejaVu Sans TTF over HTTP at runtime (the font is
 # served at `/fonts/DejaVuSans.ttf` by the page bundle — see the copy
@@ -21,3 +20,6 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["Window", "Response"] }
+
+[lints]
+workspace = true

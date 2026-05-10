@@ -5,7 +5,7 @@
 //! and incompatible with future CRDT text editing where structural ops
 //! and text edits need to commute by byte range.
 //!
-//! [`diff_to_edit`] returns the smallest single splice that transforms
+//! `diff_to_edit` returns the smallest single splice that transforms
 //! `old` into `new`: find the common prefix, find the common suffix,
 //! the difference is one [`std::ops::Range<usize>`] + replacement
 //! string. Encoded as a `ModelicaOp::EditText`, this gives:

@@ -10,10 +10,10 @@ openusd = { workspace = true }
 lunco-core = { path = "../lunco-core" }
 lunco-usd-bevy = { path = "../lunco-usd-bevy" }
 lunco-terrain = { path = "../lunco-terrain" }
-serde = { version = "1.0", features = ["derive"] }
-thiserror = "2.0"
-tracing = "0.1"
 
 [features]
 default = ["3d"]
 3d = []
+
+[lints]
+workspace = true

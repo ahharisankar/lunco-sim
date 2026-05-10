@@ -129,7 +129,6 @@ impl Panel for InspectorPanel {
         // drilled-in pin wins when set, otherwise the document's
         // first non-package class (the same default the canvas
         // projects).
-        // B.3: derive from `ModelTabs` directly.
         let drilled_in =
             crate::ui::panels::model_view::drilled_class_for_doc(world, doc_id);
 
@@ -434,12 +433,10 @@ fn apply_plot_title(
             }
         }
     }
-    // B.3: derive from `ModelTabs`.
     let class = crate::ui::panels::model_view::drilled_class_for_doc(world, doc_id)
         .or_else(|| {
             world
                 .get_resource::<crate::ui::WorkbenchState>()
-                // B.3 phase 6: derive from registry instead of `open_model`.
                 .and_then(|_s| crate::ui::state::detected_name_for(world, doc_id))
         })
         .unwrap_or_default();
@@ -506,12 +503,10 @@ fn apply_plot_binding(
     //    the diagram annotation tracks the user's choice. Empty
     //    `signal_path` is "unbind" — only emit the Remove. Empty
     //    `prev_signal` is "first bind" — only emit the Add.
-    // B.3: derive from `ModelTabs`.
     let class = crate::ui::panels::model_view::drilled_class_for_doc(world, doc_id)
         .or_else(|| {
             world
                 .get_resource::<crate::ui::WorkbenchState>()
-                // B.3 phase 6: derive from registry instead of `open_model`.
                 .and_then(|_s| crate::ui::state::detected_name_for(world, doc_id))
         })
         .unwrap_or_default();
@@ -634,12 +629,10 @@ fn apply_diagram_text_string(
             }
         }
     }
-    // B.3: derive from `ModelTabs`.
     let class = crate::ui::panels::model_view::drilled_class_for_doc(world, doc_id)
         .or_else(|| {
             world
                 .get_resource::<crate::ui::WorkbenchState>()
-                // B.3 phase 6: derive from registry instead of `open_model`.
                 .and_then(|_s| crate::ui::state::detected_name_for(world, doc_id))
         })
         .unwrap_or_default();

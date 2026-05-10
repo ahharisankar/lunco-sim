@@ -10,11 +10,6 @@
 //! - **Layer 3 (Visual)**: Mesh generation, rendering (feature-gated, client only)
 
 use bevy::prelude::*;
-use bevy::math::DVec3;
-use bevy::render::render_resource::PrimitiveTopology;
-use bevy_mesh::Indices;
-use avian3d::prelude::*;
-use big_space::prelude::{CellCoord, Grid};
 
 pub mod tile;
 pub mod quad_sphere;

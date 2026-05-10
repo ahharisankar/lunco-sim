@@ -14,7 +14,7 @@
 //! site and was easy to miss — we did miss it: ports rotated but the
 //! icon body never did.
 //!
-//! [`IconTransform`] folds all of that — including the Modelica
+//! `IconTransform` folds all of that — including the Modelica
 //! `+Y up` → canvas `+Y down` flip — into a single 2×3 affine matrix
 //! built once by the importer. Every consumer (port positioning,
 //! edge-stub direction classifier, icon body painter, bounding-rect

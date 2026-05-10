@@ -8,10 +8,11 @@ description = "LunCoSim's editor session (VS Code Workspace analog). Tracks open
 lunco-doc     = { path = "../lunco-doc" }
 lunco-twin    = { path = "../lunco-twin" }
 lunco-storage = { path = "../lunco-storage" }
-serde         = { version = "1.0", features = ["derive"] }
-serde_json    = "1.0"
-toml          = "0.8"
-thiserror     = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3.10"
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

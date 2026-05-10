@@ -3,8 +3,8 @@
 //!
 //! Direct mirror of `lunco_modelica::ui::browser_section::ModelicaSection`:
 //! one `BrowserSection` impl that iterates
-//! [`LoadedUsdStages`](crate::ui::loaded_stages::LoadedUsdStages) and
-//! draws a `CollapsingHeader` row per [`LoadedStage`].
+//! [`LoadedUsdStages`] and
+//! draws a `CollapsingHeader` row per [`crate::ui::loaded_stages::LoadedStage`].
 //!
 //! Phase 3 paints the row + a placeholder body. Phase 4 swaps the
 //! placeholder for the recursive prim-tree walk over composed stages.

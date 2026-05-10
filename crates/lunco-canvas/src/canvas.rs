@@ -6,7 +6,7 @@
 //!
 //! 1. Allocate the widget rect + capture the egui `Response`.
 //! 2. Translate egui input (pointer, keys, wheel) into
-//!    [`InputEvent`](crate::event::InputEvent)s, dispatch each to the
+//!    [`InputEvent`]s, dispatch each to the
 //!    active tool. Tool returns `Consumed` or `Passthrough`.
 //! 3. Built-in navigation handles passthrough events — middle/right-
 //!    drag for pan, scroll for zoom-at-pointer, `F` for fit-all.
@@ -14,7 +14,7 @@
 //!    moves, request a repaint.
 //! 5. Walk layers in order, each getting a fresh `DrawCtx`.
 //! 6. Run overlays (screen-space UI).
-//! 7. Return accumulated [`SceneEvent`](crate::event::SceneEvent)s
+//! 7. Return accumulated [`SceneEvent`]s
 //!    to the caller.
 //!
 //! # Why navigation is built-in, not a tool
@@ -346,7 +346,7 @@ impl Canvas {
         }
 
         if response.double_clicked() {
-            if let Some(p) = response.interact_pointer_pos().or(response.hover_pos()) {
+            if let Some(p) = response.interact_pointer_pos().or_else(|| response.hover_pos()) {
                 let screen = Pos::new(p.x, p.y);
                 let world = self.viewport.screen_to_world(screen, screen_rect);
                 input_events.push(InputEvent::DoubleClick {

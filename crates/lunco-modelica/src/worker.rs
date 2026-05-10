@@ -190,13 +190,8 @@ impl Default for ModelicaResult {
 /// after Reset without recompiling, and detect when the Step command's
 /// model_path points to stale source.
 struct CachedModel {
-    #[allow(dead_code)]
-    session_id: u64,
     model_name: String,
-    #[allow(dead_code)]
     source: Arc<str>,
-    #[allow(dead_code)]
-    dae: Box<rumoca_session::compile::DaeCompilationResult>,
 }
 
 /// Collect every readable variable from the stepper — states, inputs, and
@@ -220,6 +215,44 @@ fn result_ok(entity: Entity, session_id: u64) -> ModelicaResult {
         entity,
         session_id,
         ..Default::default()
+    }
+}
+
+/// Apply parsed input defaults to a stepper at init time, logging any
+/// mismatch between the rumoca-detected names and the stepper's actual
+/// input slots. The mismatch case is a rumoca-vs-flatten disagreement —
+/// rare, but silent failure here would mean a user-set default never
+/// reaches the simulator. Logged once per init, not per-call.
+fn apply_input_defaults_validated(
+    stepper: &mut SimStepper,
+    input_defaults: &HashMap<String, f64>,
+    ctx: &str,
+) {
+    if input_defaults.is_empty() {
+        return;
+    }
+    let known: std::collections::HashSet<String> =
+        stepper.input_names().iter().cloned().collect();
+    let unknown: Vec<&str> = input_defaults
+        .keys()
+        .filter(|n| !known.contains(*n))
+        .map(String::as_str)
+        .collect();
+    if !unknown.is_empty() {
+        bevy::log::warn!(
+            "[{ctx}] {} parsed input default(s) not in stepper.input_names(): {:?} (known: {:?})",
+            unknown.len(),
+            unknown,
+            known,
+        );
+    }
+    for (name, val) in input_defaults {
+        if !known.contains(name) {
+            continue;
+        }
+        if let Err(e) = stepper.set_input(name, *val) {
+            bevy::log::warn!("[{ctx}] set_input({name}) failed: {e:?}");
+        }
     }
 }
 
@@ -297,9 +330,7 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                                 Ok(comp_res) => {
                                     match SimStepper::new(&comp_res.dae, opts) {
                                         Ok(mut stepper) => {
-                                            for (name, val) in &input_defaults {
-                                                let _ = stepper.set_input(name, *val);
-                                            }
+                                            apply_input_defaults_validated(&mut stepper, &input_defaults, "Init");
                                             let input_names: Vec<String> = stepper.input_names().to_vec();
                                             let symbols = collect_stepper_observables(&stepper);
                                             steppers.insert(entity, (session_id, cached.model_name.clone(), stepper));
@@ -363,16 +394,12 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                                 opts.atol = 1e-1; opts.rtol = 1e-1;
                                 match SimStepper::new(&comp_res.dae, opts) {
                                     Ok(mut stepper) => {
-                                        for (name, val) in &input_defaults {
-                                            let _ = stepper.set_input(name, *val);
-                                        }
+                                        apply_input_defaults_validated(&mut stepper, &input_defaults, "Compile");
                                         let input_names: Vec<String> = stepper.input_names().to_vec();
                                         let symbols = collect_stepper_observables(&stepper);
                                         cached_models.insert(entity, CachedModel {
-                                            session_id,
                                             model_name: model_name.clone(),
-                                            source: Arc::from(source.clone()),
-                                            dae: comp_res,
+                                            source: Arc::from(source),
                                         });
                                         steppers.insert(entity, (session_id, model_name.clone(), stepper));
                                         let _ = tx_inner.send(ModelicaResult {
@@ -468,9 +495,7 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                                 match SimStepper::new(&comp_res.dae, opts) {
                                     Ok(mut stepper) => {
                                         // Set input defaults via set_input so they're runtime-changeable
-                                        for (name, val) in &input_defaults {
-                                            let _ = stepper.set_input(name, *val);
-                                        }
+                                        apply_input_defaults_validated(&mut stepper, &input_defaults, "Compile");
                                         let input_names: Vec<String> = stepper.input_names().to_vec();
                                         let symbols = collect_stepper_observables(&stepper);
                                         let temp_dir = modelica_dir().join(format!("{}_{}", entity.index(), entity.generation()));
@@ -479,10 +504,8 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                                         let _ = std::fs::write(&temp_path, &source);
 
                                         cached_models.insert(entity, CachedModel {
-                                            session_id,
                                             model_name: model_name.clone(),
-                                            source: Arc::from(source.clone()),
-                                            dae: comp_res,
+                                            source: Arc::from(source),
                                         });
                                         steppers.insert(entity, (session_id, model_name.clone(), stepper));
                                         let _ = tx_inner.send(ModelicaResult {
@@ -542,10 +565,7 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                                         let mut opts = StepperOptions::default();
                                         opts.atol = 1e-1; opts.rtol = 1e-1;
                                         if let Ok(mut s) = SimStepper::new(&comp_res.dae, opts) {
-                                            // Set input defaults first
-                                            for (name, val) in &input_defaults {
-                                                let _ = s.set_input(name, *val);
-                                            }
+                                            apply_input_defaults_validated(&mut s, &input_defaults, "Compile");
                                             // Then apply any user-provided input overrides
                                             for (name, val) in &inputs {
                                                 let _ = s.set_input(name, *val);
@@ -566,10 +586,8 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                                         if let Ok(mut s) = SimStepper::new(&comp_res.dae, opts) {
                                             for (name, val) in &inputs { let _ = s.set_input(name, *val); }
                                             cached_models.insert(entity, CachedModel {
-                                                session_id,
                                                 model_name: model_name.clone(),
                                                 source: Arc::from(std::fs::read_to_string(&model_path).unwrap_or_default()),
-                                                dae: comp_res,
                                             });
 
                                             steppers.insert(entity, (session_id, model_name.clone(), s));
@@ -865,7 +883,7 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                             let mut opts = StepperOptions::default();
                             opts.atol = 1e-1; opts.rtol = 1e-1;
                             if let Ok(mut s) = SimStepper::new(&comp_res.dae, opts) {
-                                for (name, val) in &input_defaults { let _ = s.set_input(name, *val); }
+                                apply_input_defaults_validated(&mut s, &input_defaults, "Compile");
                                 for (name, val) in &inputs { let _ = s.set_input(name, *val); }
                                 w.steppers.insert(entity, (session_id, model_name.clone(), s));
                             }
@@ -956,12 +974,11 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                     let exp_solver = comp_res.experiment_solver.clone();
                     match SimStepper::new(&comp_res.dae, opts) {
                         Ok(mut stepper) => {
-                            for (name, val) in &input_defaults { let _ = stepper.set_input(name, *val); }
+                            apply_input_defaults_validated(&mut stepper, &input_defaults, "Compile");
                             let input_names: Vec<String> = stepper.input_names().to_vec();
                             let symbols = collect_stepper_observables(&stepper);
                             w.cached_models.insert(entity, CachedModel {
-                                session_id, model_name: model_name.clone(), source: Arc::from(source.clone()),
-                                dae: comp_res.clone(),
+                                model_name: model_name.clone(), source: Arc::from(source.clone()),
                             });
 
                             w.steppers.insert(entity, (session_id, model_name.clone(), stepper));
@@ -1015,7 +1032,7 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                 match compiler.compile_str(&cached.model_name, &stripped_source, "model.mo") {
                     Ok(comp_res) => {
                         if let Ok(mut stepper) = SimStepper::new(&comp_res.dae, opts) {
-                            for (name, val) in &input_defaults { let _ = stepper.set_input(name, *val); }
+                            apply_input_defaults_validated(&mut stepper, &input_defaults, "Compile");
                             let input_names: Vec<String> = stepper.input_names().to_vec();
                             let symbols = collect_stepper_observables(&stepper);
                             w.steppers.insert(entity, (session_id, cached.model_name.clone(), stepper));
@@ -1081,12 +1098,11 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                 Ok(comp_res) => {
                     match SimStepper::new(&comp_res.dae, opts) {
                         Ok(mut stepper) => {
-                            for (name, val) in &input_defaults { let _ = stepper.set_input(name, *val); }
+                            apply_input_defaults_validated(&mut stepper, &input_defaults, "Compile");
                             let input_names: Vec<String> = stepper.input_names().to_vec();
                             let symbols = collect_stepper_observables(&stepper);
                             w.cached_models.insert(entity, CachedModel {
-                                session_id, model_name: model_name.clone(), source: Arc::from(source.clone()),
-                                dae: comp_res,
+                                model_name: model_name.clone(), source: Arc::from(source.clone()),
                             });
 
                             w.steppers.insert(entity, (session_id, model_name.clone(), stepper));
@@ -1151,7 +1167,7 @@ pub struct ModelicaModel {
     /// All other observable variables (Real soc, etc)
     pub variables: HashMap<String, f64>,
     /// Canonical id of the Modelica source document backing this entity,
-    /// looked up in [`ui::ModelicaDocumentRegistry`]. `DocumentId::default()`
+    /// looked up in [`crate::ui::state::ModelicaDocumentRegistry`]. `DocumentId::default()`
     /// (`0`) means "no document assigned yet"; systems should treat it as
     /// a miss. Not reflected — ids are session-local allocations, not
     /// scene-serializable.
@@ -1391,7 +1407,6 @@ pub fn handle_modelica_responses(
             // into ECS state.
 
             if let Some(err) = &result.error {
-                // B.3 phase 4: per-doc error on CompileStates.
                 if let Some(cs) = compile_states.as_mut() {
                     cs.set_error(model.document, err.clone());
                 }
@@ -1420,7 +1435,6 @@ pub fn handle_modelica_responses(
                 // errors flip this in the `is_new_model` block below.
                 model.is_compiled = false;
             } else if let Some(cs) = compile_states.as_mut() {
-                // B.3 phase 4: clear the per-doc error on success.
                 cs.clear_error(model.document);
             }
 

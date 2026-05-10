@@ -18,7 +18,7 @@ use lunco_workbench::{Panel, PanelId, PanelSlot};
 
 /// Which model the user has selected to attach next.
 #[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
-pub enum AttachState {
+pub(crate) enum AttachState {
     /// No attachment pending — clicks in the 3D scene behave normally.
     #[default]
     Idle,
@@ -28,7 +28,7 @@ pub enum AttachState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PendingAttachment {
+pub(crate) enum PendingAttachment {
     ModelicaBalloon,
     PythonBalloon,
 }
@@ -53,7 +53,7 @@ impl PendingAttachment {
 // Panel
 // ─────────────────────────────────────────────────────────────────────
 
-pub struct ModelsPalette;
+pub(crate) struct ModelsPalette;
 
 impl Panel for ModelsPalette {
     fn id(&self) -> PanelId { PanelId("rover_models") }
@@ -138,7 +138,7 @@ fn models_palette_content(ui: &mut egui::Ui, world: &mut World, tokens: &lunco_t
 ///
 /// Ordered **before** `handle_entity_selection` so a click that resolves
 /// to an attach consumes the frame's input.
-pub fn handle_attach_click(
+pub(crate) fn handle_attach_click(
     mut state: ResMut<AttachState>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,

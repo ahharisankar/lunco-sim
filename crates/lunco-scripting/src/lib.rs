@@ -76,7 +76,13 @@ fn run_scripted_models(
                     let _ = locals.set_item("outputs", outputs_dict);
 
                     // 2. Run source
-                    let c_str = std::ffi::CString::new(doc.source.as_str()).unwrap();
+                    let c_str = match std::ffi::CString::new(doc.source.as_str()) {
+                        Ok(c) => c,
+                        Err(_) => {
+                            error!("ScriptedModel: source contains a NUL byte; skipping");
+                            return;
+                        }
+                    };
                     if let Err(e) = py.run(&c_str, None, Some(&locals)) {
                         error!("ScriptedModel Python Error: {}", e);
                     } else {
@@ -116,7 +122,13 @@ fn handle_script_request(
                 return;
             }
             pyo3::Python::with_gil(|py| {
-                let c_str = std::ffi::CString::new(event.code.as_str()).unwrap();
+                let c_str = match std::ffi::CString::new(event.code.as_str()) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        error!("Remote Python: code contains a NUL byte; rejected");
+                        return;
+                    }
+                };
                 if let Err(e) = py.run(&c_str, None, None) {
                     error!("Remote Python Error: {}", e);
                 }

@@ -39,7 +39,6 @@
 
 use bevy::prelude::*;
 use bevy::math::DVec3;
-use avian3d::prelude::RigidBody;
 use big_space::prelude::{Grid, CellCoord};
 
 // ─────────────────────────────────────────────────────────────────────────────

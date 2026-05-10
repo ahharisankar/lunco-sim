@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy::math::DVec3;
 use avian3d::prelude::*;
-use lunco_usd::{UsdPlugins, UsdStageAsset, UsdPrimPath};
+use lunco_usd::{UsdPlugins, UsdPrimPath};
 
 fn main() {
     let mut app = App::new();

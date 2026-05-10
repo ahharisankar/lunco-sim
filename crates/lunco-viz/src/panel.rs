@@ -1,10 +1,10 @@
 //! `VizPanel` — the generic workbench host for a visualization.
 //!
 //! One panel instance per [`VizId`]. The panel looks up its
-//! [`VisualizationConfig`] in the
-//! [`VisualizationRegistry`](crate::registry::VisualizationRegistry),
-//! finds the matching [`Visualization`] impl in the
-//! [`VizKindCatalog`](crate::registry::VizKindCatalog), and dispatches
+//! [`crate::viz::VisualizationConfig`] in the
+//! [`VisualizationRegistry`],
+//! finds the matching [`crate::viz::Visualization`] impl in the
+//! [`VizKindCatalog`], and dispatches
 //! to the right render path based on the config's [`ViewTarget`].
 //!
 //! Because `VizPanel` is an `InstancePanel`, the workbench can open,

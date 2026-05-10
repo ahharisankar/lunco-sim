@@ -2,7 +2,7 @@
 //!
 //! Implements [`InstancePanel`] so the workbench can host arbitrarily
 //! many model tabs in the center dock. Each tab's instance id is the
-//! raw [`DocumentId`] it views; per-tab state (current view mode,
+//! raw [`lunco_doc::DocumentId`] it views; per-tab state (current view mode,
 //! future: text cursor, pan/zoom) lives in the [`ModelTabs`] resource.
 //!
 //! Rendering strategy: every reader names the doc/tab it's reading.
@@ -57,7 +57,7 @@ pub enum ModelViewMode {
 /// Per-tab state for a [`ModelViewPanel`] instance.
 ///
 /// Tabs are now keyed by an opaque [`TabId`] (a counter-allocated
-/// `u64`) rather than the [`DocumentId`] they view. This lets the
+/// `u64`) rather than the [`lunco_doc::DocumentId`] they view. This lets the
 /// same document live in multiple tabs (e.g. a Text view and a
 /// Canvas view side-by-side) and lets sibling classes from the same
 /// `.mo` file open in distinct tabs (drilled-in classes set
@@ -151,11 +151,11 @@ pub fn drilled_class_for_doc(
 /// Registry of open [`ModelViewPanel`] tabs.
 ///
 /// Keyed by [`TabId`] (allocated from `next_id`). Multiple tabs can
-/// reference the same [`DocumentId`] — distinguished by their
+/// reference the same [`lunco_doc::DocumentId`] — distinguished by their
 /// `drilled_class` slot.
 ///
 /// Closing a tab drops its entry here but *does not* remove the
-/// underlying `ModelicaDocument` from [`ModelicaDocumentRegistry`];
+/// underlying `ModelicaDocument` from [`crate::ui::state::ModelicaDocumentRegistry`];
 /// the registry's lifetime is the union of all tabs viewing it.
 #[derive(Resource, Default)]
 pub struct ModelTabs {
@@ -207,7 +207,7 @@ impl ModelTabs {
     /// allocate a fresh one. The newly-created tab is **pinned** by
     /// default — this entry point is for deliberate opens (drill-in,
     /// New, Open File) that should produce a persistent tab. Browser
-    /// single-clicks should use [`ensure_preview_for`] instead.
+    /// single-clicks should use `ensure_preview_for` instead.
     pub fn ensure_for(
         &mut self,
         doc: DocumentId,
@@ -247,7 +247,7 @@ impl ModelTabs {
     /// rebind.
     ///
     /// Pinning happens automatically on the first edit / drill-in
-    /// (see [`pin`]) or explicitly via the tab's right-click menu.
+    /// (see `pin`) or explicitly via the tab's right-click menu.
     pub fn ensure_preview_for(
         &mut self,
         doc: DocumentId,
@@ -328,7 +328,7 @@ impl ModelTabs {
         }
     }
 
-    // `ensure(doc)` migration shim deleted in B.4. All callers now
+    // `ensure(doc)` migration shim deleted. All callers now
     // use `ensure_for(doc, None)` directly.
 
     /// Close the specific tab. Returns the tab state if it existed.
@@ -453,7 +453,7 @@ impl ModelTabs {
         })
     }
 
-    /// Mutable variant of [`find_for`].
+    /// Mutable variant of `find_for`.
     pub fn find_for_mut(
         &mut self,
         doc: DocumentId,
@@ -629,7 +629,6 @@ impl InstancePanel for ModelViewPanel {
         // ops layer — so the user saw nothing when they tried to
         // modify something. A visible strip with a Duplicate
         // button is unmissable and one click from the fix.
-        // B.3 phase 6: derive from registry.
         let tab_read_only = crate::ui::state::read_only_for(world, doc);
         if tab_read_only {
             let mut banner_duplicate_clicked = false;
@@ -781,7 +780,7 @@ impl InstancePanel for ModelViewPanel {
         {
             let new_id = world
                 .resource_mut::<ModelTabs>()
-                .open_new(doc, drilled.clone());
+                .open_new(doc, drilled);
             world.commands().trigger(lunco_workbench::OpenTab {
                 kind: MODEL_VIEW_KIND,
                 instance: new_id,
@@ -875,7 +874,6 @@ pub(crate) fn sync_active_tab_to_doc(
     doc: DocumentId,
     drilled_class: Option<&str>,
 ) {
-    // B.3 phase 3: legacy `DrilledInClassNames` cache mirror
     // removed. `ModelTabState.drilled_class` is now authoritative
     // and readers go through
     // `crate::ui::panels::model_view::drilled_class_for_doc`.
@@ -1063,7 +1061,7 @@ pub(crate) fn sync_active_tab_to_doc(
         buf.text = source;
         buf.line_starts = line_starts.into();
         buf.detected_name = detected_name;
-        buf.model_path = path_str.clone();
+        buf.model_path = path_str;
         buf.bound_doc = Some(doc);
     }
 
@@ -1104,10 +1102,9 @@ fn render_unified_toolbar(
     let tokens = world
         .get_resource::<lunco_theme::Theme>()
         .map(|t| t.tokens.clone())
-        .unwrap_or_else(|| lunco_theme::Theme::dark().tokens.clone());
+        .unwrap_or_else(|| lunco_theme::Theme::dark().tokens);
     // Snapshot everything we need before the closure so we don't
     // fight the borrow checker mid-layout.
-    // B.3 phase 6: derive from registry / origin.
     let display_name = crate::ui::state::display_name_for(world, doc)
         .unwrap_or_else(|| format!("Model #{}", doc.raw()));
 
@@ -1117,7 +1114,6 @@ fn render_unified_toolbar(
     // (carries `msl://Foo` for drill-in tabs).
     let is_icon_only_tab = crate::ui::loaded_classes::is_icon_only_class(&display_name)
         || display_name.contains("/Icons/");
-    // B.3 phase 4: per-doc error on CompileStates.
     let compilation_error = world
         .get_resource::<crate::ui::CompileStates>()
         .and_then(|cs| cs.error_for(doc).map(str::to_string));
@@ -1451,7 +1447,6 @@ fn render_unified_toolbar(
 
     // Apply side effects after the closure.
     if dismiss_error {
-        // B.3 phase 4: per-doc error on CompileStates.
         if let Some(mut cs) = world.get_resource_mut::<crate::ui::CompileStates>() {
             cs.clear_error(doc);
         }
@@ -1697,7 +1692,6 @@ fn render_docs_view(ui: &mut egui::Ui, world: &mut World) {
     ) = match doc_id {
         None => (None, None, None, None),
         Some(doc) => {
-            // B.3: derive from `ModelTabs`.
             let drilled = drilled_class_for_doc(world, doc);
             // All four fields read from the per-doc Index. Description
             // and Documentation(info=, revisions=) are pre-extracted
@@ -2044,7 +2038,7 @@ fn render_icon_view(ui: &mut egui::Ui, world: &mut World) {
         // `model_path` no longer exists outside the cache. Use the
         // origin's display name + canonical_path heuristic to
         // reconstruct the `msl://` prefix when applicable.
-        let display = document.origin().display_name().to_string();
+        let display = document.origin().display_name();
         let from_path = display
             .strip_prefix("msl://")
             .map(|s| s.to_string());

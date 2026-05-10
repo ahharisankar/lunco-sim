@@ -17,7 +17,7 @@
 //! component on the diagram, tweaking a parameter, invoking a remote
 //! script — is a command whose observer applies ops to one or more
 //! [`lunco_doc::Document`]s. The documents fire
-//! [`DocumentChanged`] and its siblings, and every subscriber
+//! [`crate::DocumentChanged`] and its siblings, and every subscriber
 //! (re-render, re-parse, telemetry refresh, plot-variable update,
 //! replay, audit) reacts from those events.
 //!
@@ -132,7 +132,7 @@ impl DocumentChanged {
 /// registry (file opened, New Model created, script allocated, …).
 ///
 /// Fires once per document, immediately after the registry inserts it.
-/// Precedes any [`DocumentChanged`] for the same id that would otherwise
+/// Precedes any [`crate::DocumentChanged`] for the same id that would otherwise
 /// represent "filled-with-initial-source".
 #[derive(Event, Clone, Debug)]
 pub struct DocumentOpened {
@@ -174,7 +174,7 @@ impl DocumentClosed {
 /// disk (Save, Save As).
 ///
 /// Fires after a successful write. Dirty trackers use this together
-/// with [`DocumentChanged`] to maintain the save indicator.
+/// with [`crate::DocumentChanged`] to maintain the save indicator.
 #[derive(Event, Clone, Debug)]
 pub struct DocumentSaved {
     /// The document that was just persisted.
@@ -214,7 +214,7 @@ impl DocumentSaved {
 ///
 /// Handled per-domain: the registry that owns `doc` runs its
 /// [`DocumentHost`](lunco_doc::DocumentHost)`::undo()`, fires
-/// [`DocumentChanged`], and performs whatever view-state sync the
+/// [`crate::DocumentChanged`], and performs whatever view-state sync the
 /// domain requires (e.g. for Modelica, update the text buffer). Domains
 /// that don't own `doc` ignore the trigger.
 #[Command(default)]
@@ -254,12 +254,12 @@ pub struct SaveDocument {
 /// `path` semantics mirror [`OpenFile`](lunco_workbench::file_ops::OpenFile):
 ///
 /// - **Empty** → the observer fires
-///   [`picker::PickHandle`](../lunco_workbench/picker/struct.PickHandle.html)
+///   [`lunco_workbench::picker::PickHandle`](../lunco_workbench/picker/struct.PickHandle.html)
 ///   with `PickFollowUp::SaveAs(doc)` and returns. The workbench's
 ///   `on_pick_resolved` re-fires this command with the chosen path
 ///   filled in. Cancellation is silent.
 /// - **Non-empty** → the observer writes directly, rebinds the
-///   document's [`DocumentOrigin`] to the new writable `File` variant,
+///   document's [`lunco_doc::DocumentOrigin`] to the new writable `File` variant,
 ///   updates `last_saved_generation`, and fires [`DocumentSaved`].
 ///
 /// This single shape covers UI dialogs, recents, drag-drop, HTTP

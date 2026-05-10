@@ -3,26 +3,26 @@
 //! Plumbs USD into the shared workbench command bus described in
 //! `AGENTS.md` §4.2:
 //!
-//! - **Open**: observes [`OpenFile`](lunco_workbench::file_ops::OpenFile)
+//! - **Open**: observes [`OpenFile`]
 //!   and handles paths with a USD extension. Modelica observes the same
 //!   command for `.mo`; future SysML / mission crates will join the
 //!   chorus. Each observer is responsible for its own extension gate so
 //!   an `OpenFile { path: "/foo.mo" }` doesn't end up parsed as USD.
-//! - **New**: observes [`NewDocument`](lunco_workbench::file_ops::NewDocument)
+//! - **New**: observes [`NewDocument`]
 //!   gated on `kind == "usd"`. Lets File→New surface "USD Stage" once
 //!   the kind is registered.
 //! - **Save**: observes
-//!   [`SaveDocument`](lunco_doc_bevy::SaveDocument) gated on
+//!   [`SaveDocument`] gated on
 //!   [`UsdDocumentRegistry::contains`].
 //! - **Notifications**: each frame drains the registry's pending rings
-//!   into [`DocumentOpened`](lunco_doc_bevy::DocumentOpened),
-//!   [`DocumentChanged`](lunco_doc_bevy::DocumentChanged), and
-//!   [`DocumentClosed`](lunco_doc_bevy::DocumentClosed) so views
+//!   into [`DocumentOpened`],
+//!   [`lunco_doc_bevy::DocumentChanged`], and
+//!   [`DocumentClosed`] so views
 //!   subscribe through the canonical channels rather than polling the
 //!   registry directly.
 //!
 //! Registers the `usd` document kind in
-//! [`DocumentKindRegistry`](lunco_twin::DocumentKindRegistry) on build
+//! [`DocumentKindRegistry`] on build
 //! so File menus, picker dialogs, and `twin.toml` parsers see USD
 //! without any central edit.
 
@@ -38,7 +38,7 @@ use crate::document::UsdOp;
 use crate::registry::UsdDocumentRegistry;
 
 /// Stable id for the USD document kind in
-/// [`DocumentKindRegistry`](lunco_twin::DocumentKindRegistry).
+/// [`DocumentKindRegistry`].
 pub const USD_DOCUMENT_KIND: &str = "usd";
 
 /// Plugin that registers the USD document kind, the typed-command

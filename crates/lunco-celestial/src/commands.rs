@@ -1,7 +1,7 @@
 //! Typed commands for celestial surface operations.
 
 use bevy::prelude::*;
-use lunco_core::{Command, on_command};
+use lunco_core::Command;
 
 /// Teleport the avatar to a celestial body's surface.
 ///

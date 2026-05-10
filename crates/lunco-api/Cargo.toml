@@ -10,13 +10,14 @@ transport-http = ["dep:axum", "dep:tokio"]
 
 [dependencies]
 lunco-core = { path = "../lunco-core" }
-lunco-telemetry = { path = "../lunco-telemetry" }
 bevy = { workspace = true }
 image = "0.25"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-smallvec = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 # Transport: HTTP (optional, feature-gated)
 axum = { version = "0.8", features = ["ws"], optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
+
+[lints]
+workspace = true

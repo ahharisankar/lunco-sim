@@ -26,8 +26,6 @@ lunco-mobility = { path = "../lunco-mobility" }
 lunco-robotics = { path = "../lunco-robotics" }
 lunco-controller = { path = "../lunco-controller" }
 lunco-fsw = { path = "../lunco-fsw" }
-lunco-obc = { path = "../lunco-obc" }
-lunco-attributes = { path = "../lunco-attributes" }
 lunco-avatar = { path = "../lunco-avatar" }
 lunco-celestial = { path = "../lunco-celestial" }
 lunco-terrain = { path = "../lunco-terrain" }
@@ -39,17 +37,12 @@ lunco-scripting = { path = "../lunco-scripting" }
 lunco-doc = { path = "../lunco-doc" }
 lunco-theme = { path = "../lunco-theme" }
 lunco-usd = { path = "../lunco-usd" }
-lunco-usd-avian = { path = "../lunco-usd-avian" }
-lunco-usd-bevy = { path = "../lunco-usd-bevy" }
-lunco-usd-sim = { path = "../lunco-usd-sim" }
 lunco-sandbox-edit = { path = "../lunco-sandbox-edit" }
 lunco-ui = { path = "../lunco-ui" }
 lunco-workbench = { path = "../lunco-workbench" }
 lunco-assets = { workspace = true }
 lunco-api = { path = "../lunco-api" }
-openusd = { workspace = true }
 bevy_egui = { workspace = true }
-bevy-inspector-egui = { workspace = true }
 
 # Replace glibc's allocator with mimalloc on native targets. Bevy +
 # avian generate huge cross-thread allocator traffic; glibc's
@@ -75,9 +68,7 @@ tracy = ["bevy/trace_tracy"]
 # panic hooks, and RNG (std::time is unavailable on wasm32).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["console", "Document", "HtmlInputElement", "Window"] }
 console_error_panic_hook = "0.1"
-# getrandom with js feature enables wasm32 support for rand/uuid and other transitive deps
-getrandom = { version = "0.2", features = ["js"] }
-instant = "0.1"
+
+[lints]
+workspace = true

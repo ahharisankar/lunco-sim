@@ -8,12 +8,12 @@
 //!
 //! ## Lifecycle wiring
 //!
-//! - [`DocumentOpened`](lunco_doc_bevy::DocumentOpened) →
+//! - [`DocumentOpened`] →
 //!   register a [`WorkspaceStage`] in
-//!   [`LoadedUsdStages`](loaded_stages::LoadedUsdStages),
+//!   [`LoadedUsdStages`],
 //!   gated on registry membership so we don't react to Modelica /
 //!   SysML opens.
-//! - [`DocumentClosed`](lunco_doc_bevy::DocumentClosed) →
+//! - [`DocumentClosed`] →
 //!   unregister by stage id (idempotent — Modelica closes are no-ops).
 //!
 //! Twin-driven `SystemUsdStage` registration is deferred; the trait

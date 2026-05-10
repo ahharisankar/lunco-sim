@@ -422,7 +422,7 @@ fn on_drive_rover(
     q_ack: Query<&AckermannSteer>,
     mut q_digital_ports: Query<&mut DigitalPort>,
 ) {
-    let Ok(mut fsw) = q_rovers.get_mut(cmd.target) else { return };
+    let Ok(fsw) = q_rovers.get_mut(cmd.target) else { return };
 
     if fsw.brake_active {
         for name in ["drive_left", "drive_right", "steering"] {

@@ -1,6 +1,6 @@
 //! Modelica-to-diagram graph builder.
 //!
-//! Converts a parsed Modelica AST (`StoredDefinition`) into a [`ComponentGraph`]
+//! Converts a parsed Modelica AST (`StoredDefinition`) into a `ComponentGraph`
 //! that can be rendered by any diagram viewer.
 //!
 //! ## Supported diagram types
@@ -41,7 +41,7 @@ pub enum DiagramType {
     PackageHierarchy,
 }
 
-/// Builder that converts a Modelica AST into a [`ComponentGraph`].
+/// Builder that converts a Modelica AST into a `ComponentGraph`.
 pub struct ModelicaComponentBuilder {
     /// Shared reference to the parsed AST. Using `Arc` here instead
     /// of an owned `StoredDefinition` is load-bearing: MSL package
@@ -249,7 +249,6 @@ impl ModelicaComponentBuilder {
                 for conn_name in &conn_ports {
                     let key = format!("{}.{}", comp_name, conn_name);
                     connector_registry.entry(key.clone()).or_insert_with(|| ConnectorInfo {
-                        name: key.clone(),
                         comp_name: comp_name.clone(),
                         port_name: conn_name.clone(),
                         port_type: comp.type_name.to_string(),
@@ -876,8 +875,6 @@ fn scope_chain_candidates(raw: &str, ctx: Option<&str>) -> Vec<String> {
 /// Information about a connector instance in a Modelica model.
 #[derive(Debug, Clone)]
 struct ConnectorInfo {
-    #[allow(dead_code)]
-    name: String,
     comp_name: String,
     port_name: String,
     port_type: String,

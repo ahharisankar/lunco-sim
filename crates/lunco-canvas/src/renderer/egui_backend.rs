@@ -1,4 +1,4 @@
-//! Egui implementation of [`crate::ui::renderer::DiagramRenderer`].
+//! Egui implementation of [`crate::renderer::DiagramRenderer`].
 //!
 //! Wraps an `egui::Painter` and translates each trait call into the
 //! corresponding `Painter` method. This is the backend the workbench

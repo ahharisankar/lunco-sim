@@ -17,7 +17,7 @@
 //! - [`DocumentOp`] — a typed, reversible mutation.
 //! - [`DocumentHost`] — holds a Document and runs the op/apply/undo/redo loop.
 //! - [`DocumentError`] — the fallible-apply error type.
-//! - [`DocumentId`] — stable identifier for a Document.
+//! - [`crate::DocumentId`] — stable identifier for a Document.
 //!
 //! ## Example
 //!
@@ -176,7 +176,7 @@ pub trait Resolver {
 pub struct DocumentId(pub u64);
 
 impl DocumentId {
-    /// Construct a [`DocumentId`] from a raw `u64`.
+    /// Construct a [`crate::DocumentId`] from a raw `u64`.
     pub const fn new(raw: u64) -> Self {
         Self(raw)
     }

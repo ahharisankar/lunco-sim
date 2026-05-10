@@ -54,7 +54,6 @@ pub(super) fn resolve_doc_context(world: &World) -> (Option<lunco_doc::DocumentI
     // (AnnotatedRocketStage, every MSL example, …) is the *package*
     // wrapper. Adding a component to a package corrupts the file —
     // packages can only contain classes, not components.
-    // B.3: derive from `ModelTabs`.
     let drilled_in =
         crate::ui::panels::model_view::drilled_class_for_doc(world, doc_id);
     let class = drilled_in
@@ -68,7 +67,6 @@ pub(super) fn resolve_doc_context(world: &World) -> (Option<lunco_doc::DocumentI
                         .and_then(|ast| crate::ast_extract::extract_model_name_from_ast(&ast))
                 })
         })
-        // B.3 phase 6: detected_name now derives from registry directly.
         .or_else(|| crate::ui::state::detected_name_for(world, doc_id));
     (Some(doc_id), class)
 }
@@ -741,7 +739,6 @@ pub(super) fn apply_ops(
     }
 
     if hit_read_only {
-        // B.3 phase 4: per-doc error.
         if let Some(mut cs) = world.get_resource_mut::<crate::ui::CompileStates>() {
             // Don't clobber a real compile error.
             if cs.error_for(doc_id).is_none() {
@@ -784,7 +781,6 @@ pub(super) fn apply_ops(
             )
         });
     if let Some((src, new_gen)) = fresh {
-        // B.3 phase 6: in-place open_model.source mirror retired —
         // readers go through the registry directly. `src` is still
         // used for the projection-relevant hash below.
         // Canvas-originated edits have *already* mutated the scene
@@ -984,11 +980,9 @@ pub(super) fn auto_arrange_now(world: &mut World, doc_id: lunco_doc::DocumentId)
 /// the drilled-in class name (for MSL drill-in tabs); falls back to
 /// the open document's detected model name.
 pub fn active_class_for_doc(world: &mut World, doc_id: lunco_doc::DocumentId) -> Option<String> {
-    // B.3: drilled scope from `ModelTabs` (replaces the retired
     // `DrilledInClassNames` cache).
     if let Some(c) = crate::ui::panels::model_view::drilled_class_for_doc(world, doc_id) {
         return Some(c);
     }
-    // B.3 phase 6: derive from registry.
     crate::ui::state::detected_name_for(world, doc_id)
 }

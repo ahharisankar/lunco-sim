@@ -3,7 +3,7 @@
 //! ## What it shows
 //!
 //! 1. Every Modelica document currently loaded in the
-//!    [`ModelicaDocumentRegistry`] — drafts, duplicates from the
+//!    [`crate::ui::state::ModelicaDocumentRegistry`] — drafts, duplicates from the
 //!    Welcome examples, files opened in earlier sessions. This is the
 //!    workspace's authoritative view of "what Modelica content does
 //!    the user have right now."
@@ -12,7 +12,7 @@
 //!
 //! Each row is a Modelica class keyed by its **fully-qualified path**
 //! (e.g. `"AnnotatedRocketStage.RocketStage"`). Click → emits
-//! [`BrowserAction::OpenLoadedClass`] for in-memory docs, dispatched
+//! [`lunco_workbench::BrowserAction::OpenLoadedClass`] for in-memory docs, dispatched
 //! into the existing drill-in machinery so the canvas tab opens
 //! directly on the requested class.
 //!
@@ -26,7 +26,7 @@
 //! same parse the rest of the workbench sees; no panel-local cache
 //! and no panel-local rumoca call.
 //!
-//! Building the [`ClassEntry`] tree from a `SyntaxCache` is sub-
+//! Building the `ClassEntry` tree from a `SyntaxCache` is sub-
 //! millisecond on typical Modelica files (just walks the AST and
 //! clones short strings), so we re-derive on every render rather
 //! than maintain another cache layer.
@@ -37,7 +37,7 @@ use lunco_workbench::{BrowserAction, BrowserCtx, BrowserSection};
 use rumoca_session::parsing::ClassType;
 
 // `DrilledInClassNames` reads migrated to
-// `crate::ui::panels::model_view::drilled_class_for_doc` (B.3).
+// `crate::ui::panels::model_view::drilled_class_for_doc`.
 use crate::ui::state::ModelicaDocumentRegistry;
 
 /// One Modelica class entry rendered in the tree.
@@ -129,7 +129,7 @@ impl BrowserSection for ModelicaSection {
 /// the outer `CollapsingHeader` row carrying this doc's name has
 /// already been drawn; we just paint the children inline.
 ///
-/// Source-of-truth read of [`ModelicaDocumentRegistry`] via the doc's
+/// Source-of-truth read of [`crate::ui::state::ModelicaDocumentRegistry`] via the doc's
 /// [`crate::index::ModelicaIndex`]. Stateless; the registry's
 /// off-thread refresh + per-op optimistic patches keep the Index current.
 pub(crate) fn render_workspace_doc(
@@ -165,7 +165,6 @@ pub(crate) fn render_workspace_doc(
         .get_resource::<lunco_workbench::WorkspaceResource>()
         .and_then(|ws| ws.active_document);
     let active_qualified: Option<String> = active_doc.and_then(|d| {
-        // B.3: derive from `ModelTabs` instead of `DrilledInClassNames`.
         crate::ui::panels::model_view::drilled_class_for_doc(ctx.world, d)
     });
 
@@ -299,7 +298,7 @@ fn classes_from_index(index: &crate::index::ModelicaIndex) -> (Vec<ClassEntry>, 
 /// derive the class tree + error flag through the same path as the
 /// production renderer. Mirrors what `render` does, but starting
 /// from raw source (production gets the cache from
-/// [`ModelicaDocument`] via the off-thread refresh).
+/// [`crate::document::ModelicaDocument`] via the off-thread refresh).
 #[cfg(test)]
 fn parse_classes(source: &str) -> (Vec<ClassEntry>, bool) {
     let syntax = SyntaxCache::from_source(source, 0);
@@ -307,7 +306,7 @@ fn parse_classes(source: &str) -> (Vec<ClassEntry>, bool) {
 }
 
 
-/// Sort bucket for [`ClassEntry`]. Variant order = display order via
+/// Sort bucket for `ClassEntry`. Variant order = display order via
 /// derived `Ord`, so adding a new bucket is a one-line edit.
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 enum BrowserSortGroup {
@@ -347,7 +346,7 @@ fn browser_sort_group(c: &ClassEntry) -> BrowserSortGroup {
 // ---------------------------------------------------------------------------
 
 /// Paint one class row. Recurses into children when the row is
-/// expanded. Click → [`BrowserAction::OpenLoadedClass`] keyed by the
+/// expanded. Click → [`lunco_workbench::BrowserAction::OpenLoadedClass`] keyed by the
 /// owning document's id.
 ///
 /// `active_doc`/`active_qualified` describe what the foreground tab

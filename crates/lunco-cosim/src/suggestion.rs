@@ -1,7 +1,7 @@
 //! Wire suggestions — UI-only recommendations, never auto-applied.
 //!
-//! Generated when a [`SimComponent`] or [`AvianSim`] is created.
-//! The UI displays these for user review; clicking `[Accept]` creates a [`SimConnection`].
+//! Generated when a [`crate::SimComponent`] or [`crate::AvianSim`] is created.
+//! The UI displays these for user review; clicking `[Accept]` creates a [`crate::SimConnection`].
 
 use bevy::prelude::*;
 
@@ -47,7 +47,7 @@ const KNOWN_VEL_INPUTS: &[&str] = &["velocity", "v", "speed", "vel"];
 
 /// Generate wire suggestions for a newly created simulation model.
 ///
-/// Called when a [`SimComponent`] or [`AvianSim`] is added to an entity.
+/// Called when a [`crate::SimComponent`] or [`crate::AvianSim`] is added to an entity.
 /// Suggestions are based on connector name matching against known patterns.
 ///
 /// ## Example

@@ -173,7 +173,7 @@ impl UsdComposer {
                     };
 
                     let sub_reader = TextReader::read(&ref_path)?;
-                    let ref_current_dir = ref_path.parent().unwrap_or(Path::new("."));
+                    let ref_current_dir = ref_path.parent().unwrap_or_else(|| Path::new("."));
                     let mut sub_data: HashMap<sdf::Path, sdf::Spec> = sub_reader.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
                     // Only recurse into referenced file's own refs if not already processed
@@ -236,7 +236,7 @@ impl UsdComposer {
                                     Vec::new()
                                 };
                                 for child in source_children {
-                                    if !children.contains(&child) {
+                                    if !children.contains(child) {
                                         children.push(child.clone());
                                     }
                                 }
@@ -274,7 +274,7 @@ impl UsdComposer {
     fn get_default_prim_from_data(data: &HashMap<sdf::Path, sdf::Spec>) -> Option<sdf::Path> {
         if let Some(root_spec) = data.get(&sdf::Path::abs_root()) {
             if let Some(Value::Token(name)) = root_spec.fields.get(sdf::schema::FieldKey::DefaultPrim.as_str()) {
-                return sdf::Path::new(&name).ok();
+                return sdf::Path::new(name).ok();
             }
         }
         None

@@ -18,7 +18,7 @@ use crate::ui::state::ModelicaDocumentRegistry;
 /// waiting on.
 ///
 /// The heavy work (file read + rumoca parse) lives in
-/// [`crate::class_cache::ClassCache`]; this resource only tracks
+/// `crate::class_cache::ClassCache`; this resource only tracks
 /// which tabs care about which class. When the cache resolves,
 /// [`drive_drill_in_loads`] builds a `ModelicaDocument` from the
 /// cached AST + source (no second parse) and installs it into the
@@ -33,7 +33,7 @@ pub struct DrillInLoads {
 
 /// Persistent `DocumentId → qualified class name` map for tabs
 /// opened via drill-in. Lives for the tab's lifetime (cleared by
-/// [`cleanup_removed_documents`]), so downstream systems — canvas
+/// `cleanup_removed_documents`), so downstream systems — canvas
 /// projection, especially — can ask "what class was this tab
 /// drilled into?" after install has already cleared the transient
 /// [`DrillInLoads`] entry.
@@ -42,7 +42,6 @@ pub struct DrillInLoads {
 /// specific class: the installed `ModelicaDocument.canonical_path`
 /// is the `.mo` file, which for multi-class package files doesn't
 /// tell us which of the dozen classes inside the user meant.
-// B.3 phase 3: `DrilledInClassNames` resource retired (2026-05-08).
 // Drilled scope now lives on `ModelTabState.drilled_class`; readers
 // go through `crate::ui::panels::model_view::drilled_class_for_doc`
 // (or `ModelTabs::drilled_class_for_doc` directly when a Res<>
@@ -78,7 +77,7 @@ pub struct DrillInBinding {
 /// *"no operations like that must be in UI thread"*.
 ///
 /// Same shape as [`DrillInLoads`]: the bg task returns a fully-built
-/// [`ModelicaDocument`], the driver system installs it into the
+/// [`crate::document::ModelicaDocument`], the driver system installs it into the
 /// registry via `install_prebuilt`. Cleared on install and on
 /// document removal.
 #[derive(bevy::prelude::Resource, Default)]
@@ -148,7 +147,7 @@ impl DrillInLoads {
 }
 
 /// Bevy system: for each pending drill-in binding, check whether
-/// its class has landed in [`ClassCache`]. If yes, build a
+/// its class has landed in [`crate::class_cache::ClassCache`]. If yes, build a
 /// `ModelicaDocument` from the cached parts (no re-parse) and
 /// install it in the registry.
 /// Bevy system: poll pending duplicate bg tasks; `install_prebuilt`
@@ -348,7 +347,6 @@ pub fn drive_drill_in_loads(
             (path, has_components)
         };
         registry.install_prebuilt(doc_id, doc);
-        // B.3 phase 3: drilled scope lives on `ModelTabState`, set
         // by the upstream `drill_into_class` call before this
         // driver runs.
         let land_in_icon_view =
@@ -416,7 +414,6 @@ pub fn drill_into_class(world: &mut World, qualified: &str) {
             }
             tab_id
         };
-        // B.3 phase 3: drilled scope lives on `ModelTabState` —
         // `ensure_for(doc_id, Some(qualified))` immediately above
         // already wrote it.
         if let Some(mut workspace) =
@@ -536,7 +533,6 @@ fn open_drill_in_tab(
             },
         );
     }
-    // B.3 phase 3: eager singleton-bind removed. The `ensure_for`
     // call below is in the same stack frame, so no observer can
     // run between this point and the tab carrying the drilled
     // scope — the original race the eager bind protected against

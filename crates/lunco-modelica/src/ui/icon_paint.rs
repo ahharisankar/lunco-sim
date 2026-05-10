@@ -405,7 +405,7 @@ impl CoordXform {
     /// Apply a graphic primitive's local origin + rotation, then
     /// project to screen. `origin` is in Modelica coords, `rotation`
     /// is degrees CCW (matches MLS Annex D). Per-instance orientation
-    /// (rotation + mirror) gets applied by [`to_screen`] downstream.
+    /// (rotation + mirror) gets applied by [`crate::ui::icon_paint::to_screen`] downstream.
     pub fn to_screen_rotated(
         &self,
         p: Point,
@@ -528,7 +528,7 @@ fn paint_polygon(painter: &egui::Painter, xf: &CoordXform, p: &Polygon) {
     // polygons this draws the visible "X" of the crossing, even though
     // the X-quadrants aren't filled. Matches OMEdit's stroke behaviour.
     if stroke.width > 0.0 {
-        let mut closed = pts.clone();
+        let mut closed = pts;
         if closed.first() != closed.last() {
             closed.push(closed[0]);
         }

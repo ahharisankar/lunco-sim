@@ -10,7 +10,7 @@
 //! Major surface:
 //! - [`DiagramAutoLayoutSettings`] — grid spacing for un-annotated nodes
 //! - [`DEFAULT_MAX_DIAGRAM_NODES`] — projection sanity cap
-//! - [`import_model_to_diagram`] / [`import_model_to_diagram_from_ast`] — the
+//! - [`crate::ui::panels::canvas_projection::import_model_to_diagram`] / [`import_model_to_diagram_from_ast`] — the
 //!   AST → VisualDiagram converters
 
 use bevy::prelude::*;
@@ -244,7 +244,7 @@ fn build_visual_diagram_from_scan(
 ///
 /// Overridable at call time via the `max_nodes` parameter on
 /// [`import_model_to_diagram_from_ast`] or the
-/// [`DiagramProjectionLimits`] resource the Canvas projection
+/// [`crate::ui::panels::canvas_diagram::DiagramProjectionLimits`] resource the Canvas projection
 /// reads. Power users editing a `Magnetic.FundamentalWave` gizmo
 /// with 500 components should bump this in Settings, not get a
 /// blank canvas.
@@ -663,11 +663,7 @@ pub fn import_model_to_diagram_from_ast(
         let type_name = node.meta.get("type_name").map(|s| s.as_str()).unwrap_or("");
         let resolved_path: Option<String> = if type_name.contains('.') {
             Some(type_name.to_string())
-        } else if let Some(full) = imports_by_short.get(type_name) {
-            Some(full.clone())
-        } else {
-            None
-        };
+        } else { imports_by_short.get(type_name).map(|full| full.clone()) };
         let mut component_def: Option<MSLComponentDef> = resolved_path
             .as_deref()
             .and_then(|p| msl_lookup_by_path.get(p).map(|d| (*d).clone()))

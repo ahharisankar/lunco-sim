@@ -1,5 +1,5 @@
 //! Long-lived [`ModelicaEngine`] exposed as a Bevy resource and
-//! kept in lockstep with [`ModelicaDocumentRegistry`].
+//! kept in lockstep with [`crate::ui::state::ModelicaDocumentRegistry`].
 //!
 //! ## Why a long-lived engine
 //!
@@ -31,7 +31,7 @@
 //! in the registry it compares the document's generation against the
 //! per-doc cursor in [`EngineSyncCursor`]; on a delta it re-upserts
 //! the document's current source via
-//! [`ModelicaEngine::upsert_document`] (which feeds rumoca's
+//! [`crate::engine::ModelicaEngine::upsert_document`] (which feeds rumoca's
 //! content-hash artifact cache, so unchanged source between two
 //! generations is a hashmap hit). Removed documents are flushed via
 //! [`ModelicaEngine::close_document`].
@@ -565,7 +565,7 @@ pub fn drive_engine_sync(
 /// install each AST into the engine session.
 ///
 /// Wasm-only system. The worker emits one
-/// [`crate::worker_transport::WireResult::ParseDocumentDone`] per
+/// [`crate::worker_transport`] per
 /// finished parse; the transport layer pushes each into a crossbeam
 /// channel; this system pulls them off the channel and routes each
 /// through [`ModelicaEngineHandle::install_worker_parsed_ast`] (success)

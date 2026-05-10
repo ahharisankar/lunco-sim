@@ -8,7 +8,7 @@ use crate::quad_sphere::cube_to_sphere;
 
 /// Generate a mesh for a single QuadSphere tile.
 pub fn create_quadsphere_tile_mesh(
-    body_ent: Entity,
+    _body_ent: Entity,
     face: u8,
     level: u32,
     i: i32,

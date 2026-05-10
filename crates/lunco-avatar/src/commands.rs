@@ -1,7 +1,7 @@
 //! Typed commands for avatar camera control and vessel possession.
 
 use bevy::prelude::*;
-use lunco_core::{Command, on_command};
+use lunco_core::Command;
 
 /// Possess a vessel, taking direct control of it.
 ///

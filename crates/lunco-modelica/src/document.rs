@@ -8,14 +8,14 @@
 //! depend on.
 //!
 //! Alongside the text, the Document caches a **parsed AST**
-//! ([`AstCache`]). The cache is refreshed eagerly after every mutation so
+//! ([`crate::engine::AstCache`]). The cache is refreshed eagerly after every mutation so
 //! panels that need structural access (diagram, parameter inspector,
 //! placement extractor) can read `doc.ast()` without reparsing. Parse
-//! failures are observable via [`AstCache::result`] — the cache is always
+//! failures are observable via [`crate::engine::AstCache::result`] — the cache is always
 //! present, but it may hold an error.
 //!
 //! Documents are keyed by [`lunco_doc::DocumentId`] inside
-//! [`ui::ModelicaDocumentRegistry`]. Every place that spawns a
+//! [`crate::ui::state::ModelicaDocumentRegistry`]. Every place that spawns a
 //! `ModelicaModel` entity allocates a document in the registry and writes
 //! its id into [`crate::ModelicaModel::document`].
 //!
@@ -23,10 +23,10 @@
 //!
 //! Text-level ops (comfortable for human editors and AI text tools):
 //!
-//! - [`ModelicaOp::ReplaceSource`] — coarse full-buffer swap. Used by
+//! - [`crate::document::ModelicaOp::ReplaceSource`] — coarse full-buffer swap. Used by
 //!   CodeEditor's Compile and by any caller that produces the whole new
 //!   source (e.g. template expansion).
-//! - [`ModelicaOp::EditText`] — byte-range replacement. Used for granular
+//! - [`crate::document::ModelicaOp::EditText`] — byte-range replacement. Used for granular
 //!   text edits that should participate in undo/redo without losing
 //!   precision.
 //!
@@ -35,7 +35,7 @@
 //! minimal text diffs, preserving surrounding formatting and comments.
 //!
 //! Inverses: [`ReplaceSource`](ModelicaOp::ReplaceSource)'s inverse carries
-//! the previous full source. [`EditText`](ModelicaOp::EditText)'s inverse
+//! the previous full source. [`crate::document::ModelicaOp::EditText`](ModelicaOp::EditText)'s inverse
 //! is another `EditText` against the *new* range with the previous slice
 //! as replacement.
 
@@ -65,13 +65,13 @@ pub const CHANGE_HISTORY_CAPACITY: usize = 256;
 // ModelicaChange — structured change events for incremental patching
 // ---------------------------------------------------------------------------
 
-/// A structural change to a [`ModelicaDocument`].
+/// A structural change to a [`crate::document::ModelicaDocument`].
 ///
 /// Emitted on every successful mutation and retained in a bounded ring
 /// buffer so panels can patch their render state incrementally rather
 /// than rebuilding from the AST on every frame / every edit.
 ///
-/// Text-level ops ([`ModelicaOp::EditText`], [`ModelicaOp::ReplaceSource`])
+/// Text-level ops ([`crate::document::ModelicaOp::EditText`], [`crate::document::ModelicaOp::ReplaceSource`])
 /// emit [`Self::TextReplaced`] because they can't be losslessly
 /// projected onto structural changes; consumers handle that variant by
 /// doing a full rebuild. All AST-level ops emit their specific variant,
@@ -140,8 +140,8 @@ pub enum ModelicaChange {
         /// Replacement value expression (emitted verbatim).
         value: String,
     },
-    /// A class was added (long form via [`ModelicaOp::AddClass`] or short
-    /// form via [`ModelicaOp::AddShortClass`]). `qualified` is the fully
+    /// A class was added (long form via [`crate::document::ModelicaOp::AddClass`] or short
+    /// form via [`crate::document::ModelicaOp::AddShortClass`]). `qualified` is the fully
     /// qualified path (`parent.name` or just `name` for top-level).
     ClassAdded {
         /// Fully-qualified class name.
@@ -156,7 +156,7 @@ pub enum ModelicaChange {
     },
 }
 
-/// Single parse cache attached to a [`ModelicaDocument`].
+/// Single parse cache attached to a [`crate::document::ModelicaDocument`].
 ///
 /// Lenient parser (rumoca's `parse_to_syntax`) always produces a
 /// best-effort `StoredDefinition`. `errors` carries any diagnostics
@@ -268,9 +268,9 @@ impl SyntaxCache {
 
 /// The canonical Document representation of one Modelica source file.
 ///
-/// Owns the source text + a [`DocumentOrigin`] describing where it
+/// Owns the source text + a [`lunco_doc::DocumentOrigin`] describing where it
 /// came from (which drives save behavior, tab title, read-only
-/// badge) + a parsed-AST cache ([`AstCache`]) refreshed eagerly after
+/// badge) + a parsed-AST cache ([`crate::engine::AstCache`]) refreshed eagerly after
 /// every mutation.
 #[derive(Debug, Clone)]
 pub struct ModelicaDocument {
@@ -661,7 +661,7 @@ impl ModelicaDocument {
     ///
     /// Replaces the previous `doc.ast().result.as_ref().ok().cloned()`
     /// pattern. The strict `Arc<StoredDefinition>` no longer lives in
-    /// [`AstCache`] — engine + lenient cache are the canonical
+    /// [`crate::engine::AstCache`] — engine + lenient cache are the canonical
     /// storage.
     pub fn strict_ast(&self) -> Option<Arc<StoredDefinition>> {
         if !self.syntax.has_errors() {
@@ -808,7 +808,7 @@ impl ModelicaDocument {
         if !self.ast_is_stale() && !self.syntax_is_stale() {
             return;
         }
-        // Engine is the only AST source after Phase 4. If it isn't
+        // Engine is the only AST source. If it isn't
         // installed (early boot, headless test that didn't add the
         // plugin) the doc stays at its current cache and the caller
         // sees stale data — `ModelicaEnginePlugin::build` runs
@@ -967,7 +967,7 @@ impl ModelicaDocument {
     }
 
     /// Where this document came from — drives Save behaviour, tab
-    /// title, read-only badges. See [`DocumentOrigin`].
+    /// title, read-only badges. See [`lunco_doc::DocumentOrigin`].
     pub fn origin(&self) -> &DocumentOrigin {
         &self.origin
     }
@@ -1053,12 +1053,12 @@ fn find_class_by_short_name_recursive<'a>(
     walk(&ast.classes, short)
 }
 
-/// The op type for [`ModelicaDocument`].
+/// The op type for [`crate::document::ModelicaDocument`].
 ///
 /// Text-level ops land today. AST-level ops (`SetParameter`,
 /// `AddComponent`, `AddConnection`, `SetPlacement`, …) arrive alongside
 /// the pretty-printer in a follow-up commit; they will be expressed as
-/// span-based [`EditText`](Self::EditText) patches internally so
+/// span-based [`crate::document::ModelicaOp::EditText`](Self::EditText) patches internally so
 /// surrounding formatting and comments stay intact.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -1087,7 +1087,7 @@ pub enum ModelicaOp {
     /// Insertion point is chosen AST-aware: just before the
     /// `equation`/`algorithm` keyword if the class has one, otherwise
     /// just before `end ClassName;`. The decl is rendered via
-    /// [`crate::pretty::component_decl`] and spliced as an [`EditText`]
+    /// [`crate::pretty::component_decl`] and spliced as an [`crate::document::ModelicaOp::EditText`]
     /// internally, so the inverse is a straightforward deletion
     /// (`EditText` with empty replacement).
     AddComponent {
@@ -1102,7 +1102,7 @@ pub enum ModelicaOp {
     /// section. Creates an `equation` section if one does not exist.
     ///
     /// Rendered via [`crate::pretty::connect_equation`] and spliced as
-    /// an [`EditText`] internally; inverse is the matching deletion.
+    /// an [`crate::document::ModelicaOp::EditText`] internally; inverse is the matching deletion.
     AddConnection {
         /// Target class name. Accepts dotted qualified paths for
         /// nested classes (e.g. `"Pkg.Inner"`).
@@ -1114,7 +1114,7 @@ pub enum ModelicaOp {
     ///
     /// Removes the whole declaration line(s) including the trailing
     /// semicolon and newline. Uses `Component.location` as the span
-    /// anchor. Inverse is an [`EditText`] that reinserts the deleted
+    /// anchor. Inverse is an [`crate::document::ModelicaOp::EditText`] that reinserts the deleted
     /// text verbatim — including any comments / annotations that were
     /// attached to the declaration.
     RemoveComponent {
@@ -1130,7 +1130,7 @@ pub enum ModelicaOp {
     ///
     /// Spans the full equation including the trailing semicolon and
     /// any trailing `annotation(Line(...))`. Inverse is a byte-exact
-    /// [`EditText`] reinsertion.
+    /// [`crate::document::ModelicaOp::EditText`] reinsertion.
     RemoveConnection {
         /// Target class name.
         class: String,
@@ -1435,7 +1435,7 @@ impl ModelicaDocument {
     /// has a single source-of-truth for generation bumps, AST refresh,
     /// and change emission.
     ///
-    /// Returns an [`ModelicaOp::EditText`] inverse carrying the exact
+    /// Returns an [`crate::document::ModelicaOp::EditText`] inverse carrying the exact
     /// removed bytes — uniform undo for every op kind.
     fn apply_patch(
         &mut self,
@@ -1588,7 +1588,7 @@ fn class_kind_spec_to_index_kind(spec: pretty::ClassKindSpec) -> crate::index::C
     }
 }
 
-/// Translate a high-level [`ModelicaOp`] into the concrete text patch
+/// Translate a high-level [`crate::document::ModelicaOp`] into the concrete text patch
 /// and the structured change it represents. Pure function — no
 /// document state mutated.
 /// Bail with the same parse-error message `resolve_class` produces, so
@@ -1835,7 +1835,7 @@ fn op_to_patch(
             })
             .map_err(ast_mut_to_doc_error)?;
             let qualified = if parent.is_empty() {
-                name.clone()
+                name
             } else {
                 format!("{}.{}", parent, name)
             };
@@ -1860,7 +1860,7 @@ fn op_to_patch(
             })
             .map_err(ast_mut_to_doc_error)?;
             let qualified = if parent.is_empty() {
-                name.clone()
+                name
             } else {
                 format!("{}.{}", parent, name)
             };
@@ -1950,7 +1950,7 @@ fn op_to_patch(
 }
 
 // ---------------------------------------------------------------------------
-// (deleted in A.4) Legacy `compute_*_patch` text-splice helpers used to live
+// (deleted) Legacy `compute_*_patch` text-splice helpers used to live
 // here — ~1800 lines that turned each AST-shaped op into a `(byte_range,
 // replacement)` patch by hand-walking the source via `find_annotation_span`,
 // `find_placement_span`, `find_named_call_span`, `find_statement_terminator`,

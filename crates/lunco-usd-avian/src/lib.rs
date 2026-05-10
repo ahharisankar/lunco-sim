@@ -46,7 +46,6 @@ use bevy::math::DVec3;
 use avian3d::prelude::*;
 use avian3d::physics_transform::{Position, Rotation};
 pub use lunco_usd_bevy::{UsdPrimPath, UsdStageAsset};
-use lunco_terrain::TerrainTile;
 use openusd::sdf::{AbstractData, Path as SdfPath, Value};
 use openusd::usda::TextReader;
 
@@ -604,9 +603,9 @@ fn read_rel_target(reader: &TextReader, prim_path: &SdfPath, rel_name: &str) -> 
     if let Ok(val) = reader.get(&rel_sdf, "targetPaths") {
         if let Value::PathListOp(op) = &*val {
             if let Some(target) = op.explicit_items.first()
-                .or(op.prepended_items.first())
-                .or(op.appended_items.first())
-                .or(op.added_items.first())
+                .or_else(|| op.prepended_items.first())
+                .or_else(|| op.appended_items.first())
+                .or_else(|| op.added_items.first())
             {
                 return Some(target.as_str().to_string());
             }

@@ -26,7 +26,7 @@
 //!
 //! ## Scope today
 //!
-//! Batch 1 of A.2: [`set_parameter`]. Smallest blast radius — modifies
+//! Batch 1 of A.2: `set_parameter`. Smallest blast radius — modifies
 //! one entry in one component's `modifications: IndexMap<String,
 //! Expression>`. No topology change, no equation reordering. The
 //! pattern established here generalises to the rest of the helpers in
@@ -310,7 +310,7 @@ pub fn set_parameter(
 /// Mirrors `ModelicaOp::AddComponent`. The new component is constructed
 /// by rendering `decl` into a stub-class source fragment via
 /// `pretty::component_decl` and parsing it back to AST — same trick as
-/// [`set_parameter`]'s `parse_value_fragment`. Errors out if a
+/// `set_parameter`'s `parse_value_fragment`. Errors out if a
 /// component with the same name already exists; replacing in place is
 /// a different operation (`SetParameter` for individual modifications,
 /// remove-then-add for type changes).
@@ -441,7 +441,7 @@ fn parse_component_fragment(
 /// through `pretty::connect_equation`, which always emits
 /// `component.port` and produces an invalid `a.` fragment when `port`
 /// is empty (used for top-level connector instances). When `pretty/`
-/// is deleted in A.4 this becomes the only emitter for connect
+/// is deleted this becomes the only emitter for connect
 /// equations.
 fn parse_connect_equation_fragment(
     eq: &pretty::ConnectEquation,
@@ -787,27 +787,6 @@ fn append_graphic_to_section(
     Ok(())
 }
 
-/// Parse a single named-annotation fragment (`Foo(x = 1)`) by wrapping
-/// it in a stub class annotation and lifting `class.annotation[0]`.
-/// Returns an `Expression::ClassModification`.
-#[allow(dead_code)]
-fn parse_named_annotation_fragment(text: &str) -> Result<Expression, AstMutError> {
-    let stub = format!(
-        "model __LunCoFragment\nannotation({text});\nend __LunCoFragment;\n"
-    );
-    let parsed = parse_stub_cached(&stub)
-        .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })?;
-    let class = parsed
-        .classes
-        .get("__LunCoFragment")
-        .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })?;
-    class
-        .annotation
-        .first()
-        .cloned()
-        .ok_or(AstMutError::ValueParseFailed { value: text.to_string() })
-}
-
 /// Parse a fragment destined for a graphics array (`{Foo(...), Bar(...)}`)
 /// by wrapping it inside a `Diagram(graphics={text})` annotation and
 /// lifting the array's first element. Returns an
@@ -848,7 +827,7 @@ fn parse_graphics_entry(text: &str) -> Result<Expression, AstMutError> {
     elements
         .first()
         .cloned()
-        .ok_or(AstMutError::ValueParseFailed { value: text.to_string() })
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })
 }
 
 /// True when `expr` is a graphics-array entry whose head identifier
@@ -982,11 +961,11 @@ where
     let entry = arr
         .iter_mut()
         .find(|e| plot_node_signal_matches(e, signal_path))
-        .ok_or(AstMutError::PlotNodeNotFound {
+        .ok_or_else(|| AstMutError::PlotNodeNotFound {
             class: class_name,
             signal: signal_path.to_string(),
         })?;
-    let mut spec = read_plot_node_spec(entry)?;
+    let mut spec = read_plot_node_spec(entry);
     update(&mut spec);
     *entry = parse_graphics_entry(&pretty::lunco_plot_node_inner(&spec))?;
     Ok(())
@@ -1012,9 +991,7 @@ fn plot_node_signal_matches(expr: &Expression, target_signal: &str) -> bool {
 /// Default values for any field the Expression doesn't carry — the
 /// canvas's emit path always writes signal+extent+title, so missing
 /// fields only surface for hand-edited annotations.
-fn read_plot_node_spec(
-    expr: &Expression,
-) -> Result<pretty::LunCoPlotNodeSpec, AstMutError> {
+fn read_plot_node_spec(expr: &Expression) -> pretty::LunCoPlotNodeSpec {
     let mut spec = pretty::LunCoPlotNodeSpec {
         x1: 0.0,
         y1: 0.0,
@@ -1051,7 +1028,7 @@ fn read_plot_node_spec(
             }
         }
     }
-    Ok(spec)
+    spec
 }
 
 fn point_pair(e: &Expression) -> Option<(f32, f32)> {
@@ -1175,7 +1152,7 @@ where
         class: class_name,
         index,
     })?;
-    let mut spec = read_text_spec(&arr[i])?;
+    let mut spec = read_text_spec(&arr[i]);
     update(&mut spec);
     arr[i] = parse_graphics_entry(&render_text_spec(&spec))?;
     Ok(())
@@ -1193,7 +1170,7 @@ struct TextSpec {
     text: String,
 }
 
-fn read_text_spec(expr: &Expression) -> Result<TextSpec, AstMutError> {
+fn read_text_spec(expr: &Expression) -> TextSpec {
     let mut spec = TextSpec {
         x1: 0.0,
         y1: 0.0,
@@ -1220,7 +1197,7 @@ fn read_text_spec(expr: &Expression) -> Result<TextSpec, AstMutError> {
             spec.text = s;
         }
     }
-    Ok(spec)
+    spec
 }
 
 fn render_text_spec(spec: &TextSpec) -> String {
@@ -1317,7 +1294,7 @@ fn parse_experiment_expression(
 /// **How the new `Expression` is built:** rumoca's parser only consumes
 /// whole files, so we wrap the rendered `Placement(...)` text in a
 /// stub class and extract `comp.annotation[0]`. Same trick as
-/// [`set_parameter`]'s `parse_value_fragment`. The placement payload
+/// `set_parameter`'s `parse_value_fragment`. The placement payload
 /// always parses cleanly because `pretty::placement_inner` produces
 /// canonical text from typed numeric fields — no user-supplied
 /// strings cross this boundary.
@@ -1628,26 +1605,11 @@ fn ends_with_newline(source: &str, byte_end: usize) -> bool {
 /// (e.g. modifications added by the canvas). Token-number / token-type
 /// stay zero — name resolution and the typechecker re-run after every
 /// mutation, so synthesised tokens get repopulated downstream.
-#[allow(dead_code)] // wired in batch 2 (set_placement) — kept here so the
-                   // construction policy lives next to the helpers that
-                   // need it.
 pub(crate) fn synth_token(text: impl Into<Arc<str>>) -> Token {
     Token {
         text: text.into(),
         location: Default::default(),
         token_number: 0,
         token_type: 0,
-    }
-}
-
-/// Construct a synthetic terminal expression (numeric literal, string,
-/// bool). Pairs with [`synth_token`] for the unusual case where parsing
-/// a fragment is overkill — e.g. fixed boolean modifications from a
-/// checkbox in the inspector.
-#[allow(dead_code)]
-pub(crate) fn synth_terminal(terminal_type: TerminalType, text: impl Into<Arc<str>>) -> Expression {
-    Expression::Terminal {
-        terminal_type,
-        token: synth_token(text),
     }
 }

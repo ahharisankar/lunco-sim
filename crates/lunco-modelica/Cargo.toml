@@ -50,8 +50,7 @@ lunco-canvas = { path = "../lunco-canvas" }
 lunco-twin = { path = "../lunco-twin", features = ["bevy"] }
 lunco-workspace = { path = "../lunco-workspace" }
 lunco-storage = { path = "../lunco-storage" }
-lunco-cache = { path = "../lunco-cache" }
-egui_plot = "0.34.1"
+egui_plot = { workspace = true }
 # Docs view (ModelViewMode::Docs): HTML → Markdown → egui render.
 # `egui_commonmark` pulls the right `egui` version transitively to
 # match bevy_egui 0.39 (→ egui 0.33). Syntax highlighting is enabled
@@ -108,7 +107,6 @@ include_dir = "0.7"
 # actually present in MSL Resources/Images are enabled to keep the
 # compile surface small.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-usvg = { version = "0.45", default-features = false, features = ["text"] }
 # LunCoSim/rumoca fork, `wasm-asset-loader` branch (off `main`).
 # `main` already carries:
 #   - the `instant::Instant` wasm32 fix that `web-fix` was carrying
@@ -135,25 +133,23 @@ rumoca-tool-fmt = { path = "../../../rumoca/crates/rumoca-tool-fmt" }
 # parse errors. Wraps `rumoca_tool_lint::lint(source, name, opts)`
 # which returns a `Vec<LintMessage>` we map to `LogEntry`s.
 rumoca-tool-lint = { path = "../../../rumoca/crates/rumoca-tool-lint" }
-anyhow = "1.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 regex = "1.10"
 # rumoca's AST uses `indexmap::IndexMap` for class collections; we
 # reference the type directly in `ast_extract` helpers so our
 # hot-path extractors can walk the cached AST without any clone.
-indexmap = "2.6"
+indexmap = { workspace = true }
 futures-lite = "2.3"
-crossbeam-channel = "0.5"
+crossbeam-channel = { workspace = true }
 lunco-api = { path = "../lunco-api", optional = true }
 log = "0.4"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { workspace = true }
 # Native file-picker dialogs for Open Folder + Save-As. Uses the
 # OS-native picker (GTK3 on Linux, COM on Windows, Cocoa on macOS)
 # via rfd's default feature set.
-rfd = "0.15"
-# Recursive directory walking for the Twin Explorer scan.
-walkdir = "2.5"
+rfd = { workspace = true }
 
 # Native-only: Tracy profiler client. tracy-client-sys requires a C++ compile
 # that doesn't work for wasm32-unknown-unknown (clang++ → TracyClient.cpp fails).
@@ -212,7 +208,6 @@ web-sys = { version = "0.3", features = [
 ] }
 js-sys = "0.3"
 console_error_panic_hook = "0.1"
-getrandom = { version = "0.3", features = ["wasm_js"] }
 # Pure-Rust zstd decoder for the MSL bundle. Smaller than the
 # `zstd` crate (which uses a C dep) and the encoder side already runs
 # on native (see `lunco-assets/src/bin/build_msl_assets.rs`).
@@ -220,3 +215,6 @@ ruzstd = "0.7"
 # Tar reader to walk the decompressed MSL bundle. The `tar` crate is
 # fs-free if you only call `Archive::entries()`; works on wasm.
 tar = "0.4"
+
+[lints]
+workspace = true

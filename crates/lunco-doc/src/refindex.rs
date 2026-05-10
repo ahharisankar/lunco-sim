@@ -44,6 +44,7 @@ pub struct RefIndex {
 }
 
 impl RefIndex {
+    /// Construct an empty reference index.
     pub fn new() -> Self {
         Self::default()
     }

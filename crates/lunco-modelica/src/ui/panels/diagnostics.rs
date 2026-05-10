@@ -156,7 +156,6 @@ fn hash_str(s: Option<&str>) -> u64 {
 /// the initial implementation and kept the log's internal VecDeque
 /// churning even when nothing was changing.
 pub fn refresh_diagnostics(
-    // B.3 phase 4: `WorkbenchState.compilation_error` retired; per-doc
     // error lives on `CompileStates`.
     workspace: Res<lunco_workbench::WorkspaceResource>,
     registry: Res<ModelicaDocumentRegistry>,
@@ -216,7 +215,7 @@ pub fn refresh_diagnostics(
     // read the Diagnostics log across multiple open tabs without
     // guessing. `display_name` falls back to the origin's filename
     // or "Untitled" when the doc has no explicit name yet.
-    let model_tag = Some(host.document().origin().display_name().to_string());
+    let model_tag = Some(host.document().origin().display_name());
 
     // 1. AST parse errors — caught by rumoca's recovering parser.
     for msg in host.document().ast().errors.iter() {
@@ -251,9 +250,9 @@ pub fn refresh_diagnostics(
     // and caches the computed entries so most frames just return
     // the cache without touching rumoca at all.
     let source_owned = host.document().source().to_string();
-    let display_name = host.document().origin().display_name().to_string();
+    let display_name = host.document().origin().display_name();
     let dispatch_key = (doc_id, ast_gen);
-    let tag_for_worker = model_tag.clone();
+    let tag_for_worker = model_tag;
     if !source_owned.is_empty() {
         // Scope the first lock so it is ALWAYS released before we
         // reach for `lint_result_slot()` below. Prior code only

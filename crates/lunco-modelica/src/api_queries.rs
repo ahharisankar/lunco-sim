@@ -28,7 +28,7 @@ use lunco_workbench::WorkspaceResource;
 use crate::ast_extract;
 use crate::models::bundled_models;
 // `DrilledInClassNames` reads migrated to
-// `crate::ui::panels::model_view::drilled_class_for_doc` (B.3).
+// `crate::ui::panels::model_view::drilled_class_for_doc`.
 use crate::ui::state::{CompileState, CompileStates, ModelicaDocumentRegistry};
 use crate::visual_diagram::{msl_component_library, MSLComponentDef};
 use lunco_doc::DocumentId;
@@ -434,7 +434,6 @@ impl ApiQueryProvider for CompileStatusProvider {
             .get_resource::<CompileStates>()
             .map(|cs| cs.state_of(doc_id))
             .unwrap_or(CompileState::Idle);
-        // B.3: derive drilled scope from `ModelTabs` directly instead
         // of going through the `DrilledInClassNames` cache. The
         // helper falls back to first-tab-for-doc when no
         // `TabRenderContext` is in scope (which is the case here —
@@ -474,7 +473,6 @@ impl ApiQueryProvider for CompileStatusProvider {
             && drilled_in.is_none()
             && candidates.len() >= 2;
 
-        // B.3 phase 4: per-doc error on CompileStates.
         let error_message = world
             .get_resource::<crate::ui::CompileStates>()
             .and_then(|cs| cs.error_for(doc_id).map(str::to_string));
@@ -596,7 +594,6 @@ impl ApiQueryProvider for DescribeModelProvider {
         // borrow the modelica registry — `DrilledInClassNames` is a
         // separate resource and we need both. Reading them in
         // sequence keeps the borrow checker simple.
-        // B.3: derive drilled scope from `ModelTabs` directly instead
         // of going through the `DrilledInClassNames` cache. The
         // helper falls back to first-tab-for-doc when no
         // `TabRenderContext` is in scope (which is the case here —
@@ -1161,11 +1158,6 @@ fn err_doc_not_found(doc_id: DocumentId) -> ApiResponse {
     )
 }
 
-#[allow(dead_code)] // available for providers that want to surface validation errors
-fn err_invalid_params(msg: impl Into<String>) -> ApiResponse {
-    ApiResponse::error(ApiErrorCode::DeserializationError, msg)
-}
-
 /// Stable string label for a [`DocumentKind`]. Matches the file-extension
 /// taxonomy in [`lunco_twin::file_kind`]. The `Other(s)` escape hatch
 /// passes the inner string through unchanged so future domain crates can
@@ -1182,7 +1174,7 @@ fn document_kind_label(kind: &DocumentKind) -> String {
     }
 }
 
-/// Project a [`DocumentOrigin`] onto a JSON object. Untitled docs carry
+/// Project a [`lunco_doc::DocumentOrigin`] onto a JSON object. Untitled docs carry
 /// only a name; File docs carry an absolute path + writability flag —
 /// matches the discriminator the Twin Browser already shows in the UI.
 fn origin_to_json(origin: &DocumentOrigin) -> serde_json::Value {

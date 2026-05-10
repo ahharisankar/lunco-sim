@@ -446,14 +446,14 @@ fn process_usd_sim_prims(
             if let Some(joint_path_str) = joint_targets.get(&key).cloned() {
                 let joint_sdf = SdfPath::new(&joint_path_str).ok();
                 setup_physical_wheel(
-                    &mut commands, entity, &prim_path, &existing_tf,
+                    &mut commands, entity, prim_path, &existing_tf,
                     maybe_mesh, maybe_mat, maybe_child_of,
                     radius, p_drive,
                     &mut reader, joint_sdf.as_ref(),
                 );
             } else {
                 setup_raycast_wheel(
-                    &mut commands, entity, &prim_path, &existing_tf,
+                    &mut commands, entity, prim_path, &existing_tf,
                     maybe_mesh, maybe_mat, maybe_child_of,
                     radius, index, rest_length, spring_k, damping_c,
                     p_drive, p_steer,
@@ -799,9 +799,9 @@ fn read_rel_target(reader: &TextReader, prim_path: &SdfPath, rel_name: &str) -> 
     if let Ok(val) = reader.get(&rel_sdf, "targetPaths") {
         if let Value::PathListOp(op) = &*val {
             if let Some(target) = op.explicit_items.first()
-                .or(op.prepended_items.first())
-                .or(op.appended_items.first())
-                .or(op.added_items.first())
+                .or_else(|| op.prepended_items.first())
+                .or_else(|| op.appended_items.first())
+                .or_else(|| op.added_items.first())
             {
                 return Some(target.as_str().to_string());
             }

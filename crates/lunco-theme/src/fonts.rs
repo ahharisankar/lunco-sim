@@ -42,7 +42,7 @@ pub struct FontsInstalled(pub bool);
 
 /// Idempotent installer. Native reads the font from the cache dir;
 /// wasm callers must hand in pre-fetched bytes via
-/// [`install_fallback_fonts_with_bytes`] (see [`spawn_wasm_font_fetch`]).
+/// [`install_fallback_fonts_with_bytes`] (see [`crate::spawn_wasm_font_fetch`]).
 /// Silently no-ops if the font file is missing — the app still runs,
 /// just without the expanded glyph coverage. A warning is logged so the
 /// missing-font condition is visible.
@@ -65,7 +65,7 @@ pub fn install_fallback_fonts(ctx: &egui::Context) {
 
 /// Wasm stub: there's no filesystem at runtime, so the sync entry
 /// point can't read the font. Callers go through
-/// [`spawn_wasm_font_fetch`] instead, which fetches over HTTP and then
+/// [`crate::spawn_wasm_font_fetch`] instead, which fetches over HTTP and then
 /// calls [`install_fallback_fonts_with_bytes`] once the bytes land.
 #[cfg(target_arch = "wasm32")]
 pub fn install_fallback_fonts(_ctx: &egui::Context) {}

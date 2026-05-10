@@ -428,7 +428,7 @@ impl ComponentBuilder {
             id,
             kind,
             label,
-            qualified_name: name.clone(),
+            qualified_name: name,
             ports: Vec::new(),
             meta: HashMap::new(),
         });
@@ -587,8 +587,8 @@ impl ComponentGraph {
         for wire in &wires {
             entity_names.entry(wire.source()).or_insert_with(|| format!("entity_{}", wire.source()));
             entity_names.entry(wire.target()).or_insert_with(|| format!("entity_{}", wire.target()));
-            entity_is_digital.entry(wire.source()).or_insert(wire.is_digital());
-            entity_is_digital.entry(wire.target()).or_insert(wire.is_digital());
+            entity_is_digital.entry(wire.source()).or_insert_with(|| wire.is_digital());
+            entity_is_digital.entry(wire.target()).or_insert_with(|| wire.is_digital());
         }
 
         // Second pass: create all nodes with both input and output ports

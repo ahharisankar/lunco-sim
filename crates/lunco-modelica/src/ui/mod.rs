@@ -241,7 +241,7 @@ fn close_drilled_tabs_on_class_removed(
     watermark.0.insert(doc, highest_gen);
 }
 
-// `mirror_open_model_on_doc_changed` deleted in B.3 phase 6 cleanup.
+// `mirror_open_model_on_doc_changed` deleted cleanup.
 
 fn sync_workspace_on_doc_opened(
     trigger: On<lunco_doc_bevy::DocumentOpened>,
@@ -420,7 +420,7 @@ fn scan_twin_on_added(
 /// any compile-state bookkeeping attached to that document.
 ///
 /// Behavior preserved from the entity-keyed era: when an entity is
-/// despawned, its backing [`ModelicaDocument`](crate::document::ModelicaDocument)
+/// despawned, its backing [`crate::document::ModelicaDocument`](crate::document::ModelicaDocument)
 /// is also removed. The long-term design lets documents outlive entities
 /// (edit-without-running, cosim re-spawn), so this will become opt-in
 /// once the tab/view layer can explicitly unload a document.
@@ -429,7 +429,6 @@ fn cleanup_removed_documents(
     registry: Option<ResMut<ModelicaDocumentRegistry>>,
     compile_states: Option<ResMut<CompileStates>>,
     canvas_state: Option<ResMut<panels::canvas_diagram::CanvasDiagramState>>,
-    // B.3 phase 3: `DrilledInClassNames` retired.
     signals: Option<ResMut<lunco_viz::SignalRegistry>>,
     viz_registry: Option<ResMut<lunco_viz::VisualizationRegistry>>,
 ) {
@@ -450,7 +449,6 @@ fn cleanup_removed_documents(
             if let Some(canvas) = canvas_state.as_mut() {
                 canvas.drop_doc(doc);
             }
-            // B.3 phase 3: `DrilledInClassNames` retired —
             // tab-removal handled by `ModelTabs::close` /
             // `close_all_for_doc` already.
         }
@@ -468,7 +466,7 @@ fn cleanup_removed_documents(
 /// The Modelica workbench's default workspace preset.
 ///
 /// Mirrors the "Analyze — Modelica deep dive" slot map from the workbench
-/// design doc ([`docs/architecture/11-workbench.md`] § 4).
+/// design doc (`docs/architecture/11-workbench.md` § 4).
 pub struct AnalyzePerspective;
 
 impl Perspective for AnalyzePerspective {
@@ -716,7 +714,6 @@ impl Plugin for ModelicaUiPlugin {
             .init_resource::<panels::canvas_diagram::CanvasDiagramState>()
             .init_resource::<panels::canvas_diagram::PaletteSettings>()
             .init_resource::<panels::canvas_diagram::DiagramProjectionLimits>()
-            // B.3 phase 3: `DrilledInClassNames` retired.
             .init_resource::<panels::canvas_diagram::DrillInLoads>()
             .init_resource::<panels::canvas_diagram::CanvasSnapSettings>()
             .init_resource::<panels::canvas_diagram::DuplicateLoads>()
@@ -965,7 +962,7 @@ fn install_image_loaders_once(
     // Custom loader for `modelica://Package/Resources/…` URIs used
     // throughout MSL Documentation blocks.
     let loader = std::sync::Arc::new(image_loader::ModelicaImageLoader::new());
-    ctx.add_bytes_loader(loader.clone());
+    ctx.add_bytes_loader(loader);
     bevy::log::info!(
         "[ModelicaImageLoader] installed egui_extras loaders + modelica:// loader"
     );

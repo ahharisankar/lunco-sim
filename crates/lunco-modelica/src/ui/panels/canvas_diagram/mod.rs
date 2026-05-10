@@ -150,6 +150,13 @@ fn build_registry() -> VisualRegistry {
             d.kind,
             crate::visual_diagram::PortKind::Input | crate::visual_diagram::PortKind::Output,
         ) || causal_by_name;
+        // Materialise the per-frame HashMap lookup keys here, once per
+        // projection — avoids two `format!()` allocations per edge per
+        // frame in `OrthogonalEdgeVisual::draw`.
+        let flow_lookup_keys = d.flow_vars.first().map(|fv| (
+            format!("{}.{}", d.source_path, fv.name),
+            format!("{}.{}", d.target_path, fv.name),
+        ));
         OrthogonalEdgeVisual {
             color: d
                 .icon_color
@@ -160,9 +167,9 @@ fn build_registry() -> VisualRegistry {
             is_causal,
             source_path: d.source_path.clone(),
             target_path: d.target_path.clone(),
-            kind: d.kind,
             flow_vars: d.flow_vars.clone(),
             connector_leaf: leaf,
+            flow_lookup_keys,
         }
     });
     reg
@@ -186,7 +193,7 @@ pub(super) const ICON_W: f32 = 20.0;
 ///
 /// Conventions:
 ///
-/// - [`ModelicaPos`] — Modelica `.mo` source convention. +Y up.
+/// - [`crate::ui::panels::canvas_diagram::ModelicaPos`] — Modelica `.mo` source convention. +Y up.
 ///   Ranges typically `-100..100` per axis. This is the authored
 ///   coordinate that lands in `annotation(Placement(...))`.
 ///
@@ -250,13 +257,13 @@ pub mod coords {
 // ─── Panel state + Bevy resource ───────────────────────────────────
 
 /// Per-document canvas state. Each open model tab owns one of
-/// these, keyed by [`DocumentId`] on [`CanvasDiagramState`]. Holds
+/// these, keyed by [`lunco_doc::DocumentId`] on [`CanvasDiagramState`]. Holds
 /// the transform + selection + in-flight projection task for that
 /// specific document so switching tabs doesn't leak viewport,
 /// selection, or a stale projection into a neighbour.
 /// Shared handle to the target class's `Diagram(graphics={...})`
 /// annotation — painted as canvas background by
-/// [`DiagramDecorationLayer`]. Projector updates it each time the
+/// `DiagramDecorationLayer`. Projector updates it each time the
 /// drilled-in class changes.
 pub type BackgroundDiagramHandle = std::sync::Arc<
     std::sync::RwLock<
@@ -271,7 +278,7 @@ pub struct CanvasDocState {
     pub canvas: Canvas,
     pub last_seen_gen: u64,
     /// Generation that the *canvas scene* already reflects, ahead of
-    /// or equal to the AST projection. Bumped by [`apply_ops`] when a
+    /// or equal to the AST projection. Bumped by `apply_ops` when a
     /// canvas-originated edit has already been applied locally
     /// (drag → SetPlacement leaves the scene moved; menu Add → a
     /// synthesised node is inserted into the scene). The project gate
@@ -394,7 +401,7 @@ impl Default for CanvasDocState {
 /// so the panel's `render` can pull it out via `world.resource_mut`.
 ///
 /// State is sharded per-document — each open model tab has its own
-/// [`CanvasDocState`] entry so viewport/selection/projection/context
+/// [`crate::ui::panels::canvas_diagram::CanvasDocState`] entry so viewport/selection/projection/context
 /// menu never bleed between tabs. `fallback` is used only when no
 /// document is bound (startup, every tab closed).
 /// Per-tab key for [`CanvasDiagramState`]. Each tab owns its own
@@ -417,7 +424,7 @@ impl CanvasDiagramState {
     /// `doc`, or the shared fallback when `doc` is `None` /
     /// no tab has been opened yet. Non-render callers (event
     /// observers, ops layer) still use this; the canvas render path
-    /// keys explicitly by [`get_for_tab`].
+    /// keys explicitly by `get_for_tab`.
     pub fn get(&self, doc: Option<lunco_doc::DocumentId>) -> &CanvasDocState {
         match doc.and_then(|d| self.first_tab_for(d)) {
             Some(tab_id) => self.per_tab.get(&tab_id).unwrap_or(&self.fallback),
@@ -428,7 +435,7 @@ impl CanvasDiagramState {
     /// Legacy mutable lookup; routes to the first tab viewing
     /// `doc`. **Does not allocate** on a `None`/missing-doc path —
     /// returns the fallback. Callers that *need* an entry should
-    /// pass an explicit `tab_id` via [`get_mut_for_tab`].
+    /// pass an explicit `tab_id` via `get_mut_for_tab`.
     pub fn get_mut(
         &mut self,
         doc: Option<lunco_doc::DocumentId>,
@@ -488,7 +495,7 @@ impl CanvasDiagramState {
         }
     }
 
-    /// Mutable counterpart of [`get_for_render`]. When both
+    /// Mutable counterpart of `get_for_render`. When both
     /// `render_tab_id` and `doc` are populated, allocates a per-tab
     /// entry; otherwise routes through the legacy first-tab path.
     pub fn get_mut_for_render(
@@ -503,7 +510,7 @@ impl CanvasDiagramState {
     }
 
     // `get_for(doc, drilled)` / `get_mut_for(doc, drilled)` migration
-    // shims deleted in B.4. The `drilled` argument was always ignored
+    // shims deleted. The `drilled` argument was always ignored
     // (drilled scopes are independent tabs since the Phase-1 tab
     // refactor) and no callers remained outside test code. Use
     // `get_for_render` / `get_mut_for_render` for tab-aware lookups
@@ -565,7 +572,7 @@ impl CanvasDiagramState {
         self.first_tab_for(doc).is_some()
     }
 
-    // `has_entry_for(doc, drilled)` migration shim deleted in B.4.
+    // `has_entry_for(doc, drilled)` migration shim deleted.
     // No callers; use `has_entry(doc)` directly.
 
     /// Has *this specific tab* ever been projected? Renders the
@@ -738,7 +745,6 @@ pub(super) fn render_target(
     let doc = world
         .resource::<lunco_workbench::WorkspaceResource>()
         .active_document?;
-    // B.3: derive from `ModelTabs`.
     let drilled = crate::ui::panels::model_view::drilled_class_for_doc(world, doc);
     Some((doc, drilled))
 }

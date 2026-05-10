@@ -19,7 +19,7 @@ use lunco_scripting::ScriptRegistry;
 use lunco_scripting::doc::ScriptedModel;
 use lunco_workbench::{Panel, PanelId, PanelSlot};
 
-pub struct CodePanel;
+pub(crate) struct CodePanel;
 
 impl Panel for CodePanel {
     fn id(&self) -> PanelId { PanelId("rover_code") }

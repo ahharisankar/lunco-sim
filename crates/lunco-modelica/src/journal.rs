@@ -2,12 +2,12 @@
 //!
 //! `lunco-twin-journal` is generic and stores op payloads as
 //! `serde_json::Value`. This module produces structured *summaries* of
-//! [`ModelicaOp`]s and records them in the journal alongside their
+//! [`crate::document::ModelicaOp`]s and records them in the journal alongside their
 //! inverses.
 //!
 //! ## Why summaries, not full op serialization
 //!
-//! [`ModelicaOp`] carries domain-specific structures (`ComponentDecl`,
+//! [`crate::document::ModelicaOp`] carries domain-specific structures (`ComponentDecl`,
 //! `Placement`, `ConnectEquation`, `LunCoPlotNodeSpec`, …) that are not
 //! `Serialize` today. Deriving `Serialize` end-to-end is a follow-up
 //! when the full-replay / CRDT path matures. For the foundation the
@@ -25,13 +25,13 @@
 //!
 //! Author defaults to [`AuthorTag::local_user`]. Future entry points
 //! (HTTP API observers, agent scripts) construct their own
-//! [`AuthorTag::for_tool`] before calling [`record_op_summary`].
+//! [`AuthorTag::for_tool`] before calling `record_op_summary`.
 
 use serde_json::{json, Value};
 
 use crate::document::ModelicaOp;
 
-/// Build a structured summary of a [`ModelicaOp`] for the journal.
+/// Build a structured summary of a [`crate::document::ModelicaOp`] for the journal.
 ///
 /// Each variant produces a JSON object with a `kind` discriminant and
 /// the key fields a UI / audit layer cares about — class name, instance

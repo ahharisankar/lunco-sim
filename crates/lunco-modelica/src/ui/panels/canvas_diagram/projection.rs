@@ -573,7 +573,7 @@ pub(super) fn projection_relevant_source_hash(source: &str) -> u64 {
 /// Running projection task + the generation that spawned it, so the
 /// poll loop can tell whether we've moved on since and should drop a
 /// stale result. The owning doc is implicit: each task lives on that
-/// doc's [`CanvasDocState`].
+/// doc's [`crate::ui::panels::canvas_diagram::CanvasDocState`].
 ///
 /// # Cancellation
 ///

@@ -484,7 +484,7 @@ impl Journal {
             parent_streams: Vec::new(),
             created_at_ms: now_ms(),
             created_by: AuthorTag {
-                user: local_author.0.clone(),
+                user: local_author.0,
                 tool: "system".to_string(),
             },
         };
@@ -563,7 +563,7 @@ impl Journal {
     ///
     /// Used by domains that haven't yet derived `Serialize` on their op
     /// type — they build a structured summary by hand and record it.
-    /// Equivalent to [`record_op`] minus the typed serialize step.
+    /// Equivalent to [`crate::Journal::record_op`] minus the typed serialize step.
     pub fn record_op_value(
         &mut self,
         author: AuthorTag,
@@ -671,7 +671,7 @@ impl Journal {
         self.branches
             .entry("main".to_string())
             .and_modify(|b| b.head = head.clone())
-            .or_insert(Branch {
+            .or_insert_with(|| Branch {
                 name: "main".to_string(),
                 stream: StreamId::main(),
                 head,
@@ -836,7 +836,7 @@ pub enum UndoScope {
 /// `record_local(id)` is called whenever this author appends an op-entry.
 /// `take_undo(scope, journal)` pops the most recent matching id; the
 /// workbench then dispatches the *inverse* op as a fresh op (which itself
-/// becomes another journal entry, recorded back via [`record_redo`] so
+/// becomes another journal entry, recorded back via [`crate::Journal::record_redo`] so
 /// the next undo reverses it again).
 pub struct UndoManager {
     pub author: AuthorTag,

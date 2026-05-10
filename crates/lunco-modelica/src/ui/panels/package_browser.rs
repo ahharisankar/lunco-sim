@@ -94,7 +94,7 @@ pub struct FileLoadResult {
 }
 
 /// Tracks one in-memory ("scratch") model the user has created this
-/// session. The document itself lives in [`ModelicaDocumentRegistry`];
+/// session. The document itself lives in [`crate::ui::state::ModelicaDocumentRegistry`];
 /// this is the Package Browser's view of it (display name + id).
 #[derive(Debug, Clone)]
 pub struct InMemoryEntry {
@@ -106,7 +106,6 @@ pub struct InMemoryEntry {
     /// Kept for direct lookups (close-entry, duplicate, etc.); the
     /// re-open path currently resolves via `find_by_path(id)` and
     /// doesn't strictly need this field.
-    #[allow(dead_code)]
     pub doc: DocumentId,
 }
 
@@ -206,7 +205,7 @@ impl PackageTreeCache {
     /// load. Used by R1's loading-overlay reader to derive the
     /// "is anything still loading?" boolean per doc, without going
     /// through the retired `WorkbenchState.is_loading` singleton
-    /// (B.3 phase 5).
+    ///.
     pub fn is_loading(&self, doc: lunco_doc::DocumentId) -> bool {
         self.loading_ids.values().any(|d| *d == doc)
     }
@@ -975,7 +974,6 @@ pub fn handle_package_loading_tasks(
         // tab's `drilled_class` so `sync_active_tab_to_doc` keeps
         // republishing this scope on every render and so the tab
         // title reflects the class name (not the package file).
-        // B.3 phase 3: write to the tab directly; legacy
         // `DrilledInClassNames` cache mirror removed.
         let queued_qualified = pending_drill_ins.take(&result.id);
         if let Some(qualified) = queued_qualified {
@@ -985,7 +983,6 @@ pub fn handle_package_loading_tasks(
         }
 
         workbench.diagram_dirty = true;
-        // B.3 phase 5: `is_loading` retired; per-doc derivation
         // comes from `PackageTreeCache::is_loading(doc)`,
         // `DrillInLoads::is_loading(doc)`, and
         // `DuplicateLoads::is_loading(doc)`.
@@ -1019,7 +1016,6 @@ impl Panel for PackageBrowserPanel {
         });
 
 
-        // B.3 phase 6: derive active path from registry display_name.
         let active_path_str = world
             .get_resource::<lunco_workbench::WorkspaceResource>()
             .and_then(|ws| ws.active_document)
@@ -1317,7 +1313,7 @@ enum PackageAction {
     /// click opens pinned (a permanent tab that won't be replaced
     /// by the next browser click).
     Open(String, String, ModelLibrary, bool),
-    // `Instantiate` variant deleted in B.4. Drag-and-drop is the
+    // `Instantiate` variant deleted. Drag-and-drop is the
     // canonical instantiate gesture; if a future right-click "Add to
     // canvas" path needs it back, restore it from history.
     /// User started dragging a class row — stash a
@@ -1590,7 +1586,7 @@ fn render_node(
                     ModelLibrary::User => "📁 User model — writable",
                     ModelLibrary::InMemory => "💾 In-memory — writable",
                 };
-                let qualified = msl_path.clone();
+                let qualified = msl_path;
                 let display_name = name.clone();
                 resp.on_hover_ui(move |ui| {
                     ui.strong(display_name);
@@ -1636,7 +1632,6 @@ fn commit_current_model_edits(world: &mut World) {
         Some(id) => id,
         None => return,
     };
-    // B.3 phase 6: derive from registry.
     let (is_read_only, model_name) = {
         let registry = world.resource::<ModelicaDocumentRegistry>();
         let Some(host) = registry.host(doc_id) else { return };
@@ -1644,7 +1639,7 @@ fn commit_current_model_edits(world: &mut World) {
         let detected = document
             .strict_ast()
             .and_then(|ast| crate::ast_extract::extract_model_name_from_ast(&ast))
-            .unwrap_or_else(|| document.origin().display_name().to_string());
+            .unwrap_or_else(|| document.origin().display_name());
         (document.is_read_only(), detected)
     };
     if is_read_only {
@@ -1672,7 +1667,6 @@ fn commit_current_model_edits(world: &mut World) {
     // wasm — the "switching back to AnnotatedRocketStage stalls"
     // symptom. `EditorBufferState.bound_doc` carries the typed
     // identity used here.
-    // B.3 phase 6: use typed `bound_doc` identity instead of the
     // legacy origin-prefixed `model_path` string comparison.
     let (buffer_bound, buffer_text) = world
         .get_resource::<crate::ui::panels::code_editor::EditorBufferState>()
@@ -1803,7 +1797,7 @@ pub fn render_twin_node(
             if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 let new_name = rename.buffer.trim().to_string();
                 if !new_name.is_empty() && new_name != node.name {
-                    let parent = node.path.parent().unwrap_or(std::path::Path::new(""));
+                    let parent = node.path.parent().unwrap_or_else(|| std::path::Path::new(""));
                     let new_path = parent.join(&new_name);
                     action.commit_rename = Some((node.path.clone(), new_path));
                 } else {
@@ -2254,7 +2248,6 @@ pub(crate) fn open_model(
     // commit so the user's changes survive a round-trip.
     commit_current_model_edits(world);
 
-    // B.3 phase 5: per-doc loading is now derived from
     // `PackageTreeCache::loading_ids` (the entry inserted further
     // below already encodes "this doc is loading").
 
@@ -2433,7 +2426,6 @@ pub(crate) fn open_model(
         tab_id
     };
     if let Some(doc) = already_open {
-        // B.3 phase 3: drilled scope flows through `acquire_tab`'s
         // call to `ensure_for(doc, target_class)`; the tab table
         // is now authoritative.
         let tab_id = acquire_tab(world, doc);
@@ -2441,7 +2433,6 @@ pub(crate) fn open_model(
             kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
             instance: tab_id,
         });
-        // B.3 phase 5: `state.is_loading` retired; per-doc loading
         // derives from `PackageTreeCache::is_loading(doc)` etc.
         return;
     }
@@ -2455,7 +2446,6 @@ pub(crate) fn open_model(
             kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
             instance: tab_id,
         });
-        // B.3 phase 5: `state.is_loading` retired; per-doc loading
         // derives from `PackageTreeCache::is_loading(doc)` etc.
         return;
     }
@@ -2485,11 +2475,11 @@ pub(crate) fn open_model(
         writable,
     };
     let pool = AsyncComputeTaskPool::get();
-    let id_clone = id.clone();
-    let dedup_key_clone = dedup_key.clone();
+    let id_clone = id;
+    let dedup_key_clone = dedup_key;
     let name_clone = name.clone();
-    let name_result = name.clone();
-    let lib_clone = library.clone();
+    let name_result = name;
+    let lib_clone = library;
 
     let task = pool.spawn(async move {
         let source_text = if id_clone.starts_with("bundled://") {
@@ -2687,7 +2677,7 @@ pub(crate) fn open_model(
 // `ui::commands` picks the next free `UntitledN` name, allocates the
 // doc, and opens a tab. Rename is deferred to Save-As.
 
-/// Render one named root from [`PackageTreeCache::roots`] inline at
+/// Render one named root from [`crate::ui::panels::package_browser::PackageTreeCache::roots`] inline at
 /// the caller's egui cursor. Used by the Twin panel's per-domain
 /// `BrowserSection`s (today: `ModelicaSection`'s MSL and Bundled
 /// sub-groups) to surface the package tree without duplicating the
@@ -2703,7 +2693,6 @@ pub(crate) fn open_model(
 /// `"bundled_root"` for bundled examples. Unknown ids are silently
 /// no-op (caller's collapsing header just shows blank).
 pub(crate) fn render_root_subtree(world: &mut World, ui: &mut egui::Ui, root_id: &str) {
-    // B.3 phase 6: derive active path from registry display_name.
     let active_path = world
         .get_resource::<lunco_workbench::WorkspaceResource>()
         .and_then(|ws| ws.active_document)
@@ -2714,7 +2703,6 @@ pub(crate) fn render_root_subtree(world: &mut World, ui: &mut egui::Ui, root_id:
     // package, `AnnotatedRocketStage` when the package itself is
     // selected. Used for tree-row highlighting so the inner-class
     // bundled rows light up alongside their containing file.
-    // B.3: derive from `ModelTabs`.
     let active_drill: Option<String> = world
         .get_resource::<lunco_workbench::WorkspaceResource>()
         .and_then(|ws| ws.active_document)

@@ -29,7 +29,7 @@ use crate::document::{ModelicaDocument, ModelicaOp};
 // Model File Tracking
 // ---------------------------------------------------------------------------
 
-// `OpenModel` retired in B.3 phase 6 (2026-05-08). The cache held
+// `OpenModel` retired (2026-05-08). The cache held
 // fields all derivable from the document host:
 //   - `source` / `line_starts` → `host.document().source()` + Index.
 //   - `display_name` → `host.document().origin().display_name()`.
@@ -111,21 +111,18 @@ pub struct WorkbenchState {
     /// **Selection bridge**: which `ModelicaModel` entity panels are viewing.
     /// Set by any context (library, 3D viewport, colony tree).
     pub selected_entity: Option<Entity>,
-    // B.3 phase 4: `compilation_error` field retired. Per-doc
     // storage on `CompileStates.errors[doc]`; readers go through
     // `compile_states.error_for(doc)`.
     /// Render-side **derived projection** of the active document.
     ///
     /// Identity (which doc is active) lives on
-    /// [`lunco_workbench::WorkspaceResource::active_document`]. This
+    /// [`lunco_workbench::WorkspaceResource`]. This
     /// field is a pre-flattened view of the registry's
     /// `host(active).document()` plus a few open-time-only fields
-    // B.3 phase 6 (2026-05-08): `open_model` field retired.
     // All readers migrated to derive from
     // `ModelicaDocumentRegistry::host(doc).document()` directly.
     /// Flag to signal the diagram panel should rebuild from registry source.
     pub diagram_dirty: bool,
-    // B.3 phase 5: `is_loading` retired. Per-doc loading derives from
     // `PackageTreeCache::is_loading(doc)`,
     // `DrillInLoads::is_loading(doc)`, and
     // `DuplicateLoads::is_loading(doc)`.
@@ -147,11 +144,11 @@ pub struct WorkbenchState {
 // CompileState — per-document compile lifecycle
 // ---------------------------------------------------------------------------
 
-/// Current compile-lifecycle state for a single [`ModelicaDocument`].
+/// Current compile-lifecycle state for a single [`crate::document::ModelicaDocument`].
 ///
-/// Separate from [`ModelicaModel::is_stepping`] (a per-entity simulation
+/// Separate from [`crate::ModelicaModel::is_stepping`] (a per-entity simulation
 /// tick guard) and from error *content* (which lives in
-/// [`WorkbenchState::compilation_error`] today). This enum is the
+/// [`crate::ui::state::WorkbenchState`] today). This enum is the
 /// answer to "is a compile in flight for this document?" — UI uses it
 /// to disable the Compile button while the worker is busy and to show
 /// an at-a-glance status chip.
@@ -291,7 +288,7 @@ pub fn display_name_for(world: &bevy::prelude::World, doc: DocumentId) -> Option
 world
         .resource::<ModelicaDocumentRegistry>()
         .host(doc)
-        .map(|h| h.document().origin().display_name().to_string())
+        .map(|h| h.document().origin().display_name())
 }
 
 // ---------------------------------------------------------------------------
@@ -299,7 +296,7 @@ world
 // ---------------------------------------------------------------------------
 
 /// Registry of [`DocumentHost<ModelicaDocument>`] instances, keyed by
-/// [`DocumentId`].
+/// [`lunco_doc::DocumentId`].
 ///
 /// **The single source of truth for Modelica source text.** Every spawn
 /// path (CodeEditor Compile, Diagram auto-compile, `balloon_setup`, the
@@ -347,7 +344,7 @@ pub struct ModelicaDocumentRegistry {
 }
 
 impl ModelicaDocumentRegistry {
-    /// Allocate a fresh Untitled [`DocumentId`] + [`DocumentHost`]
+    /// Allocate a fresh Untitled [`lunco_doc::DocumentId`] + [`DocumentHost`]
     /// holding `source`. Display name is `Untitled-<id>`. Not linked
     /// to any entity.
     pub fn allocate(&mut self, source: String) -> DocumentId {
@@ -361,7 +358,7 @@ impl ModelicaDocumentRegistry {
         id
     }
 
-    /// Allocate a fresh [`DocumentId`] + [`DocumentHost`] with an
+    /// Allocate a fresh [`lunco_doc::DocumentId`] + [`DocumentHost`] with an
     /// explicit origin. Use this when opening from disk or bundled
     /// assets so `SaveDocument` + read-only badges work.
     pub fn allocate_with_origin(
@@ -381,7 +378,7 @@ impl ModelicaDocumentRegistry {
         id
     }
 
-    /// Allocate a fresh [`DocumentId`] WITHOUT building the host.
+    /// Allocate a fresh [`lunco_doc::DocumentId`] WITHOUT building the host.
     /// Pairs with [`Self::install_prebuilt`]: caller uses the id
     /// to build a `ModelicaDocument` off-thread (the parse can take
     /// seconds on large MSL package files), then installs the
@@ -415,7 +412,7 @@ impl ModelicaDocumentRegistry {
     }
 
     /// Convenience: [`allocate`](Self::allocate) + [`link`](Self::link).
-    /// Returns the new [`DocumentId`] — the caller must also write it into
+    /// Returns the new [`lunco_doc::DocumentId`] — the caller must also write it into
     /// `ModelicaModel::document` so downstream systems can resolve it
     /// without touching the registry.
     pub fn open_for(&mut self, entity: Entity, source: String) -> DocumentId {
@@ -505,7 +502,7 @@ impl ModelicaDocumentRegistry {
     /// document changed (different source), `false` on no-op (identical
     /// source) or unknown id.
     ///
-    /// Queues a [`DocumentChanged`] notification when the source actually
+    /// Queues a [`lunco_doc_bevy::DocumentChanged`] notification when the source actually
     /// changes; [`drain_pending_changes`](Self::drain_pending_changes)
     /// emits the observer trigger on the next system run.
     pub fn checkpoint_source(&mut self, doc: DocumentId, source: String) -> bool {
@@ -586,7 +583,7 @@ impl ModelicaDocumentRegistry {
         self.hosts.iter().map(|(id, host)| (*id, host))
     }
 
-    /// Which [`DocumentId`] does `entity` reference, if any.
+    /// Which [`lunco_doc::DocumentId`] does `entity` reference, if any.
     pub fn document_of(&self, entity: Entity) -> Option<DocumentId> {
         self.by_entity.get(&entity).copied()
     }
@@ -645,7 +642,7 @@ impl Default for WorkbenchState {
     }
 }
 
-// `mirror_active_open_model` deleted in B.3 phase 6 (2026-05-08).
+// `mirror_active_open_model` deleted (2026-05-08).
 // The `WorkbenchState::open_model` cache it kept fresh is gone;
 // readers derive source/metadata from
 // `ModelicaDocumentRegistry::host(doc).document()` directly.

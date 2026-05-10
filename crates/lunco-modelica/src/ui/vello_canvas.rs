@@ -11,7 +11,7 @@
 //! This is the Phase-1 milestone from
 //! `docs/architecture/canvas-vello.md` (TBD). The egui-based custom
 //! draw path stays in place during the migration so the workbench
-//! never breaks; we'll retire it in Phase 3.
+//! never breaks; we'll retire it.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
@@ -51,7 +51,6 @@ struct TabTarget {
     scene: Entity,
     /// Last allocated texture size. Future resize pass compares
     /// against the panel's current rect.
-    #[allow(dead_code)]
     size: (u32, u32),
     /// Per-frame buffer: text labels the diagram wants drawn this
     /// frame. The drawing system fills this; the sync system

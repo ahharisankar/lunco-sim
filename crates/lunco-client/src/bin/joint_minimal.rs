@@ -180,7 +180,7 @@ fn setup(
                     DistanceJoint::new(anchor, slave)
                         .with_local_anchor1(DVec3::ZERO)
                         .with_local_anchor2(DVec3::ZERO)
-                        .with_rest_length(2.0),
+                        .with_limits(2.0, 2.0),
                     Name::new("Joint_Distance"),
                 ));
             }

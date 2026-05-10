@@ -1,6 +1,6 @@
 //! Per-document UI projection.
 //!
-//! [`ModelicaIndex`] is what panels read. Built once per parse-success from
+//! [`crate::index::ModelicaIndex`] is what panels read. Built once per parse-success from
 //! the rumoca AST, then *patched* directly by typed ops for sub-frame
 //! interactivity. UI never touches the AST and never runs regex against
 //! source text.
@@ -145,7 +145,7 @@ pub struct ClassEntry {
     pub documentation: (Option<String>, Option<String>),
     /// Count of declared equations in this class, excluding `Empty`
     /// placeholders and `connect(...)` (which is tracked separately
-    /// via [`Self::connections_in_class`]). Includes algebraic, For,
+    /// via `Self::connections_in_class`). Includes algebraic, For,
     /// When, If, FunctionCall, and Assert equations — anything the
     /// empty-diagram overlay should call out as "this class has
     /// equation content beyond just connections".

@@ -11,7 +11,7 @@
 //!   spawning + worker registration + welcome-tab swap-out for free.
 //! - **`OpenModelicaClass`** — same as `OpenFile`, *plus* records a
 //!   "when this file finishes loading, push this qualified path into
-//!   `DrilledInClassNames`" entry on [`PendingDrillIns`]. The package
+//!   `DrilledInClassNames`" entry on `PendingDrillIns`. The package
 //!   browser's load-task handler reads it after allocating the
 //!   document and applies it before opening the model-view tab, so
 //!   the canvas projector lands on the right class on first paint.
@@ -20,14 +20,13 @@ use bevy::prelude::*;
 use lunco_workbench::{BrowserAction, BrowserActions};
 use std::collections::HashMap;
 
-// B.3 phase 3: `DrilledInClassNames` retired — drilled scope lives
 // on `ModelTabState.drilled_class`.
 use crate::ui::state::ModelLibrary;
 
 /// `file_id (absolute path string) → qualified class path` queued by
 /// [`drain_browser_actions`]. The package-browser's load-task handler
 /// drains the matching entry the moment a Document is allocated and
-/// pushes it into [`DrilledInClassNames`], so the canvas projector
+/// pushes it into `DrilledInClassNames`, so the canvas projector
 /// drills into the right class without any second click.
 ///
 /// Entries linger if the load fails (the queue would silently grow);

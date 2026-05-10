@@ -146,6 +146,55 @@ egui_colors = "0.4.0"
 catppuccin-egui = "5.2.0"
 egui-phosphor = "0.7.1"
 
+# Centralised here so version drift across crates is visible in one
+# place. Each crate opts in via `dep = { workspace = true }`.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+toml = "0.8"
+uuid = { version = "1", features = ["v4", "serde"] }
+indexmap = { version = "2.6", features = ["serde"] }
+smol_str = { version = "0.2", features = ["serde"] }
+crossbeam-channel = "0.5"
+egui_plot = "0.34.1"
+rfd = "0.15"
+tempfile = "3.10"
+thiserror = "2.0"
+
+# ── Lints (inherited via `[lints] workspace = true` per crate) ───────
+# Encodes policy decisions:
+# - Default `unused`/`dead_code` lints stay at warn (compiler default)
+#   — we keep the workspace clean of them.
+# - `unreachable_pub` and `missing_docs` raised to warn — both currently
+#   at zero across the workspace; surfaces drift early.
+# - Selected clippy lints we've already cleaned to zero are pinned at
+#   warn so future code re-introducing them gets flagged.
+# - `needless_pass_by_value` is silenced because Bevy SystemParams
+#   (Res, Query, Commands, On, …) are framework-mandated by-value and
+#   trip the lint en masse with no actionable signal. Audit on demand
+#   with a grep filter; see prior session notes.
+[workspace.lints.rust]
+unreachable_pub = "warn"
+# `missing_docs` stays at the compiler default (allow) workspace-wide;
+# crates that want strict doc coverage opt in with `#![warn(missing_docs)]`
+# in their `lib.rs` (currently: lunco-doc, lunco-doc-bevy, lunco-workbench,
+# lunco-workspace, lunco-storage, lunco-twin). Forcing it on every crate
+# would surface 1500+ warnings on the long-tail crates without value.
+missing_docs = "allow"
+
+[workspace.lints.clippy]
+redundant_clone = "warn"
+clone_on_copy = "warn"
+or_fun_call = "warn"
+needless_collect = "warn"
+unnecessary_wraps = "warn"
+needless_borrow = "warn"
+manual_map = "warn"
+manual_unwrap_or = "warn"
+useless_conversion = "warn"
+redundant_closure = "warn"
+needless_pass_by_value = "allow"
+
 # ── Dev profile ──────────────────────────────────────────────────────
 # Bevy/avian/parry are unusably slow at opt-level 0. opt-level=1 on our
 # own crates + opt-level=3 on deps recovers most of release-mode runtime

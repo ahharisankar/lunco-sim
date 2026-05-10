@@ -30,7 +30,7 @@ use super::{
 };
 
 // Per-event sibling-scene replay (`apply_event_to_sibling_scene`)
-// removed in A.5. Sibling tabs viewing the same `(doc,
+// removed. Sibling tabs viewing the same `(doc,
 // drilled_class)` now re-derive their scene from the gen-bumped AST
 // on the next render, via the projection cursor in `render_canvas`.
 // This is correct-by-construction: every mutation flows through
@@ -69,7 +69,7 @@ impl Panel for CanvasDiagramPanel {
         // Each tab gets its own viewport / selection / scene —
         // splits of the same model can pan, zoom, and select
         // independently.
-        // `render_drilled` snapshot deleted in B.4 — `render_tab_id`
+        // `render_drilled` snapshot deleted — `render_tab_id`
         // alone scopes the lookup correctly. `ModelTabState` carries
         // the drilled class per-tab; nothing in this render path
         // needs the drilled name as a separate variable.
@@ -96,7 +96,6 @@ impl Panel for CanvasDiagramPanel {
                 self.render_canvas(ui, world);
                 return;
             };
-            // B.3 phase 6: derive presence from registry+workspace.
             if world
                 .resource::<lunco_workbench::WorkspaceResource>()
                 .active_document
@@ -242,7 +241,7 @@ impl Panel for CanvasDiagramPanel {
                 // `SyntaxCache` only when strict parse failed — that
                 // way partial-parse states still draw something
                 // instead of going blank.
-                // Engine is the canonical AST source after Phase 4.
+                // Engine is the canonical AST source.
                 // If the engine hasn't parsed yet (first paint after
                 // doc install), strict_ast() returns None — paint
                 // the loading overlay and retry next tick. Mirrors
@@ -475,7 +474,7 @@ impl Panel for CanvasDiagramPanel {
                     ));
                     docstate.projection_task = Some(ProjectionTask {
                         gen_at_spawn: gen,
-                        target_at_spawn: target_class_snapshot.clone(),
+                        target_at_spawn: target_class_snapshot,
                         spawned_at,
                         deadline,
                         cancel,
@@ -907,7 +906,7 @@ impl CanvasDiagramPanel {
     fn render_canvas(&self, ui: &mut egui::Ui, world: &mut World) {
         // Same per-render-call drill scope + tab id snapshot as the
         // parent `render` method.
-        // `render_drilled` snapshot deleted in B.4 — `render_tab_id`
+        // `render_drilled` snapshot deleted — `render_tab_id`
         // alone scopes the lookup correctly. `ModelTabState` carries
         // the drilled class per-tab; nothing in this render path
         // needs the drilled name as a separate variable.
@@ -946,7 +945,6 @@ impl CanvasDiagramPanel {
         // effect here. We gate the whole right-click menu on this
         // so readonly tabs don't even offer "Add component" etc.;
         // the canvas itself stays fully navigable (pan/zoom/select).
-        // B.3 phase 6: derive from registry.
         let tab_read_only = active_doc
             .map(|d| crate::ui::state::read_only_for(world, d))
             .unwrap_or(false);
@@ -1186,7 +1184,7 @@ impl CanvasDiagramPanel {
             active.canvas = response.is_pointer_button_down_on();
         }
 
-        // Sibling-tab event replay was removed in A.5. After the
+        // Sibling-tab event replay was removed. After the
         // AST-canonical migration each mutation flows
         // canvas → host.apply → AST → source → DocumentChanged → next
         // frame's projection picks up the new gen and re-derives the

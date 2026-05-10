@@ -7,7 +7,7 @@
 //! 1. Reserves the `modelica_graphs` slot in the bottom dock.
 //! 2. Renders a small toolbar (Fit + count).
 //! 3. Delegates the plot to [`LinePlot::render_panel_2d`] reading the
-//!    [`DEFAULT_MODELICA_GRAPH`](crate::ui::viz::DEFAULT_MODELICA_GRAPH)
+//!    [`DEFAULT_MODELICA_GRAPH`]
 //!    config.
 //!
 //! No shadow state, no per-frame syncing — Telemetry writes directly

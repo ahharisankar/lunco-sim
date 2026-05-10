@@ -187,7 +187,7 @@ fn restore_from_localstorage(world: &mut World) {
 /// Default is "all clear" — autosave runs as before until setters
 /// wire in. Setters land incrementally:
 /// - `canvas`: written from `canvas_diagram/panel.rs` per frame
-///   from `response.is_pointer_button_down_on()`. **Wired in B.0.R1.**
+///   from `response.is_pointer_button_down_on()`. **Wired.R1.**
 /// - `text`: written by the code editor while
 ///   `EditorBufferState.pending_commit_at` is `Some(_)`. **TODO.**
 /// - `modal`: written by Open/Save As/prompt dialogs while open.

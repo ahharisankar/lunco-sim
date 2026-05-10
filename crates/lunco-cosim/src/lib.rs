@@ -13,7 +13,7 @@
 //! | **SimComponent** (Modelica) | `height`, `velocity`, `g` | `netForce`, `volume`, ... |
 //! | **SimComponent** (FMU)     | `current_in`            | `soc`, `voltage`, ...         |
 //!
-//! [`SimConnection`] connects any output to any input, following the FMI/SSP pattern.
+//! [`crate::SimConnection`] connects any output to any input, following the FMI/SSP pattern.
 //!
 //! ## Example
 //!
@@ -55,7 +55,7 @@ pub use connection::*;
 
 /// Plugin for co-simulation orchestration.
 ///
-/// Registers [`SimComponent`], [`AvianSim`], and [`SimConnection`] types,
+/// Registers [`crate::SimComponent`], [`crate::AvianSim`], and [`crate::SimConnection`] types,
 /// and adds systems for wire propagation and Avian manual stepping.
 ///
 /// ## Usage
@@ -65,7 +65,7 @@ pub use connection::*;
 /// ```
 ///
 /// Engine plugins (e.g., `lunco-modelica`) depend on this crate and
-/// create [`SimComponent`] instances when models compile.
+/// create [`crate::SimComponent`] instances when models compile.
 pub struct CoSimPlugin;
 
 impl Plugin for CoSimPlugin {
@@ -109,7 +109,7 @@ impl Plugin for CoSimPlugin {
     }
 }
 
-/// Observer: auto-adds [`AvianSim`] to any entity that gets a [`RigidBody`].
+/// Observer: auto-adds [`crate::AvianSim`] to any entity that gets a [`avian3d::prelude::RigidBody`].
 ///
 /// This makes Avian available as a co-simulation model alongside
 /// any other model (Modelica, FMU, GMAT) on the same entity.
@@ -126,7 +126,7 @@ pub fn on_add_rigid_body(
     commands.entity(entity).try_insert(avian);
 }
 
-/// Observer: auto-adds [`Forces`] to any entity that gets a [`RigidBody`].
+/// Observer: auto-adds [`Forces`] to any entity that gets a [`avian3d::prelude::RigidBody`].
 ///
 /// This is required for [`apply_sim_forces`] to work — Avian only creates the
 /// `Forces` component lazily on first access, but the co-simulation bridge

@@ -1,16 +1,16 @@
 //! Command bus for Modelica documents.
 //!
-//! Every user intent that mutates a [`ModelicaDocument`] is a Bevy event
+//! Every user intent that mutates a [`crate::document::ModelicaDocument`] is a Bevy event
 //! fired via `commands.trigger(...)`; the observers in this module are
 //! the single write surface. UI buttons, keyboard shortcuts, the remote
 //! API, and scripting all funnel through the same path.
 //!
 //! The generic commands ([`lunco_doc_bevy::UndoDocument`] /
-//! [`RedoDocument`](lunco_doc_bevy::RedoDocument) /
-//! [`SaveDocument`](lunco_doc_bevy::SaveDocument) /
-//! [`CloseDocument`](lunco_doc_bevy::CloseDocument)) carry a
-//! [`DocumentId`] without naming a domain. Each observer here checks
-//! whether [`ModelicaDocumentRegistry`] owns the id and acts or
+//! [`RedoDocument`] /
+//! [`SaveDocument`] /
+//! [`CloseDocument`]) carry a
+//! [`lunco_doc::DocumentId`] without naming a domain. Each observer here checks
+//! whether [`crate::ui::state::ModelicaDocumentRegistry`] owns the id and acts or
 //! no-ops — USD, scripting, SysML can install parallel observers that
 //! handle *their* ids with no coordination needed.
 //!
@@ -44,7 +44,7 @@ use crate::{ModelicaChannels, ModelicaCommand, ModelicaModel};
 ///
 /// Matches VS Code's "New File" flow — no name dialog, no Save-As
 /// prompt. The observer picks the next free `Untitled<N>` name,
-/// allocates an in-memory [`ModelicaDocument`](crate::document::ModelicaDocument)
+/// allocates an in-memory [`crate::document::ModelicaDocument`](crate::document::ModelicaDocument)
 /// with a `mem://Untitled<N>` marker path, records it in the Package
 /// Browser's in-memory list, and triggers an [`OpenTab`](lunco_workbench::OpenTab)
 /// so the user lands on the editable tab immediately.
@@ -78,8 +78,8 @@ pub struct DuplicateModelFromReadOnly {
 /// buffer is expected to have been flushed by the caller via
 /// [`ModelicaDocumentRegistry::checkpoint_source`] before firing), parses
 /// parameters / inputs, spawns or updates the [`ModelicaModel`] entity
-/// linked to the document, marks the [`CompileState`] as
-/// [`CompileState::Compiling`], and sends a
+/// linked to the document, marks the [`crate::ui::state::CompileState`] as
+/// [`crate::ui::state::CompileState::Compiling`], and sends a
 /// [`ModelicaCommand::Compile`] to the worker.
 ///
 /// Unknown / foreign ids are no-ops.
@@ -432,7 +432,10 @@ pub(crate) fn render_fast_run_setup(
         cancelled = true;
     }
     if confirmed {
-        let entry = setup.0.take().unwrap();
+        let Some(entry) = setup.0.take() else {
+            bevy::log::warn!("[FastRunSettings] confirmed without an entry — modal closed concurrently");
+            return;
+        };
         // Persist edited bounds + inputs into the draft so
         // FastRunActiveModel picks them up. Overrides untouched.
         let draft = drafts.entry(entry.model_ref.clone());
@@ -475,7 +478,7 @@ pub(crate) fn render_fast_run_setup(
 /// Render the compile-class picker modal when
 /// [`CompileClassPickerState`] is populated. Confirming re-dispatches
 /// `CompileModel` with the chosen class stamped into
-/// [`DrilledInClassNames`] so downstream observers see the user's
+/// `DrilledInClassNames` so downstream observers see the user's
 /// pick exactly as they would've after a manual drill-in. Cancel
 /// just clears the state.
 pub(crate) fn render_compile_class_picker(
@@ -552,7 +555,6 @@ pub(crate) fn render_compile_class_picker(
     if let Some(qualified) = confirmed {
         let doc = entry.doc;
         let purpose = entry.purpose;
-        // B.3 phase 3: write the picked class onto every tab
         // viewing this doc so subsequent reads via
         // `drilled_class_for_doc` see the user's choice. Replaces
         // the legacy `DrilledInClassNames` cache write.
@@ -1050,7 +1052,6 @@ fn on_document_closed_cleanup(
     // both the Workspace pointer and the UI cache in lockstep.
     if workspace.active_document == Some(doc) {
         workspace.active_document = None;
-        // B.3 phase 6: `open_model` cache retired.
         workbench.editor_buffer.clear();
     }
 }
@@ -1063,7 +1064,7 @@ fn on_document_closed_cleanup(
 /// command(s) it maps to, targeting the currently-active document.
 ///
 /// **Ownership-aware**: only resolves when the active document is
-/// owned by [`ModelicaDocumentRegistry`]. If another domain (USD,
+/// owned by [`crate::ui::state::ModelicaDocumentRegistry`]. If another domain (USD,
 /// scripting, SysML) owns the active doc, its own resolver handles
 /// the intent and this observer no-ops — both resolvers fire on
 /// every intent and each picks the ones that belong to it.
@@ -1389,7 +1390,7 @@ fn on_save_as_document(
             // Attach `.mo` if the user hasn't already chosen a full
             // filename (Untitled<N> is the common case).
             if raw.ends_with(".mo") {
-                raw.to_string()
+                raw
             } else {
                 format!("{raw}.mo")
             }
@@ -1569,7 +1570,6 @@ fn on_compile_model(
         // extractors, which at least try once; if they also fail,
         // the error message below fires.
         let msg = "Could not parse Modelica source for compile.".to_string();
-        // B.3 phase 4: per-doc error.
         compile_states.set_error(doc, msg.clone());
         console.error(format!("Compile failed: {msg}"));
         return;
@@ -1580,7 +1580,6 @@ fn on_compile_model(
     // package. Without this the compile picks the first non-package
     // class (often the package wrapper) and the simulator returns
     // `EmptySystem`.
-    // B.3 phase 3: derive from `ModelTabs`.
     let drilled_in_class: Option<String> = model_tabs.drilled_class_for_doc(doc);
     // Class resolution priority:
     //   1. explicit_class on the event       — API caller knows exactly
@@ -1607,7 +1606,6 @@ fn on_compile_model(
                     "compile_model class `{cls}` not found. Candidates: [{}]",
                     candidates.join(", ")
                 );
-                // B.3 phase 4: per-doc error.
                 compile_states.set_error(doc, msg.clone());
                 console.error(format!("Compile failed: {msg}"));
                 let _ = diagnostics;
@@ -1631,7 +1629,7 @@ fn on_compile_model(
             if picker.0.as_ref().map(|p| p.doc) != Some(doc) {
                 picker.0 = Some(CompileClassPickerEntry {
                     doc,
-                    candidates: candidate_classes.clone(),
+                    candidates: candidate_classes,
                     preselected: 0,
                     purpose: PickerPurpose::Compile,
                 });
@@ -1644,7 +1642,6 @@ fn on_compile_model(
         .or(detected_first_class);
     let Some(model_name) = model_name else {
         let msg = "Could not find a valid model declaration.".to_string();
-        // B.3 phase 4: per-doc error.
         compile_states.set_error(doc, msg.clone());
         console.error(format!("Compile failed: {msg}"));
         return;
@@ -1666,7 +1663,7 @@ fn on_compile_model(
             model.is_stepping = true;
             model.is_compiling = true;
             model.model_name = model_name.clone();
-            model.parameters = params.clone();
+            model.parameters = params;
             model.inputs.clear();
             for (name, val) in &inputs_with_defaults {
                 let existing = old_inputs.get(name).copied();
@@ -1837,8 +1834,8 @@ fn on_create_new_scratch_model(
     cache
         .in_memory_models
         .push(crate::ui::panels::package_browser::InMemoryEntry {
-            display_name: name.clone(),
-            id: mem_id.clone(),
+            display_name: name,
+            id: mem_id,
             doc: doc_id,
         });
 
@@ -1895,7 +1892,6 @@ fn on_duplicate_model_from_read_only(
             return;
         };
         let doc = host.document();
-        // B.3 phase 3: derive from `ModelTabs`.
         let fqn = model_tabs.drilled_class_for_doc(source_doc);
         let ast_opt = doc.strict_ast();
         // Top-level class name = first key in `ast.classes` if we
@@ -1986,7 +1982,7 @@ fn on_duplicate_model_from_read_only(
     // only; no world access from the task.
     let origin_short_for_task = origin_class_short.clone();
     let name_for_task = name.clone();
-    let origin_fqn_for_task = origin_fqn.clone();
+    let origin_fqn_for_task = origin_fqn;
     let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
         // We always duplicate the file-level *top* class (see the
         // `top_short` derivation above). For a single-file package
@@ -2058,7 +2054,7 @@ fn on_duplicate_model_from_read_only(
         crate::ui::panels::canvas_diagram::DuplicateBinding {
             display_name: name.clone(),
             origin_short: origin_class_short.clone(),
-            inner_drill: inner_drill.clone(),
+            inner_drill: inner_drill,
             started: web_time::Instant::now(),
             task,
             _busy: busy,
@@ -2205,7 +2201,7 @@ fn spawn_duplicate_class_task(world: &mut World, qualified: String, name_hint: S
         .filter(|s| s.full_start < s.full_end && s.full_end <= source_full.len());
         let class_src = match spans_opt.as_ref() {
             Some(s) => source_full[s.full_start..s.full_end].to_string(),
-            None => source_full.clone(),
+            None => source_full,
         };
         let extract_ms = t_extract.elapsed().as_secs_f64() * 1000.0;
         // 4 + 4b. Single-pass rewrite: parse class_src once, then
@@ -2293,7 +2289,7 @@ fn spawn_duplicate_class_task(world: &mut World, qualified: String, name_hint: S
             doc_id,
             crate::ui::panels::canvas_diagram::DuplicateBinding {
                 display_name: name.clone(),
-                origin_short: origin_short.clone(),
+                origin_short: origin_short,
                 // Duplicate flow operates on a single named class
                 // (`qualified` is already the leaf the user clicked) —
                 // there's no inner-drill to preserve.
@@ -3107,7 +3103,6 @@ fn on_format_document(trigger: On<FormatDocument>, mut commands: Commands) {
             bevy::log::warn!("[FormatDocument] no active document");
             return;
         };
-        // B.3 phase 6: derive from registry.
         let workbench_read_only = crate::ui::state::read_only_for(world, doc);
         if workbench_read_only {
             bevy::log::info!("[FormatDocument] tab is read-only — skipping");
@@ -3137,7 +3132,9 @@ fn on_format_document(trigger: On<FormatDocument>, mut commands: Commands) {
         // edit.
         let mut registry = world.resource_mut::<crate::ui::state::ModelicaDocumentRegistry>();
         if let Some(host) = registry.host_mut(doc) {
-            let _ = host.apply(ModelicaOp::ReplaceSource { new: formatted });
+            if let Err(e) = host.apply(ModelicaOp::ReplaceSource { new: formatted }) {
+                bevy::log::warn!("[FormatDocument] apply failed: {e:?}");
+            }
         }
     });
 }
@@ -3210,7 +3207,6 @@ fn update_status_bar(
         return;
     }
     let active_doc = workspace.as_ref().and_then(|w| w.active_document);
-    // B.3 phase 6: derive from registry directly.
     let model_name = active_doc
         .and_then(|d| {
             registry.host(d).and_then(|h| {
@@ -3218,7 +3214,7 @@ fn update_status_bar(
                 document
                     .strict_ast()
                     .and_then(|ast| crate::ast_extract::extract_model_name_from_ast(&ast))
-                    .or_else(|| Some(document.origin().display_name().to_string()))
+                    .or_else(|| Some(document.origin().display_name()))
             })
         })
         .unwrap_or_else(|| "(untitled)".to_string());
@@ -3457,7 +3453,7 @@ fn on_fast_run_active_model(trigger: On<FastRunActiveModel>, mut commands: Comma
             };
             let document = host.document();
             let source = document.source().to_string();
-            let filename = document.origin().display_name().to_string();
+            let filename = document.origin().display_name();
             let index = document.index();
             let candidates: Vec<String> = index
                 .classes
@@ -3683,9 +3679,7 @@ fn on_add_canvas_plot(trigger: On<AddCanvasPlot>, mut commands: Commands) {
         // does — drill-in target wins, then the workbench's
         // detected name. Empty class is a hard error: every plot
         // tile lives inside a specific class's Diagram annotation.
-        // B.3: derive from `ModelTabs`.
         let class = crate::ui::panels::model_view::drilled_class_for_doc(world, doc)
-            // B.3 phase 6: derive from registry.
             .or_else(|| crate::ui::state::detected_name_for(world, doc))
             .unwrap_or_default();
         if class.is_empty() {
@@ -3774,7 +3768,7 @@ fn on_new_plot_panel(trigger: On<NewPlotPanel>, mut commands: Commands) {
         registry.insert(VisualizationConfig {
             id,
             title: title.clone(),
-            kind: LINE_PLOT_KIND.clone(),
+            kind: LINE_PLOT_KIND,
             view: ViewTarget::Panel2D,
             inputs,
             style: serde_json::Value::Null,
@@ -3999,7 +3993,7 @@ fn on_open_file(trigger: On<OpenFile>, mut commands: Commands) {
         let mut registry =
             world.resource_mut::<crate::ui::state::ModelicaDocumentRegistry>();
         let doc_id = registry.allocate_with_origin(
-            source.clone(),
+            source,
             lunco_doc::DocumentOrigin::File {
                 path: path_buf,
                 writable: true,
@@ -4365,7 +4359,7 @@ fn on_move_component(trigger: On<MoveComponent>, mut commands: Commands) {
                 .unwrap_or((20.0, 20.0))
         };
         let op = ModelicaOp::SetPlacement {
-            class: class.clone(),
+            class: class,
             name: ev.name.clone(),
             placement: Placement {
                 x: ev.x,

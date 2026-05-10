@@ -14,10 +14,10 @@
 //!   [`UriResolution::OpenResource`] pointing at the concrete file
 //!   under the MSL cache.
 //!
-//! Registered from [`ModelicaCommandsPlugin::build`]
+//! Registered from [`crate::ui::commands::ModelicaCommandsPlugin::build`]
 //! (`ui/commands.rs`); the observer in this module then translates
 //! `UriClicked` with `doc_kind == "modelica"` into the existing
-//! [`OpenClass`] command — so clicks in Documentation reuse the same
+//! [`crate::ui::commands::OpenClass`] command — so clicks in Documentation reuse the same
 //! drill-in pipeline as clicks from the Welcome tab or the canvas.
 
 use std::path::PathBuf;
@@ -113,7 +113,7 @@ fn resolve_resource(class_dotted: &str, subpath: &str) -> UriResolution {
 }
 
 /// Observer: translate `UriClicked` events for `modelica://` URIs
-/// into the concrete [`OpenClass`](crate::ui::commands::OpenClass)
+/// into the concrete [`crate::ui::commands::OpenClass`](crate::ui::commands::OpenClass)
 /// command. Non-Modelica resolutions are ignored — other domain
 /// observers pick them up. Resource opens + anchor navigation are
 /// logged at `debug` for now (no domain command yet wires them; a

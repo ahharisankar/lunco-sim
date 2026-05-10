@@ -1,6 +1,6 @@
 //! Connection propagation system.
 //!
-//! Copies output values to input values through [`SimConnection`]s.
+//! Copies output values to input values through [`crate::SimConnection`]s.
 //! This is the core of the co-simulation master algorithm — follows the
 //! FMI pattern of "read outputs, write inputs."
 
@@ -15,7 +15,7 @@ pub enum CosimSet {
     Propagate,
 }
 
-/// Propagates values through all [`SimConnection`]s.
+/// Propagates values through all [`crate::SimConnection`]s.
 pub fn propagate_connections(
     q_connections: Query<&SimConnection>,
     mut set: ParamSet<(

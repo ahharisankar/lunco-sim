@@ -39,7 +39,13 @@ pub fn process_repl_commands(
         #[cfg(feature = "python")]
         {
             Python::with_gil(|py| {
-                let c_str = CString::new(cmd.as_str()).unwrap();
+                let c_str = match CString::new(cmd.as_str()) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        error!("REPL: command contains a NUL byte; rejected");
+                        return;
+                    }
+                };
                 match py.run(&c_str, None, None) {
                     Ok(_) => {}
                     Err(e) => {

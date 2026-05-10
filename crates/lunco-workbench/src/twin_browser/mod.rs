@@ -65,7 +65,7 @@ pub const TWIN_BROWSER_PANEL_ID: PanelId = PanelId("lunco.workbench.twin_browser
 ///
 /// Each [`BrowserSection`] declares which scope it belongs to via
 /// [`BrowserSection::scope`]. The panel renders only the sections
-/// matching the active scope (see [`ActiveBrowserScope`]).
+/// matching the active scope (see `ActiveBrowserScope`).
 ///
 /// More scopes may join later (a Subsystems / Usages tab once the
 /// cosim graph view exists, surfacing a Twin's `[scenarios.*]`
@@ -140,6 +140,7 @@ pub struct UnsavedDocEntry {
 /// list with per-row dirty markers.
 #[derive(Resource, Default, Debug, Clone)]
 pub struct UnsavedDocs {
+    /// One entry per dirty document the Files section should mark.
     pub entries: Vec<UnsavedDocEntry>,
 }
 

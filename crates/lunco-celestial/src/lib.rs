@@ -15,7 +15,7 @@ use bevy_shader::Shader;
 
 mod clock;
 mod ephemeris;
-mod registry;
+pub mod registry;
 mod big_space_setup;
 mod systems;
 mod coords;

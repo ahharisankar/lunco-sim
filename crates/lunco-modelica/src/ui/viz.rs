@@ -29,7 +29,7 @@ pub fn ensure_default_modelica_graph(
         registry.insert(VisualizationConfig {
             id: DEFAULT_MODELICA_GRAPH,
             title: "Modelica".into(),
-            kind: LINE_PLOT_KIND.clone(),
+            kind: LINE_PLOT_KIND,
             view: ViewTarget::Panel2D,
             inputs: Vec::new(),
             style: serde_json::Value::Null,

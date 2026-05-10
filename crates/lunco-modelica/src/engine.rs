@@ -21,9 +21,9 @@
 //!
 //! ## What's wired today
 //!
-//! - [`Self::upsert_document`] / [`Self::close_document`] — add or
+//! - `Self::upsert_document` / `Self::close_document` — add or
 //!   replace a document's source in the session.
-//! - [`Self::inherited_components`] — calls
+//! - `Self::inherited_components` — calls
 //!   `Session::class_component_members_query` so panels get
 //!   inheritance-merged member lists for free (no per-panel
 //!   reimplementation of `extract_*_inherited`).
@@ -52,7 +52,7 @@ pub use rumoca_session::compile::{
 /// Workspace-wide rumoca state for one Twin's Modelica content.
 ///
 /// Plain Rust — **not** a Bevy `Resource`. Bevy users wrap this in
-/// [`ModelicaEngineRes`] (below) which is the actual `Resource`.
+/// [`crate::engine::ModelicaEngineRes`] (below) which is the actual `Resource`.
 /// The split keeps the engine usable from headless contexts
 /// (`lunco-twin-server`, CLI, AI-agent runtimes, WASM thin clients)
 /// without forcing Bevy into the dependency graph of every consumer.
@@ -63,7 +63,7 @@ pub use rumoca_session::compile::{
 pub struct ModelicaEngine {
     session: Session,
     /// `DocumentId` → URI used inside the session. Stable for the
-    /// document's lifetime; freed on [`Self::close_document`].
+    /// document's lifetime; freed on `Self::close_document`.
     uri_for_doc: HashMap<DocumentId, String>,
     /// Documents whose async parse is currently in flight. Prevents
     /// double-spawning the same parse while a worker is mid-flight.
@@ -267,7 +267,7 @@ impl ModelicaEngine {
 
     /// Inheritance-merged component members with variability +
     /// causality preserved. Same `extends` walk as
-    /// [`Self::inherited_components`] but consumers don't have to
+    /// `Self::inherited_components` but consumers don't have to
     /// re-walk the AST to bucket parameters / inputs / outputs.
     ///
     /// Backed by
