@@ -39,6 +39,8 @@
 //! is another `EditText` against the *new* range with the previous slice
 //! as replacement.
 
+pub(crate) mod duplicate;
+
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
