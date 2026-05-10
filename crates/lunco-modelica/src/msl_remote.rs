@@ -388,6 +388,16 @@ fn log_state_transition(s: &MslLoadState) {
 /// into [`StatusBus`] events. Phase changes become discrete `Info`
 /// entries (preserved in history); byte/file counts within a phase
 /// become `Progress` ticks (updated in place).
+///
+/// This system uses the *legacy* `push_progress`/`clear_progress`
+/// API rather than `begin` + `BusyHandle` because it is a state
+/// mirror, not a task owner — there is no scope-bound future to
+/// carry the handle. `MslLoadState` itself is the lifetime
+/// authority. Legacy progress events implicitly target
+/// [`BusyScope::Global`], which matches the actual semantics
+/// (MSL preload affects the whole workspace). Don't refactor this
+/// to `begin` without first introducing a place to store the
+/// handle that drops in lockstep with state transitions.
 fn mirror_state_to_status_bus(
     state: Res<MslLoadState>,
     mut bus: ResMut<lunco_workbench::status_bus::StatusBus>,

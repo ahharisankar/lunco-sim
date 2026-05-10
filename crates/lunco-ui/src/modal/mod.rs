@@ -105,3 +105,82 @@ impl ModalQueue {
         !self.pending.is_empty() || !self.results.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req(title: &str) -> ModalRequest {
+        ModalRequest {
+            title: title.to_string(),
+            body: ModalBody::Text(String::new()),
+            buttons: vec![ModalButton::Confirm("OK".into())],
+            dismiss_on_esc: true,
+        }
+    }
+
+    #[test]
+    fn request_returns_unique_ids() {
+        let mut q = ModalQueue::default();
+        let a = q.request(req("A"));
+        let b = q.request(req("B"));
+        assert_ne!(a, b);
+        assert_eq!(q.pending.len(), 2);
+        assert!(q.is_active());
+    }
+
+    #[test]
+    fn poll_consumes_outcome_exactly_once() {
+        let mut q = ModalQueue::default();
+        let id = q.request(req("A"));
+        // Simulate the host resolving the modal.
+        q.results
+            .insert(id, ModalOutcome::Confirmed("OK".into()));
+        assert_eq!(
+            q.poll(id),
+            Some(ModalOutcome::Confirmed("OK".into()))
+        );
+        assert_eq!(q.poll(id), None);
+    }
+
+    #[test]
+    fn cancel_removes_pending_request() {
+        let mut q = ModalQueue::default();
+        let a = q.request(req("A"));
+        let b = q.request(req("B"));
+        q.cancel(a);
+        assert_eq!(q.pending.len(), 1);
+        assert_eq!(q.pending[0].0, b);
+    }
+
+    #[test]
+    fn cancel_drops_unpolled_outcome() {
+        let mut q = ModalQueue::default();
+        let id = q.request(req("A"));
+        q.results
+            .insert(id, ModalOutcome::Confirmed("OK".into()));
+        q.cancel(id);
+        assert_eq!(q.poll(id), None);
+    }
+
+    #[test]
+    fn cancel_unknown_id_is_noop() {
+        let mut q = ModalQueue::default();
+        let id = q.request(req("A"));
+        q.cancel(ModalId(9999));
+        assert_eq!(q.pending.len(), 1);
+        // Original entry untouched.
+        assert_eq!(q.pending[0].0, id);
+    }
+
+    #[test]
+    fn pending_order_preserved() {
+        let mut q = ModalQueue::default();
+        let ids: Vec<_> = ["A", "B", "C"]
+            .iter()
+            .map(|t| q.request(req(t)))
+            .collect();
+        let order: Vec<_> = q.pending.iter().map(|(id, _)| *id).collect();
+        assert_eq!(order, ids);
+    }
+}
