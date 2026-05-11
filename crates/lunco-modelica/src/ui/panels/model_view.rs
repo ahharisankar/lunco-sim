@@ -1139,6 +1139,15 @@ fn render_unified_toolbar(
                 .map(|m| (m.paused, m.current_time))
         });
 
+    // Snapshot runner busy state up front so the status pill (rendered
+    // before the action buttons) can surface "⏩ Running…" — the
+    // background Fast Run was previously invisible in compact mode,
+    // making the toolbar look frozen mid-simulation.
+    let runner_busy = world
+        .get_resource::<crate::ModelicaRunnerResource>()
+        .map(|r| r.0.is_busy())
+        .unwrap_or(false);
+
     // Collect button presses without touching world inside the closure.
     let mut compile_clicked = false;
     let mut fast_run_clicked = false;
@@ -1215,35 +1224,34 @@ fn render_unified_toolbar(
         }
         ui.separator();
 
+        // Status pill. Quiescent states (Ready, Idle) stay glyph-only
+        // so the toolbar reads tight; *active* states (Compiling, Fast
+        // Run busy, Error) always carry a label, regardless of the
+        // ambient compact flag, so a glance answers "is it doing
+        // something / did it break?" without hovering.
         if let Some(ref err) = compilation_error {
             let chip = ui
-                .colored_label(egui::Color32::LIGHT_RED, if compact { "⚠" } else { "⚠ Error" })
-                .on_hover_text(err);
+                .colored_label(tokens.error, "⚠ Error")
+                .on_hover_text(format!("{err}\n(click to dismiss)"));
             if chip.clicked() {
                 dismiss_error = true;
             }
+        } else if runner_busy {
+            ui.colored_label(tokens.warning, "⏩ Running…")
+                .on_hover_text("Fast Run in progress — background simulation");
         } else {
             match compile_state {
                 CompileState::Compiling => {
-                    ui.colored_label(
-                        tokens.warning,
-                        if compact { "⏳" } else { "⏳ Compiling…" },
-                    )
-                    .on_hover_text("Compiling…");
+                    ui.colored_label(tokens.warning, "⏳ Compiling…")
+                        .on_hover_text("Compiling…");
                 }
                 CompileState::Ready => {
-                    ui.colored_label(
-                        tokens.success,
-                        if compact { "✓" } else { "✓ Ready" },
-                    )
-                    .on_hover_text("Ready");
+                    ui.colored_label(tokens.success, if compact { "✓" } else { "✓ Ready" })
+                        .on_hover_text("Ready");
                 }
                 CompileState::Error => {
-                    ui.colored_label(
-                        tokens.error,
-                        if compact { "⚠" } else { "⚠ Error" },
-                    )
-                    .on_hover_text("Compile error");
+                    ui.colored_label(tokens.error, "⚠ Error")
+                        .on_hover_text("Compile error");
                 }
                 CompileState::Idle => {
                     ui.colored_label(
@@ -1272,17 +1280,19 @@ fn render_unified_toolbar(
         // read-only Example is a valid (and common) workflow. Save
         // stays gated on writable; Compile only waits for an
         // in-flight compile to settle.
-        let runner_busy = world
-            .get_resource::<crate::ModelicaRunnerResource>()
-            .map(|r| r.0.is_busy())
-            .unwrap_or(false);
         let compile_enabled = !matches!(compile_state, CompileState::Compiling) && !runner_busy;
         compile_clicked = ui
             .add_enabled(
                 compile_enabled,
                 egui::Button::new(if compact { "🚀" } else { "🚀 Compile" }),
             )
-            .on_hover_text("Compile the current model and run it (F5)")
+            .on_hover_text(
+                "Interactive run — compile the model and step it in realtime. \
+                 Pause/Resume from the toolbar and edit parameters in the \
+                 Telemetry panel while the simulation runs; values take effect \
+                 on the next step. Use this when you want to feel the model \
+                 respond. (F5)",
+            )
             .clicked();
 
         // Fast Run — batch simulation off-thread (Web Worker on wasm,
@@ -1301,10 +1311,11 @@ fn render_unified_toolbar(
         fast_run_clicked = ui
             .add_enabled(fast_enabled, egui::Button::new(fast_label))
             .on_hover_text(
-                "Fast Run: compile + simulate end-to-end as fast as possible. \
-                 Result lands in the Experiments registry; multiple runs can be \
-                 plotted together. Bounds default from the model's experiment(...) \
-                 annotation.",
+                "Fast Run — batch simulate end-to-end as fast as possible (no \
+                 realtime, no live edits). Each run is recorded in 🧪 Experiments \
+                 and can be overlaid in plots. Use this for parameter studies and \
+                 comparing scenarios; for live tweaking use 🚀 Compile (Interactive). \
+                 Bounds default from the model's experiment(...) annotation.",
             )
             .clicked();
 
@@ -1344,7 +1355,7 @@ fn render_unified_toolbar(
                     })
                     .unwrap_or(lunco_experiments::RunBounds {
                         t_start: 0.0,
-                        t_end: 1.0,
+                        t_end: 10.0,
                         dt: None,
                         tolerance: None,
                         solver: None,
@@ -1524,7 +1535,7 @@ fn render_unified_toolbar(
                     })
                     .unwrap_or(lunco_experiments::RunBounds {
                         t_start: 0.0,
-                        t_end: 1.0,
+                        t_end: 10.0,
                         dt: None,
                         tolerance: None,
                         solver: None,

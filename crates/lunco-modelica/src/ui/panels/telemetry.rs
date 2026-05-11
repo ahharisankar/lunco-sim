@@ -119,11 +119,30 @@ impl Panel for TelemetryPanel {
         };
 
         let Some(entity) = entity else {
-            ui.label("No model selected.");
+            // Pre-compile state. The Parameters list above is sourced
+            // from the AST and is already populated; the runtime block
+            // below it is empty because no stepper exists yet. Spelling
+            // that out — and offering the Compile action inline —
+            // avoids the "Parameters (17) … No model selected" stall
+            // where the two lines look like they contradict each other.
+            render_runtime_hint(
+                ui,
+                muted,
+                world,
+                "Live telemetry appears here once the model is compiled.",
+            );
             return;
         };
         if !has_data {
-            ui.label("Model not found.");
+            // Stepper entity exists but lost its `ModelicaModel`
+            // component (post-Reset / mid-rebuild). Offer Compile so the
+            // user can recover without hunting for the toolbar button.
+            render_runtime_hint(
+                ui,
+                muted,
+                world,
+                "Stepper went away — recompile to restore live telemetry.",
+            );
             return;
         }
 
@@ -524,6 +543,40 @@ impl Panel for TelemetryPanel {
         // Telemetry. Telemetry now does parameters / inputs / variable
         // toggles only; graph-axis controls live on the graph itself.
     }
+}
+
+/// Empty-state for the runtime-telemetry section: a muted explanation
+/// + an inline 🚀 Compile button that triggers the same
+/// `CompileActiveModel` the toolbar fires. Used both pre-compile (no
+/// stepper exists yet) and after a stepper loses its component
+/// (post-Reset / mid-rebuild). Keeping the action in-panel means users
+/// don't have to hunt the toolbar to escape the empty state.
+fn render_runtime_hint(
+    ui: &mut egui::Ui,
+    muted: egui::Color32,
+    world: &mut World,
+    msg: &str,
+) {
+    let active_doc = world
+        .get_resource::<lunco_workbench::WorkspaceResource>()
+        .and_then(|w| w.active_document);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new(msg).color(muted).size(11.0));
+        if let Some(doc) = active_doc {
+            if ui
+                .small_button("🚀 Compile")
+                .on_hover_text("Compile the active model and start the stepper (F5)")
+                .clicked()
+            {
+                world
+                    .commands()
+                    .trigger(crate::ui::commands::CompileActiveModel {
+                        doc,
+                        class: String::new(),
+                    });
+            }
+        }
+    });
 }
 
 /// Render the parameter inspector for component nodes selected on

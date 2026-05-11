@@ -962,7 +962,7 @@ fn on_fast_run_active_model(trigger: On<FastRunActiveModel>, mut commands: Comma
             .default_bounds(&model_ref)
             .unwrap_or_else(|| lunco_experiments::RunBounds {
                 t_start: 0.0,
-                t_end: 1.0,
+                t_end: 10.0,
                 dt: None,
                 tolerance: None,
                 solver: None,

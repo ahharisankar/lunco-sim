@@ -210,22 +210,69 @@ impl Panel for ExperimentsPanel {
         };
 
         if rows.is_empty() {
+            // Detect *why* the experiments table is empty so the
+            // hint actually matches the user's situation. Without
+            // this, the panel says "Press ⏩ Run above" even when
+            // ⏩ Run was hidden by `render_setup_section` (no doc /
+            // no class), leaving the user pointing at empty space.
+            let active_doc = world
+                .get_resource::<lunco_workbench::WorkspaceResource>()
+                .and_then(|w| w.active_document);
+            let has_class = active_doc
+                .and_then(|doc| {
+                    world
+                        .get_resource::<crate::ui::state::ModelicaDocumentRegistry>()
+                        .and_then(|r| r.host(doc))
+                        .map(|h| {
+                            h.document().index().classes.values().any(|c| {
+                                !matches!(c.kind, crate::index::ClassKind::Package)
+                            })
+                        })
+                })
+                .unwrap_or(false);
+
             ui.vertical_centered(|ui| {
-                ui.add_space(16.0);
+                ui.add_space(12.0);
                 ui.label(
-                    egui::RichText::new("No experiments yet")
+                    egui::RichText::new("Experiments")
                         .size(13.0)
                         .strong(),
                 );
-                ui.add_space(4.0);
+                ui.add_space(2.0);
                 ui.weak(
-                    "▶ Press ⏩ Run above (or the ⏩ Fast button on the model toolbar)",
+                    "Fast Run — batch simulate a model end-to-end with chosen \
+                     bounds and parameter overrides; each run is recorded \
+                     below and can be overlaid in plots. For live tweaking \
+                     while the model runs, use 🚀 Compile on the model \
+                     toolbar (Interactive realtime mode).",
                 );
-                ui.weak("to start your first experiment.");
-                ui.add_space(4.0);
-                ui.weak(
-                    "Pick variables in the Telemetry panel — they appear in the plot.",
-                );
+                ui.add_space(8.0);
+
+                match (active_doc, has_class) {
+                    (None, _) => {
+                        ui.weak("① Open a model — pick one in the Files panel,");
+                        ui.weak("   or use File → New / Open Example.");
+                        ui.weak("② A ⏩ Run button appears above once a model is active.");
+                    }
+                    (Some(_), false) => {
+                        ui.weak(
+                            "Active document has no model class yet. Switch to \
+                             the 📝 Text view and add a `model Foo … end Foo;`,",
+                        );
+                        ui.weak("then return here to set bounds and click ⏩ Run.");
+                    }
+                    (Some(_), true) => {
+                        ui.weak(
+                            "▶ Press ⏩ Run above (or the ⏩ Fast button on the \
+                             model toolbar) to start your first experiment.",
+                        );
+                        ui.add_space(2.0);
+                        ui.weak(
+                            "Pick variables in the Telemetry panel — they \
+                             appear in the plot below the table.",
+                        );
+                    }
+                }
             });
             return;
         }
@@ -582,7 +629,7 @@ impl ExperimentsPanel {
                 })
                 .unwrap_or(lunco_experiments::RunBounds {
                     t_start: 0.0,
-                    t_end: 1.0,
+                    t_end: 10.0,
                     dt: None,
                     tolerance: None,
                     solver: None,
@@ -668,7 +715,13 @@ impl ExperimentsPanel {
                         "Bounds invalid — t_end must be greater than t_start.",
                     )
                 } else {
-                    btn.on_hover_text("Compile + simulate this model from t_start to t_end.")
+                    btn.on_hover_text(
+                        "Fast Run — compile + simulate end-to-end from t_start \
+                         to t_end as fast as possible (no realtime, no live \
+                         parameter edits). Result lands as a new row below; \
+                         use 🚀 Compile on the model toolbar instead if you \
+                         want interactive realtime stepping.",
+                    )
                 };
                 if btn.clicked() {
                     run_clicked = true;
@@ -728,6 +781,62 @@ impl ExperimentsPanel {
                 bounds.dt = Some(dt_v);
                 bounds_changed = true;
             }
+
+            // Solver picker. rumoca exposes three modes via
+            // `SimSolverMode::from_external_name`: "auto" → Auto
+            // (heuristic chooser), names containing "rk"/"dopri"/
+            // "esdirk"/"trbdf2"/"euler"/"midpoint" → RkLike (explicit
+            // Runge-Kutta family for non-stiff systems), everything
+            // else → Bdf (implicit, default for stiff DAEs).
+            // Stored as `Option<String>`; `None` means "use the
+            // experiment(...) annotation, otherwise rumoca's default
+            // (BDF)". See rumoca-sim/src/with_diffsol/mod.rs:90.
+            ui.separator();
+            ui.label("solver:")
+                .on_hover_text(
+                    "Integration method. Auto picks based on problem \
+                     stiffness. BDF is implicit (good for stiff DAEs — \
+                     thermal, chemical, electrical networks). RK4 is \
+                     explicit Runge-Kutta (faster on non-stiff problems \
+                     like rigid-body mechanics).",
+                );
+            let current: String = bounds.solver.clone().unwrap_or_else(|| "auto".to_string());
+            let current = current.as_str();
+            let label = match current {
+                "auto" => "Auto",
+                "bdf" => "BDF (stiff)",
+                "rk4" => "RK4 (non-stiff)",
+                other => other,
+            };
+            egui::ComboBox::from_id_salt("setup_solver")
+                .selected_text(label)
+                .width(140.0)
+                .show_ui(ui, |ui| {
+                    for (val, label, hover) in [
+                        ("auto", "Auto",
+                         "Let the backend pick based on stiffness heuristics."),
+                        ("bdf", "BDF (stiff)",
+                         "Backward Differentiation Formula — implicit, robust \
+                          on stiff DAEs (thermal, chemical, electrical). \
+                          Slower per step but stable with large dt."),
+                        ("rk4", "RK4 (non-stiff)",
+                         "Explicit Runge-Kutta — fast on smooth, non-stiff \
+                          problems (rigid-body mechanics, kinematics). \
+                          Can blow up on stiff systems."),
+                    ] {
+                        let resp = ui
+                            .selectable_label(current == val, label)
+                            .on_hover_text(hover);
+                        if resp.clicked() {
+                            bounds.solver = if val == "auto" {
+                                None
+                            } else {
+                                Some(val.to_string())
+                            };
+                            bounds_changed = true;
+                        }
+                    }
+                });
         });
 
         // Inputs row(s). Wrap horizontally — a model with many
@@ -906,7 +1015,7 @@ impl ExperimentsPanel {
                     })
                     .unwrap_or(lunco_experiments::RunBounds {
                         t_start: 0.0,
-                        t_end: 1.0,
+                        t_end: 10.0,
                         dt: None,
                         tolerance: None,
                         solver: None,
