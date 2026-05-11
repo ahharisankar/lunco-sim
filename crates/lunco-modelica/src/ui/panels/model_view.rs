@@ -1050,16 +1050,29 @@ pub(crate) fn sync_active_tab_to_doc(
         ws.active_document = Some(doc);
     }
 
-    // Editor buffer carries typed `bound_doc` identity used by
-    // `package_browser`'s stale-buffer check.
-    {
-        let mut buf = world.resource_mut::<EditorBufferState>();
-        buf.text = source;
-        buf.line_starts = line_starts.into();
-        buf.detected_name = detected_name;
-        buf.model_path = path_str;
-        buf.bound_doc = Some(doc);
-    }
+    // Editor buffer sync removed.
+    //
+    // This function used to overwrite `EditorBufferState.{text,
+    // line_starts, detected_name, model_path, bound_doc}` from
+    // `doc.source()` every frame. That was the legacy push-from-
+    // doc-to-buffer pipeline; it ran *before* `CodeEditorPanel::
+    // render` and clobbered any uncommitted typing whenever the
+    // mismatch condition tripped. The new pipeline is:
+    //
+    // - `editor_on_doc_changed` observer — push-driven, fires on
+    //   `DocumentChanged`, syncs the bound doc's buffer from
+    //   `doc.source()`. Replaces the per-frame mismatch poll.
+    // - `code_editor::render` tab-switch branch — handles initial
+    //   load + per-pane snapshot/restore when the user clicks a
+    //   different tab.
+    //
+    // Both paths track `generation` correctly; this site doesn't
+    // need to participate. Below we keep only the responsibilities
+    // that are genuinely model_view's: workspace `active_document`
+    // pointer, `WorkbenchState.editor_buffer` mirror (consumed by
+    // non-editor panels), `diagram_dirty` flag, and selected-entity
+    // refresh.
+    let _ = (path_str, line_starts, detected_name);
 
     // The canvas viewer reprojects from the document AST every frame
     // when the generation advances, so there is no per-tab cache to

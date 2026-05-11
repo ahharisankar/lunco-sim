@@ -57,7 +57,10 @@ mod panel;
 pub use theme::CanvasThemeSnapshot;
 pub use panel::CanvasDiagramPanel;
 pub(crate) use panel::invalidate_port_icon_cache;
-pub use ops::{active_class_for_doc, apply_one_op_as, apply_ops_as, apply_ops_public, on_auto_arrange_diagram};
+pub use ops::{
+    active_class_for_doc, apply_one_op_as, apply_ops_as, apply_ops_public,
+    drain_pending_structural_ops, on_auto_arrange_diagram, PendingStructuralOps,
+};
 pub use pulse::{
     DEFAULT_EDGE_FLASH_MS, DEFAULT_PULSE_MS, EdgePulseHandle, PendingApiConnection,
     PendingApiConnectionQueue, PendingApiFocus, PendingApiFocusQueue, PulseEntry, PulseHandle,

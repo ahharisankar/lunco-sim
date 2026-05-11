@@ -682,6 +682,15 @@ impl Plugin for ModelicaUiPlugin {
             // Push-driven editor buffer sync — replaces the old
             // per-frame generation poll in `CodeEditorPanel::render`.
             .add_observer(panels::code_editor::editor_on_doc_changed)
+            // Structural ops that arrive against a stale syntax
+            // cache are deferred here and applied once the async
+            // engine sync lands a fresh parse — removes the last
+            // sync-reparse from the write path.
+            .init_resource::<panels::canvas_diagram::PendingStructuralOps>()
+            .add_systems(
+                Update,
+                panels::canvas_diagram::drain_pending_structural_ops,
+            )
             .add_systems(Update, derive_doc_title)
             // Twin-panel: keep the loaded-classes list in sync with
             // the document registry. One `WorkspaceClass` per

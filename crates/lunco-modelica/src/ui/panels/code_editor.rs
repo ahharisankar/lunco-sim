@@ -218,19 +218,41 @@ pub fn editor_on_doc_changed(
     mut buf_state: ResMut<EditorBufferState>,
 ) {
     let doc = trigger.event().doc;
-    if buf_state.bound_doc != Some(doc) {
+    let bound = buf_state.bound_doc;
+    if bound != Some(doc) {
+        bevy::log::info!(
+            "[editor-obs] skip: doc={} bound={:?}",
+            doc.raw(),
+            bound.map(|d| d.raw())
+        );
         return;
     }
     let Some(host) = registry.host(doc) else { return };
     let current_gen = host.generation();
-    if buf_state.generation == current_gen {
+    let buf_gen = buf_state.generation;
+    let pending = buf_state.pending_commit_at;
+    bevy::log::info!(
+        "[editor-obs] fire: doc={} current_gen={} buf_gen={} pending={:?}",
+        doc.raw(),
+        current_gen,
+        buf_gen,
+        pending,
+    );
+    if buf_gen == current_gen {
         return;
     }
 
-    if buf_state.pending_commit_at.is_some() {
+    if pending.is_some() {
         buf_state.generation = current_gen;
         return;
     }
+
+    bevy::log::warn!(
+        "[editor-obs] RESYNC: doc={} buf_gen={} → current_gen={} — buf.text will be overwritten with doc.source",
+        doc.raw(),
+        buf_gen,
+        current_gen,
+    );
 
     let document = host.document();
     let src = document.source().to_string();
@@ -1088,11 +1110,24 @@ pub fn commit_pending_buffer(world: &mut World, doc: lunco_doc::DocumentId) -> b
         if let Some((range, replacement)) =
             crate::text_diff::diff_to_edit(&prior, &committed)
         {
+            bevy::log::info!(
+                "[editor-flush] doc={} EditText {:?} replace_len={} prior_len={} committed_len={}",
+                doc.raw(),
+                range,
+                replacement.len(),
+                prior.len(),
+                committed.len(),
+            );
             let result = crate::ui::panels::canvas_diagram::apply_one_op_as(
                 world,
                 doc,
                 crate::document::ModelicaOp::EditText { range, replacement },
                 lunco_twin_journal::AuthorTag::for_tool("code-editor"),
+            );
+            bevy::log::info!(
+                "[editor-flush] doc={} apply result: {}",
+                doc.raw(),
+                if result.is_ok() { "Ok" } else { "Err" },
             );
             if result.is_ok() {
                 // Self-edit landed: pull the doc's new generation

@@ -518,33 +518,34 @@ fn op_needs_fresh_ast_pre_apply(op: &ModelicaOp) -> bool {
     )
 }
 
-/// Single-op kernel: pre-op AST refresh (when the op needs one) →
-/// `host.apply(op)` → on success, waive the AST debounce so the
-/// async engine sync picks the doc up on the next tick. **No
-/// synchronous reparse on the write path** — typing a character
-/// (an `EditText` op) would otherwise pay the whole-program
-/// semantic cost on the main thread (observed: ~2 s on an 11 KB
-/// file with MSL inheritance) and freeze the UI.
+/// Single-op kernel: `host.apply(op)` → on success, waive the AST
+/// debounce so the async engine sync picks the doc up on the next
+/// tick. **No synchronous reparse anywhere.** Both pre- and
+/// post-apply sync reparses have been removed from this path so
+/// the write side never blocks the UI thread, regardless of op
+/// kind or doc size.
 ///
-/// Freshness contract after this returns:
+/// Freshness contract:
 ///
-/// - Structured ops (`FreshAst::Mutated`): the syntax cache is
-///   already up-to-date — `host.apply` installs the mutated AST
-///   inline. Same-frame readers see fresh.
-/// - Text ops (`FreshAst::TextEdit`): the syntax cache is stale
-///   until `drive_engine_sync` lands the async parse and fires
-///   `DocumentChanged`. UI consumers subscribe to that event
-///   rather than reading speculatively.
+/// - Pre-apply: kernel assumes the syntax cache is fresh enough
+///   for `host.apply` to use. Callers (`apply_one_op_as`,
+///   `apply_ops`) enforce this — when the op needs a fresh AST
+///   and the cache is stale, they defer the op into
+///   [`PendingStructuralOps`] and drain it after the async parse
+///   lands. The kernel itself never reparses.
+/// - Post-apply: structured ops install `FreshAst::Mutated`
+///   inline, so same-frame readers see fresh. Text ops mark the
+///   cache stale; `drive_engine_sync` reparses off-thread and
+///   fires `DocumentChanged`. UI subscribers react then.
 ///
-/// The pre-apply check still forces a sync reparse for structural
-/// ops that need the latest tree to mutate (see
-/// `op_needs_fresh_ast_pre_apply`). That path is the one place the
-/// kernel still does expensive work synchronously; converting it
-/// to a "queue until clean" gate is a separate refactor.
+/// In debug builds, kernel debug-asserts the pre-apply contract
+/// to catch any caller that bypasses the gate and lands a
+/// structural op against stale syntax — the apply would mutate a
+/// stale tree and emit a wrong patch.
 ///
 /// Both [`apply_one_op_as`] and [`apply_ops`] funnel through here so
-/// the pre-apply contract and journal-pair shape can't drift
-/// between the single-op and batch paths.
+/// the journal-pair shape can't drift between single-op and batch
+/// paths.
 ///
 /// Returns `(host.apply result, optional (forward, backward) journal
 /// summaries)`. Caller is responsible for journal-record +
@@ -557,10 +558,12 @@ fn apply_one_op_kernel(
     Result<lunco_doc::Ack, lunco_doc::Reject>,
     Option<(serde_json::Value, serde_json::Value)>,
 ) {
+    debug_assert!(
+        !op_needs_fresh_ast_pre_apply(&op) || !host.document().syntax_is_stale(),
+        "apply_one_op_kernel: op {:?} requires fresh AST but syntax cache is stale — caller must defer through PendingStructuralOps",
+        std::mem::discriminant(&op),
+    );
     let forward = crate::journal::summarize_op(&op);
-    if op_needs_fresh_ast_pre_apply(&op) {
-        host.document_mut().refresh_ast_now();
-    }
     let result = host.apply(op);
     let pair = if result.is_ok() {
         host.document_mut().waive_ast_debounce();
@@ -571,6 +574,88 @@ fn apply_one_op_kernel(
         None
     };
     (result, pair)
+}
+
+/// Queue of structural ops that arrived while their target doc had
+/// a stale syntax cache. Drained by [`drain_pending_structural_ops`]
+/// after the async engine sync lands a fresh parse.
+///
+/// Replaces the old synchronous `refresh_ast_now()` in the kernel
+/// pre-apply path: instead of blocking the main thread to reparse
+/// before applying, the op waits one async parse cycle (typically
+/// hundreds of milliseconds) and lands as soon as the cache is
+/// fresh again. The user perceives a normal latency on their click,
+/// the UI never freezes.
+///
+/// Per-doc FIFO order is preserved so dependent ops in the same
+/// burst (e.g. AddClass then AddVariable in that class) apply in
+/// the order they were issued.
+#[derive(bevy::prelude::Resource, Default)]
+pub struct PendingStructuralOps {
+    queue: std::collections::HashMap<
+        lunco_doc::DocumentId,
+        std::collections::VecDeque<(ModelicaOp, lunco_twin_journal::AuthorTag)>,
+    >,
+}
+
+fn deferred_ack() -> lunco_doc::Ack {
+    let mut ack = lunco_doc::Ack::default();
+    ack.assigned = serde_json::json!({ "deferred": true });
+    ack
+}
+
+/// Exclusive system that retries queued structural ops once their
+/// target doc's syntax cache catches up. Cheap when the queue is
+/// empty (steady state); only does work after a stretch of typing
+/// preceded a structural op.
+pub fn drain_pending_structural_ops(world: &mut bevy::prelude::World) {
+    // Phase 1: identify docs whose cache is fresh and have a non-empty queue.
+    let fresh_docs: Vec<lunco_doc::DocumentId> = {
+        let Some(registry) = world.get_resource::<ModelicaDocumentRegistry>() else {
+            return;
+        };
+        let Some(pending) = world.get_resource::<PendingStructuralOps>() else {
+            return;
+        };
+        pending
+            .queue
+            .iter()
+            .filter(|(_, q)| !q.is_empty())
+            .filter_map(|(doc, _)| {
+                registry
+                    .host(*doc)
+                    .map(|h| !h.document().syntax_is_stale())
+                    .unwrap_or(false)
+                    .then_some(*doc)
+            })
+            .collect()
+    };
+    if fresh_docs.is_empty() {
+        return;
+    }
+
+    // Phase 2: drain queues into a local Vec, dropping the resource borrow.
+    let ready: Vec<(lunco_doc::DocumentId, ModelicaOp, lunco_twin_journal::AuthorTag)> = {
+        let mut pending = world.resource_mut::<PendingStructuralOps>();
+        let mut out = Vec::new();
+        for doc in &fresh_docs {
+            if let Some(q) = pending.queue.get_mut(doc) {
+                while let Some((op, author)) = q.pop_front() {
+                    out.push((*doc, op, author));
+                }
+                if q.is_empty() {
+                    pending.queue.remove(doc);
+                }
+            }
+        }
+        out
+    };
+
+    // Phase 3: re-enter the public apply path. With a fresh cache,
+    // the deferred gate will pass and the kernel applies normally.
+    for (doc, op, author) in ready {
+        let _ = apply_one_op_as(world, doc, op, author);
+    }
 }
 
 /// Record one (forward, inverse) op pair into the canonical Twin
@@ -608,16 +693,46 @@ fn record_journal_entry(
 /// exactly as before.
 ///
 /// Side effects on success — guaranteed by [`apply_one_op_kernel`]:
-/// - `waive_ast_debounce()` + `refresh_ast_now()` so the next call
-///   sees a fresh AST.
+/// - `waive_ast_debounce()` so `drive_engine_sync` reparses promptly.
 /// - `registry.mark_changed(doc)` (queues a `DocumentChanged` event).
 /// - One canonical journal entry recorded with the supplied `author`.
+///
+/// Deferral: when `op` needs a fresh AST to apply (see
+/// [`op_needs_fresh_ast_pre_apply`]) and the doc's syntax cache is
+/// stale, the op is pushed into [`PendingStructuralOps`] and a
+/// `deferred_ack` is returned immediately. The op then lands on
+/// the next [`drain_pending_structural_ops`] tick after the async
+/// parse completes. From the caller's perspective the op is
+/// accepted; the journal entry, `DocumentChanged`, and any other
+/// side-effects fire on actual apply, not on enqueue.
 pub fn apply_one_op_as(
     world: &mut World,
     doc_id: lunco_doc::DocumentId,
     op: ModelicaOp,
     author: lunco_twin_journal::AuthorTag,
 ) -> Result<lunco_doc::Ack, lunco_doc::Reject> {
+    if op_needs_fresh_ast_pre_apply(&op) {
+        let stale = world
+            .get_resource::<ModelicaDocumentRegistry>()
+            .and_then(|r| r.host(doc_id))
+            .map(|h| h.document().syntax_is_stale())
+            .unwrap_or(false);
+        if stale {
+            if let Some(mut registry) = world.get_resource_mut::<ModelicaDocumentRegistry>() {
+                if let Some(host) = registry.host_mut(doc_id) {
+                    host.document_mut().waive_ast_debounce();
+                }
+            }
+            world
+                .resource_mut::<PendingStructuralOps>()
+                .queue
+                .entry(doc_id)
+                .or_default()
+                .push_back((op, author));
+            return Ok(deferred_ack());
+        }
+    }
+
     let (result, pair) = {
         let Some(mut registry) = world.get_resource_mut::<ModelicaDocumentRegistry>() else {
             return Err(lunco_doc::Reject::InvalidOp(
@@ -648,6 +763,32 @@ pub(super) fn apply_ops(
     ops: Vec<ModelicaOp>,
     author: lunco_twin_journal::AuthorTag,
 ) {
+    // Deferral gate: same contract as `apply_one_op_as`. If any op
+    // in the batch reads the AST to apply and the syntax cache is
+    // stale, queue the *entire* batch so dependent intra-batch ops
+    // (e.g. AddClass + AddVariable in that class) stay in order
+    // and apply against the same fresh tree.
+    if ops.iter().any(op_needs_fresh_ast_pre_apply) {
+        let stale = world
+            .get_resource::<ModelicaDocumentRegistry>()
+            .and_then(|r| r.host(doc_id))
+            .map(|h| h.document().syntax_is_stale())
+            .unwrap_or(false);
+        if stale {
+            if let Some(mut registry) = world.get_resource_mut::<ModelicaDocumentRegistry>() {
+                if let Some(host) = registry.host_mut(doc_id) {
+                    host.document_mut().waive_ast_debounce();
+                }
+            }
+            let mut pending = world.resource_mut::<PendingStructuralOps>();
+            let queue = pending.queue.entry(doc_id).or_default();
+            for op in ops {
+                queue.push_back((op, author.clone()));
+            }
+            return;
+        }
+    }
+
     // TEMP: timing instrumentation to find the source of the
     // multi-second lag observed when adding components from the
     // right-click menu. Each phase is timed independently so we
@@ -733,9 +874,8 @@ pub(super) fn apply_ops(
                 Err(e) => bevy::log::warn!("[CanvasDiagram] op failed: {}", e),
             }
         }
-        // Kernel already does waive_ast_debounce + refresh_ast_now
-        // per successful op (refresh is no-op when AST is fresh, so
-        // the only real cost is the post-`ReplaceSource` reparse).
+        // Kernel waives the AST debounce per successful op; reparse
+        // is async via `drive_engine_sync`. No sync reparse here.
         if any_applied {
             // Queue one `DocumentChanged` notification for the batch
             // (drained each frame, deduped by `drain_pending_changes`).
