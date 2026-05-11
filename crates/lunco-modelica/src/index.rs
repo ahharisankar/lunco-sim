@@ -150,6 +150,12 @@ pub struct ClassEntry {
     /// empty-diagram overlay should call out as "this class has
     /// equation content beyond just connections".
     pub equation_count: usize,
+    /// `partial` keyword on the class header. Partial classes can't
+    /// be instantiated, so they're never valid simulation roots —
+    /// `is_simulatable` (and the Compile / Fast Run picker) excludes
+    /// them. Plain bases without `partial` are still simulatable
+    /// even when used purely as `extends` targets.
+    pub partial: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +171,18 @@ pub enum ClassKind {
     ExpandableConnector,
     Operator,
     OperatorRecord,
+}
+
+impl ClassKind {
+    /// Whether this class kind can be the *root* of a simulation. Only
+    /// `model` and `block` declare equations and time-evolving state;
+    /// the rest (connectors, records, types, functions, packages) are
+    /// structural pieces and produce empty/invalid simulations when
+    /// passed to the compiler. Used by Compile / Fast Run pickers to
+    /// avoid offering nonsense choices.
+    pub fn is_simulatable(self) -> bool {
+        matches!(self, ClassKind::Model | ClassKind::Block | ClassKind::Class)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -445,6 +463,7 @@ impl ModelicaIndex {
                 icon: None,
                 documentation: (None, None),
                 equation_count: 0,
+                partial: false,
             },
         );
     }
@@ -522,6 +541,62 @@ impl ModelicaIndex {
             .filter_map(move |key| self.components.iter().find(|c| c.key == *key))
     }
 
+    /// Qualified names of classes that the Compile / Fast Run picker
+    /// should offer, ranked best-first. "Best" means: simulatable
+    /// kind (`model` / `block` / `class`), not `partial`, and not
+    /// instantiated as a sub-component anywhere else in the document.
+    /// Sub-components remain in the list (so unit-testing a `Tank` in
+    /// isolation is still possible) but are sorted to the bottom.
+    /// Connectors, records, types, functions, packages, and partial
+    /// classes are dropped entirely — they can't be simulation roots.
+    ///
+    /// Pair with [`Self::simulation_top_level_count`] to decide
+    /// whether the picker should auto-skip.
+    pub fn simulation_candidates(&self) -> Vec<String> {
+        let used_as_subcomponent = self.subcomponent_type_names();
+        let mut ranked: Vec<(u8, &str)> = self
+            .classes
+            .values()
+            .filter(|c| c.kind.is_simulatable() && !c.partial)
+            .map(|c| {
+                let rank = if is_subcomponent(&c.name, &used_as_subcomponent) {
+                    1
+                } else {
+                    0
+                };
+                (rank, c.name.as_str())
+            })
+            .collect();
+        // Sort by tier first, then alphabetically within the tier so
+        // the picker doesn't shuffle between calls.
+        ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(b.1)));
+        ranked.into_iter().map(|(_, n)| n.to_string()).collect()
+    }
+
+    /// How many candidates are tier-0 ("top-level": simulatable, not
+    /// `partial`, not used as a sub-component elsewhere). Callers use
+    /// `== 1` as the trigger to bypass the picker entirely — there's
+    /// only one obvious thing to simulate, so just simulate it.
+    pub fn simulation_top_level_count(&self) -> usize {
+        let used_as_subcomponent = self.subcomponent_type_names();
+        self.classes
+            .values()
+            .filter(|c| c.kind.is_simulatable() && !c.partial)
+            .filter(|c| !is_subcomponent(&c.name, &used_as_subcomponent))
+            .count()
+    }
+
+    fn subcomponent_type_names(&self) -> std::collections::HashSet<&str> {
+        // Author code typically writes `Tank tank1;` (short), but a
+        // fully-qualified reference is also valid — keep both forms
+        // so the lookup matches either declaration style.
+        let mut s = std::collections::HashSet::new();
+        for c in &self.components {
+            s.insert(c.type_name.as_str());
+        }
+        s
+    }
+
     /// Iterate connections in `class` in declaration order.
     pub fn connections_in_class<'a>(
         &'a self,
@@ -533,6 +608,11 @@ impl ModelicaIndex {
             .flat_map(|keys| keys.iter())
             .filter_map(move |key| self.connections.iter().find(|c| c.key == *key))
     }
+}
+
+fn is_subcomponent(qualified: &str, used: &std::collections::HashSet<&str>) -> bool {
+    let short = qualified.rsplit('.').next().unwrap_or(qualified);
+    used.contains(qualified) || used.contains(short)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -598,6 +678,7 @@ fn insert_class_recursive(idx: &mut ModelicaIndex, qualified: String, class_def:
         icon,
         documentation,
         equation_count,
+        partial: class_def.partial,
     };
     idx.classes.insert(qualified.clone(), entry);
 

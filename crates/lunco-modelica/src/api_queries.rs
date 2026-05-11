@@ -385,11 +385,9 @@ impl ApiQueryProvider for ListCompileCandidatesProvider {
         let candidates: Vec<serde_json::Value> = host
             .document()
             .index()
-            .classes
-            .values()
-            .filter(|c| !matches!(c.kind, crate::index::ClassKind::Package))
-            .map(|c| {
-                let qualified = c.name.clone();
+            .simulation_candidates()
+            .into_iter()
+            .map(|qualified| {
                 let short = qualified
                     .rsplit('.')
                     .next()
@@ -445,21 +443,17 @@ impl ApiQueryProvider for CompileStatusProvider {
         // doc has 2+ non-package classes. Easier to recompute than to
         // expose CompileClassPickerState which is a UI concern.
         let registry = world.resource::<ModelicaDocumentRegistry>();
-        let (candidates, has_ast) = match registry.host(doc_id) {
+        let (candidates, top_level_count, has_ast) = match registry.host(doc_id) {
             Some(host) => {
-                let has_ast = !host.document().ast().has_errors();
+                let doc_ref = host.document();
+                let has_ast = !doc_ref.ast().has_errors();
                 // Non-package class qualified names from the per-doc
                 // Index — sees optimistic patches and avoids walking
                 // the AST. Same pattern as the candidates query above.
-                let cands: Vec<String> = host
-                    .document()
-                    .index()
-                    .classes
-                    .values()
-                    .filter(|c| !matches!(c.kind, crate::index::ClassKind::Package))
-                    .map(|c| c.name.clone())
-                    .collect();
-                (cands, has_ast)
+                let index = doc_ref.index();
+                let cands = index.simulation_candidates();
+                let top_level = index.simulation_top_level_count();
+                (cands, top_level, has_ast)
             }
             None => return err_doc_not_found(doc_id),
         };
@@ -469,8 +463,13 @@ impl ApiQueryProvider for CompileStatusProvider {
         // Once a compile is in flight, has succeeded, or has errored,
         // the caller already provided enough context (or the picker
         // was bypassed), so reporting `true` here would be misleading.
+        // Mirror the gate in `on_compile_model`: the picker only opens
+        // when there's no obvious top-level root (i.e. !=1 top-level
+        // candidates) AND the doc has 2+ candidates total. With one
+        // clear root the compile path auto-picks it without prompting.
         let picker_pending = matches!(state, CompileState::Idle)
             && drilled_in.is_none()
+            && top_level_count != 1
             && candidates.len() >= 2;
 
         let error_message = world
