@@ -403,6 +403,78 @@ pub fn remove_connection(
     Ok(())
 }
 
+/// Set or clear the `annotation(Line(points={...}))` on a
+/// `connect(...)` equation matching `(from, to)`. Empty `points` clears
+/// the annotation entirely (wire falls back to auto-routing on next
+/// projection). Returns `ConnectionNotFound` when no match exists.
+///
+/// Implemented by rendering a stub `connect(...) annotation(Line(...))`
+/// via `pretty::connect_equation`, parsing it, and stealing the parsed
+/// `annotation: Vec<Expression>` to overwrite the target equation's
+/// annotation field. Keeps annotation-expression construction in one
+/// place (the parser) instead of building Expression nodes by hand.
+pub fn set_connection_line(
+    class: &mut ClassDef,
+    from: &pretty::PortRef,
+    to: &pretty::PortRef,
+    points: &[(f32, f32)],
+) -> Result<(), AstMutError> {
+    let class_name = class.name.text.to_string();
+    let new_annotation: Vec<rumoca_session::parsing::ast::Expression> = if points.is_empty() {
+        Vec::new()
+    } else {
+        let stub_eq = pretty::ConnectEquation {
+            from: from.clone(),
+            to: to.clone(),
+            line: Some(pretty::Line { points: points.to_vec() }),
+        };
+        let parsed = parse_connect_equation_with_annotation_fragment(&stub_eq)?;
+        match parsed {
+            rumoca_session::parsing::ast::Equation::Connect { annotation, .. } => annotation,
+            _ => return Err(AstMutError::ValueParseFailed { value: "connect annotation".into() }),
+        }
+    };
+    let mut matched = false;
+    for eq in class.equations.iter_mut() {
+        if let rumoca_session::parsing::ast::Equation::Connect { lhs, rhs, annotation } = eq {
+            if matches_port_ref(lhs, from) && matches_port_ref(rhs, to) {
+                *annotation = new_annotation;
+                matched = true;
+                break;
+            }
+        }
+    }
+    if !matched {
+        return Err(AstMutError::ConnectionNotFound {
+            class: class_name,
+            from: format!("{}.{}", from.component, from.port),
+            to: format!("{}.{}", to.component, to.port),
+        });
+    }
+    Ok(())
+}
+
+/// Variant of [`parse_connect_equation_fragment`] that renders via
+/// `pretty::connect_equation` so the `annotation(Line(...))` is
+/// included. Used by `set_connection_line` to obtain a parsed
+/// annotation tree shaped exactly like the source emitter would write.
+fn parse_connect_equation_with_annotation_fragment(
+    eq: &pretty::ConnectEquation,
+) -> Result<rumoca_session::parsing::ast::Equation, AstMutError> {
+    let body = pretty::connect_equation(eq);
+    let stub = format!("model __LunCoFragment\nequation\n{body}end __LunCoFragment;\n");
+    let parsed = parse_stub_cached(&stub).ok_or_else(|| {
+        AstMutError::ValueParseFailed { value: body.clone() }
+    })?;
+    let cls = parsed.classes.get("__LunCoFragment").ok_or_else(|| {
+        AstMutError::ValueParseFailed { value: body.clone() }
+    })?;
+    cls.equations
+        .first()
+        .cloned()
+        .ok_or(AstMutError::ValueParseFailed { value: body })
+}
+
 /// Match a parsed `ComponentReference` against a `pretty::PortRef`.
 ///
 /// Two shapes show up in practice:

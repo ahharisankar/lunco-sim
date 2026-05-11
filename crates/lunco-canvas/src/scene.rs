@@ -75,6 +75,23 @@ pub enum NodeHitKind {
     Port(PortId),
 }
 
+/// Hit-test kind for edges — which part of the wire polyline the
+/// pointer is over. Same rationale as [`NodeHitKind`]: defined in the
+/// scene module so geometry-only callers don't have to import
+/// `visual`. The [`crate::visual::EdgeHit`] alias re-exports this for
+/// visual-side users.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeHitKind {
+    /// On the wire but not on a specific handle.
+    Body,
+    /// On the i-th *interior* waypoint of the polyline.
+    Corner(usize),
+    /// On the midpoint of the i-th segment of the polyline. Segment 0
+    /// connects the source port to the first interior waypoint (or
+    /// directly to the target port when none exist).
+    Segment(usize),
+}
+
 /// Squared perpendicular distance from `p` to the finite segment
 /// `(a,b)`. Endpoint-clamped. Mirror of the one in `visual.rs`; kept
 /// private to scene so the two modules stay independent.
@@ -310,6 +327,13 @@ pub struct Edge {
     /// caller uses to key against its own store.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    /// Interior waypoints of the wire's polyline, in world coordinates.
+    /// `Vec::new()` = no authored bends (the visual decides whether to
+    /// auto-route). Owned by the scene so [`crate::tool::Tool`] can
+    /// mutate them during a drag without reaching into per-domain edge
+    /// `data` payloads. Endpoints (port positions) are NOT included.
+    #[serde(default)]
+    pub waypoints: Vec<Pos>,
 }
 
 /// The canvas's authored state.
@@ -456,40 +480,117 @@ impl Scene {
         None
     }
 
-    /// Data-driven edge hit test — returns the first edge within
-    /// `threshold` world-units of `world_pos`, walking in reverse
-    /// insertion order.
-    ///
-    /// Treats the edge as a straight segment between its endpoints;
-    /// that's an approximation for bezier/orthogonal routed edges,
-    /// but acceptable for click-target discrimination. A richer
-    /// variant (bezier curve distance, orthogonal path walk) can be
-    /// added when edge shapes diverge enough to matter.
-    pub fn hit_edge(&self, world_pos: Pos, threshold: f32) -> Option<EdgeId> {
-        let thr_sq = threshold * threshold;
-        for (id, edge) in self.edges.iter().rev() {
-            let Some(from_node) = self.nodes.get(&edge.from.node) else { continue };
-            let Some(to_node) = self.nodes.get(&edge.to.node) else { continue };
-            let Some(from_port) = from_node
-                .ports
-                .iter()
-                .find(|p| p.id == edge.from.port)
-            else {
-                continue;
-            };
-            let Some(to_port) = to_node.ports.iter().find(|p| p.id == edge.to.port) else {
-                continue;
-            };
-            let a = Pos::new(
+    /// Walk an edge's full polyline (port → interior waypoints → port)
+    /// and report the closest segment's perpendicular squared distance
+    /// to `world_pos`, plus the index of that segment. Returns `None`
+    /// if the edge's endpoints can't be resolved. Used by both
+    /// [`Self::hit_edge`] (threshold check) and the future
+    /// waypoint-handle hit tests that need to know *which* segment was
+    /// hit. Endpoints are at indices 0 and `1 + waypoints.len()`.
+    pub fn edge_polyline_closest_segment(
+        &self,
+        edge: &Edge,
+        world_pos: Pos,
+    ) -> Option<(usize, f32)> {
+        let (from, to) = self.edge_endpoint_positions(edge)?;
+        let mut pts: Vec<Pos> = Vec::with_capacity(2 + edge.waypoints.len());
+        pts.push(from);
+        pts.extend(edge.waypoints.iter().copied());
+        pts.push(to);
+        let mut best: Option<(usize, f32)> = None;
+        for i in 0..pts.len() - 1 {
+            let d = perpendicular_dist_sq(world_pos, pts[i], pts[i + 1]);
+            if best.as_ref().map_or(true, |(_, bd)| d < *bd) {
+                best = Some((i, d));
+            }
+        }
+        best
+    }
+
+    /// World-space port positions of an edge's two endpoints. Returns
+    /// `None` if either node or port is missing — callers should treat
+    /// that as "skip this edge".
+    pub fn edge_endpoint_positions(&self, edge: &Edge) -> Option<(Pos, Pos)> {
+        let from_node = self.nodes.get(&edge.from.node)?;
+        let to_node = self.nodes.get(&edge.to.node)?;
+        let from_port = from_node.ports.iter().find(|p| p.id == edge.from.port)?;
+        let to_port = to_node.ports.iter().find(|p| p.id == edge.to.port)?;
+        Some((
+            Pos::new(
                 from_node.rect.min.x + from_port.local_offset.x,
                 from_node.rect.min.y + from_port.local_offset.y,
-            );
-            let b = Pos::new(
+            ),
+            Pos::new(
                 to_node.rect.min.x + to_port.local_offset.x,
                 to_node.rect.min.y + to_port.local_offset.y,
-            );
-            if perpendicular_dist_sq(world_pos, a, b) <= thr_sq {
-                return Some(*id);
+            ),
+        ))
+    }
+
+    /// Data-driven edge hit test — returns the first edge within
+    /// `threshold` world-units of `world_pos`, walking in reverse
+    /// insertion order. Honours interior waypoints: a wire with bends
+    /// only "clicks" when the cursor is near one of its actual
+    /// segments, not when it sits diagonally between the two ports.
+    pub fn hit_edge(&self, world_pos: Pos, threshold: f32) -> Option<EdgeId> {
+        self.hit_edge_kind(world_pos, threshold, false, 0.0)
+            .map(|(id, _)| id)
+    }
+
+    /// Like [`Self::hit_edge`] but classifies the hit into corner /
+    /// segment / body. When `with_handles` is true and `handle_radius`
+    /// is positive, interior-waypoint hits within `handle_radius` and
+    /// segment-midpoint hits within `handle_radius` (along the segment
+    /// axis perpendicular) take priority over plain body hits. Caller
+    /// passes `with_handles = true` only when the matching edge is
+    /// selected — handles are only drawn on selected edges, so they
+    /// shouldn't grab clicks otherwise.
+    pub fn hit_edge_kind(
+        &self,
+        world_pos: Pos,
+        threshold: f32,
+        with_handles: bool,
+        handle_radius: f32,
+    ) -> Option<(EdgeId, EdgeHitKind)> {
+        let thr_sq = threshold * threshold;
+        let handle_sq = handle_radius * handle_radius;
+        for (id, edge) in self.edges.iter().rev() {
+            let Some((from, to)) = self.edge_endpoint_positions(edge) else { continue };
+            // Handle checks first (corner > segment midpoint > body).
+            if with_handles && handle_radius > 0.0 {
+                // Corner handles on interior waypoints.
+                for (i, w) in edge.waypoints.iter().enumerate() {
+                    let dx = world_pos.x - w.x;
+                    let dy = world_pos.y - w.y;
+                    if dx * dx + dy * dy <= handle_sq {
+                        return Some((*id, EdgeHitKind::Corner(i)));
+                    }
+                }
+                // Segment-midpoint handles.
+                let mut pts: Vec<Pos> = Vec::with_capacity(2 + edge.waypoints.len());
+                pts.push(from);
+                pts.extend(edge.waypoints.iter().copied());
+                pts.push(to);
+                for i in 0..pts.len() - 1 {
+                    let mx = (pts[i].x + pts[i + 1].x) * 0.5;
+                    let my = (pts[i].y + pts[i + 1].y) * 0.5;
+                    let dx = world_pos.x - mx;
+                    let dy = world_pos.y - my;
+                    if dx * dx + dy * dy <= handle_sq {
+                        // Skip degenerate segments (<= 2 * handle_radius long).
+                        let sx = pts[i + 1].x - pts[i].x;
+                        let sy = pts[i + 1].y - pts[i].y;
+                        if sx * sx + sy * sy > (4.0 * handle_sq) {
+                            return Some((*id, EdgeHitKind::Segment(i)));
+                        }
+                    }
+                }
+            }
+            // Fall back to plain body hit.
+            if let Some((_seg, d)) = self.edge_polyline_closest_segment(edge, world_pos) {
+                if d <= thr_sq {
+                    return Some((*id, EdgeHitKind::Body));
+                }
             }
         }
         None
@@ -551,6 +652,7 @@ mod tests {
             kind: "test".into(),
             data: empty_node_data(),
             origin: None,
+            waypoints: Vec::new(),
         });
         id
     }

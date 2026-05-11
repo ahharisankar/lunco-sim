@@ -122,6 +122,16 @@ pub enum ModelicaChange {
         /// Target port.
         to: PortRef,
     },
+    /// The `annotation(Line(points={...}))` of a `connect(...)` was set
+    /// or cleared. Topology is unchanged — pure routing edit.
+    ConnectionLineChanged {
+        /// Qualified class name.
+        class: String,
+        /// Source port.
+        from: PortRef,
+        /// Target port.
+        to: PortRef,
+    },
     /// A component's `Placement` annotation was set or replaced.
     PlacementChanged {
         /// Qualified class name.
@@ -1141,6 +1151,28 @@ pub enum ModelicaOp {
         /// Other endpoint.
         to: pretty::PortRef,
     },
+    /// Set or clear the `annotation(Line(points={...}))` of an existing
+    /// `connect(...)` equation. Topology unchanged — wire-routing edit
+    /// only.
+    ///
+    /// Empty `points` clears the annotation, letting the wire fall back
+    /// to auto-routing on next projection. Non-empty `points` writes a
+    /// fresh `annotation(Line(points={{x1,y1},{x2,y2},...}))`.
+    ///
+    /// Points are in **Modelica diagram coordinates** (Y up); the
+    /// canvas-side translator (`canvas_diagram::ops::build_ops_from_events`)
+    /// flips Y from the canvas convention before emitting this op.
+    SetConnectionLine {
+        /// Target class name.
+        class: String,
+        /// One endpoint of the connection.
+        from: pretty::PortRef,
+        /// Other endpoint.
+        to: pretty::PortRef,
+        /// Polyline points in Modelica diagram coordinates. Empty = no
+        /// `Line` annotation (revert to auto-route).
+        points: Vec<(f32, f32)>,
+    },
     /// Set or replace the `Placement` annotation on a component.
     ///
     /// If the component already has an `annotation(Placement(...))`,
@@ -1544,6 +1576,12 @@ impl ModelicaDocument {
                     to_port,
                 );
             }
+            ModelicaChange::ConnectionLineChanged { class: _, from: _, to: _ } => {
+                // Wire routing edit — topology is unchanged, so the
+                // class/component index needs no patch. Annotation
+                // text round-trips through `regenerate_class_patch` on
+                // its own.
+            }
             ModelicaChange::ParameterChanged {
                 class,
                 component,
@@ -1702,6 +1740,20 @@ fn op_to_patch(
             )
             .map_err(ast_mut_to_doc_error)?;
             let change = ModelicaChange::ConnectionRemoved { class, from, to };
+            Ok((r, rp, change, FreshAst::Mutated(fresh_ast)))
+        }
+        ModelicaOp::SetConnectionLine { class, from, to, points } => {
+            ast_check_no_parse_error(ast)?;
+            let from_c = from.clone();
+            let to_c = to.clone();
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::set_connection_line(c, &from_c, &to_c, &points),
+            )
+            .map_err(ast_mut_to_doc_error)?;
+            let change = ModelicaChange::ConnectionLineChanged { class, from, to };
             Ok((r, rp, change, FreshAst::Mutated(fresh_ast)))
         }
         ModelicaOp::SetPlacement { class, name, placement } => {

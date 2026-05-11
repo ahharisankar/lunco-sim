@@ -71,6 +71,13 @@ pub fn summarize_op(op: &ModelicaOp) -> Value {
             "from": format!("{}.{}", from.component, from.port),
             "to": format!("{}.{}", to.component, to.port),
         }),
+        ModelicaOp::SetConnectionLine { class, from, to, points } => json!({
+            "kind": "SetConnectionLine",
+            "class": class,
+            "from": format!("{}.{}", from.component, from.port),
+            "to": format!("{}.{}", to.component, to.port),
+            "points": points.len(),
+        }),
         ModelicaOp::SetPlacement { class, name, .. } => json!({
             "kind": "SetPlacement",
             "class": class,

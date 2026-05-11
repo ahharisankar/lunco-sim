@@ -443,6 +443,14 @@ pub(super) fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramN
                 port: CanvasPortId::new(edge.target_port.clone()),
             },
             kind: "modelica.connection".into(),
+            // Mirror the interior polyline (authored or auto-routed)
+            // into the scene's first-class waypoints field so the
+            // canvas tool can hit-test + mutate it during drag without
+            // reaching into per-domain edge data. Renderer keeps a
+            // separate copy in `ConnectionEdgeData` for its own draw
+            // path until the visual is refactored to read from
+            // `Edge::waypoints` directly.
+            waypoints: waypoints_world.clone(),
             data: std::sync::Arc::new(ConnectionEdgeData {
                 connector_type: connector_type.clone(),
                 from_dir,

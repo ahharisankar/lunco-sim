@@ -52,6 +52,16 @@ pub enum SceneEvent {
     EdgeDeleted {
         id: EdgeId,
     },
+    /// User finished editing an edge's polyline (drag of a corner or
+    /// segment handle ended). Carries the final list of *interior*
+    /// waypoints in world coords (port endpoints excluded). Emitted
+    /// once on drag-end, matching `NodeMoved`'s cadence — no per-frame
+    /// events during the drag, so consumers translate one user gesture
+    /// to one domain op + one undo entry.
+    EdgeWaypointsChanged {
+        id: EdgeId,
+        points: Vec<Pos>,
+    },
     /// Node was deleted. `orphaned_edges` lists edges that the scene
     /// had to remove because they pointed at the gone node — so the
     /// caller can emit one combined undo entry rather than discovering

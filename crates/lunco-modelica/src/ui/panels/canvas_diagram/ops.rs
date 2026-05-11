@@ -278,6 +278,29 @@ pub(super) fn build_ops_from_events(
                     ops.push(op);
                 }
             }
+            SceneEvent::EdgeWaypointsChanged { id, points } => {
+                let Some(edge) = scene.edge(*id) else { continue };
+                if edge.kind.as_str() != "modelica.connection" {
+                    continue;
+                }
+                let Some(from_node) = scene.node(edge.from.node) else { continue };
+                let Some(to_node) = scene.node(edge.to.node) else { continue };
+                let Some(from_instance) = from_node.origin.clone() else { continue };
+                let Some(to_instance) = to_node.origin.clone() else { continue };
+                // Canvas Y is +down; Modelica diagram Y is +up. Flip
+                // so the round-trip back through `extract_line_points`
+                // lands at the same canvas positions.
+                let modelica_points: Vec<(f32, f32)> = points
+                    .iter()
+                    .map(|p| (p.x, -p.y))
+                    .collect();
+                ops.push(ModelicaOp::SetConnectionLine {
+                    class: class.to_string(),
+                    from: pretty::PortRef::new(&from_instance, edge.from.port.as_str()),
+                    to: pretty::PortRef::new(&to_instance, edge.to.port.as_str()),
+                    points: modelica_points,
+                });
+            }
             _ => {}
         }
     }
