@@ -6,7 +6,6 @@ use lunco_workbench::{Panel, PanelId, PanelSlot};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::ast_extract::hash_content;
 use crate::ui::{ModelicaDocumentRegistry, WorkbenchState};
 
 /// Per-tab editor buffer snapshot. Stashed in `EditorBufferState.per_doc`
@@ -21,7 +20,7 @@ use crate::ui::{ModelicaDocumentRegistry, WorkbenchState};
 /// already passes `model_path` around — doesn't need to change.
 #[derive(Default, Clone)]
 pub struct TabBuffer {
-    pub source_hash: u64,
+    pub generation: u64,
     pub text: String,
     pub line_starts: Arc<[usize]>,
     pub detected_name: Option<String>,
@@ -47,8 +46,11 @@ pub struct CodeEditorMenuRequest {
 /// Tracks which model the editor buffer belongs to, to detect model switches.
 #[derive(Resource)]
 pub struct EditorBufferState {
-    /// Hash of the source that was loaded into editor_buffer.
-    pub source_hash: u64,
+    /// Document generation that was last loaded into editor_buffer.
+    /// B.3 phase 6 replacement for `source_hash` — comparing `u64`
+    /// from the registry is faster and more authoritative than
+    /// hashing the whole buffer.
+    pub generation: u64,
     /// The doc origin path the buffer was last synced from
     /// (`bundled://…`, `mem://…`, file path).
     pub model_path: String,
@@ -132,7 +134,7 @@ pub const EDIT_DEBOUNCE_SEC: f64 = 0.35;
 impl Default for EditorBufferState {
     fn default() -> Self {
         Self {
-            source_hash: 0,
+            generation: 0,
             model_path: String::new(),
             bound_doc: None,
             text: String::new(),
@@ -158,7 +160,7 @@ impl EditorBufferState {
         self.per_doc.insert(
             self.model_path.clone(),
             TabBuffer {
-                source_hash: self.source_hash,
+                generation: self.generation,
                 text: self.text.clone(),
                 line_starts: self.line_starts.clone(),
                 detected_name: self.detected_name.clone(),
@@ -173,7 +175,7 @@ impl EditorBufferState {
     /// the registry-source re-sync), `false` otherwise.
     pub fn restore_snapshot(&mut self, model_path: &str) -> bool {
         if let Some(snap) = self.per_doc.remove(model_path) {
-            self.source_hash = snap.source_hash;
+            self.generation = snap.generation;
             self.text = snap.text;
             self.line_starts = snap.line_starts;
             self.detected_name = snap.detected_name;
@@ -193,6 +195,65 @@ impl EditorBufferState {
     }
 }
 
+/// Reacts to `DocumentChanged` to keep the live editor buffer in
+/// step with the document's source without a per-frame poll.
+/// Replaces the same-tab divergence check that used to live in
+/// `CodeEditorPanel::render`.
+///
+/// `buf_state.generation` is the per-bound-doc watermark — no
+/// separate resource needed. Snapshots for other tabs
+/// (`EditorBufferState::per_doc`) stay frozen and reconcile on
+/// tab-switch via the post-restore stale check in `render()`.
+///
+/// Pending typing: when `pending_commit_at.is_some()` we advance
+/// the generation watermark but don't overwrite buffer text.
+/// `commit_pending_buffer` will re-diff the still-typing buffer
+/// against the new source on its next flush. Concurrent
+/// structural edits during active typing are accepted as lost
+/// (the user is staring at the text); merging both intents
+/// requires per-keystroke ops, out of scope here.
+pub fn editor_on_doc_changed(
+    trigger: On<lunco_doc_bevy::DocumentChanged>,
+    registry: Res<ModelicaDocumentRegistry>,
+    mut buf_state: ResMut<EditorBufferState>,
+) {
+    let doc = trigger.event().doc;
+    if buf_state.bound_doc != Some(doc) {
+        return;
+    }
+    let Some(host) = registry.host(doc) else { return };
+    let current_gen = host.generation();
+    if buf_state.generation == current_gen {
+        return;
+    }
+
+    if buf_state.pending_commit_at.is_some() {
+        buf_state.generation = current_gen;
+        return;
+    }
+
+    let document = host.document();
+    let src = document.source().to_string();
+    let mut starts: Vec<usize> = vec![0];
+    for (i, b) in src.as_bytes().iter().enumerate() {
+        if *b == b'\n' {
+            starts.push(i + 1);
+        }
+    }
+    let detected = document
+        .index()
+        .classes
+        .values()
+        .find(|c| !matches!(c.kind, crate::index::ClassKind::Package))
+        .map(|c| c.name.clone());
+
+    buf_state.text = src;
+    buf_state.line_starts = starts.into();
+    buf_state.generation = current_gen;
+    buf_state.detected_name = detected;
+    buf_state.cached_galley = None;
+}
+
 /// Pull the live source for `path` from the document registry by
 /// `doc` id and stuff it into `EditorBufferState`'s live fields.
 /// Per-tab routing (split views) requires the doc-id keyed lookup —
@@ -210,7 +271,7 @@ fn sync_buffer_from_registry(world: &mut World, path: &str) {
                 .and_then(|ws| ws.active_document)
         });
     let Some(doc) = target_doc else { return };
-    let (source, line_starts, detected_name) = {
+    let (source, line_starts, detected_name, generation) = {
         let registry = world.resource::<ModelicaDocumentRegistry>();
         let Some(host) = registry.host(doc) else { return };
         let document = host.document();
@@ -228,7 +289,7 @@ fn sync_buffer_from_registry(world: &mut World, path: &str) {
             .values()
             .find(|c| !matches!(c.kind, crate::index::ClassKind::Package))
             .map(|c| c.name.clone());
-        (src, starts.into(), detected)
+        (src, starts.into(), detected, host.generation())
     };
     // Galley cache is layout-tied; can't pull it from the registry.
     // Letting it be None here forces a one-frame relayout — same
@@ -238,7 +299,7 @@ fn sync_buffer_from_registry(world: &mut World, path: &str) {
     buf_state.line_starts = line_starts;
     buf_state.model_path = path.to_string();
     buf_state.bound_doc = Some(doc);
-    buf_state.source_hash = hash_content(&buf_state.text);
+    buf_state.generation = generation;
     buf_state.detected_name = detected_name;
     buf_state.cached_galley = None;
     // Fresh load from doc → no pending commit yet.
@@ -350,85 +411,36 @@ impl Panel for CodeEditorPanel {
         // egui's ScrollArea retains the previous file's scroll offset
         // (driven by cursor position) and the new file opens with its
         // first few columns hidden behind the left panel boundary.
+        // Tab-switch handling. Same-tab content divergence is
+        // pushed into `editor_on_doc_changed` (see this file) so
+        // there's no per-frame generation poll here — render only
+        // runs sync logic when the user actually moves between
+        // tabs.
         let mut model_switched = false;
         if let Some(ref path) = model_path {
-            // Resync from the registry source when either
-            //   (a) the model itself changed (`model_path` diverged), or
-            //   (b) some other panel mutated the registry source —
-            //       currently the diagram panel after applying AST
-            //       ops — and the content hash now differs from what
-            //       this buffer last synced.
-            //
-            // Case (b) is what propagates diagram edits (add / delete
-            // component) into the code view. Gap: if the user has
-            // un-committed text edits in this buffer AND triggers a
-            // diagram edit, the resync clobbers them. That's a known
-            // transitional gap until the code editor writes every
-            // keystroke through the Document (its own `EditText` op).
-            // External hash from the tab's *own* doc (not the
-            // registry source) so split-Text panes
-            // don't fight over each other's content.
-            let external_hash = tab_target
-                .and_then(|d| world.resource::<ModelicaDocumentRegistry>().host(d))
-                .map(|h| hash_content(h.document().source()))
-                .unwrap_or(0);
-            let (needs_sync, path_changed) = {
-                let buf_state = world.resource::<EditorBufferState>();
-                let path_changed = buf_state.model_path != *path;
-                (path_changed || buf_state.source_hash != external_hash, path_changed)
-            };
+            let path_changed = world.resource::<EditorBufferState>().model_path != *path;
             model_switched = path_changed;
 
-            if needs_sync {
-                // Tab-switch path: snapshot the OLD tab's buffer
-                // (whatever's in the live fields right now belongs to
-                // the previous `model_path`) before we overwrite.
-                // Try to restore the NEW tab's snapshot first; only
-                // fall back to re-syncing from the registry source
-                // when this is the first time we've seen the tab —
-                // otherwise the user's uncommitted edits get clobbered.
-                if path_changed {
-                    let mut buf_state = world.resource_mut::<EditorBufferState>();
-                    buf_state.snapshot_current();
-                    let restored = buf_state.restore_snapshot(path);
-                    drop(buf_state);
-                    if restored {
-                        // Restored from snapshot — no source pull
-                        // needed. But if the registry source has
-                        // diverged since we saved (some other panel
-                        // mutated it), the restored buffer is stale
-                        // relative to `external_hash`. Detect that
-                        // and fall through to re-sync.
-                        let external_hash = tab_target
-                            .and_then(|d| {
-                                world
-                                    .resource::<ModelicaDocumentRegistry>()
-                                    .host(d)
-                            })
-                            .map(|h| hash_content(h.document().source()))
-                            .unwrap_or(0);
-                        let buf_hash = world.resource::<EditorBufferState>().source_hash;
-                        if buf_hash == external_hash {
-                            // In sync; nothing more to do.
-                            // (Skip the registry-source re-sync below.)
-                        } else {
-                            // External edit happened while this tab
-                            // was hidden; drop the stale snapshot
-                            // and pull the fresh source.
-                            sync_buffer_from_registry(world, path);
-                        }
-                    } else {
-                        sync_buffer_from_registry(world, path);
-                    }
-                } else {
-                    // Same tab, but content hash diverged (some
-                    // panel mutated the registry source — typically
-                    // the diagram panel after applying AST ops).
-                    // Pull the fresh source. This still clobbers
-                    // uncommitted text edits for now; the long-term
-                    // fix is to write every keystroke through a
-                    // Document op so the buffer never diverges from
-                    // the doc to begin with.
+            if path_changed {
+                let mut buf_state = world.resource_mut::<EditorBufferState>();
+                buf_state.snapshot_current();
+                let restored = buf_state.restore_snapshot(path);
+                drop(buf_state);
+                // Restored snapshots may be stale if the doc was
+                // mutated while this tab was hidden — the observer
+                // only updates the *bound* tab. Compare against the
+                // registry and fall through to a fresh pull when
+                // they diverge. New-tab path falls straight through
+                // to the same sync.
+                let stale = {
+                    let buf_gen = world.resource::<EditorBufferState>().generation;
+                    let external_gen = tab_target
+                        .and_then(|d| world.resource::<ModelicaDocumentRegistry>().host(d))
+                        .map(|h| h.generation())
+                        .unwrap_or(0);
+                    buf_gen != external_gen
+                };
+                if !restored || stale {
                     sync_buffer_from_registry(world, path);
                 }
             }
@@ -1076,13 +1088,26 @@ pub fn commit_pending_buffer(world: &mut World, doc: lunco_doc::DocumentId) -> b
         if let Some((range, replacement)) =
             crate::text_diff::diff_to_edit(&prior, &committed)
         {
-            let _ = crate::ui::panels::canvas_diagram::apply_one_op_as(
+            let result = crate::ui::panels::canvas_diagram::apply_one_op_as(
                 world,
                 doc,
                 crate::document::ModelicaOp::EditText { range, replacement },
                 lunco_twin_journal::AuthorTag::for_tool("code-editor"),
             );
-            wrote = true;
+            if result.is_ok() {
+                // Self-edit landed: pull the doc's new generation
+                // forward into our buffer state so the next frame's
+                // same-tab divergence check doesn't fire on our own
+                // op and resync over still-uncommitted typing the
+                // user added between this flush and the next render.
+                if let Some(host) =
+                    world.resource::<ModelicaDocumentRegistry>().host(doc)
+                {
+                    let new_gen = host.generation();
+                    world.resource_mut::<EditorBufferState>().generation = new_gen;
+                }
+                wrote = true;
+            }
         }
     }
     world.resource_mut::<EditorBufferState>().pending_commit_at = None;

@@ -894,21 +894,17 @@ pub(crate) fn sync_active_tab_to_doc(
         .get_resource::<lunco_workbench::WorkspaceResource>()
         .and_then(|ws| ws.active_document)
         == Some(doc);
-    // Fast-path: if the buffer's text length matches the live
-    // source for this doc and we're already active, nothing to do.
-    let buffer_matches_live = {
-        let live = world
-            .resource::<ModelicaDocumentRegistry>()
-            .host(doc)
-            .map(|h| h.document().source().len())
-            .unwrap_or(0);
-        let buf_len = world
-            .get_resource::<EditorBufferState>()
-            .map(|b| b.text.len())
-            .unwrap_or(0);
-        live > 0 && live == buf_len
+    // Fast-path: if we're already active AND the buffer is already bound
+    // to this doc with the same generation, nothing to do.
+    let buffer_matches = {
+        let registry = world.resource::<ModelicaDocumentRegistry>();
+        let live_gen = registry.host(doc).map(|h| h.generation()).unwrap_or(0);
+        let buf = world.get_resource::<EditorBufferState>();
+        let buf_doc = buf.and_then(|b| b.bound_doc);
+        let buf_gen = buf.map(|b| b.generation).unwrap_or(0);
+        buf_doc == Some(doc) && buf_gen == live_gen
     };
-    if active_matches && buffer_matches_live {
+    if active_matches && buffer_matches {
         refresh_selected_entity_for(world, doc);
         return;
     }

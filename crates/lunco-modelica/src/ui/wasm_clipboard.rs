@@ -55,20 +55,26 @@ impl Plugin for WasmClipboardPlugin {
     }
 }
 
-/// Spawn an async `navigator.clipboard.readText()` and stash the
-/// resolved text in `pending_paste`. Used by the right-click menu's
-/// "Paste" entry — it has no real paste gesture, so this is the only
-/// remaining option, and the browser will prompt for permission. The
-/// keyboard Ctrl/Cmd+V path goes through the synchronous `paste`
-/// event listener instead and never hits this. No-op on native.
+/// Stash clipboard text into the pending-paste slot so the editor
+/// picks it up on the next frame.
+///
+/// - On wasm: spawn an async `navigator.clipboard.readText()`. The
+///   keyboard Ctrl/Cmd+V path goes through the synchronous `paste`
+///   event listener instead and never hits this; menu/toolbar buttons
+///   have no real paste gesture so the browser prompts once.
+/// - On native: read the OS clipboard synchronously via `arboard` and
+///   stash the result. arboard is already in the dep tree (bevy_egui
+///   uses it for its own Ctrl/Cmd+V handling).
 pub fn request_paste_from_clipboard() {
     #[cfg(target_arch = "wasm32")]
     inner::request_paste_async();
+    #[cfg(not(target_arch = "wasm32"))]
+    native::request_paste_sync();
 }
 
 /// Drain a pending paste, if any. The editor calls this each frame
 /// and inserts the returned text at the cursor (replacing any
-/// selection). No-op on native (returns `None`).
+/// selection).
 pub fn take_pending_paste() -> Option<String> {
     #[cfg(target_arch = "wasm32")]
     {
@@ -76,7 +82,43 @@ pub fn take_pending_paste() -> Option<String> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        None
+        native::take_pending_paste()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+    use std::sync::Mutex;
+
+    // Single global slot. The editor render runs on the main thread and
+    // arboard is synchronous, so a `Mutex` is overkill in practice; using
+    // it anyway to avoid relying on thread-local lifetimes when called
+    // from inside an egui closure.
+    static PENDING: Mutex<Option<String>> = Mutex::new(None);
+
+    pub(super) fn request_paste_sync() {
+        // Re-create the clipboard handle per call. arboard caches the
+        // X11/Wayland/Cocoa/Windows connection internally, so this is
+        // cheap, and avoids holding a long-lived handle that some
+        // platforms (Wayland) dislike across compositor restarts.
+        let text = match arboard::Clipboard::new()
+            .and_then(|mut cb| cb.get_text())
+        {
+            Ok(t) => t,
+            Err(e) => {
+                bevy::log::warn!(
+                    "[clipboard] paste failed: {e}"
+                );
+                return;
+            }
+        };
+        if let Ok(mut slot) = PENDING.lock() {
+            *slot = Some(text);
+        }
+    }
+
+    pub(super) fn take_pending_paste() -> Option<String> {
+        PENDING.lock().ok().and_then(|mut slot| slot.take())
     }
 }
 

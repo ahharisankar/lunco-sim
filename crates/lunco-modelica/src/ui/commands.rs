@@ -896,15 +896,17 @@ fn apply_undo_or_redo(
     };
 
     let Some(source) = new_source else { return };
-    sync_editor_buffer_to_source(&source, editor, workbench);
+    sync_editor_buffer_to_source(doc, &source, registry, editor, workbench);
 }
 
 /// Write the given source into [`EditorBufferState`] (including line
-/// starts, detected name, hash) and [`WorkbenchState::editor_buffer`]
+/// starts, detected name, generation) and [`WorkbenchState::editor_buffer`]
 /// so both the text view and any mirror consumers see the new content
 /// on the next frame.
 fn sync_editor_buffer_to_source(
+    doc: DocumentId,
     source: &str,
+    registry: &ModelicaDocumentRegistry,
     editor: &mut EditorBufferState,
     workbench: &mut WorkbenchState,
 ) {
@@ -923,7 +925,10 @@ fn sync_editor_buffer_to_source(
     // via the `DocumentChanged` pipeline that callers fire after
     // mutating the document, and that path refreshes the per-doc
     // Index that UI consumers (inspector, canvas overlays) read.
-    editor.source_hash = hash_content(source);
+    editor.generation = registry
+        .host(doc)
+        .map(|h| h.generation())
+        .unwrap_or(0);
     workbench.editor_buffer = source.to_string();
 }
 

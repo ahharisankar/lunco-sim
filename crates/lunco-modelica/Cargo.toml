@@ -157,6 +157,14 @@ rfd = { workspace = true }
 # Connect with the `tracy-profiler` GUI on a debug/native build.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 bevy = { workspace = true, features = ["trace_tracy"] }
+# OS clipboard for the code editor's menu / toolbar / right-click Paste
+# buttons on native. Ctrl/Cmd+V already works through bevy_egui's own
+# arboard plumbing, but the buttons go through
+# `ui/wasm_clipboard.rs::request_paste_from_clipboard()` which was
+# wasm-only; the native branch reads via arboard so the buttons match
+# the keyboard path. Already transitively present via bevy_egui's
+# `manage_clipboard` feature — no new compile.
+arboard = "3"
 
 # Web-specific: wasm32-unknown-unknown needs JS interop for console output,
 # panic hooks, and RNG (std::time is unavailable).

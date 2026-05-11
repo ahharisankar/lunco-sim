@@ -679,6 +679,9 @@ impl Plugin for ModelicaUiPlugin {
             // changes) per fire.
             .init_resource::<ClassRemovedWatermark>()
             .add_observer(close_drilled_tabs_on_class_removed)
+            // Push-driven editor buffer sync — replaces the old
+            // per-frame generation poll in `CodeEditorPanel::render`.
+            .add_observer(panels::code_editor::editor_on_doc_changed)
             .add_systems(Update, derive_doc_title)
             // Twin-panel: keep the loaded-classes list in sync with
             // the document registry. One `WorkspaceClass` per

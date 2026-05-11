@@ -6095,6 +6095,7 @@ name = "lunco-modelica"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arboard",
  "arc-swap",
  "bevy",
  "bevy_egui",

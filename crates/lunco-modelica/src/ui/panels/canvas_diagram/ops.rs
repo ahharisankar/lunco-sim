@@ -519,20 +519,32 @@ fn op_needs_fresh_ast_pre_apply(op: &ModelicaOp) -> bool {
 }
 
 /// Single-op kernel: pre-op AST refresh (when the op needs one) →
-/// `host.apply(op)` → on success, waive the AST debounce *and* force
-/// a synchronous reparse so the *next* call (in this batch or via a
-/// separate API call) sees a fresh AST.
+/// `host.apply(op)` → on success, waive the AST debounce so the
+/// async engine sync picks the doc up on the next tick. **No
+/// synchronous reparse on the write path** — typing a character
+/// (an `EditText` op) would otherwise pay the whole-program
+/// semantic cost on the main thread (observed: ~2 s on an 11 KB
+/// file with MSL inheritance) and freeze the UI.
 ///
-/// `refresh_ast_now` early-returns when the syntax cache is already
-/// at the current generation — and structured ops install a fresh
-/// AST inline via `FreshAst::Mutated`, so the post-apply refresh is
-/// effectively only a real reparse after `ReplaceSource`-class
-/// (`FreshAst::TextEdit`) ops. Cheap to leave it in the kernel; this
-/// is the one place the AST-freshness invariant is enforced.
+/// Freshness contract after this returns:
+///
+/// - Structured ops (`FreshAst::Mutated`): the syntax cache is
+///   already up-to-date — `host.apply` installs the mutated AST
+///   inline. Same-frame readers see fresh.
+/// - Text ops (`FreshAst::TextEdit`): the syntax cache is stale
+///   until `drive_engine_sync` lands the async parse and fires
+///   `DocumentChanged`. UI consumers subscribe to that event
+///   rather than reading speculatively.
+///
+/// The pre-apply check still forces a sync reparse for structural
+/// ops that need the latest tree to mutate (see
+/// `op_needs_fresh_ast_pre_apply`). That path is the one place the
+/// kernel still does expensive work synchronously; converting it
+/// to a "queue until clean" gate is a separate refactor.
 ///
 /// Both [`apply_one_op_as`] and [`apply_ops`] funnel through here so
-/// the pre-apply AST contract, post-apply refresh, and journal-pair
-/// shape can't drift between the single-op and batch paths.
+/// the pre-apply contract and journal-pair shape can't drift
+/// between the single-op and batch paths.
 ///
 /// Returns `(host.apply result, optional (forward, backward) journal
 /// summaries)`. Caller is responsible for journal-record +
@@ -552,7 +564,6 @@ fn apply_one_op_kernel(
     let result = host.apply(op);
     let pair = if result.is_ok() {
         host.document_mut().waive_ast_debounce();
-        host.document_mut().refresh_ast_now();
         host.last_applied_inverse()
             .map(crate::journal::summarize_op)
             .map(|backward| (forward, backward))
