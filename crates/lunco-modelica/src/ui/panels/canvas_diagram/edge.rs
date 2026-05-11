@@ -133,6 +133,7 @@ impl EdgeVisual for OrthogonalEdgeVisual {
         ctx: &mut DrawCtx,
         from: CanvasPos,
         to: CanvasPos,
+        waypoints_screen: &[CanvasPos],
         selected: bool,
     ) {
         let palette = modelica_icon_palette_from_ctx(ctx.ui.ctx());
@@ -166,11 +167,22 @@ impl EdgeVisual for OrthogonalEdgeVisual {
         // of inventing a straight from→to line that ignores stubs
         // and waypoints.
         let polyline: Vec<egui::Pos2> = 'route: {
-            if !self.waypoints_world.is_empty() {
-                let from_screen = egui::pos2(from.x, from.y);
-                let to_screen = egui::pos2(to.x, to.y);
-                let way_screen: Vec<egui::Pos2> = self
-                    .waypoints_world
+            // Prefer the live waypoints provided by the caller — these
+            // come straight from `Edge::waypoints` (mutated live by the
+            // canvas tool during a waypoint drag), so the wire follows
+            // the cursor without waiting for a re-projection. Fall back
+            // to the visual's frozen `waypoints_world` only if the live
+            // list is empty (defends against any caller that doesn't
+            // pass them).
+            let from_screen = egui::pos2(from.x, from.y);
+            let to_screen = egui::pos2(to.x, to.y);
+            let way_screen: Vec<egui::Pos2> = if !waypoints_screen.is_empty() {
+                waypoints_screen
+                    .iter()
+                    .map(|p| egui::pos2(p.x, p.y))
+                    .collect()
+            } else {
+                self.waypoints_world
                     .iter()
                     .map(|p| {
                         let s = ctx
@@ -178,7 +190,9 @@ impl EdgeVisual for OrthogonalEdgeVisual {
                             .world_to_screen(*p, ctx.screen_rect);
                         egui::pos2(s.x, s.y)
                     })
-                    .collect();
+                    .collect()
+            };
+            if !way_screen.is_empty() {
                 const ALIGN_TOL: f32 = 1.0;
                 let first_far = way_screen
                     .first()
@@ -343,6 +357,52 @@ impl EdgeVisual for OrthogonalEdgeVisual {
                 );
                 let text = edge_hover_text(self, &state);
                 paint_wire_tooltip(painter, p, &text, col);
+            }
+        }
+
+        // ── Editable waypoint handles ────────────────────────────────────
+        // Dymola/OMEdit: when a wire is selected, paint a filled square
+        // at every interior corner and an outlined square at the
+        // midpoint of every reasonably-long segment. The canvas tool
+        // hit-tests these geometrically against `Edge::waypoints`, so
+        // the paint here only needs to mirror that hit geometry.
+        if selected {
+            let handle_size = (4.0 * scale).max(3.0);
+            let fill = egui::Color32::from_rgb(255, 196, 60);
+            let outline = egui::Stroke::new(1.0, egui::Color32::BLACK);
+            // Corner handles — one per interior waypoint.
+            for w in waypoints_screen {
+                let r = egui::Rect::from_center_size(
+                    egui::pos2(w.x, w.y),
+                    egui::vec2(handle_size, handle_size),
+                );
+                painter.rect_filled(r, 0.0, fill);
+                painter.rect_stroke(r, 0.0, outline, egui::StrokeKind::Outside);
+            }
+            // Segment midpoint handles — outlined squares; skip
+            // segments shorter than ~3× the handle so they don't
+            // overlap corner handles or each other.
+            let min_seg = handle_size * 3.0;
+            for w in polyline.windows(2) {
+                let a = w[0];
+                let b = w[1];
+                let dx = b.x - a.x;
+                let dy = b.y - a.y;
+                let len = (dx * dx + dy * dy).sqrt();
+                if len < min_seg {
+                    continue;
+                }
+                let mid = egui::pos2((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+                let r = egui::Rect::from_center_size(
+                    mid,
+                    egui::vec2(handle_size, handle_size),
+                );
+                painter.rect_stroke(
+                    r,
+                    0.0,
+                    egui::Stroke::new(1.2, fill),
+                    egui::StrokeKind::Outside,
+                );
             }
         }
     }

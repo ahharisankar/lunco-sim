@@ -133,6 +133,7 @@ pub trait EdgeVisual: Send + Sync {
         ctx: &mut DrawCtx,
         from_screen: Pos,
         to_screen: Pos,
+        waypoints_screen: &[Pos],
         selected: bool,
     );
 
@@ -320,6 +321,7 @@ impl EdgeVisual for PlaceholderEdgeVisual {
         ctx: &mut DrawCtx,
         from_screen: Pos,
         to_screen: Pos,
+        _waypoints_screen: &[Pos],
         selected: bool,
     ) {
         let col = if selected {

@@ -215,7 +215,19 @@ impl Layer for EdgesLayer {
                 .unwrap_or_else(|| Box::new(crate::visual::PlaceholderEdgeVisual));
             let selected =
                 selection.contains(crate::selection::SelectItem::Edge(*eid));
-            visual.draw(ctx, from_s, to_s, selected);
+            // Project the live waypoints (mid-drag this is what the
+            // tool just mutated) into screen space, with the same
+            // pixel-snap as the endpoints so the polyline stays
+            // aligned across zoom levels.
+            let waypoints_screen: Vec<crate::scene::Pos> = edge
+                .waypoints
+                .iter()
+                .map(|w| {
+                    let s = ctx.viewport.world_to_screen(*w, sr);
+                    crate::scene::Pos::new(s.x.round(), s.y.round())
+                })
+                .collect();
+            visual.draw(ctx, from_s, to_s, &waypoints_screen, selected);
         }
         // Post-pass: junction dots. A small filled circle at any
         // port that hosts ≥3 incident wires. Drawn on top of the
