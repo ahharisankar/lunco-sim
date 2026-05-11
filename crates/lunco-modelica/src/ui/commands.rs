@@ -2652,15 +2652,77 @@ fn on_open_file(trigger: On<OpenFile>, mut commands: Commands) {
             return;
         }
 
-        let source = match std::fs::read_to_string(&path) {
+        // Read the file off the main thread. A 150 KB MSL package
+        // file synchronously read on the input path is ~30 ms of
+        // stutter; spawn on AsyncCompute and re-enter the World via
+        // `Commands::queue` when the bytes are ready.
+        let path_buf = std::path::PathBuf::from(&path);
+        let path_for_task = path_buf.clone();
+        let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
+            std::fs::read_to_string(&path_for_task)
+        });
+        // The task's `Task<...>` will complete on a worker thread.
+        // Bevy doesn't have a "wait for this task on the main
+        // thread" idiom that doesn't block; instead, we detach a
+        // small async wrapper that re-enters the main thread via
+        // a one-shot channel + a polling system. Lighter-weight
+        // shape: detach the task with an inline callback that
+        // queues the installation work on the next Update tick.
+        bevy::tasks::AsyncComputeTaskPool::get()
+            .spawn(async move {
+                let read_result = task.await;
+                // Hand off to main thread via the universal one-shot
+                // channel — there's no cross-thread `&mut World`
+                // access available from async land, so we deposit
+                // the result into a dedicated resource that a
+                // PreUpdate system drains and installs.
+                let _ = OPEN_FILE_RESULT_TX
+                    .get_or_init(|| {
+                        let (tx, rx) = std::sync::mpsc::channel::<OpenFileResult>();
+                        let _ = OPEN_FILE_RESULT_RX.set(std::sync::Mutex::new(rx));
+                        tx
+                    })
+                    .send(OpenFileResult {
+                        path: path_buf,
+                        read_result,
+                    });
+            })
+            .detach();
+    });
+}
+
+struct OpenFileResult {
+    path: std::path::PathBuf,
+    read_result: std::io::Result<String>,
+}
+
+static OPEN_FILE_RESULT_TX: std::sync::OnceLock<std::sync::mpsc::Sender<OpenFileResult>> =
+    std::sync::OnceLock::new();
+static OPEN_FILE_RESULT_RX: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Receiver<OpenFileResult>>> =
+    std::sync::OnceLock::new();
+
+/// Drain pending `OpenFile` reads and install them as documents.
+/// Runs each tick; cheap when the queue is empty.
+pub fn drain_open_file_results(world: &mut bevy::prelude::World) {
+    let Some(rx_mutex) = OPEN_FILE_RESULT_RX.get() else {
+        return;
+    };
+    let pending: Vec<OpenFileResult> = {
+        let Ok(rx) = rx_mutex.lock() else {
+            return;
+        };
+        rx.try_iter().collect()
+    };
+    for result in pending {
+        let path = result.path;
+        let source = match result.read_result {
             Ok(s) => s,
             Err(e) => {
-                bevy::log::warn!("[OpenFile] {} read failed: {}", path, e);
-                return;
+                bevy::log::warn!("[OpenFile] {} read failed: {}", path.display(), e);
+                continue;
             }
         };
-        let path_buf = std::path::PathBuf::from(&path);
-        let stem = path_buf
+        let stem = path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("Opened")
@@ -2670,11 +2732,10 @@ fn on_open_file(trigger: On<OpenFile>, mut commands: Commands) {
         let doc_id = registry.allocate_with_origin(
             source,
             lunco_doc::DocumentOrigin::File {
-                path: path_buf,
+                path: path.clone(),
                 writable: true,
             },
         );
-        // Land in Canvas view so the user sees the diagram.
         let mut tabs = world.resource_mut::<crate::ui::panels::model_view::ModelTabs>();
         let tab_id = tabs.ensure_for(doc_id, None);
         if let Some(tab) = tabs.get_mut(tab_id) {
@@ -2684,8 +2745,8 @@ fn on_open_file(trigger: On<OpenFile>, mut commands: Commands) {
             kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
             instance: tab_id,
         });
-        bevy::log::info!("[OpenFile] opened `{}` as `{}`", path, stem);
-    });
+        bevy::log::info!("[OpenFile] opened `{}` as `{}`", path.display(), stem);
+    }
 }
 
 /// Open a bundled (`assets/models/*.mo`) example as an Untitled doc.

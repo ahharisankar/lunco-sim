@@ -93,26 +93,34 @@ pub fn peek_or_load_msl_class_blocking(
     qualified: &str,
 ) -> Option<Arc<rumoca_session::parsing::ast::ClassDef>> {
     let handle = crate::engine_resource::global_engine_handle()?;
-    let mut engine = handle.lock();
-    if !engine.has_class(qualified) {
-        let path = resolve_class_path_indexed(qualified)
-            .or_else(|| locate_library_file(qualified))?;
-        let uri = path.to_string_lossy().replace('\\', "/");
-        // Pre-parsed MSL bundle short-circuit — install the cached
-        // AST without re-parsing. On wasm this is the ONLY allowed
-        // path: `add_document` calls rumoca synchronously which
-        // freezes the UI for minutes on a 150 KB MSL file.
-        let cached_ast = crate::msl_remote::global_parsed_msl()
-            .and_then(|b| b.iter().find(|(k, _)| k == &uri).map(|(_, ast)| ast.clone()));
-        if let Some(ast) = cached_ast {
-            engine.session_mut().add_parsed_batch(vec![(uri, ast)]);
-        } else {
-            // Cache miss. Native: parse synchronously (real worker
-            // threads make this acceptable). Wasm: refuse — UI
-            // responsiveness is non-negotiable. Caller gets None,
-            // renders default; the worker / next sync tick will
-            // populate the engine async and the next render will
-            // pick up the real class.
+
+    // Phase 1: brief lock to check whether the class is already
+    // installed. If yes, just hand it back.
+    {
+        let mut engine = handle.lock();
+        if engine.has_class(qualified) {
+            return engine.class_def(qualified).map(Arc::new);
+        }
+    }
+
+    // Phase 2: locate + parse OUTSIDE the lock. This is the slow
+    // step (file I/O + rumoca parse + extends-chain resolution can
+    // take seconds for MSL classes with deep inheritance). Holding
+    // the engine mutex across this step froze the UI: every
+    // main-thread system that touches the engine
+    // (`drive_engine_sync`, icon lookups, inspector queries) would
+    // block until the parse completed. Parse first, install second.
+    let path = resolve_class_path_indexed(qualified)
+        .or_else(|| locate_library_file(qualified))?;
+    let uri = path.to_string_lossy().replace('\\', "/");
+
+    // Bundled MSL: AST is pre-parsed at build time, no rumoca work.
+    let cached_ast = crate::msl_remote::global_parsed_msl()
+        .and_then(|b| b.iter().find(|(k, _)| k == &uri).map(|(_, ast)| ast.clone()));
+
+    let parsed_ast: Option<rumoca_session::parsing::ast::StoredDefinition> = match cached_ast {
+        Some(ast) => Some(ast),
+        None => {
             #[cfg(target_arch = "wasm32")]
             {
                 bevy::log::warn!(
@@ -124,9 +132,35 @@ pub fn peek_or_load_msl_class_blocking(
             #[cfg(not(target_arch = "wasm32"))]
             {
                 let source = read_msl_source_bytes(&path)?;
-                engine.session_mut().add_document(&uri, &source).ok()?;
+                // Parse standalone without holding the engine lock.
+                // `add_document` would do this internally but inside
+                // the lock; the standalone `parse_to_ast` lets us
+                // pay the parse cost off-lock and install via
+                // `add_parsed_batch` (cheap) afterwards.
+                match rumoca_phase_parse::parse_to_ast(&source, &uri) {
+                    Ok(ast) => Some(ast),
+                    Err(e) => {
+                        bevy::log::warn!(
+                            "[class_cache] rumoca parse failed for {qualified} (uri={uri}): {e:?}"
+                        );
+                        return None;
+                    }
+                }
             }
         }
+    };
+
+    let parsed_ast = parsed_ast?;
+
+    // Phase 3: re-acquire the lock briefly to install. Another
+    // task may have raced ahead and installed the same class
+    // while we were parsing — `add_parsed_batch` is idempotent
+    // for matching content, and `class_def` returns whatever is
+    // current. The wasted parse is acceptable; the alternative
+    // (per-class loading mutex) is more state for negligible win.
+    let mut engine = handle.lock();
+    if !engine.has_class(qualified) {
+        engine.session_mut().add_parsed_batch(vec![(uri, parsed_ast)]);
     }
     engine.class_def(qualified).map(Arc::new)
 }

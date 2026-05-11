@@ -653,6 +653,7 @@ impl Plugin for ModelicaUiPlugin {
             .add_systems(Update, panels::package_browser::handle_package_loading_tasks)
             .add_systems(Update, cleanup_removed_documents)
             .add_systems(Update, drain_document_changes)
+            .add_systems(Update, commands::drain_open_file_results)
             // Mirror the active document's volatile fields (source,
             // line_starts, detected_name) into the registry-by-doc lookup
             // B.3 phase 6 (2026-05-08): the

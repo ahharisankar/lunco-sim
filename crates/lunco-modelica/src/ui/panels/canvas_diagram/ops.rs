@@ -813,6 +813,12 @@ pub(super) fn apply_ops(
     let n = ops.len();
     let mut any_applied = false;
     let mut hit_read_only = false;
+    // Capture before the consuming loop: did this batch include a
+    // drag-style op whose visual was already applied to the scene?
+    // See the `canvas_acked_gen` block below.
+    let any_optimistic_visual = ops
+        .iter()
+        .any(|op| matches!(op, ModelicaOp::SetPlacement { .. }));
 
     // Preload any newly-referenced MSL class on a background task
     // so the engine session is warm by the time the projection
@@ -977,27 +983,46 @@ pub(super) fn apply_ops(
         // remove, palette drop) fall through to gen-advance on the
         // sibling's next render, which reprojects from the
         // freshly-rewritten source.
-        if let Some(mut state) = world.get_resource_mut::<CanvasDiagramState>() {
-            if let Some(tab_id) = editing_tab {
-                let docstate = state.get_mut_for_tab(tab_id, doc_id);
-                docstate.canvas_acked_gen = new_gen;
-                docstate.last_seen_gen = new_gen;
-                docstate.last_seen_source_hash = new_hash;
-            } else {
-                // Non-render-context dispatch (API, observer); doc-keyed
-                // fallback slot. The per-tab slots are untouched, so
-                // sibling tabs gate normally on their next render —
-                // their `last_seen_gen` is older than the new gen, the
-                // hash check sees the source change, and they reproject
-                // from the freshly-installed AST. No invalidation hack
-                // needed since AST-canonical ops keep `ast_is_stale`
-                // false (see document::apply_patch fresh_ast install).
-                let docstate = state.get_mut(Some(doc_id));
-                docstate.canvas_acked_gen = new_gen;
-                docstate.last_seen_gen = new_gen;
-                docstate.last_seen_source_hash = new_hash;
+        // The previous code unconditionally acked the new gen on the
+        // editing tab to suppress projection — the assumption being
+        // that the canvas had already optimistically synthesised the
+        // affected node/edge before dispatch. That optimistic-synth
+        // path (`synthesize_msl_node`) was deleted; menu-add /
+        // palette-drop / context-menu ops now produce *no* same-frame
+        // scene change. Acking the gen here was telling the projection
+        // gate "scene already matches new state" — a lie — and the
+        // gate then skipped projection forever, leaving the user
+        // staring at an empty canvas after adding components.
+        //
+        // We only ack for ops whose visual is genuinely already
+        // applied by the time apply_ops returns. Today the canvas
+        // only does true optimistic update for drag (`SetPlacement`
+        // adjusts the scene's node rect in-place before the op
+        // dispatches). Everything else needs the projector to rebuild
+        // the scene from the new AST — let `gen_advanced` fire.
+        if any_optimistic_visual {
+            if let Some(mut state) = world.get_resource_mut::<CanvasDiagramState>() {
+                if let Some(tab_id) = editing_tab {
+                    let docstate = state.get_mut_for_tab(tab_id, doc_id);
+                    docstate.canvas_acked_gen = new_gen;
+                    docstate.last_seen_gen = new_gen;
+                    docstate.last_seen_source_hash = new_hash;
+                } else {
+                    let docstate = state.get_mut(Some(doc_id));
+                    docstate.canvas_acked_gen = new_gen;
+                    docstate.last_seen_gen = new_gen;
+                    docstate.last_seen_source_hash = new_hash;
+                }
             }
         }
+        // Non-drag ops: leave `last_seen_gen`, `canvas_acked_gen`,
+        // AND `last_seen_source_hash` untouched. The next canvas
+        // render sees `gen_advanced=true` plus a fresh source hash
+        // that no longer matches the stored one, and the projection
+        // gate fires a reprojection. Updating the hash here (a
+        // previous mistake) made the hash-skip check pass falsely
+        // and the canvas never re-rendered the new component.
+        let _ = new_hash;
     }
 
     let mirror_ms = t_mirror_start.elapsed().as_secs_f64() * 1000.0;
