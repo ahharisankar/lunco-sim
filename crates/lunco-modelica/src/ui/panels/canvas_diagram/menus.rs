@@ -16,6 +16,38 @@ use super::palette::{self, PaletteSettings};
 use super::{CanvasDiagramState, active_doc_from_world};
 use crate::ui::panels::model_view::TabRenderContext;
 
+/// Build a `SetConnectionLine` op from the current edge's waypoints
+/// after applying `mutate` to a fresh copy. `mutate` may insert,
+/// remove, or move waypoints freely (canvas coords). Returns `None`
+/// if the edge or its endpoints can't be resolved. Used by the
+/// right-click bend insert/delete entries.
+fn op_modify_waypoints(
+    world: &mut World,
+    edge_id: lunco_canvas::EdgeId,
+    class: &str,
+    mutate: impl FnOnce(&mut Vec<lunco_canvas::Pos>),
+) -> Option<ModelicaOp> {
+    let active_doc = active_doc_from_world(world);
+    let tab = render_tab_id(world);
+    let state = world.resource::<CanvasDiagramState>();
+    let scene = &state.get_for_render(tab, active_doc).canvas.scene;
+    let edge = scene.edge(edge_id)?;
+    let from_node = scene.node(edge.from.node)?;
+    let to_node = scene.node(edge.to.node)?;
+    let from_instance = from_node.origin.clone()?;
+    let to_instance = to_node.origin.clone()?;
+    let mut pts: Vec<lunco_canvas::Pos> = edge.waypoints.clone();
+    mutate(&mut pts);
+    // Canvas Y is +down; Modelica is +up. Flip on the way to source.
+    let modelica_pts: Vec<(f32, f32)> = pts.iter().map(|p| (p.x, -p.y)).collect();
+    Some(ModelicaOp::SetConnectionLine {
+        class: class.to_string(),
+        from: crate::pretty::PortRef::new(&from_instance, edge.from.port.as_str()),
+        to: crate::pretty::PortRef::new(&to_instance, edge.to.port.as_str()),
+        points: modelica_pts,
+    })
+}
+
 /// Read the active tab id from `TabRenderContext`. `None` when called
 /// outside a panel render call (observers, off-render systems);
 /// callers fall back to first-tab semantics in that case via
@@ -217,11 +249,61 @@ pub(super) fn render_edge_menu(
     ui: &mut egui::Ui,
     world: &mut World,
     id: lunco_canvas::EdgeId,
+    hit: lunco_canvas::EdgeHitKind,
+    click_world: lunco_canvas::Pos,
     editing_class: Option<&str>,
     out: &mut Vec<ModelicaOp>,
 ) {
     ui.label(egui::RichText::new("Connection").strong());
     ui.separator();
+    // ── Bend insert / delete (hit-kind dependent) ───────────────────
+    if let Some(class) = editing_class {
+        match hit {
+            lunco_canvas::EdgeHitKind::Corner(idx) => {
+                if ui.button("✕ Delete bend").clicked() {
+                    if let Some(op) = op_modify_waypoints(
+                        world,
+                        id,
+                        class,
+                        |pts| {
+                            if idx < pts.len() {
+                                pts.remove(idx);
+                            }
+                        },
+                    ) {
+                        out.push(op);
+                    }
+                    ui.close();
+                }
+            }
+            lunco_canvas::EdgeHitKind::Segment(seg_idx) => {
+                if ui.button("➕ Add bend here").clicked() {
+                    if let Some(op) = op_modify_waypoints(
+                        world,
+                        id,
+                        class,
+                        |pts| {
+                            // Segment seg_idx spans (seg_idx-1, seg_idx)
+                            // within the interior list, where indices
+                            // outside that span correspond to the port
+                            // endpoints. Insert the click position as
+                            // a fresh interior bend at position seg_idx.
+                            let insert_at = seg_idx.min(pts.len());
+                            pts.insert(
+                                insert_at,
+                                lunco_canvas::Pos::new(click_world.x, click_world.y),
+                            );
+                        },
+                    ) {
+                        out.push(op);
+                    }
+                    ui.close();
+                }
+            }
+            lunco_canvas::EdgeHitKind::Body => {}
+        }
+        ui.separator();
+    }
     if ui.button("✂ Delete").clicked() {
         if let Some(class) = editing_class {
             if let Some(op) = op_remove_edge(world, id, class) {

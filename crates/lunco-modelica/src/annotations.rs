@@ -1366,14 +1366,46 @@ pub fn extract_line_points(annotation: &[Expression]) -> Vec<(f32, f32)> {
 /// `None` when the annotation has no `Line(...)` call or fewer than 2
 /// points (matching `extract_line_points`'s "empty" semantics).
 pub fn extract_line_route(annotation: &[Expression]) -> Option<(Vec<(f32, f32)>, bool)> {
+    extract_line_full(annotation).map(|r| (r.points, r.smooth_bezier))
+}
+
+/// Full extracted view of a `connect(...) annotation(Line(...))` — the
+/// data the canvas projection needs (points + style fields). Returns
+/// `None` when no `Line(...)` call exists. Differs from `extract_line`
+/// (the internal AST-shape parser) in that it returns canvas-side f32
+/// coordinates and only the fields the renderer can act on today.
+pub struct LineRoute {
+    pub points: Vec<(f32, f32)>,
+    pub smooth_bezier: bool,
+    pub color: Option<[u8; 3]>,
+    pub thickness: Option<f32>,
+}
+
+pub fn extract_line_full(annotation: &[Expression]) -> Option<LineRoute> {
     let line_call = find_call(annotation, "Line")?;
     let line_args = call_args(line_call)?;
     let line = extract_line(line_args)?;
-    if line.points.len() < 2 {
-        return None;
-    }
-    let points = line.points.iter().map(|p| (p.x as f32, p.y as f32)).collect();
-    Some((points, line.smooth_bezier))
+    let points: Vec<(f32, f32)> = line
+        .points
+        .iter()
+        .map(|p| (p.x as f32, p.y as f32))
+        .collect();
+    let color = line.color.map(|c| [c.r, c.g, c.b]);
+    // Thickness is f64 default 0.25 in annotations::Line; only
+    // surface as a non-default override when the source explicitly
+    // changed it. 0.25 default round-trips as None so projection
+    // doesn't write false overrides.
+    let thickness = if (line.thickness - 0.25).abs() > f64::EPSILON {
+        Some(line.thickness as f32)
+    } else {
+        None
+    };
+    Some(LineRoute {
+        points,
+        smooth_bezier: line.smooth_bezier,
+        color,
+        thickness,
+    })
 }
 
 fn extract_line(args: &[Expression]) -> Option<Line> {

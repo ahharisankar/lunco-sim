@@ -36,6 +36,11 @@ pub struct ConnectionEdgeData {
     /// orthogonal segments to a Catmull-Rom-style curve through the
     /// polyline points.
     pub smooth_bezier: bool,
+    /// `Line(thickness=…)` override from source. `1.0` = default; the
+    /// renderer multiplies its base stroke width by this. The
+    /// Modelica default 0.25 round-trips as `1.0` here (it's the
+    /// "leave alone" sentinel).
+    pub thickness_scale: f32,
 }
 
 /// Which edge of the icon a port sits on. Determines which axis the
@@ -114,6 +119,9 @@ pub(super) struct OrthogonalEdgeVisual {
     /// Render the wire as a smooth curve when set — mirrors the
     /// `smooth=Smooth.Bezier` source annotation.
     pub(super) smooth_bezier: bool,
+    /// Multiplier on the base stroke width; 1.0 = default. Derived
+    /// from `Line(thickness=…)` in source.
+    pub(super) thickness_scale: f32,
 }
 
 impl Default for OrthogonalEdgeVisual {
@@ -130,6 +138,7 @@ impl Default for OrthogonalEdgeVisual {
             connector_leaf: String::new(),
             flow_lookup_keys: None,
             smooth_bezier: false,
+            thickness_scale: 1.0,
         }
     }
 }
@@ -165,7 +174,7 @@ impl EdgeVisual for OrthogonalEdgeVisual {
         let zoom_norm = (ctx.viewport.zoom / 3.0).sqrt().clamp(0.7, 1.6);
         let _w0 = base_width * zoom_norm;
         let scale = zoom_norm;
-        let width = base_width * scale;
+        let width = base_width * scale * self.thickness_scale.max(0.1);
         let stroke = egui::Stroke::new(width, col);
         let painter = ctx.ui.painter();
 

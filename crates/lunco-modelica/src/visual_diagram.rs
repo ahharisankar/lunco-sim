@@ -368,6 +368,15 @@ pub struct DiagramEdge {
     /// points instead of straight segments.
     #[serde(default)]
     pub smooth_bezier: bool,
+    /// `Line(color={r,g,b})` override from source. When `Some`, the
+    /// renderer uses this instead of the connector-derived colour.
+    #[serde(default)]
+    pub color: Option<[u8; 3]>,
+    /// `Line(thickness=…)` override from source. When `Some`, the
+    /// renderer scales its base stroke width by this value (1.0 =
+    /// default). `None` when source kept the Modelica default 0.25.
+    #[serde(default)]
+    pub thickness: Option<f32>,
 }
 
 /// The complete visual diagram.
@@ -458,6 +467,8 @@ impl VisualDiagram {
                 target_port,
                 waypoints: Vec::new(),
                 smooth_bezier: false,
+                color: None,
+                thickness: None,
             });
         }
     }

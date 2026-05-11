@@ -992,8 +992,38 @@ impl DefaultTool {
                 match hit {
                     EdgeHit::Corner(i) => {
                         if let Some(p) = new_pts.get_mut(*i) {
-                            let (sx, sy) =
+                            let (mut sx, mut sy) =
                                 snap_point(p.x + dx, p.y + dy, active_snap);
+                            // Wire-alignment snap: when nearby (within
+                            // tolerance) bend coords on other wires
+                            // share x/y, lock to them. Cheap O(W·B)
+                            // scan; W and B are small at typical
+                            // schematic complexity. Alt bypasses
+                            // (mirrors the grid-snap bypass).
+                            if !modifiers.alt {
+                                const ALIGN_TOL: f32 = 3.0;
+                                let mut best_dx: Option<(f32, f32)> = None;
+                                let mut best_dy: Option<(f32, f32)> = None;
+                                for (eid, other) in ops.scene.edges() {
+                                    if *eid == *edge { continue; }
+                                    for w in &other.waypoints {
+                                        let dx_to = (w.x - sx).abs();
+                                        if dx_to < ALIGN_TOL
+                                            && best_dx.map_or(true, |(d, _)| dx_to < d)
+                                        {
+                                            best_dx = Some((dx_to, w.x));
+                                        }
+                                        let dy_to = (w.y - sy).abs();
+                                        if dy_to < ALIGN_TOL
+                                            && best_dy.map_or(true, |(d, _)| dy_to < d)
+                                        {
+                                            best_dy = Some((dy_to, w.y));
+                                        }
+                                    }
+                                }
+                                if let Some((_, x)) = best_dx { sx = x; }
+                                if let Some((_, y)) = best_dy { sy = y; }
+                            }
                             *p = Pos::new(sx, sy);
                         }
                     }
@@ -1288,11 +1318,54 @@ impl DefaultTool {
                         }
                     })
                     .collect();
+                // Also collect edges whose polyline (endpoints +
+                // interior waypoints) intersects the band — wires can
+                // now be box-selected for batch delete / re-style.
+                let hit_edges: Vec<EdgeId> = ops
+                    .scene
+                    .edges()
+                    .filter_map(|(eid, e)| {
+                        let Some((from, to)) =
+                            ops.scene.edge_endpoint_positions(e)
+                        else {
+                            return None;
+                        };
+                        let any_in = |p: Pos| -> bool {
+                            band.contains(p)
+                        };
+                        if any_in(from)
+                            || any_in(to)
+                            || e.waypoints.iter().any(|w| any_in(*w))
+                        {
+                            return Some(*eid);
+                        }
+                        // Final fallback: any segment crosses the band.
+                        let mut pts: Vec<Pos> =
+                            Vec::with_capacity(2 + e.waypoints.len());
+                        pts.push(from);
+                        pts.extend(e.waypoints.iter().copied());
+                        pts.push(to);
+                        for w in pts.windows(2) {
+                            if segment_rect_intersects(w[0], w[1], band) {
+                                return Some(*eid);
+                            }
+                        }
+                        None
+                    })
+                    .collect();
                 if !extend && !toggle {
                     ops.selection.clear();
                 }
                 for id in hit_ids {
                     let it = SelectItem::Node(id);
+                    if toggle {
+                        ops.selection.toggle(it);
+                    } else {
+                        ops.selection.add(it);
+                    }
+                }
+                for id in hit_edges {
+                    let it = SelectItem::Edge(id);
                     if toggle {
                         ops.selection.toggle(it);
                     } else {
@@ -1388,6 +1461,43 @@ fn nearest_port_on_node(
 /// Axis-aligned rectangle intersection test (including touch).
 fn rects_intersect(a: Rect, b: Rect) -> bool {
     a.min.x <= b.max.x && a.max.x >= b.min.x && a.min.y <= b.max.y && a.max.y >= b.min.y
+}
+
+/// True when the segment `(a, b)` crosses or lies inside the
+/// axis-aligned rectangle `r`. Used so a rubber-band that doesn't
+/// enclose either wire endpoint but crosses a long segment still
+/// selects the wire.
+fn segment_rect_intersects(a: Pos, b: Pos, r: Rect) -> bool {
+    // Trivial accept: either endpoint inside.
+    if r.contains(a) || r.contains(b) {
+        return true;
+    }
+    // Clip the segment to the rect on each axis using the Liang-
+    // Barsky parametric approach. If the resulting t-interval is
+    // non-empty within [0, 1], the segment intersects the rect.
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let mut t_enter: f32 = 0.0;
+    let mut t_exit: f32 = 1.0;
+    let clip = |p: f32, q: f32, t_enter: &mut f32, t_exit: &mut f32| -> bool {
+        if p.abs() < f32::EPSILON {
+            // Parallel to clip edge: accept iff inside.
+            return q >= 0.0;
+        }
+        let t = q / p;
+        if p < 0.0 {
+            if t > *t_exit { return false; }
+            if t > *t_enter { *t_enter = t; }
+        } else {
+            if t < *t_enter { return false; }
+            if t < *t_exit { *t_exit = t; }
+        }
+        true
+    };
+    clip(-dx, a.x - r.min.x, &mut t_enter, &mut t_exit)
+        && clip(dx, r.max.x - a.x, &mut t_enter, &mut t_exit)
+        && clip(-dy, a.y - r.min.y, &mut t_enter, &mut t_exit)
+        && clip(dy, r.max.y - a.y, &mut t_enter, &mut t_exit)
 }
 
 /// Quantise `(x, y)` to the canvas grid when snap is enabled. No-op

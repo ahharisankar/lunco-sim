@@ -1613,10 +1613,18 @@ impl CanvasDiagramPanel {
                         screen_rect,
                     );
                     let hit_node = docstate.canvas.scene.hit_node(world_pos, 6.0);
-                    let hit_edge = docstate.canvas.scene.hit_edge(world_pos, 4.0);
+                    // Right-click resolves handles even on non-selected
+                    // wires so "Delete bend" / "Add bend here" stay
+                    // discoverable. Body hits fall through to a plain
+                    // edge-target so the existing Delete / Properties
+                    // entries still render.
+                    let hit_edge = docstate
+                        .canvas
+                        .scene
+                        .hit_edge_kind(world_pos, 4.0, true, 5.0);
                     let target = match (hit_node, hit_edge) {
                         (Some((id, _)), _) => ContextMenuTarget::Node(id),
-                        (_, Some(id)) => ContextMenuTarget::Edge(id),
+                        (_, Some((id, kind))) => ContextMenuTarget::Edge(id, kind),
                         _ => ContextMenuTarget::Empty,
                     };
                     let _ = state;
@@ -1666,11 +1674,13 @@ impl CanvasDiagramPanel {
                             &mut collected,
                         );
                     }
-                    ContextMenuTarget::Edge(id) => {
+                    ContextMenuTarget::Edge(id, kind) => {
                         menus::render_edge_menu(
                             ui,
                             world,
                             *id,
+                            *kind,
+                            menu.world_pos,
                             editing_class.as_deref(),
                             &mut collected,
                         );
