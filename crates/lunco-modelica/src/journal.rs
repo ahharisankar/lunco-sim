@@ -87,6 +87,12 @@ pub fn summarize_op(op: &ModelicaOp) -> Value {
             "thickness": thickness,
             "smooth_bezier": smooth_bezier,
         }),
+        ModelicaOp::ReverseConnection { class, from, to } => json!({
+            "kind": "ReverseConnection",
+            "class": class,
+            "from": format!("{}.{}", from.component, from.port),
+            "to": format!("{}.{}", to.component, to.port),
+        }),
         ModelicaOp::SetPlacement { class, name, .. } => json!({
             "kind": "SetPlacement",
             "class": class,

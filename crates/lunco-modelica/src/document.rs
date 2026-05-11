@@ -139,6 +139,14 @@ pub enum ModelicaChange {
         from: PortRef,
         to: PortRef,
     },
+    /// Source/target swapped on a `connect(...)` equation. Topology
+    /// unchanged (Modelica `connect` is symmetric); pure source-text
+    /// reorder. `from`/`to` describe the *new* direction.
+    ConnectionReversed {
+        class: String,
+        from: PortRef,
+        to: PortRef,
+    },
     /// A component's `Placement` annotation was set or replaced.
     PlacementChanged {
         /// Qualified class name.
@@ -1193,6 +1201,14 @@ pub enum ModelicaOp {
         thickness: Option<f64>,
         smooth_bezier: Option<bool>,
     },
+    /// Swap `from`/`to` on an existing `connect(...)` equation. The
+    /// `Line(...)` annotation is preserved verbatim. Modelica `connect`
+    /// is symmetric, so this is a source-text reorder only.
+    ReverseConnection {
+        class: String,
+        from: pretty::PortRef,
+        to: pretty::PortRef,
+    },
     /// Set or replace the `Placement` annotation on a component.
     ///
     /// If the component already has an `annotation(Placement(...))`,
@@ -1605,6 +1621,10 @@ impl ModelicaDocument {
             ModelicaChange::ConnectionLineStyleChanged { class: _, from: _, to: _ } => {
                 // Wire styling edit — also topology-neutral.
             }
+            ModelicaChange::ConnectionReversed { class: _, from: _, to: _ } => {
+                // Source-text reorder of a symmetric `connect` —
+                // topology is unchanged, no index patch needed.
+            }
             ModelicaChange::ParameterChanged {
                 class,
                 component,
@@ -1800,6 +1820,26 @@ fn op_to_patch(
             )
             .map_err(ast_mut_to_doc_error)?;
             let change = ModelicaChange::ConnectionLineStyleChanged { class, from, to };
+            Ok((r, rp, change, FreshAst::Mutated(fresh_ast)))
+        }
+        ModelicaOp::ReverseConnection { class, from, to } => {
+            ast_check_no_parse_error(ast)?;
+            let from_c = from.clone();
+            let to_c = to.clone();
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::reverse_connection(c, &from_c, &to_c),
+            )
+            .map_err(ast_mut_to_doc_error)?;
+            // Report the *new* direction so consumers can track the
+            // swap if they care.
+            let change = ModelicaChange::ConnectionReversed {
+                class,
+                from: to,
+                to: from,
+            };
             Ok((r, rp, change, FreshAst::Mutated(fresh_ast)))
         }
         ModelicaOp::SetPlacement { class, name, placement } => {

@@ -164,6 +164,13 @@ pub enum ToolPreview {
     },
     /// Rubber-band selection rectangle, world-space.
     RubberBand(Rect),
+    /// Alignment guide lines drawn while a waypoint snaps to another
+    /// wire's bend coordinate. `x`/`y` are world-space lines; either
+    /// can be `None` (only the matching axis drew a guide).
+    SnapGuides {
+        x: Option<f32>,
+        y: Option<f32>,
+    },
 }
 
 // ─── DefaultTool ────────────────────────────────────────────────────
@@ -257,6 +264,11 @@ enum State {
         to_world: Pos,
         original: Vec<Pos>,
         current: Vec<Pos>,
+        /// Most recent snap-to-other-wire alignment hit, in world
+        /// coords — `(Some(x), _)` means we snapped to vertical line
+        /// `x`. Renderer reads this to draw guide lines.
+        snap_x: Option<f32>,
+        snap_y: Option<f32>,
     },
 }
 
@@ -537,6 +549,14 @@ impl Tool for DefaultTool {
                     origin_world.y.max(pointer_world.y),
                 );
                 Some(ToolPreview::RubberBand(Rect::from_min_max(min, max)))
+            }
+            State::DraggingEdgeWaypoint { snap_x, snap_y, .. }
+                if snap_x.is_some() || snap_y.is_some() =>
+            {
+                Some(ToolPreview::SnapGuides {
+                    x: *snap_x,
+                    y: *snap_y,
+                })
             }
             _ => None,
         }
@@ -886,6 +906,8 @@ impl DefaultTool {
                         to_world,
                         original: original.clone(),
                         current: original,
+                        snap_x: None,
+                        snap_y: None,
                     };
                 }
             }
@@ -970,7 +992,11 @@ impl DefaultTool {
                 to_world,
                 original,
                 current,
+                snap_x,
+                snap_y,
             } => {
+                *snap_x = None;
+                *snap_y = None;
                 let mut dx = world.x - origin_world.x;
                 let mut dy = world.y - origin_world.y;
                 // Shift = constrain to the dominant axis (locks to
@@ -1021,8 +1047,14 @@ impl DefaultTool {
                                         }
                                     }
                                 }
-                                if let Some((_, x)) = best_dx { sx = x; }
-                                if let Some((_, y)) = best_dy { sy = y; }
+                                if let Some((_, x)) = best_dx {
+                                    sx = x;
+                                    *snap_x = Some(x);
+                                }
+                                if let Some((_, y)) = best_dy {
+                                    sy = y;
+                                    *snap_y = Some(y);
+                                }
                             }
                             *p = Pos::new(sx, sy);
                         }

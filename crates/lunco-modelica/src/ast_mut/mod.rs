@@ -508,6 +508,36 @@ pub fn set_connection_line(
     Ok(())
 }
 
+/// Swap `lhs`/`rhs` of a matching `connect(...)` equation. Topology
+/// is unchanged (Modelica `connect` is symmetric), but the source
+/// text reflects the new direction and the annotation Vec is
+/// preserved untouched.
+pub fn reverse_connection(
+    class: &mut ClassDef,
+    from: &pretty::PortRef,
+    to: &pretty::PortRef,
+) -> Result<(), AstMutError> {
+    let class_name = class.name.text.to_string();
+    let mut matched = false;
+    for eq in class.equations.iter_mut() {
+        if let rumoca_session::parsing::ast::Equation::Connect { lhs, rhs, .. } = eq {
+            if matches_port_ref(lhs, from) && matches_port_ref(rhs, to) {
+                std::mem::swap(lhs, rhs);
+                matched = true;
+                break;
+            }
+        }
+    }
+    if !matched {
+        return Err(AstMutError::ConnectionNotFound {
+            class: class_name,
+            from: format!("{}.{}", from.component, from.port),
+            to: format!("{}.{}", to.component, to.port),
+        });
+    }
+    Ok(())
+}
+
 /// Set or clear individual `Line(...)` annotation fields on a
 /// `connect(...)` equation matching `(from, to)`. `None` fields are
 /// left untouched. Topology is unchanged. Returns

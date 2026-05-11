@@ -318,6 +318,35 @@ pub(super) fn render_edge_menu(
         ui.close();
     }
     if ui.button("↺ Reverse direction").clicked() {
+        if let Some(class) = editing_class {
+            let active_doc = active_doc_from_world(world);
+            let tab = render_tab_id(world);
+            let state = world.resource::<CanvasDiagramState>();
+            let scene = &state.get_for_render(tab, active_doc).canvas.scene;
+            if let Some(edge) = scene.edge(id) {
+                if let (Some(from_node), Some(to_node)) = (
+                    scene.node(edge.from.node),
+                    scene.node(edge.to.node),
+                ) {
+                    if let (Some(from_inst), Some(to_inst)) = (
+                        from_node.origin.clone(),
+                        to_node.origin.clone(),
+                    ) {
+                        out.push(ModelicaOp::ReverseConnection {
+                            class: class.to_string(),
+                            from: crate::pretty::PortRef::new(
+                                &from_inst,
+                                edge.from.port.as_str(),
+                            ),
+                            to: crate::pretty::PortRef::new(
+                                &to_inst,
+                                edge.to.port.as_str(),
+                            ),
+                        });
+                    }
+                }
+            }
+        }
         ui.close();
     }
     // ── Wire properties submenu ─────────────────────────────────────
