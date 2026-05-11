@@ -443,7 +443,7 @@ impl ApiQueryProvider for CompileStatusProvider {
         // doc has 2+ non-package classes. Easier to recompute than to
         // expose CompileClassPickerState which is a UI concern.
         let registry = world.resource::<ModelicaDocumentRegistry>();
-        let (candidates, top_level_count, has_ast) = match registry.host(doc_id) {
+        let (candidates, preferred_count, has_ast) = match registry.host(doc_id) {
             Some(host) => {
                 let doc_ref = host.document();
                 let has_ast = !doc_ref.ast().has_errors();
@@ -452,7 +452,7 @@ impl ApiQueryProvider for CompileStatusProvider {
                 // the AST. Same pattern as the candidates query above.
                 let index = doc_ref.index();
                 let cands = index.simulation_candidates();
-                let top_level = index.simulation_top_level_count();
+                let top_level = index.simulation_preferred_count();
                 (cands, top_level, has_ast)
             }
             None => return err_doc_not_found(doc_id),
@@ -469,7 +469,7 @@ impl ApiQueryProvider for CompileStatusProvider {
         // clear root the compile path auto-picks it without prompting.
         let picker_pending = matches!(state, CompileState::Idle)
             && drilled_in.is_none()
-            && top_level_count != 1
+            && preferred_count != 1
             && candidates.len() >= 2;
 
         let error_message = world

@@ -156,6 +156,12 @@ pub struct ClassEntry {
     /// them. Plain bases without `partial` are still simulatable
     /// even when used purely as `extends` targets.
     pub partial: bool,
+    /// Authored `experiment(...)` annotation, if present. The mere
+    /// presence is the strongest "this class is a simulation root"
+    /// signal we have — `simulation_candidates` ranks these above
+    /// all other candidates so the Compile / Fast Run picker picks
+    /// the author-tagged target by default.
+    pub experiment: Option<crate::annotations::Experiment>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -464,6 +470,7 @@ impl ModelicaIndex {
                 documentation: (None, None),
                 equation_count: 0,
                 partial: false,
+                experiment: None,
             },
         );
     }
@@ -542,48 +549,48 @@ impl ModelicaIndex {
     }
 
     /// Qualified names of classes that the Compile / Fast Run picker
-    /// should offer, ranked best-first. "Best" means: simulatable
-    /// kind (`model` / `block` / `class`), not `partial`, and not
-    /// instantiated as a sub-component anywhere else in the document.
-    /// Sub-components remain in the list (so unit-testing a `Tank` in
-    /// isolation is still possible) but are sorted to the bottom.
-    /// Connectors, records, types, functions, packages, and partial
+    /// should offer, ranked best-first. Tiers (lowest = best):
+    ///
+    /// * **0** — has an `experiment(...)` annotation. Author tagged
+    ///   it as a simulation root; this is the strongest signal.
+    /// * **1** — top-level: not used as a sub-component anywhere else
+    ///   in the doc.
+    /// * **2** — sub-component model. Kept in the list so unit-testing
+    ///   a `Tank` in isolation remains possible, but sorted last.
+    ///
+    /// Connectors, records, types, functions, packages, and `partial`
     /// classes are dropped entirely — they can't be simulation roots.
     ///
-    /// Pair with [`Self::simulation_top_level_count`] to decide
-    /// whether the picker should auto-skip.
+    /// Pair with [`Self::simulation_preferred_count`] to decide whether
+    /// the picker should auto-skip.
     pub fn simulation_candidates(&self) -> Vec<String> {
         let used_as_subcomponent = self.subcomponent_type_names();
         let mut ranked: Vec<(u8, &str)> = self
             .classes
             .values()
             .filter(|c| c.kind.is_simulatable() && !c.partial)
-            .map(|c| {
-                let rank = if is_subcomponent(&c.name, &used_as_subcomponent) {
-                    1
-                } else {
-                    0
-                };
-                (rank, c.name.as_str())
-            })
+            .map(|c| (sim_tier(c, &used_as_subcomponent), c.name.as_str()))
             .collect();
-        // Sort by tier first, then alphabetically within the tier so
-        // the picker doesn't shuffle between calls.
         ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(b.1)));
         ranked.into_iter().map(|(_, n)| n.to_string()).collect()
     }
 
-    /// How many candidates are tier-0 ("top-level": simulatable, not
-    /// `partial`, not used as a sub-component elsewhere). Callers use
-    /// `== 1` as the trigger to bypass the picker entirely — there's
-    /// only one obvious thing to simulate, so just simulate it.
-    pub fn simulation_top_level_count(&self) -> usize {
+    /// How many candidates sit in the *best non-empty* tier — i.e.
+    /// experiment-annotated if any exist, otherwise top-level. Callers
+    /// use `== 1` as the trigger to bypass the picker entirely: with
+    /// one obviously-preferred class there's nothing to disambiguate.
+    pub fn simulation_preferred_count(&self) -> usize {
         let used_as_subcomponent = self.subcomponent_type_names();
-        self.classes
+        let tiers: Vec<u8> = self
+            .classes
             .values()
             .filter(|c| c.kind.is_simulatable() && !c.partial)
-            .filter(|c| !is_subcomponent(&c.name, &used_as_subcomponent))
-            .count()
+            .map(|c| sim_tier(c, &used_as_subcomponent))
+            .collect();
+        let Some(&best) = tiers.iter().min() else {
+            return 0;
+        };
+        tiers.iter().filter(|&&t| t == best).count()
     }
 
     fn subcomponent_type_names(&self) -> std::collections::HashSet<&str> {
@@ -615,6 +622,16 @@ fn is_subcomponent(qualified: &str, used: &std::collections::HashSet<&str>) -> b
     used.contains(qualified) || used.contains(short)
 }
 
+fn sim_tier(c: &ClassEntry, used: &std::collections::HashSet<&str>) -> u8 {
+    if c.experiment.is_some() {
+        0
+    } else if !is_subcomponent(&c.name, used) {
+        1
+    } else {
+        2
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AST → Index helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -640,6 +657,7 @@ fn insert_class_recursive(idx: &mut ModelicaIndex, qualified: String, class_def:
     let icon = crate::annotations::extract_icon(&class_def.annotation);
     let documentation =
         crate::ui::panels::model_view::extract_documentation(&class_def.annotation);
+    let experiment = crate::annotations::extract_experiment(&class_def.annotation);
 
     // Count non-trivial equations: skip `Empty` placeholders and
     // `Connect` (tracked separately via `connections`). Mirrors the
@@ -679,6 +697,7 @@ fn insert_class_recursive(idx: &mut ModelicaIndex, qualified: String, class_def:
         documentation,
         equation_count,
         partial: class_def.partial,
+        experiment,
     };
     idx.classes.insert(qualified.clone(), entry);
 

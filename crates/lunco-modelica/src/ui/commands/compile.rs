@@ -488,7 +488,7 @@ fn on_compile_model(
     // compile (see `ModelicaCommand::Compile`), so any AST staleness
     // here only affects telemetry-panel labels for one debounce
     // cycle, not the compiled model itself.
-    let (source, ast_for_extract, candidate_classes, top_level_count, detected_first_class, params, inputs_with_defaults, runtime_inputs) =
+    let (source, ast_for_extract, candidate_classes, preferred_count, detected_first_class, params, inputs_with_defaults, runtime_inputs) =
         match registry.host(doc) {
             Some(h) => {
                 let doc_ref = h.document();
@@ -498,7 +498,7 @@ fn on_compile_model(
                 // AST walk per call).
                 let index = doc_ref.index();
                 let candidates = index.simulation_candidates();
-                let top_level_count = index.simulation_top_level_count();
+                let preferred_count = index.simulation_preferred_count();
                 let first_non_package = candidates.first().cloned();
                 // Compile-time seed values for `ModelicaModel`
                 // (parameters / input defaults / runtime input names)
@@ -534,7 +534,7 @@ fn on_compile_model(
                     doc_ref.source().to_string(),
                     ast,
                     candidates,
-                    top_level_count,
+                    preferred_count,
                     first_non_package,
                     params,
                     inputs_with_defaults,
@@ -601,15 +601,17 @@ fn on_compile_model(
     // `render_compile_class_picker` in ui/mod.rs) re-dispatches
     // `CompileModel` once the user confirms.
     // Show the picker only when there's genuine ambiguity about
-    // which top-level model to run. `top_level_count == 1` means the
-    // doc has exactly one obvious root (e.g. `RocketStage` in a
-    // package full of helper sub-models like `Tank` / `Engine`) — in
-    // that case `simulation_candidates()` already sorted it first, so
-    // we just compile it directly without prompting. The picker only
-    // appears when the doc has two or more top-level models, or zero
-    // (in which case the user has to opt into a sub-model anyway).
+    // which model to run. `preferred_count == 1` means exactly one
+    // class sits in the best non-empty tier — either the sole
+    // `experiment(...)`-annotated class (Dymola / OMEdit's notion of
+    // an obvious root), or, absent any annotation, the sole top-level
+    // model (e.g. `RocketStage` in a package of helper sub-models
+    // like `Tank` / `Engine`). In either case `simulation_candidates`
+    // already sorted it first, so we just compile it directly.
+    // The picker only opens with 2+ equally-good candidates, or with
+    // zero — at which point the user has to opt into a sub-model.
     if chosen_via_explicit.is_none() && drilled_in_class.is_none() {
-        let need_picker = top_level_count != 1 && candidate_classes.len() >= 2;
+        let need_picker = preferred_count != 1 && candidate_classes.len() >= 2;
         if need_picker {
             // If a picker is already open for *this* doc, leave it
             // alone so rapid repeated Compile clicks don't blow away

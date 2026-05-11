@@ -170,6 +170,21 @@ impl Default for CoordinateSystem {
     }
 }
 
+/// Decoded `experiment(StartTime=..., StopTime=..., Tolerance=..., Interval=...)`
+/// class annotation. The mere presence of this annotation is the
+/// strongest possible signal that a class is meant to be a simulation
+/// root — Dymola/OMEdit treat such classes as the obvious target.
+/// All numeric fields are optional because authors commonly set
+/// only `StopTime`. Pre-fill of Fast Run's start/stop fields uses
+/// these values when available.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct Experiment {
+    pub start_time: Option<f64>,
+    pub stop_time: Option<f64>,
+    pub tolerance: Option<f64>,
+    pub interval: Option<f64>,
+}
+
 /// Decoded `Icon(coordinateSystem=..., graphics={...})` annotation.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Icon {
@@ -669,6 +684,22 @@ pub fn extract_placement(annotations: &[Expression]) -> Option<Placement> {
     let transformation = find_call(placement_args, "transformation")
         .and_then(extract_transformation)?;
     Some(Placement { transformation })
+}
+
+/// Extract the `experiment(...)` annotation from a class's annotation
+/// list. Returns `None` when the call is absent. Returns `Some` even
+/// when no recognized fields are inside — the *presence* of the call
+/// is itself meaningful (Dymola / OMEdit treat experiment-tagged
+/// classes as simulation roots regardless of which fields are set).
+pub fn extract_experiment(annotations: &[Expression]) -> Option<Experiment> {
+    let call = find_call(annotations, "experiment")?;
+    let args = call_args(call).unwrap_or(&[]);
+    Some(Experiment {
+        start_time: named_arg(args, "StartTime").and_then(extract_number),
+        stop_time: named_arg(args, "StopTime").and_then(extract_number),
+        tolerance: named_arg(args, "Tolerance").and_then(extract_number),
+        interval: named_arg(args, "Interval").and_then(extract_number),
+    })
 }
 
 /// Extract the `Icon(...)` annotation from a class's annotation list.
