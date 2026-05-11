@@ -370,6 +370,39 @@ impl Layer for ToolPreviewLayer {
                     );
                 }
             }
+            crate::tool::ToolPreview::GhostEdgeWithBends {
+                from_world,
+                bends,
+                to_world,
+                snap_target,
+            } => {
+                let mut pts: Vec<egui::Pos2> =
+                    Vec::with_capacity(2 + bends.len());
+                let a = ctx.viewport.world_to_screen(*from_world, sr);
+                pts.push(egui::pos2(a.x, a.y));
+                for b in bends {
+                    let s = ctx.viewport.world_to_screen(*b, sr);
+                    pts.push(egui::pos2(s.x, s.y));
+                }
+                let b = ctx.viewport.world_to_screen(*to_world, sr);
+                pts.push(egui::pos2(b.x, b.y));
+                let stroke = egui::Stroke::new(2.0, theme.ghost_edge);
+                for w in pts.windows(2) {
+                    painter.line_segment([w[0], w[1]], stroke);
+                }
+                painter.circle_filled(pts[0], 4.0, theme.ghost_edge);
+                for p in &pts[1..pts.len().saturating_sub(1)] {
+                    painter.circle_filled(*p, 3.0, theme.ghost_edge);
+                }
+                if let Some(t) = snap_target {
+                    let s = ctx.viewport.world_to_screen(*t, sr);
+                    painter.circle_stroke(
+                        egui::pos2(s.x, s.y),
+                        8.0,
+                        egui::Stroke::new(2.0, theme.snap_target),
+                    );
+                }
+            }
             crate::tool::ToolPreview::RubberBand(r) => {
                 let sr_rect = ctx.viewport.world_rect_to_screen(*r, sr);
                 let rect = egui::Rect::from_min_max(

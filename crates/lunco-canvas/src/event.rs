@@ -44,9 +44,14 @@ pub enum SceneEvent {
     /// The canvas has already validated that a connection makes sense
     /// (same node ≠, ports exist); domain validity (connector kinds)
     /// is the caller's call via the tool's hook.
+    ///
+    /// `points` are interior bends the user placed mid-creation
+    /// (click-to-bend), in world coords. Empty = quick drag with no
+    /// authored bends; the domain layer should auto-route.
     EdgeCreated {
         from: PortRef,
         to: PortRef,
+        points: Vec<Pos>,
     },
     /// Existing edge was deleted (Delete key, context menu, etc.).
     EdgeDeleted {

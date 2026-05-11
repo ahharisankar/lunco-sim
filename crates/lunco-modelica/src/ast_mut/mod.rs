@@ -419,8 +419,16 @@ pub fn set_connection_line(
     to: &pretty::PortRef,
     points: &[(f32, f32)],
 ) -> Result<(), AstMutError> {
+    use rumoca_session::parsing::ast::Expression;
     let class_name = class.name.text.to_string();
-    let new_annotation: Vec<rumoca_session::parsing::ast::Expression> = if points.is_empty() {
+
+    // Build the new annotation Vec by parsing a stub
+    // `connect(...) annotation(Line(points={...}))`. We use this *both*
+    // as the fallback annotation when no existing Line is present, *and*
+    // as a source of a syntactically-valid `points=` NamedArgument when
+    // we surgically update an existing Line — that way color/thickness/
+    // smooth/arrow on the source survive a points-only edit.
+    let new_annotation: Vec<Expression> = if points.is_empty() {
         Vec::new()
     } else {
         let stub_eq = pretty::ConnectEquation {
@@ -428,17 +436,63 @@ pub fn set_connection_line(
             to: to.clone(),
             line: Some(pretty::Line { points: points.to_vec() }),
         };
-        let parsed = parse_connect_equation_with_annotation_fragment(&stub_eq)?;
+        let parsed = parse_connect_equation_fragment(&stub_eq)?;
         match parsed {
             rumoca_session::parsing::ast::Equation::Connect { annotation, .. } => annotation,
             _ => return Err(AstMutError::ValueParseFailed { value: "connect annotation".into() }),
         }
     };
+
     let mut matched = false;
     for eq in class.equations.iter_mut() {
         if let rumoca_session::parsing::ast::Equation::Connect { lhs, rhs, annotation } = eq {
             if matches_port_ref(lhs, from) && matches_port_ref(rhs, to) {
-                *annotation = new_annotation;
+                if points.is_empty() {
+                    // Empty points = caller wants to clear the wire
+                    // annotation (revert to auto-route). Drop just the
+                    // Line(...) entry — leave any other annotation
+                    // entries (Documentation, Dialog, …) alone.
+                    annotation.retain(|e| !expression_is_line_call(e));
+                } else {
+                    // Try to update an existing Line(...) entry's
+                    // `points=` sub-arg in place, preserving its
+                    // color/thickness/smooth/arrow fields. Falls back
+                    // to wholesale annotation replacement when the
+                    // target had no Line entry yet (first-edit case).
+                    let new_points_arg =
+                        extract_points_named_argument(&new_annotation);
+                    let mut updated = false;
+                    if let Some(new_arg) = new_points_arg {
+                        for entry in annotation.iter_mut() {
+                            if let Expression::FunctionCall {
+                                comp,
+                                args,
+                            } = entry
+                            {
+                                if !ref_is_simple(comp, "Line") {
+                                    continue;
+                                }
+                                // Replace existing points= arg.
+                                let mut replaced = false;
+                                for a in args.iter_mut() {
+                                    if named_arg_name(a) == Some("points") {
+                                        *a = new_arg.clone();
+                                        replaced = true;
+                                        break;
+                                    }
+                                }
+                                if !replaced {
+                                    args.insert(0, new_arg.clone());
+                                }
+                                updated = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !updated {
+                        *annotation = new_annotation.clone();
+                    }
+                }
                 matched = true;
                 break;
             }
@@ -454,25 +508,56 @@ pub fn set_connection_line(
     Ok(())
 }
 
-/// Variant of [`parse_connect_equation_fragment`] that renders via
-/// `pretty::connect_equation` so the `annotation(Line(...))` is
-/// included. Used by `set_connection_line` to obtain a parsed
-/// annotation tree shaped exactly like the source emitter would write.
-fn parse_connect_equation_with_annotation_fragment(
-    eq: &pretty::ConnectEquation,
-) -> Result<rumoca_session::parsing::ast::Equation, AstMutError> {
-    let body = pretty::connect_equation(eq);
-    let stub = format!("model __LunCoFragment\nequation\n{body}end __LunCoFragment;\n");
-    let parsed = parse_stub_cached(&stub).ok_or_else(|| {
-        AstMutError::ValueParseFailed { value: body.clone() }
-    })?;
-    let cls = parsed.classes.get("__LunCoFragment").ok_or_else(|| {
-        AstMutError::ValueParseFailed { value: body.clone() }
-    })?;
-    cls.equations
-        .first()
-        .cloned()
-        .ok_or(AstMutError::ValueParseFailed { value: body })
+/// True when the expression is a `Line(...)` function-call entry.
+/// Other annotation entries (Documentation, vendor extensions) are
+/// passed through verbatim.
+fn expression_is_line_call(e: &rumoca_session::parsing::ast::Expression) -> bool {
+    use rumoca_session::parsing::ast::Expression;
+    if let Expression::FunctionCall { comp, .. } = e {
+        ref_is_simple(comp, "Line")
+    } else {
+        false
+    }
+}
+
+/// True when the reference is a single-segment ident equal to `name`.
+fn ref_is_simple(
+    cref: &rumoca_session::parsing::ast::ComponentReference,
+    name: &str,
+) -> bool {
+    cref.parts.len() == 1 && &*cref.parts[0].ident.text == name
+}
+
+/// Return the named-argument's name (the parameter name as written in
+/// source), or `None` if `expr` is not a NamedArgument.
+fn named_arg_name(expr: &rumoca_session::parsing::ast::Expression) -> Option<&str> {
+    use rumoca_session::parsing::ast::Expression;
+    match expr {
+        Expression::NamedArgument { name, .. } => Some(&name.text),
+        _ => None,
+    }
+}
+
+/// From a freshly-parsed annotation Vec `[Line(points={...})]`, pluck
+/// the `points=` NamedArgument expression so it can be spliced into an
+/// existing Line that we're updating in place.
+fn extract_points_named_argument(
+    annotation: &[rumoca_session::parsing::ast::Expression],
+) -> Option<rumoca_session::parsing::ast::Expression> {
+    use rumoca_session::parsing::ast::Expression;
+    for e in annotation {
+        if let Expression::FunctionCall { comp, args } = e {
+            if !ref_is_simple(comp, "Line") {
+                continue;
+            }
+            for a in args {
+                if named_arg_name(a) == Some("points") {
+                    return Some(a.clone());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Match a parsed `ComponentReference` against a `pretty::PortRef`.
@@ -531,9 +616,13 @@ fn parse_component_fragment(
 fn parse_connect_equation_fragment(
     eq: &pretty::ConnectEquation,
 ) -> Result<rumoca_session::parsing::ast::Equation, AstMutError> {
-    let from_text = render_port_ref(&eq.from);
-    let to_text = render_port_ref(&eq.to);
-    let body = format!("  connect({from_text}, {to_text});\n");
+    // Emit via `pretty::connect_equation` so any `eq.line` annotation
+    // is included in the parse — previously this dropped Line(...)
+    // when `eq.line.is_some()`. The parser populates
+    // `Equation::Connect.annotation` accordingly, so AddConnection
+    // with click-to-bend points lands a `Line(points={...})` in
+    // source on first save.
+    let body = pretty::connect_equation(eq);
     let stub = format!("model __LunCoFragment\nequation\n{body}end __LunCoFragment;\n");
     let parsed = parse_stub_cached(&stub).ok_or_else(|| {
         AstMutError::ValueParseFailed { value: body.clone() }
@@ -548,16 +637,6 @@ fn parse_connect_equation_fragment(
         .ok_or(AstMutError::ValueParseFailed { value: body })
 }
 
-/// Render a [`pretty::PortRef`] into its source form. Two-segment
-/// `component.port` when both fields are populated; just `component`
-/// when `port` is empty (top-level connector instance).
-fn render_port_ref(p: &pretty::PortRef) -> String {
-    if p.port.is_empty() {
-        p.component.clone()
-    } else {
-        format!("{}.{}", p.component, p.port)
-    }
-}
 
 /// Add a new variable declaration to a class.
 ///

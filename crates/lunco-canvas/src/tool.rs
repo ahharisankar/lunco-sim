@@ -153,6 +153,15 @@ pub enum ToolPreview {
         /// the layer can highlight the snap.
         snap_target: Option<Pos>,
     },
+    /// Same as [`Self::GhostEdge`] but with intermediate bend points
+    /// the user has placed via click-to-bend. Layers render the
+    /// polyline `from_world → bends[0] → … → bends[N-1] → to_world`.
+    GhostEdgeWithBends {
+        from_world: Pos,
+        bends: Vec<Pos>,
+        to_world: Pos,
+        snap_target: Option<Pos>,
+    },
     /// Rubber-band selection rectangle, world-space.
     RubberBand(Rect),
 }
@@ -196,10 +205,19 @@ enum State {
     /// origin port; `pointer_world` is the tip of the ghost edge,
     /// updated each PointerMove. On release over a valid target
     /// port we emit `EdgeCreated`.
+    ///
+    /// `points` is the list of bends the user placed mid-creation by
+    /// clicking in empty space (Dymola/OMEdit-style click-to-bend).
+    /// `mode` distinguishes the two ways to enter this state — `Drag`
+    /// commits on release (the original press-and-drag flow), while
+    /// `Click` only commits on a port-click (the new click-to-bend
+    /// flow entered via a bare port-click).
     ConnectingFromPort {
         from: PortRef,
         from_world: Pos,
         pointer_world: Pos,
+        points: Vec<Pos>,
+        mode: ConnectMode,
     },
 
     /// Resizing a node by its bottom-right handle. Mutates
@@ -240,6 +258,20 @@ enum State {
         original: Vec<Pos>,
         current: Vec<Pos>,
     },
+}
+
+/// How a wire-creation gesture was entered. The two modes have
+/// different release semantics — see [`State::ConnectingFromPort`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectMode {
+    /// Entered via press-and-drag from a port. Release on a port
+    /// commits; release on empty space cancels (legacy behaviour).
+    Drag,
+    /// Entered via a bare port click (press + release on the same
+    /// port without moving). The wire follows the cursor; subsequent
+    /// clicks in empty space place bends; a click on a target port
+    /// commits.
+    Click,
 }
 
 /// Which scene element the primary press landed on — recorded at
@@ -342,7 +374,7 @@ impl Tool for DefaultTool {
                     .collect();
                 *original_rects = remapped;
             }
-            State::ConnectingFromPort { from, .. } => {
+            State::ConnectingFromPort { from, points: _, .. } => {
                 if let Some(new_id) = find_new_id(from.node) {
                     from.node = new_id;
                 } else {
@@ -362,11 +394,21 @@ impl Tool for DefaultTool {
                 ..
             } => {
                 self.last_pointer_world = Some(*world);
+                // Special-case: when wire-drawing is already active
+                // (entered via drag-promote or bare-port-click), a
+                // press on a port commits, a press in empty space
+                // appends a bend, and a press on the source port
+                // cancels. Don't fall through to `on_primary_down`,
+                // which would reset state to PrimaryPressed.
+                if matches!(self.state, State::ConnectingFromPort { .. }) {
+                    self.on_wire_drawing_click(*world, ops);
+                    return ToolOutcome::Consumed;
+                }
                 self.on_primary_down(*world, modifiers.shift, modifiers.ctrl, ops);
                 ToolOutcome::Consumed
             }
 
-            InputEvent::PointerMove { world, .. } => {
+            InputEvent::PointerMove { world, modifiers, .. } => {
                 self.last_pointer_world = Some(*world);
                 // A move might promote Pressed → Dragging, or feed
                 // an in-flight drag. Pan (middle-drag) lives in
@@ -374,7 +416,7 @@ impl Tool for DefaultTool {
                 if matches!(self.state, State::Idle) {
                     ToolOutcome::Passthrough
                 } else {
-                    self.on_pointer_move(*world, ops);
+                    self.on_pointer_move(*world, *modifiers, ops);
                     ToolOutcome::Consumed
                 }
             }
@@ -425,10 +467,36 @@ impl Tool for DefaultTool {
                     ToolOutcome::Consumed
                 }
                 "Escape" => {
-                    // Abort any in-flight drag/connect. Don't clear
-                    // the selection — Escape in most editors cancels
-                    // the interaction, not the selection.
-                    self.state = State::Idle;
+                    // Abort any in-flight drag/connect. Revert
+                    // mid-drag mutations so the scene looks like the
+                    // user never started the gesture (Figma-style).
+                    let state = std::mem::replace(&mut self.state, State::Idle);
+                    match state {
+                        State::DraggingNodes {
+                            original_rects, ..
+                        } => {
+                            for (nid, orig) in original_rects {
+                                if let Some(n) = ops.scene.node_mut(nid) {
+                                    n.rect = orig;
+                                }
+                            }
+                        }
+                        State::ResizingNode {
+                            id, original_rect, ..
+                        } => {
+                            if let Some(n) = ops.scene.node_mut(id) {
+                                n.rect = original_rect;
+                            }
+                        }
+                        State::DraggingEdgeWaypoint {
+                            edge, original, ..
+                        } => {
+                            if let Some(e) = ops.scene.edge_mut(edge) {
+                                e.waypoints = original;
+                            }
+                        }
+                        _ => {}
+                    }
                     ToolOutcome::Consumed
                 }
                 _ => ToolOutcome::Passthrough,
@@ -447,11 +515,13 @@ impl Tool for DefaultTool {
             State::ConnectingFromPort {
                 from_world,
                 pointer_world,
+                points,
                 ..
-            } => Some(ToolPreview::GhostEdge {
+            } => Some(ToolPreview::GhostEdgeWithBends {
                 from_world: *from_world,
+                bends: points.clone(),
                 to_world: *pointer_world,
-                snap_target: None, // filled in by future enhancement
+                snap_target: None,
             }),
             State::RubberBand {
                 origin_world,
@@ -476,6 +546,73 @@ impl Tool for DefaultTool {
 impl DefaultTool {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Handle a primary click while already in `ConnectingFromPort`
+    /// state — implements Dymola/OMEdit click-to-bend during wire
+    /// creation. Click on a different node's port = commit; click
+    /// on the source port or empty space inside the source node =
+    /// cancel; click in empty world space = append a bend.
+    fn on_wire_drawing_click(&mut self, world: Pos, ops: &mut CanvasOps) {
+        let State::ConnectingFromPort { from, from_world, points, mode, .. } =
+            std::mem::replace(&mut self.state, State::Idle)
+        else {
+            return;
+        };
+        // Hit test: port → commit / cancel; body → ignore (don't
+        // commit through a node body that isn't a port); empty → bend.
+        let target = ops.scene.hit_node(world, PORT_HIT_RADIUS);
+        match target {
+            Some((nid, NodeHitKind::Port(pid))) => {
+                if nid == from.node && pid == from.port {
+                    // Clicked the source port again — cancel.
+                    return;
+                }
+                if nid != from.node {
+                    let to = PortRef { node: nid, port: pid };
+                    ops.events.push(SceneEvent::EdgeCreated {
+                        from,
+                        to,
+                        points,
+                    });
+                    return;
+                }
+                // Same-node port — keep drawing.
+                self.state = State::ConnectingFromPort {
+                    from,
+                    from_world,
+                    pointer_world: world,
+                    points,
+                    mode,
+                };
+            }
+            Some((_, NodeHitKind::Body)) => {
+                // Clicking on a node body without hitting a port
+                // doesn't commit (Dymola requires a port hit) — stay
+                // in wire-drawing mode.
+                self.state = State::ConnectingFromPort {
+                    from,
+                    from_world,
+                    pointer_world: world,
+                    points,
+                    mode,
+                };
+            }
+            None => {
+                // Empty space — append a bend at the click position
+                // (grid-snap so the bend lands cleanly).
+                let (sx, sy) = snap_point(world.x, world.y, ops.snap);
+                let mut new_points = points;
+                new_points.push(Pos::new(sx, sy));
+                self.state = State::ConnectingFromPort {
+                    from,
+                    from_world,
+                    pointer_world: world,
+                    points: new_points,
+                    mode,
+                };
+            }
+        }
     }
 
     fn on_primary_down(
@@ -617,7 +754,12 @@ impl DefaultTool {
         };
     }
 
-    fn on_pointer_move(&mut self, world: Pos, ops: &mut CanvasOps) {
+    fn on_pointer_move(
+        &mut self,
+        world: Pos,
+        modifiers: crate::event::Modifiers,
+        ops: &mut CanvasOps,
+    ) {
         // Promote Pressed → Dragging once the pointer has moved past
         // the click threshold.
         if let State::PrimaryPressed {
@@ -685,6 +827,8 @@ impl DefaultTool {
                         from,
                         from_world,
                         pointer_world: world,
+                        points: Vec::new(),
+                        mode: ConnectMode::Drag,
                     };
                 }
                 PressTarget::Empty => {
@@ -827,8 +971,20 @@ impl DefaultTool {
                 original,
                 current,
             } => {
-                let dx = world.x - origin_world.x;
-                let dy = world.y - origin_world.y;
+                let mut dx = world.x - origin_world.x;
+                let mut dy = world.y - origin_world.y;
+                // Shift = constrain to the dominant axis (locks to
+                // pure horizontal or vertical motion). Useful for
+                // keeping a wire orthogonal while dragging a corner.
+                if modifiers.shift {
+                    if dx.abs() >= dy.abs() {
+                        dy = 0.0;
+                    } else {
+                        dx = 0.0;
+                    }
+                }
+                // Alt bypasses grid snap (Dymola convention).
+                let active_snap = if modifiers.alt { None } else { ops.snap };
                 // Recompute `current` from `original + delta` each
                 // frame so the math is drift-free even after many
                 // PointerMoves.
@@ -836,9 +992,8 @@ impl DefaultTool {
                 match hit {
                     EdgeHit::Corner(i) => {
                         if let Some(p) = new_pts.get_mut(*i) {
-                            // Optional grid snap mirrors node drag.
                             let (sx, sy) =
-                                snap_point(p.x + dx, p.y + dy, ops.snap);
+                                snap_point(p.x + dx, p.y + dy, active_snap);
                             *p = Pos::new(sx, sy);
                         }
                     }
@@ -876,7 +1031,7 @@ impl DefaultTool {
                         if *i >= 1 && *i - 1 < new_pts.len() {
                             let p = new_pts[*i - 1];
                             let (nx, ny) =
-                                snap_point(p.x + qdx, p.y + qdy, ops.snap);
+                                snap_point(p.x + qdx, p.y + qdy, active_snap);
                             new_pts[*i - 1] = Pos::new(nx, ny);
                         } else {
                             // Segment 0 starts at the from-port — we
@@ -887,14 +1042,14 @@ impl DefaultTool {
                             let (nx, ny) = snap_point(
                                 from_world.x + qdx,
                                 from_world.y + qdy,
-                                ops.snap,
+                                active_snap,
                             );
                             new_pts.insert(0, Pos::new(nx, ny));
                         }
                         if *i < new_pts.len() {
                             let p = new_pts[*i];
                             let (nx, ny) =
-                                snap_point(p.x + qdx, p.y + qdy, ops.snap);
+                                snap_point(p.x + qdx, p.y + qdy, active_snap);
                             new_pts[*i] = Pos::new(nx, ny);
                         } else {
                             // Last segment ends at the to-port — same
@@ -902,7 +1057,7 @@ impl DefaultTool {
                             let (nx, ny) = snap_point(
                                 to_world.x + qdx,
                                 to_world.y + qdy,
-                                ops.snap,
+                                active_snap,
                             );
                             new_pts.push(Pos::new(nx, ny));
                         }
@@ -939,9 +1094,22 @@ impl DefaultTool {
                             ops,
                         );
                     }
-                    PressTarget::Port(_, _) => {
-                        // A bare port-click with no drag does
-                        // nothing — we don't select ports.
+                    PressTarget::Port(from, from_world) => {
+                        // Bare port-click → enter click-to-bend wire
+                        // mode. Subsequent clicks in empty space
+                        // append bends; a click on a target port
+                        // commits the wire. Esc cancels. Read-only
+                        // tabs bail (mirrors the drag path).
+                        if ops.read_only {
+                            return;
+                        }
+                        self.state = State::ConnectingFromPort {
+                            from,
+                            from_world,
+                            pointer_world: from_world,
+                            points: Vec::new(),
+                            mode: ConnectMode::Click,
+                        };
                     }
                     PressTarget::Empty => {
                         // Click on empty space — clear selection
@@ -1011,13 +1179,27 @@ impl DefaultTool {
                 }
             }
 
-            State::ConnectingFromPort { from, .. } => {
-                // Commit the edge if the release landed on a
-                // different node. First try a direct port hit;
-                // if the release is on the body (between ports or
-                // past them slightly), snap to that node's closest
-                // port. Saves users from pixel-perfecting every
-                // drop, matching Dymola / OMEdit behaviour.
+            State::ConnectingFromPort { from, points, mode, .. } => {
+                // `Click` mode releases (between click-to-bend
+                // events) are not commit signals — they're just the
+                // pointer button coming back up after each individual
+                // click. Restore the state and bail. Only an
+                // explicit port-click during a PointerDown commits
+                // a Click-mode wire (handled in `on_primary_down`).
+                if mode == ConnectMode::Click {
+                    self.state = State::ConnectingFromPort {
+                        from,
+                        from_world: self
+                            .last_pointer_world
+                            .unwrap_or(world),
+                        pointer_world: world,
+                        points,
+                        mode,
+                    };
+                    return;
+                }
+                // Drag mode: commit on release-over-a-port (snap to
+                // body if close enough). Empty-space release cancels.
                 let target_node_and_port =
                     match ops.scene.hit_node(world, PORT_HIT_RADIUS) {
                         Some((nid, NodeHitKind::Port(pid))) => Some((nid, pid)),
@@ -1033,8 +1215,11 @@ impl DefaultTool {
                             node: target_node,
                             port: target_port,
                         };
-                        ops.events
-                            .push(SceneEvent::EdgeCreated { from, to });
+                        ops.events.push(SceneEvent::EdgeCreated {
+                            from,
+                            to,
+                            points,
+                        });
                     }
                 }
                 // Note: when release lands on pure empty space,
@@ -1059,6 +1244,11 @@ impl DefaultTool {
                 let cleaned = cleanup_collinear(&current);
                 if let Some(e) = ops.scene.edge_mut(edge) {
                     e.waypoints = cleaned.clone();
+                    // First edit on an auto-routed wire captures its
+                    // path into source — flip the authored flag so
+                    // future rubber-band passes treat the wire as
+                    // user-authored.
+                    e.waypoints_authored = true;
                 }
                 if cleaned != original {
                     ops.events.push(SceneEvent::EdgeWaypointsChanged {
@@ -1531,6 +1721,7 @@ mod tests {
             data: empty_node_data(),
             origin: None,
             waypoints: Vec::new(),
+            waypoints_authored: false,
         });
         sel.set(SelectItem::Node(NodeId(0)));
         run(

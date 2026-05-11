@@ -1360,6 +1360,22 @@ pub fn extract_line_points(annotation: &[Expression]) -> Vec<(f32, f32)> {
     line.points.iter().map(|p| (p.x as f32, p.y as f32)).collect()
 }
 
+/// Like [`extract_line_points`] but also returns the `smooth=Bezier`
+/// flag so the renderer can switch between straight orthogonal
+/// segments and a smooth curve through the same points. Returns
+/// `None` when the annotation has no `Line(...)` call or fewer than 2
+/// points (matching `extract_line_points`'s "empty" semantics).
+pub fn extract_line_route(annotation: &[Expression]) -> Option<(Vec<(f32, f32)>, bool)> {
+    let line_call = find_call(annotation, "Line")?;
+    let line_args = call_args(line_call)?;
+    let line = extract_line(line_args)?;
+    if line.points.len() < 2 {
+        return None;
+    }
+    let points = line.points.iter().map(|p| (p.x as f32, p.y as f32)).collect();
+    Some((points, line.smooth_bezier))
+}
+
 fn extract_line(args: &[Expression]) -> Option<Line> {
     // `points` may be wrapped in `DynamicSelect(static_matrix,
     // dynamic_matrix)` (MLS §18) — e.g. `Modelica.Blocks.Continuous.Integrator`'s

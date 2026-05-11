@@ -370,6 +370,7 @@ pub(super) fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramN
         // wrap-around routes that the per-frame Z-bend heuristic
         // can't manage. Authored waypoints win — preserves user
         // intent on hand-routed connections.
+        let waypoints_authored = !edge.waypoints.is_empty();
         let waypoints_world: Vec<CanvasPos> = if !edge.waypoints.is_empty() {
             edge.waypoints
                 .iter()
@@ -449,8 +450,12 @@ pub(super) fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramN
             // reaching into per-domain edge data. Renderer keeps a
             // separate copy in `ConnectionEdgeData` for its own draw
             // path until the visual is refactored to read from
-            // `Edge::waypoints` directly.
+            // `Edge::waypoints` directly. `waypoints_authored`
+            // distinguishes user-authored bends (from source
+            // annotation) from auto-router output so rubber-band on
+            // node move only persists what the user actually authored.
             waypoints: waypoints_world.clone(),
+            waypoints_authored,
             data: std::sync::Arc::new(ConnectionEdgeData {
                 connector_type: connector_type.clone(),
                 from_dir,
@@ -472,6 +477,7 @@ pub(super) fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramN
                     .as_ref()
                     .map(|p| p.flow_vars.clone())
                     .unwrap_or_default(),
+                smooth_bezier: edge.smooth_bezier,
             }),
             origin: None,
         });

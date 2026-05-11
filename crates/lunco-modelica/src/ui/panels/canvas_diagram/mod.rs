@@ -170,6 +170,7 @@ fn build_registry() -> VisualRegistry {
             flow_vars: d.flow_vars.clone(),
             connector_leaf: leaf,
             flow_lookup_keys,
+            smooth_bezier: d.smooth_bezier,
         }
     });
     reg

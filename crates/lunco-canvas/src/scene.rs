@@ -334,6 +334,15 @@ pub struct Edge {
     /// `data` payloads. Endpoints (port positions) are NOT included.
     #[serde(default)]
     pub waypoints: Vec<Pos>,
+    /// True when [`Self::waypoints`] came from a source-level
+    /// annotation (the user / domain authored them) rather than from
+    /// an auto-router. Hosts use this to gate persistence: rubber-band
+    /// of incident wires on a node move should only emit an authored-
+    /// path op when the wire was authored to begin with, otherwise
+    /// every node drag would freeze the auto-router's output into the
+    /// source annotation.
+    #[serde(default)]
+    pub waypoints_authored: bool,
 }
 
 /// The canvas's authored state.
@@ -653,6 +662,7 @@ mod tests {
             data: empty_node_data(),
             origin: None,
             waypoints: Vec::new(),
+            waypoints_authored: false,
         });
         id
     }

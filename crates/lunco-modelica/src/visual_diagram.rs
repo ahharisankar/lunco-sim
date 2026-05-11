@@ -363,6 +363,11 @@ pub struct DiagramEdge {
     /// between them in source order.
     #[serde(default)]
     pub waypoints: Vec<(f32, f32)>,
+    /// True when the source annotation specified `smooth=Smooth.Bezier`.
+    /// Renderer switches to a Catmull-Rom curve through the polyline
+    /// points instead of straight segments.
+    #[serde(default)]
+    pub smooth_bezier: bool,
 }
 
 /// The complete visual diagram.
@@ -452,6 +457,7 @@ impl VisualDiagram {
                 target_node,
                 target_port,
                 waypoints: Vec::new(),
+                smooth_bezier: false,
             });
         }
     }
