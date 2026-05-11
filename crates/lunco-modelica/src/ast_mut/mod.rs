@@ -508,6 +508,143 @@ pub fn set_connection_line(
     Ok(())
 }
 
+/// Set or clear individual `Line(...)` annotation fields on a
+/// `connect(...)` equation matching `(from, to)`. `None` fields are
+/// left untouched. Topology is unchanged. Returns
+/// `ConnectionNotFound` if no matching connect exists.
+///
+/// Used by the wire properties dialog: each control mutates one
+/// field, leaving the others (including authored points) alone.
+pub fn set_connection_line_style(
+    class: &mut ClassDef,
+    from: &pretty::PortRef,
+    to: &pretty::PortRef,
+    color: Option<[u8; 3]>,
+    thickness: Option<f64>,
+    smooth_bezier: Option<bool>,
+) -> Result<(), AstMutError> {
+    use rumoca_session::parsing::ast::Expression;
+    let class_name = class.name.text.to_string();
+    // Build a stub Line(...) carrying all the requested fields so we
+    // can lift parsed NamedArgument expressions from it. Fields the
+    // caller didn't set get sensible neutral values that won't be
+    // used (we only splice the args the caller asked for).
+    let mut stub_args: Vec<String> = Vec::new();
+    stub_args.push("points={{0,0},{0,0}}".into());
+    if let Some([r, g, b]) = color {
+        stub_args.push(format!("color={{{},{},{}}}", r, g, b));
+    }
+    if let Some(t) = thickness {
+        stub_args.push(format!("thickness={}", fmt_f64(t)));
+    }
+    if let Some(s) = smooth_bezier {
+        let v = if s { "Smooth.Bezier" } else { "Smooth.None" };
+        stub_args.push(format!("smooth={}", v));
+    }
+    let stub_body = format!(
+        "connect(a.b, c.d) annotation(Line({}));\n",
+        stub_args.join(", ")
+    );
+    let stub = format!(
+        "model __LunCoFragment\nequation\n  {stub_body}end __LunCoFragment;\n",
+    );
+    let parsed = parse_stub_cached(&stub).ok_or_else(|| {
+        AstMutError::ValueParseFailed { value: stub_body.clone() }
+    })?;
+    let parsed_cls = parsed.classes.get("__LunCoFragment").ok_or_else(|| {
+        AstMutError::ValueParseFailed { value: stub_body.clone() }
+    })?;
+    let parsed_eq = parsed_cls.equations.first().ok_or_else(|| {
+        AstMutError::ValueParseFailed { value: stub_body.clone() }
+    })?;
+    let parsed_annotation = match parsed_eq {
+        rumoca_session::parsing::ast::Equation::Connect { annotation, .. } => annotation,
+        _ => return Err(AstMutError::ValueParseFailed { value: stub_body }),
+    };
+
+    let mut matched = false;
+    for eq in class.equations.iter_mut() {
+        if let rumoca_session::parsing::ast::Equation::Connect { lhs, rhs, annotation } = eq {
+            if !(matches_port_ref(lhs, from) && matches_port_ref(rhs, to)) {
+                continue;
+            }
+            // Find or insert a Line(...) entry in the target annotation.
+            let line_idx = annotation
+                .iter()
+                .position(|e| expression_is_line_call(e));
+            if line_idx.is_none() {
+                // No Line at all yet — splice the whole stub Line.
+                if let Some(line_expr) =
+                    parsed_annotation.iter().find(|e| expression_is_line_call(e))
+                {
+                    annotation.push(line_expr.clone());
+                }
+            }
+            // Re-locate (insertion may have just happened) and patch
+            // the named args the caller requested.
+            let line_idx = annotation
+                .iter()
+                .position(|e| expression_is_line_call(e))
+                .ok_or_else(|| AstMutError::ValueParseFailed {
+                    value: "Line entry missing after splice".into(),
+                })?;
+            let names_to_patch: Vec<&str> = {
+                let mut v: Vec<&str> = Vec::new();
+                if color.is_some() { v.push("color"); }
+                if thickness.is_some() { v.push("thickness"); }
+                if smooth_bezier.is_some() { v.push("smooth"); }
+                v
+            };
+            if let Expression::FunctionCall { args, .. } = &mut annotation[line_idx] {
+                for name in names_to_patch {
+                    let Some(new_arg) = parsed_annotation
+                        .iter()
+                        .filter_map(|e| match e {
+                            Expression::FunctionCall { comp, args } if ref_is_simple(comp, "Line") => Some(args),
+                            _ => None,
+                        })
+                        .flatten()
+                        .find(|a| named_arg_name(a) == Some(name))
+                        .cloned()
+                    else { continue };
+                    let mut replaced = false;
+                    for a in args.iter_mut() {
+                        if named_arg_name(a) == Some(name) {
+                            *a = new_arg.clone();
+                            replaced = true;
+                            break;
+                        }
+                    }
+                    if !replaced {
+                        args.push(new_arg);
+                    }
+                }
+            }
+            matched = true;
+            break;
+        }
+    }
+    if !matched {
+        return Err(AstMutError::ConnectionNotFound {
+            class: class_name,
+            from: format!("{}.{}", from.component, from.port),
+            to: format!("{}.{}", to.component, to.port),
+        });
+    }
+    Ok(())
+}
+
+/// Format an `f64` for emission inside a `Line(...)` literal — strips
+/// the trailing `.0` egui would otherwise carry along (`0.25` not
+/// `0.25000`).
+fn fmt_f64(v: f64) -> String {
+    if v == v.trunc() {
+        format!("{}", v as i64)
+    } else {
+        format!("{}", v)
+    }
+}
+
 /// True when the expression is a `Line(...)` function-call entry.
 /// Other annotation entries (Documentation, vendor extensions) are
 /// passed through verbatim.

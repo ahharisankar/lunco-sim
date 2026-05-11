@@ -238,6 +238,89 @@ pub(super) fn render_edge_menu(
     if ui.button("↺ Reverse direction").clicked() {
         ui.close();
     }
+    // ── Wire properties submenu ─────────────────────────────────────
+    // Inline color/thickness/smooth controls. Each change emits a
+    // separate `SetConnectionLineStyle` op so the source-level
+    // surgical update only touches the field the user actually
+    // changed (`Phase D` infrastructure handles preservation).
+    let Some(class) = editing_class else { return };
+    let active_doc = active_doc_from_world(world);
+    let tab = render_tab_id(world);
+    let scene_state = world.resource::<CanvasDiagramState>();
+    let scene = &scene_state.get_for_render(tab, active_doc).canvas.scene;
+    let Some(edge) = scene.edge(id) else { return };
+    let Some(from_node) = scene.node(edge.from.node) else { return };
+    let Some(to_node) = scene.node(edge.to.node) else { return };
+    let Some(from_instance) = from_node.origin.clone() else { return };
+    let Some(to_instance) = to_node.origin.clone() else { return };
+    let from_port = edge.from.port.as_str().to_string();
+    let to_port = edge.to.port.as_str().to_string();
+    // Pull seed values from the live edge data. Color: ConnectionEdge
+    // icon_color (per-connector tint); smooth: smooth_bezier flag.
+    // Thickness has no plumbed scene-side mirror — seed at the
+    // Modelica default (0.25). The surgical writer preserves any
+    // existing thickness in source until the user actively drags
+    // the slider, so a wrong seed doesn't lose user data.
+    let data = edge
+        .data
+        .downcast_ref::<super::edge::ConnectionEdgeData>();
+    let (mut color_rgb, mut smooth, default_thickness) = match data {
+        Some(d) => {
+            let c = d
+                .icon_color
+                .map(|c| [c.r(), c.g(), c.b()])
+                .unwrap_or([0, 0, 0]);
+            (c, d.smooth_bezier, 0.25_f64)
+        }
+        None => ([0u8, 0, 0], false, 0.25_f64),
+    };
+    // Egui keeps in-flight slider state across frames; we mirror the
+    // last-emitted thickness into ctx data so the slider doesn't
+    // snap back to the seed mid-edit.
+    let thickness_id = egui::Id::new(("wire-thickness", id));
+    let mut thickness: f64 = ui
+        .ctx()
+        .data(|d| d.get_temp::<f64>(thickness_id))
+        .unwrap_or(default_thickness);
+    ui.separator();
+    ui.label(egui::RichText::new("Properties").strong());
+    let mk_op = |color: Option<[u8; 3]>,
+                 thickness: Option<f64>,
+                 smooth_bezier: Option<bool>| {
+        ModelicaOp::SetConnectionLineStyle {
+            class: class.to_string(),
+            from: crate::pretty::PortRef::new(&from_instance, &from_port),
+            to: crate::pretty::PortRef::new(&to_instance, &to_port),
+            color,
+            thickness,
+            smooth_bezier,
+        }
+    };
+    ui.horizontal(|ui| {
+        ui.label("Color");
+        if ui.color_edit_button_srgb(&mut color_rgb).changed() {
+            out.push(mk_op(Some(color_rgb), None, None));
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Thickness");
+        let r = ui.add(
+            egui::Slider::new(&mut thickness, 0.05..=2.0).step_by(0.05),
+        );
+        if r.changed() {
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(thickness_id, thickness));
+        }
+        if r.drag_stopped() || (r.changed() && !r.dragged()) {
+            out.push(mk_op(None, Some(thickness), None));
+        }
+    });
+    if ui
+        .checkbox(&mut smooth, "Smooth (Bezier)")
+        .changed()
+    {
+        out.push(mk_op(None, None, Some(smooth)));
+    }
 }
 
 pub(super) fn render_empty_menu(

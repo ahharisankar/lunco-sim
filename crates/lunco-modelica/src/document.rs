@@ -132,6 +132,13 @@ pub enum ModelicaChange {
         /// Target port.
         to: PortRef,
     },
+    /// Style fields of `Line(...)` (color, thickness, smooth) were
+    /// edited on a `connect(...)` equation. Topology unchanged.
+    ConnectionLineStyleChanged {
+        class: String,
+        from: PortRef,
+        to: PortRef,
+    },
     /// A component's `Placement` annotation was set or replaced.
     PlacementChanged {
         /// Qualified class name.
@@ -1173,6 +1180,19 @@ pub enum ModelicaOp {
         /// `Line` annotation (revert to auto-route).
         points: Vec<(f32, f32)>,
     },
+    /// Edit one or more style fields of an existing `connect(...)`
+    /// `Line(...)` annotation. `None` fields are left untouched —
+    /// callers send only what the user changed in the properties
+    /// dialog. Inserts a fresh `Line(...)` if the connect had no
+    /// annotation yet.
+    SetConnectionLineStyle {
+        class: String,
+        from: pretty::PortRef,
+        to: pretty::PortRef,
+        color: Option<[u8; 3]>,
+        thickness: Option<f64>,
+        smooth_bezier: Option<bool>,
+    },
     /// Set or replace the `Placement` annotation on a component.
     ///
     /// If the component already has an `annotation(Placement(...))`,
@@ -1582,6 +1602,9 @@ impl ModelicaDocument {
                 // text round-trips through `regenerate_class_patch` on
                 // its own.
             }
+            ModelicaChange::ConnectionLineStyleChanged { class: _, from: _, to: _ } => {
+                // Wire styling edit — also topology-neutral.
+            }
             ModelicaChange::ParameterChanged {
                 class,
                 component,
@@ -1754,6 +1777,29 @@ fn op_to_patch(
             )
             .map_err(ast_mut_to_doc_error)?;
             let change = ModelicaChange::ConnectionLineChanged { class, from, to };
+            Ok((r, rp, change, FreshAst::Mutated(fresh_ast)))
+        }
+        ModelicaOp::SetConnectionLineStyle {
+            class,
+            from,
+            to,
+            color,
+            thickness,
+            smooth_bezier,
+        } => {
+            ast_check_no_parse_error(ast)?;
+            let from_c = from.clone();
+            let to_c = to.clone();
+            let (r, rp, fresh_ast) = crate::ast_mut::regenerate_class_patch(
+                source,
+                parsed,
+                &class,
+                |c| crate::ast_mut::set_connection_line_style(
+                    c, &from_c, &to_c, color, thickness, smooth_bezier,
+                ),
+            )
+            .map_err(ast_mut_to_doc_error)?;
+            let change = ModelicaChange::ConnectionLineStyleChanged { class, from, to };
             Ok((r, rp, change, FreshAst::Mutated(fresh_ast)))
         }
         ModelicaOp::SetPlacement { class, name, placement } => {

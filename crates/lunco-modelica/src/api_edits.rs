@@ -1591,7 +1591,8 @@ pub(crate) fn internal_op_to_api(op: &ModelicaOp) -> Option<ApiOp> {
         | ModelicaOp::AddEquation { .. }
         | ModelicaOp::AddIconGraphic { .. }
         | ModelicaOp::AddDiagramGraphic { .. }
-        | ModelicaOp::SetExperimentAnnotation { .. } => None,
+        | ModelicaOp::SetExperimentAnnotation { .. }
+        | ModelicaOp::SetConnectionLineStyle { .. } => None,
     }
 }
 
