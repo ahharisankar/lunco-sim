@@ -197,16 +197,23 @@ pub(crate) fn open_model(
     use crate::ui::panels::model_view::MODEL_VIEW_KIND;
     use bevy::tasks::AsyncComputeTaskPool;
 
+    // MSL clicks: route through the drill-in pipeline which
+    // extracts JUST the target class slice (a few KB) instead of
+    // loading the entire package wrapper file (often 100+ KB).
+    // Without this, clicking `Modelica.Blocks.Examples.PID_Controller`
+    // ends up parsing the 152 KB `Blocks/package.mo` — a 100+ second
+    // operation that leaves the canvas blank the whole time.
+    if let Some(rel) = id.strip_prefix("msl_path:") {
+        crate::ui::panels::canvas_diagram::drill_into_class(world, rel);
+        return;
+    }
+
     // Bundled inner-class ids look like `bundled://<file>#<qualified>`;
     // the fragment is the drill-in target, the part before `#` is the
-    // filename. MSL ids look like `msl_path:<qualified>` and resolve
-    // their drill-in target via the qualified path itself once the
-    // owning file lands.
+    // filename.
     let drill_in_qualified: Option<String> = if id.starts_with("bundled://") {
         let tail = id.strip_prefix("bundled://").unwrap_or("");
         tail.split_once('#').map(|(_, q)| q.to_string())
-    } else if let Some(rel) = id.strip_prefix("msl_path:") {
-        Some(rel.to_string())
     } else {
         None
     };
@@ -219,12 +226,9 @@ pub(crate) fn open_model(
 
     let already_open = world.resource::<ModelicaDocumentRegistry>().find_by_path(&path_buf);
     if let Some(doc) = already_open {
-        let tab_id = world.resource_mut::<crate::ui::panels::model_view::ModelTabs>().ensure_for(doc, None);
-        if let Some(qualified) = drill_in_qualified.clone() {
-            if let Some(tab) = world.resource_mut::<crate::ui::panels::model_view::ModelTabs>().get_mut(tab_id) {
-                tab.drilled_class = Some(qualified);
-            }
-        }
+        let tab_id = world
+            .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
+            .ensure_for(doc, drill_in_qualified.clone());
         world.commands().trigger(lunco_workbench::OpenTab { kind: MODEL_VIEW_KIND, instance: tab_id });
         return;
     }
@@ -237,7 +241,9 @@ pub(crate) fn open_model(
         world.resource_mut::<crate::ui::browser_dispatch::PendingDrillIns>().queue(id.clone(), qualified);
     }
 
-    let tab_id = world.resource_mut::<crate::ui::panels::model_view::ModelTabs>().ensure_for(reserved_doc_id, None);
+    let tab_id = world
+        .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
+        .ensure_for(reserved_doc_id, drill_in_qualified.clone());
     world.commands().trigger(lunco_workbench::OpenTab { kind: MODEL_VIEW_KIND, instance: tab_id });
 
     let writable = matches!(library, ModelLibrary::User);

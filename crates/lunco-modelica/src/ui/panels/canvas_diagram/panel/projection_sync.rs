@@ -51,6 +51,10 @@ pub(crate) fn poll_and_swap_projection(
     });
 
     if let Some((gen, target, source_hash, scene)) = done_task {
+        bevy::log::info!(
+            "[CanvasDiagram] poll_done gen={} target={:?} new_scene_nodes={} old_scene_nodes={}",
+            gen, target, scene.node_count(), docstate.canvas.scene.node_count(),
+        );
         docstate.projection_task = None;
         if scene.node_count() == 0 && docstate.canvas.scene.node_count() > 0 {
             docstate.last_seen_gen = gen;

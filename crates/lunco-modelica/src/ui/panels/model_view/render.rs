@@ -304,11 +304,34 @@ fn render_docs_view(ui: &mut egui::Ui, world: &mut World) {
         world.resource::<ModelicaDocumentRegistry>().host(doc).and_then(|h| {
             let index = h.document().index();
             let fallback = || index.classes.values().find(|c| !matches!(c.kind, crate::index::ClassKind::Package)).or_else(|| index.classes.values().next());
+            // The index keys classes by the qualified name rumoca
+            // produced — which is the name *as declared in the file*,
+            // not the full path including the file's `within` scope.
+            // So `drilled = "Modelica.Blocks.Examples.BooleanNetwork1"`
+            // has to fall through to the `Blocks.Examples.BooleanNetwork1`
+            // form (within=`Modelica`) or even just the suffix when
+            // the within is multi-segment. Try the full path first,
+            // then progressively strip leading segments, then leaf
+            // name, then a within-aware suffix-match against the
+            // index keys as a last resort.
             let entry = if let Some(q) = drilled.as_deref() {
-                index.classes.get(q).or_else(|| {
+                let mut found = index.classes.get(q);
+                if found.is_none() {
+                    let mut remainder = q;
+                    while let Some((_, rest)) = remainder.split_once('.') {
+                        if let Some(e) = index.classes.get(rest) { found = Some(e); break; }
+                        remainder = rest;
+                    }
+                }
+                if found.is_none() {
+                    // Last-resort suffix scan: index key ends with
+                    // `.<leaf>` or equals `<leaf>`.
                     let leaf = q.rsplit('.').next().unwrap_or(q);
-                    index.classes.get(leaf)
-                }).or_else(fallback)
+                    found = index.classes.iter()
+                        .find(|(k, _)| k.as_str() == leaf || k.ends_with(&format!(".{leaf}")))
+                        .map(|(_, v)| v);
+                }
+                found.or_else(fallback)
             } else {
                 fallback()
             }?;
