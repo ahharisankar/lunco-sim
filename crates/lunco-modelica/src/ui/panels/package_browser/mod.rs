@@ -29,8 +29,6 @@ pub fn handle_package_loading_tasks(
     mut cache: ResMut<PackageTreeCache>,
     mut workbench: ResMut<WorkbenchState>,
     mut registry: ResMut<ModelicaDocumentRegistry>,
-    mut model_tabs: ResMut<crate::ui::panels::model_view::ModelTabs>,
-    mut pending_drill_ins: ResMut<crate::ui::browser_dispatch::PendingDrillIns>,
     mut workspace: ResMut<lunco_workbench::WorkspaceResource>,
 ) {
     use futures_lite::future;
@@ -72,12 +70,9 @@ pub fn handle_package_loading_tasks(
         let doc_id = result.doc_id;
         registry.install_prebuilt(doc_id, result.doc);
 
-        let queued_qualified = pending_drill_ins.take(&result.id);
-        if let Some(qualified) = queued_qualified {
-            if let Some(tab) = model_tabs.find_for_mut(doc_id, None) {
-                tab.drilled_class = Some(qualified);
-            }
-        }
+        // Drill-in target is already on the tab — `open_class` set it
+        // via `ensure_for(doc, drilled)` synchronously before the load
+        // task was spawned. No post-install patching needed.
 
         workbench.diagram_dirty = true;
         workspace.active_document = Some(doc_id);
@@ -281,9 +276,6 @@ fn open_bundled_class(world: &mut World, class: &ClassRef) {
 
     let reserved_doc_id = world.resource_mut::<ModelicaDocumentRegistry>().reserve_id();
     world.resource_mut::<PackageTreeCache>().loading_ids.insert(dedup_key.clone(), reserved_doc_id);
-    if let Some(q) = drilled_for_tab.clone() {
-        world.resource_mut::<crate::ui::browser_dispatch::PendingDrillIns>().queue(dedup_key.clone(), q);
-    }
     let tab_id = world
         .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
         .ensure_for(reserved_doc_id, drilled_for_tab.clone());
@@ -331,9 +323,6 @@ fn open_user_file_class(world: &mut World, path: PathBuf, class: &ClassRef) {
     let dedup_key = path.display().to_string();
     let reserved_doc_id = world.resource_mut::<ModelicaDocumentRegistry>().reserve_id();
     world.resource_mut::<PackageTreeCache>().loading_ids.insert(dedup_key.clone(), reserved_doc_id);
-    if let Some(q) = drilled.clone() {
-        world.resource_mut::<crate::ui::browser_dispatch::PendingDrillIns>().queue(dedup_key.clone(), q);
-    }
     let tab_id = world
         .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
         .ensure_for(reserved_doc_id, drilled.clone());

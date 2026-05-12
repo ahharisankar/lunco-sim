@@ -3,59 +3,15 @@
 //!
 //! Sections push abstract intents (`OpenFile`, `OpenModelicaClass`)
 //! during render; this system picks them up the same frame and turns
-//! them into concrete app behaviour:
-//!
-//! - **`OpenFile`** — opens the file as a Modelica document via the
-//!   existing `package_browser::open_model` path. Same code that runs
-//!   when the user clicks a file in the legacy browser, so we get tab
-//!   spawning + worker registration + welcome-tab swap-out for free.
-//! - **`OpenModelicaClass`** — same as `OpenFile`, *plus* records a
-//!   "when this file finishes loading, push this qualified path into
-//!   `DrilledInClassNames`" entry on `PendingDrillIns`. The package
-//!   browser's load-task handler reads it after allocating the
-//!   document and applies it before opening the model-view tab, so
-//!   the canvas projector lands on the right class on first paint.
+//! them into [`ClassRef`](crate::class_ref::ClassRef) values dispatched
+//! to [`crate::ui::panels::package_browser::open_class`]. The drill-in
+//! target rides directly on the `ClassRef`, so there is no out-of-band
+//! queue to synchronise with the async source load — `ensure_for(doc,
+//! drilled)` writes the tab state up front and the load task fills in
+//! the source when it lands.
 
 use bevy::prelude::*;
 use lunco_workbench::{BrowserAction, BrowserActions};
-use std::collections::HashMap;
-
-// on `ModelTabState.drilled_class`.
-
-/// `file_id (absolute path string) → qualified class path` queued by
-/// [`drain_browser_actions`]. The package-browser's load-task handler
-/// drains the matching entry the moment a Document is allocated and
-/// pushes it into `DrilledInClassNames`, so the canvas projector
-/// drills into the right class without any second click.
-///
-/// Entries linger if the load fails (the queue would silently grow);
-/// in practice that doesn't happen because every load path either
-/// completes or the app restarts. A future polish step: GC entries
-/// older than ~10 s.
-#[derive(Resource, Default)]
-pub struct PendingDrillIns {
-    by_file_id: HashMap<String, String>,
-}
-
-impl PendingDrillIns {
-    /// Stash a drill-in to apply when `file_id` finishes loading.
-    pub fn queue(&mut self, file_id: String, qualified_path: String) {
-        self.by_file_id.insert(file_id, qualified_path);
-    }
-
-    /// Pop the queued qualified path for `file_id`, if any.
-    pub fn take(&mut self, file_id: &str) -> Option<String> {
-        self.by_file_id.remove(file_id)
-    }
-
-    /// Look up the queued qualified path for `file_id` without
-    /// removing it. Used by `open_model` so the dedup branches
-    /// (already-open / loading) can scope the tab to the same class
-    /// the post-load installer will eventually drill into.
-    pub fn peek(&self, file_id: &str) -> Option<&str> {
-        self.by_file_id.get(file_id).map(String::as_str)
-    }
-}
 
 /// Drain the Twin Browser action outbox each frame and dispatch.
 ///

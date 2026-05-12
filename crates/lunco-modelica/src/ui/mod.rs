@@ -648,7 +648,6 @@ impl Plugin for ModelicaUiPlugin {
             .init_resource::<panels::palette::PaletteState>()
             .init_resource::<panels::palette::ComponentDragPayload>()
             .insert_resource(panels::package_browser::PackageTreeCache::new())
-            .init_resource::<browser_dispatch::PendingDrillIns>()
             .add_systems(Update, browser_dispatch::drain_browser_actions)
             .add_systems(Update, panels::package_browser::handle_package_loading_tasks)
             .add_systems(Update, cleanup_removed_documents)
