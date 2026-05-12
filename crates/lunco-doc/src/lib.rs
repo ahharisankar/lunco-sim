@@ -221,14 +221,26 @@ pub enum DocumentOrigin {
         /// Human-readable identifier (shown on the tab until saved).
         name: String,
     },
+    /// Bundled example shipped inside the app binary. `filename` is
+    /// the `.mo` file's name (e.g. `"AnnotatedRocketStage.mo"`) —
+    /// not a filesystem path. Read-only: source comes from
+    /// `include_dir!()` at compile time. Distinct from
+    /// [`File`](Self::File) because there's no on-disk path to
+    /// canonicalise, save to, or hand to the engine sync's
+    /// filesystem-cache lookup.
+    Bundled {
+        /// Original `.mo` filename. Used for dedup, display, and
+        /// engine-session URI synthesis.
+        filename: String,
+    },
     /// Backed by a filesystem path. `writable` gates the Save button
-    /// so library / bundled assets stay read-only even though they
-    /// have a concrete path.
+    /// so library assets stay read-only even though they have a
+    /// concrete path.
     File {
         /// Canonical filesystem path (absolute preferred).
         path: PathBuf,
-        /// Whether writes are permitted. `false` for library /
-        /// bundled-example files.
+        /// Whether writes are permitted. `false` for library
+        /// entries opened read-only.
         writable: bool,
     },
 }
@@ -256,12 +268,23 @@ impl DocumentOrigin {
         Self::Untitled { name: name.into() }
     }
 
-    /// Filesystem path, if any. `None` for [`Untitled`](Self::Untitled).
+    /// Shorthand: a bundled example doc.
+    pub fn bundled(filename: impl Into<String>) -> Self {
+        Self::Bundled { filename: filename.into() }
+    }
+
+    /// Filesystem path, if any. `None` for [`Untitled`](Self::Untitled)
+    /// and [`Bundled`](Self::Bundled) — neither has an on-disk path.
     pub fn canonical_path(&self) -> Option<&Path> {
         match self {
             Self::File { path, .. } => Some(path.as_path()),
-            Self::Untitled { .. } => None,
+            Self::Untitled { .. } | Self::Bundled { .. } => None,
         }
+    }
+
+    /// Whether this document is a bundled example.
+    pub fn is_bundled(&self) -> bool {
+        matches!(self, Self::Bundled { .. })
     }
 
     /// Whether Save may write to this origin. `false` for read-only
@@ -269,6 +292,17 @@ impl DocumentOrigin {
     /// (Save-As is required for the latter).
     pub fn is_writable(&self) -> bool {
         matches!(self, Self::File { writable: true, .. })
+    }
+
+    /// Whether the document is read-only (cannot be mutated or saved
+    /// in place). Includes bundled examples and read-only file
+    /// origins.
+    pub fn is_read_only(&self) -> bool {
+        match self {
+            Self::Bundled { .. } => true,
+            Self::File { writable, .. } => !writable,
+            Self::Untitled { .. } => false,
+        }
     }
 
     /// Whether the document accepts mutating ops. **Different from
@@ -285,6 +319,7 @@ impl DocumentOrigin {
     pub fn accepts_mutations(&self) -> bool {
         match self {
             Self::Untitled { .. } => true,
+            Self::Bundled { .. } => false,
             Self::File { writable, .. } => *writable,
         }
     }
@@ -297,10 +332,14 @@ impl DocumentOrigin {
 
     /// Best-effort display name — the tab title before any
     /// domain-specific overrides. File stem for `File`, the stashed
-    /// `name` for `Untitled`.
+    /// `name` for `Untitled`, the filename stem for `Bundled`.
     pub fn display_name(&self) -> String {
         match self {
             Self::Untitled { name } => name.clone(),
+            Self::Bundled { filename } => filename
+                .strip_suffix(".mo")
+                .unwrap_or(filename.as_str())
+                .to_string(),
             Self::File { path, .. } => path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())

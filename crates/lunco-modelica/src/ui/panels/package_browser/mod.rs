@@ -232,13 +232,12 @@ fn open_bundled_class(world: &mut World, class: &ClassRef) {
         Some(stem) => format!("{stem}.mo"),
         None => return, // Library root click — no class to open.
     };
-    let path_marker = PathBuf::from(format!("bundled://{filename}"));
     let drilled = class.qualified();
     let drilled_for_tab = if class.path.len() > 1 { Some(drilled.clone()) } else { None };
 
     // Dedup: same bundled file already loaded → reuse the doc, just
     // ensure a tab keyed on the new drill target.
-    let already_open = world.resource::<ModelicaDocumentRegistry>().find_by_path(&path_marker);
+    let already_open = world.resource::<ModelicaDocumentRegistry>().find_bundled(&filename);
     if let Some(doc) = already_open {
         let tab_id = world
             .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
@@ -254,7 +253,7 @@ fn open_bundled_class(world: &mut World, class: &ClassRef) {
     world.commands().trigger(lunco_workbench::OpenTab { kind: MODEL_VIEW_KIND, instance: tab_id });
 
     let display_name = class.short_name().to_string();
-    let origin = lunco_doc::DocumentOrigin::File { path: path_marker.clone(), writable: false };
+    let origin = lunco_doc::DocumentOrigin::Bundled { filename: filename.clone() };
     let filename_for_task = filename.clone();
     let task = AsyncComputeTaskPool::get().spawn(async move {
         let source_text = crate::models::get_model(&filename_for_task)

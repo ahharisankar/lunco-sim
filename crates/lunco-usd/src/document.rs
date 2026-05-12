@@ -243,7 +243,7 @@ impl UsdDocument {
         let source = source.into();
         let last_saved_generation = match &origin {
             DocumentOrigin::File { .. } => Some(0),
-            DocumentOrigin::Untitled { .. } => None,
+            DocumentOrigin::Untitled { .. } | DocumentOrigin::Bundled { .. } => None,
         };
         Self {
             id,

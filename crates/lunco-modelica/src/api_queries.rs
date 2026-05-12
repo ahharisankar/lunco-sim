@@ -969,6 +969,7 @@ impl ApiQueryProvider for FindModelProvider {
                         DocumentOrigin::File { path, .. } => {
                             path.to_string_lossy().into_owned()
                         }
+                        DocumentOrigin::Bundled { filename } => format!("bundled://{filename}"),
                         DocumentOrigin::Untitled { name } => format!("mem://{name}"),
                     };
                     (e.id.raw(), e.title.clone(), uri)
@@ -1183,6 +1184,10 @@ fn origin_to_json(origin: &DocumentOrigin) -> serde_json::Value {
         DocumentOrigin::Untitled { name } => serde_json::json!({
             "kind": "untitled",
             "name": name,
+        }),
+        DocumentOrigin::Bundled { filename } => serde_json::json!({
+            "kind": "bundled",
+            "filename": filename,
         }),
         DocumentOrigin::File { path, writable } => serde_json::json!({
             "kind": "file",

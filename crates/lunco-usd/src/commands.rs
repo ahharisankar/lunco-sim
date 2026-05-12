@@ -201,6 +201,13 @@ fn on_save_document(trigger: On<SaveDocument>, mut commands: Commands) {
                 );
                 return;
             }
+            DocumentOrigin::Bundled { .. } => {
+                bevy::log::warn!(
+                    "[SaveUsd] {} is a bundled example — read-only",
+                    doc_id
+                );
+                return;
+            }
         };
         let source = doc.source().to_string();
         if let Err(e) = std::fs::write(&path, &source) {

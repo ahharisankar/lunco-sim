@@ -230,14 +230,7 @@ fn sync_workspace_on_doc_opened(
     };
     let doc = host.document();
     let origin = doc.origin().clone();
-    let title = match &origin {
-        lunco_doc::DocumentOrigin::Untitled { name } => name.clone(),
-        lunco_doc::DocumentOrigin::File { path, .. } => path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("(file)")
-            .to_string(),
-    };
+    let title = origin.display_name();
     ws.add_document(lunco_workspace::DocumentEntry {
         id,
         kind: lunco_workspace::DocumentKind::Modelica,
@@ -274,14 +267,7 @@ fn sync_workspace_on_doc_saved(
     let Some(host) = registry.host(id) else { return };
     let doc = host.document();
     let new_origin = doc.origin().clone();
-    let new_title = match &new_origin {
-        lunco_doc::DocumentOrigin::Untitled { name } => name.clone(),
-        lunco_doc::DocumentOrigin::File { path, .. } => path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("(file)")
-            .to_string(),
-    };
+    let new_title = new_origin.display_name();
     // Push to recents on every File-saved event. `push_loose` dedupes
     // to the front, so re-saving an existing file simply hoists it to
     // the top — matches VS Code behaviour and is what makes Save-As

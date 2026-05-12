@@ -433,11 +433,26 @@ impl ModelicaDocumentRegistry {
     }
 
     /// Look up a document by its canonical path. Returns `None` for
-    /// untitled docs or if no document was opened from that path.
-    /// Used by API / scripting to resolve `path` → `DocumentId`.
+    /// untitled / bundled docs or if no document was opened from that
+    /// path. Used by API / scripting to resolve `path` →
+    /// `DocumentId`.
     pub fn find_by_path(&self, path: &std::path::Path) -> Option<DocumentId> {
         self.hosts.iter().find_map(|(id, host)| {
             (host.document().canonical_path() == Some(path)).then_some(*id)
+        })
+    }
+
+    /// Look up a document whose origin is
+    /// [`lunco_doc::DocumentOrigin::Bundled`] with the given filename.
+    /// Used by the package browser's bundled-doc dedup — the typed
+    /// equivalent of `find_by_path` for the bundled variant, which
+    /// has no on-disk path.
+    pub fn find_bundled(&self, filename: &str) -> Option<DocumentId> {
+        self.hosts.iter().find_map(|(id, host)| {
+            match host.document().origin() {
+                lunco_doc::DocumentOrigin::Bundled { filename: f } if f == filename => Some(*id),
+                _ => None,
+            }
         })
     }
 

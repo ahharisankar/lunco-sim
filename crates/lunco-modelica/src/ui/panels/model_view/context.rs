@@ -111,6 +111,9 @@ pub fn sync_active_tab_to_doc(
                 lunco_doc::DocumentOrigin::Untitled { .. } => {
                     crate::ui::state::ModelLibrary::InMemory
                 }
+                lunco_doc::DocumentOrigin::Bundled { .. } => {
+                    crate::ui::state::ModelLibrary::Bundled
+                }
                 lunco_doc::DocumentOrigin::File { writable: true, .. } => {
                     crate::ui::state::ModelLibrary::User
                 }
