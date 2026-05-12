@@ -21,7 +21,6 @@ use lunco_workbench::{BrowserAction, BrowserActions};
 use std::collections::HashMap;
 
 // on `ModelTabState.drilled_class`.
-use crate::ui::state::ModelLibrary;
 
 /// `file_id (absolute path string) → qualified class path` queued by
 /// [`drain_browser_actions`]. The package-browser's load-task handler
@@ -94,20 +93,8 @@ pub fn drain_browser_actions(world: &mut World) {
                     continue;
                 };
                 let abs = root.join(&relative_path);
-                let id = abs.to_string_lossy().to_string();
-                let name = relative_path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("Untitled")
-                    .to_string();
-                // Twin Browser file click → preview slot.
-                crate::ui::panels::package_browser::open_model(
-                    world,
-                    id,
-                    name,
-                    ModelLibrary::User,
-                    false,
-                );
+                let class = crate::class_ref::ClassRef::user_file(abs, Vec::<String>::new());
+                crate::ui::panels::package_browser::open_class(world, class, false);
             }
             BrowserAction::OpenModelicaClass {
                 relative_path,
@@ -121,29 +108,12 @@ pub fn drain_browser_actions(world: &mut World) {
                     continue;
                 };
                 let abs = root.join(&relative_path);
-                let id = abs.to_string_lossy().to_string();
-                let name = relative_path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("Untitled")
-                    .to_string();
-                // Queue the drill-in target *first* so it's already
-                // there when the load task completes — even though
-                // `open_model` spawns the load asynchronously, the
-                // resource write happens synchronously here so there's
-                // no race.
-                world
-                    .resource_mut::<PendingDrillIns>()
-                    .queue(id.clone(), qualified_path);
-                // Twin Browser class click → preview slot (with
-                // a queued drill-in target above).
-                crate::ui::panels::package_browser::open_model(
-                    world,
-                    id,
-                    name,
-                    ModelLibrary::User,
-                    false,
-                );
+                let qualified_parts: Vec<String> = qualified_path
+                    .split('.')
+                    .map(String::from)
+                    .collect();
+                let class = crate::class_ref::ClassRef::user_file(abs, qualified_parts);
+                crate::ui::panels::package_browser::open_class(world, class, false);
             }
             BrowserAction::OpenLoadedClass {
                 doc_id,

@@ -2,6 +2,7 @@
 
 use bevy::prelude::*;
 use bevy_egui::egui;
+use crate::class_ref::{ClassRef, Library};
 use crate::ui::state::{ModelicaDocumentRegistry, ModelLibrary, WorkbenchState};
 use std::path::{PathBuf};
 
@@ -174,8 +175,14 @@ pub fn render_root_subtree(world: &mut World, ui: &mut egui::Ui, root_id: &str) 
         }
     }
 
-    if let Some(render::PackageAction::Open(id, name, lib, pinned)) = action {
-        open_model(world, id, name, lib, pinned);
+    if let Some(render::PackageAction::Open(id, _name, _lib, pinned)) = action {
+        if let Some(class) = ClassRef::parse_tree_id(&id) {
+            open_class(world, class, pinned);
+        } else if let Some(class) = resolve_mem_id(world, &id) {
+            open_class(world, class, pinned);
+        } else {
+            bevy::log::warn!("[PackageBrowser] unparseable tree id `{id}`");
+        }
     } else if let Some(render::PackageAction::DragStart { msl_path }) = action {
         if let Some(def) = crate::visual_diagram::msl_component_by_path(&msl_path) {
             world
@@ -187,91 +194,115 @@ pub fn render_root_subtree(world: &mut World, ui: &mut egui::Ui, root_id: &str) 
     }
 }
 
-pub(crate) fn open_model(
-    world: &mut World,
-    id: String,
-    name: String,
-    library: ModelLibrary,
-    _pinned: bool,
-) {
+/// Single entry point for "open a Modelica class in the workbench".
+///
+/// Replaces the legacy `open_model` / `open_bundled_in_world` /
+/// per-scheme branches with one dispatch on [`Library`]. Every UI
+/// gesture (tree click, palette drop, typed command, session
+/// restore) translates its intent into a [`ClassRef`] and calls
+/// this function — there is no second code path that can disagree
+/// about how a given `ClassRef` should load, dedupe, or drill in.
+///
+/// Loading strategy by library:
+/// - [`Library::Msl`] / [`Library::ThirdParty`]: slim-slice load via
+///   [`drill_into_class`]. Extracts the target class (~5–10 KB)
+///   instead of parsing the wrapper package file (often 100+ KB),
+///   so the canvas paints in well under a second.
+/// - [`Library::Bundled`]: in-memory source from
+///   [`crate::models::get_model`]; cheap, eager whole-file load
+///   because bundled files are small by design.
+/// - [`Library::UserFile`]: full file read; the user's source is
+///   the canvas of authority, slim slices would lose context for
+///   sibling-class references.
+/// - [`Library::Untitled`]: focus the existing tab for the doc id;
+///   there's no source to load.
+pub(crate) fn open_class(world: &mut World, class: ClassRef, pinned: bool) {
+    let _ = pinned; // VS Code preview/pin semantics — wired through later.
+    match &class.library {
+        Library::Msl | Library::ThirdParty { .. } => {
+            // The slim-slice drill-in path is exactly what we need
+            // for system libraries: it owns the file lookup, the
+            // class-slice extraction, the tab plumbing, and the
+            // `DrillInLoads` busy state. Pass the absolute qualified
+            // name so its `library_fs::resolve_class_path_indexed`
+            // can find the owning .mo file.
+            crate::ui::panels::canvas_diagram::drill_into_class(world, &class.qualified());
+        }
+        Library::Bundled => {
+            open_bundled_class(world, &class);
+        }
+        Library::UserFile { path } => {
+            open_user_file_class(world, path.clone(), &class);
+        }
+        Library::Untitled(doc_id) => {
+            focus_existing_doc_tab(world, *doc_id, class.qualified());
+        }
+    }
+}
+
+/// Resolve a legacy `mem://<name>` tree id to a [`ClassRef`] by
+/// consulting [`PackageTreeCache::in_memory_models`]. Lives here
+/// rather than in [`ClassRef::parse_tree_id`] because the mapping
+/// from name → `DocumentId` requires world state the parser doesn't
+/// own.
+pub(crate) fn resolve_mem_id(world: &World, id: &str) -> Option<ClassRef> {
+    let mem_name = id.strip_prefix("mem://")?;
+    let entry = world
+        .resource::<PackageTreeCache>()
+        .in_memory_models
+        .iter()
+        .find(|e| e.id == id || e.display_name == mem_name)?;
+    Some(ClassRef::untitled(entry.doc, [mem_name.to_string()]))
+}
+
+fn open_bundled_class(world: &mut World, class: &ClassRef) {
     use crate::ui::panels::model_view::MODEL_VIEW_KIND;
     use bevy::tasks::AsyncComputeTaskPool;
 
-    // MSL clicks: route through the drill-in pipeline which
-    // extracts JUST the target class slice (a few KB) instead of
-    // loading the entire package wrapper file (often 100+ KB).
-    // Without this, clicking `Modelica.Blocks.Examples.PID_Controller`
-    // ends up parsing the 152 KB `Blocks/package.mo` — a 100+ second
-    // operation that leaves the canvas blank the whole time.
-    if let Some(rel) = id.strip_prefix("msl_path:") {
-        crate::ui::panels::canvas_diagram::drill_into_class(world, rel);
-        return;
-    }
-
-    // Bundled inner-class ids look like `bundled://<file>#<qualified>`;
-    // the fragment is the drill-in target, the part before `#` is the
-    // filename.
-    let drill_in_qualified: Option<String> = if id.starts_with("bundled://") {
-        let tail = id.strip_prefix("bundled://").unwrap_or("");
-        tail.split_once('#').map(|(_, q)| q.to_string())
-    } else {
-        None
+    let filename = match class.path.first() {
+        Some(stem) => format!("{stem}.mo"),
+        None => return, // Library root click — no class to open.
     };
+    let dedup_key = format!("bundled://{filename}");
+    let path_marker = PathBuf::from(&dedup_key);
+    let drilled = class.qualified();
+    let drilled_for_tab = if class.path.len() > 1 { Some(drilled.clone()) } else { None };
 
-    let path_buf = if let Some(rel) = id.strip_prefix("msl_path:") {
-        resolve_msl_path_in_cache(world, rel).unwrap_or_else(|| PathBuf::from(&id))
-    } else {
-        PathBuf::from(&id)
-    };
-
-    let already_open = world.resource::<ModelicaDocumentRegistry>().find_by_path(&path_buf);
+    // Dedup: same bundled file already loaded → reuse the doc, just
+    // ensure a tab keyed on the new drill target.
+    let already_open = world.resource::<ModelicaDocumentRegistry>().find_by_path(&path_marker);
     if let Some(doc) = already_open {
         let tab_id = world
             .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
-            .ensure_for(doc, drill_in_qualified.clone());
+            .ensure_for(doc, drilled_for_tab.clone());
         world.commands().trigger(lunco_workbench::OpenTab { kind: MODEL_VIEW_KIND, instance: tab_id });
         return;
     }
 
     let reserved_doc_id = world.resource_mut::<ModelicaDocumentRegistry>().reserve_id();
-    world.resource_mut::<PackageTreeCache>().loading_ids.insert(id.clone(), reserved_doc_id);
-    // Queue drill-in target so `handle_package_loading_tasks` can
-    // attach it to the tab once the load completes.
-    if let Some(qualified) = drill_in_qualified.clone() {
-        world.resource_mut::<crate::ui::browser_dispatch::PendingDrillIns>().queue(id.clone(), qualified);
+    world.resource_mut::<PackageTreeCache>().loading_ids.insert(dedup_key.clone(), reserved_doc_id);
+    if let Some(q) = drilled_for_tab.clone() {
+        world.resource_mut::<crate::ui::browser_dispatch::PendingDrillIns>().queue(dedup_key.clone(), q);
     }
-
     let tab_id = world
         .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
-        .ensure_for(reserved_doc_id, drill_in_qualified.clone());
+        .ensure_for(reserved_doc_id, drilled_for_tab.clone());
     world.commands().trigger(lunco_workbench::OpenTab { kind: MODEL_VIEW_KIND, instance: tab_id });
 
-    let writable = matches!(library, ModelLibrary::User);
-    let origin = lunco_doc::DocumentOrigin::File { path: path_buf.clone(), writable };
-    
-    let id_clone = id.clone();
-    let name_clone = name.clone();
-    let lib_clone = library.clone();
-
+    let display_name = class.short_name().to_string();
+    let origin = lunco_doc::DocumentOrigin::File { path: path_marker.clone(), writable: false };
+    let dedup_for_task = dedup_key.clone();
+    let filename_for_task = filename.clone();
     let task = AsyncComputeTaskPool::get().spawn(async move {
-        let source_text = if id_clone.starts_with("bundled://") {
-            let tail = id_clone.strip_prefix("bundled://").unwrap_or("");
-            // Bundled inner-class ids look like `bundled://<file>#<qualified>`;
-            // the `#frag` is consumed by the drill-in layer, the filename
-            // lookup uses just the part before `#`.
-            let filename = tail.split('#').next().unwrap_or(tail);
-            crate::models::get_model(filename).unwrap_or("").to_string()
-        } else {
-            std::fs::read_to_string(&path_buf).unwrap_or_default()
-        };
-
+        let source_text = crate::models::get_model(&filename_for_task)
+            .unwrap_or("")
+            .to_string();
         let doc = crate::document::ModelicaDocument::with_origin(reserved_doc_id, source_text.clone(), origin);
-        let dedup_key = id_clone.clone();
         crate::ui::panels::package_browser::cache::FileLoadResult {
-            id: id_clone,
-            dedup_key,
-            name: name_clone,
-            library: lib_clone,
+            id: dedup_for_task.clone(),
+            dedup_key: dedup_for_task,
+            name: display_name,
+            library: ModelLibrary::Bundled,
             source: source_text.into(),
             line_starts: vec![0].into(),
             detected_name: None,
@@ -280,54 +311,63 @@ pub(crate) fn open_model(
             doc,
         }
     });
-
     world.resource_mut::<PackageTreeCache>().file_tasks.push(task);
 }
 
-/// Resolve a `msl_path:` qualified name to the `.mo` file that owns
-/// it by consulting [`PackageTreeCache::roots`]. Each library root
-/// in the cache knows its own `package_path` (the qualified name of
-/// the top-level class) and its on-disk `fs_path`, so we can resolve
-/// uniformly for MSL, third-party libraries (`ThermofluidStream.*`),
-/// or anything else that was registered as a root.
-fn resolve_msl_path_in_cache(world: &World, rel_path: &str) -> Option<PathBuf> {
-    let cache = world.resource::<PackageTreeCache>();
-    let mut best: Option<(PathBuf, String, usize)> = None;
-    for root in &cache.roots {
-        if let PackageNode::Category { package_path, fs_path, .. } = root {
-            if fs_path.as_os_str().is_empty() { continue; }
-            // Match either the bare top-level name (e.g.
-            // `ThermofluidStream`) or a qualified prefix
-            // (`ThermofluidStream.Boundaries.X`).
-            let matches = rel_path == package_path.as_str()
-                || rel_path.starts_with(&format!("{package_path}."));
-            if matches {
-                let prefix_len = package_path.len();
-                if best.as_ref().map(|(_, _, l)| prefix_len > *l).unwrap_or(true) {
-                    best = Some((fs_path.clone(), package_path.clone(), prefix_len));
-                }
-            }
-        }
+fn open_user_file_class(world: &mut World, path: PathBuf, class: &ClassRef) {
+    use crate::ui::panels::model_view::MODEL_VIEW_KIND;
+    use bevy::tasks::AsyncComputeTaskPool;
+
+    let drilled = if class.path.is_empty() { None } else { Some(class.qualified()) };
+    let already_open = world.resource::<ModelicaDocumentRegistry>().find_by_path(&path);
+    if let Some(doc) = already_open {
+        let tab_id = world
+            .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
+            .ensure_for(doc, drilled.clone());
+        world.commands().trigger(lunco_workbench::OpenTab { kind: MODEL_VIEW_KIND, instance: tab_id });
+        return;
     }
-    let (fs_root, package_path, _) = best?;
-    // Strip the matched prefix and walk down the remaining segments,
-    // accepting either a sibling `.mo` file or a sub-package directory
-    // at each step.
-    let remainder = rel_path
-        .strip_prefix(&package_path)
-        .map(|s| s.trim_start_matches('.'))
-        .unwrap_or("");
-    let parts: Vec<&str> = if remainder.is_empty() { Vec::new() } else { remainder.split('.').collect() };
-    for end in (0..=parts.len()).rev() {
-        let mut as_file = fs_root.clone();
-        for seg in &parts[..end] { as_file.push(seg); }
-        if end > 0 {
-            as_file.set_extension("mo");
-            if as_file.is_file() { return Some(as_file); }
-            as_file.set_extension("");
-        }
-        as_file.push("package.mo");
-        if as_file.is_file() { return Some(as_file); }
+
+    let dedup_key = path.display().to_string();
+    let reserved_doc_id = world.resource_mut::<ModelicaDocumentRegistry>().reserve_id();
+    world.resource_mut::<PackageTreeCache>().loading_ids.insert(dedup_key.clone(), reserved_doc_id);
+    if let Some(q) = drilled.clone() {
+        world.resource_mut::<crate::ui::browser_dispatch::PendingDrillIns>().queue(dedup_key.clone(), q);
     }
-    None
+    let tab_id = world
+        .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
+        .ensure_for(reserved_doc_id, drilled.clone());
+    world.commands().trigger(lunco_workbench::OpenTab { kind: MODEL_VIEW_KIND, instance: tab_id });
+
+    let display_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Opened").to_string();
+    let origin = lunco_doc::DocumentOrigin::File { path: path.clone(), writable: true };
+    let path_for_task = path.clone();
+    let dedup_for_task = dedup_key.clone();
+    let task = AsyncComputeTaskPool::get().spawn(async move {
+        let source_text = std::fs::read_to_string(&path_for_task).unwrap_or_default();
+        let doc = crate::document::ModelicaDocument::with_origin(reserved_doc_id, source_text.clone(), origin);
+        crate::ui::panels::package_browser::cache::FileLoadResult {
+            id: dedup_for_task.clone(),
+            dedup_key: dedup_for_task,
+            name: display_name,
+            library: ModelLibrary::User,
+            source: source_text.into(),
+            line_starts: vec![0].into(),
+            detected_name: None,
+            layout_job: None,
+            doc_id: reserved_doc_id,
+            doc,
+        }
+    });
+    world.resource_mut::<PackageTreeCache>().file_tasks.push(task);
 }
+
+fn focus_existing_doc_tab(world: &mut World, doc: lunco_doc::DocumentId, qualified: String) {
+    use crate::ui::panels::model_view::MODEL_VIEW_KIND;
+    let drilled = if qualified.is_empty() { None } else { Some(qualified) };
+    let tab_id = world
+        .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
+        .ensure_for(doc, drilled);
+    world.commands().trigger(lunco_workbench::OpenTab { kind: MODEL_VIEW_KIND, instance: tab_id });
+}
+

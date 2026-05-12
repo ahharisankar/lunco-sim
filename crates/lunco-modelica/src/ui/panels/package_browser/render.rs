@@ -110,8 +110,14 @@ impl Panel for PackageBrowserPanel {
         }
         if let Some(a) = action {
             match a {
-                PackageAction::Open(id, name, lib, pinned) => {
-                    super::open_model(world, id, name, lib, pinned);
+                PackageAction::Open(id, _name, _lib, pinned) => {
+                    if let Some(class) = crate::class_ref::ClassRef::parse_tree_id(&id) {
+                        super::open_class(world, class, pinned);
+                    } else if let Some(class) = super::resolve_mem_id(world, &id) {
+                        super::open_class(world, class, pinned);
+                    } else {
+                        bevy::log::warn!("[PackageBrowser] unparseable tree id `{id}`");
+                    }
                 }
                 PackageAction::DragStart { msl_path } => {
                     if let Some(def) = crate::visual_diagram::msl_component_by_path(&msl_path) {

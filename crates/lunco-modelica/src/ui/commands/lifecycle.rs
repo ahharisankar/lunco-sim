@@ -503,12 +503,16 @@ pub fn on_open_in_new_view(trigger: On<OpenInNewView>, mut commands: Commands) {
 pub fn on_open_file(trigger: On<OpenFile>, mut commands: Commands) {
     let path = trigger.event().path.clone();
     commands.queue(move |world: &mut World| {
-        if let Some(filename) = path.strip_prefix("bundled://") {
-            open_bundled_in_world(world, filename);
-            return;
-        }
+        // `mem://` lookups need the in-memory cache to resolve a
+        // DocumentId; tree-id parser can't see it, so handle here.
         if let Some(name) = path.strip_prefix("mem://") {
             focus_in_memory_doc(world, name);
+            return;
+        }
+        // Everything else (bundled://, file://, raw .mo path) flows
+        // through the typed ClassRef + single `open_class` entry.
+        if let Some(class) = crate::class_ref::ClassRef::parse_tree_id(&path) {
+            crate::ui::panels::package_browser::open_class(world, class, true);
             return;
         }
 
@@ -605,44 +609,6 @@ pub fn drain_open_file_results(world: &mut bevy::prelude::World) {
         });
         bevy::log::info!("[OpenFile] opened `{}` as `{}`", path.display(), stem);
     }
-}
-
-pub fn open_bundled_in_world(world: &mut World, tail: &str) {
-    // Bundled inner-class ids look like `<file>#<qualified>`; the
-    // filename portion drives source lookup, the fragment (if any)
-    // is the drill-in target for the canvas projector.
-    let (filename, drill_in) = match tail.split_once('#') {
-        Some((f, q)) => (f, Some(q.to_string())),
-        None => (tail, None),
-    };
-    let Some(source) = crate::models::get_model(filename) else {
-        bevy::log::warn!("[OpenFile] no bundled model named `{}`", filename);
-        return;
-    };
-    let display_name = std::path::Path::new(filename)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(filename)
-        .to_string();
-    let mut registry =
-        world.resource_mut::<ModelicaDocumentRegistry>();
-    let doc_id = registry.allocate_with_origin(
-        source.to_string(),
-        DocumentOrigin::untitled(display_name.clone()),
-    );
-    let mut tabs = world.resource_mut::<ModelTabs>();
-    let tab_id = tabs.ensure_for(doc_id, None);
-    if let Some(tab) = tabs.get_mut(tab_id) {
-        tab.view_mode = crate::ui::panels::model_view::ModelViewMode::Canvas;
-        if drill_in.is_some() {
-            tab.drilled_class = drill_in;
-        }
-    }
-    world.commands().trigger(lunco_workbench::OpenTab {
-        kind: MODEL_VIEW_KIND,
-        instance: tab_id,
-    });
-    bevy::log::info!("[OpenFile] opened bundled `{}` as `{}`", filename, display_name);
 }
 
 pub fn focus_in_memory_doc(world: &mut World, name: &str) {

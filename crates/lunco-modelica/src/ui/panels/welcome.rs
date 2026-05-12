@@ -31,7 +31,6 @@ use bevy_egui::egui;
 use lunco_workbench::{Panel, PanelId, PanelSlot};
 
 use crate::models::bundled_models;
-use crate::ui::state::ModelLibrary;
 use crate::ui::welcome_progress::ExampleProgress;
 use crate::visual_diagram::{msl_component_library, MSLComponentDef};
 
@@ -966,17 +965,11 @@ impl Panel for WelcomePanel {
                 });
         }
         if let Some(filename) = open_bundled {
-            let id = format!("bundled://{}", filename);
-            let name = filename
-                .strip_suffix(".mo")
-                .unwrap_or(filename)
-                .to_string();
+            let stem = filename.strip_suffix(".mo").unwrap_or(filename).to_string();
             // Welcome card click is deliberate → pinned tab.
-            crate::ui::panels::package_browser::open_model(
+            crate::ui::panels::package_browser::open_class(
                 world,
-                id,
-                name,
-                ModelLibrary::Bundled,
+                crate::class_ref::ClassRef::bundled([stem]),
                 true,
             );
         }
