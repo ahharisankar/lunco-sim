@@ -278,6 +278,13 @@ struct MSLComponentDef {
     /// keyword (`"model"`, `"block"`, …) for legacy JSON compat.
     #[serde(default)]
     class_kind: lunco_modelica::index::ClassKind,
+    /// `partial` keyword on the class header (MLS §4.4). Partial
+    /// classes can't be instantiated directly — palette + sim-
+    /// candidate pickers skip them. Replaces the legacy
+    /// `.Interfaces.` path heuristic with a formal language-level
+    /// signal.
+    #[serde(default)]
+    partial: bool,
     icon_text: Option<String>,
     /// Parsed `Icon(graphics={...})` annotation — already merged
     /// across the `extends` chain via `extract_icon_inherited`. This
@@ -1057,7 +1064,15 @@ impl MSLIndexer {
                 let documentation_info = self.doc_infos.get(&short_name).cloned();
                 let is_example = full_name.contains(".Examples.");
                 let domain = msl_domain(full_name);
-                let class_kind = lunco_modelica::index::map_class_type(&class.class_type);
+                // `expandable connector` (MLS §9.1.3) is a connector
+                // with the `expandable` keyword — folded into the
+                // typed enum so consumers don't need a separate flag.
+                let class_kind = match (&class.class_type, class.expandable) {
+                    (rumoca_session::parsing::ast::ClassType::Connector, true) => {
+                        lunco_modelica::index::ClassKind::ExpandableConnector
+                    }
+                    (t, _) => lunco_modelica::index::map_class_type(t),
+                };
 
                 all_comps.push(MSLComponentDef {
                     name: short_name.clone(),
@@ -1074,6 +1089,7 @@ impl MSLIndexer {
                     is_example,
                     domain,
                     class_kind,
+                    partial: class.partial,
                     icon_text,
                     icon_graphics,
                     diagram_graphics,
@@ -1209,34 +1225,34 @@ fn main() {
     // hierarchy here so the Package Browser can render them with
     // proper kind badges and expandable inner classes (matches MSL /
     // workspace docs) without paying any parse cost at startup.
-    let bundled_trees = scan_bundled_examples();
+    let bundled_nodes = scan_bundled_examples();
     println!(
-        "[indexer] bundled examples indexed: {} files",
-        bundled_trees.len()
+        "[indexer] bundled examples indexed: {} top-level nodes",
+        bundled_nodes.len()
     );
 
     // Local `MslIndex` mirror — wire-compatible with
     // `lunco_modelica::visual_diagram::MslIndex` (serde structurally
     // matches), but built around the indexer's local
     // `MSLComponentDef` so we don't need to share the type across
-    // crates. The runtime reader on the other side uses the
-    // canonical `MslIndex` and accepts both shapes.
+    // crates. The bundled tree is now `Vec<PackageNode>` so the
+    // runtime is a trivial deserialise.
     #[derive(Serialize)]
     struct LocalMslIndex<'a> {
         components: &'a [MSLComponentDef],
-        bundled: &'a [lunco_modelica::visual_diagram::BundledFileTree],
+        bundled: &'a [lunco_modelica::ui::panels::package_browser::types::PackageNode],
     }
     let output_path = lunco_assets::msl_dir().join("msl_index.json");
     let index = LocalMslIndex {
         components: &components,
-        bundled: &bundled_trees,
+        bundled: &bundled_nodes,
     };
     let json = serde_json::to_string_pretty(&index).unwrap();
     fs::write(&output_path, json).unwrap();
     println!(
-        "[indexer] wrote {} components + {} bundled trees → {}",
+        "[indexer] wrote {} components + {} bundled nodes → {}",
         components.len(),
-        bundled_trees.len(),
+        bundled_nodes.len(),
         output_path.display()
     );
 
@@ -1277,17 +1293,16 @@ fn main() {
 }
 
 /// Parse every bundled `.mo` (compiled into `lunco_modelica` via
-/// `include_dir!`) and produce a [`crate::visual_diagram::BundledFileTree`] for each. The
-/// runtime Package Browser consumes the result so multi-class
-/// bundled files (`AnnotatedRocketStage.mo`'s package + nested
-/// models / connectors) render with the same shape MSL files get.
+/// `include_dir!`) and produce `PackageNode`s ready for the runtime
+/// Package Browser to clone directly. No intermediate shape: the
+/// indexer emits the exact tree the browser consumes, so the
+/// runtime side is a trivial deserialise.
 ///
 /// Pure function over the in-memory `bundled_models()` list — no
 /// disk I/O beyond what `include_dir!` already inlined at compile
 /// time, so the cost is `n * parse(file)`, ≤ ~10 small files.
-fn scan_bundled_examples() -> Vec<lunco_modelica::visual_diagram::BundledFileTree> {
+fn scan_bundled_examples() -> Vec<lunco_modelica::ui::panels::package_browser::types::PackageNode> {
     use lunco_modelica::models::bundled_models;
-    use lunco_modelica::visual_diagram::BundledFileTree;
 
     // `parse_to_syntax(...).best_effort()` is the same path
     // `SyntaxCache::from_source` uses and is what the workspace
@@ -1301,43 +1316,52 @@ fn scan_bundled_examples() -> Vec<lunco_modelica::visual_diagram::BundledFileTre
             let syntax = rumoca_phase_parse::parse_to_syntax(m.source, m.filename);
             let ast = syntax.best_effort();
             let (top_short, top_class) = ast.classes.iter().next()?;
-            Some(BundledFileTree {
-                filename: m.filename.to_string(),
-                top: bundled_class_tree(top_short, top_class, ""),
-            })
+            Some(bundled_class_node(m.filename, top_short, top_class, ""))
         })
         .collect()
 }
 
-fn bundled_class_tree(
+fn bundled_class_node(
+    filename: &str,
     short_name: &str,
     class_def: &ClassDef,
     parent_path: &str,
-) -> lunco_modelica::visual_diagram::BundledClassTree {
-    use lunco_modelica::visual_diagram::BundledClassTree;
+) -> lunco_modelica::ui::panels::package_browser::types::PackageNode {
+    use lunco_modelica::index::ClassKind;
+    use lunco_modelica::ui::panels::package_browser::types::PackageNode;
+    use lunco_modelica::ui::state::ModelLibrary;
+
     let qualified = if parent_path.is_empty() {
         short_name.to_string()
     } else {
         format!("{parent_path}.{short_name}")
     };
-    let children = class_def
+    let kind = lunco_modelica::index::map_class_type(&class_def.class_type);
+    let id = format!("bundled://{filename}#{qualified}");
+    let is_package = matches!(kind, ClassKind::Package);
+    let children: Vec<PackageNode> = class_def
         .classes
         .iter()
         .map(|(child_short, child_def)| {
-            bundled_class_tree(child_short, child_def, &qualified)
+            bundled_class_node(filename, child_short, child_def, &qualified)
         })
         .collect();
-    BundledClassTree {
-        short_name: short_name.to_string(),
-        qualified_path: qualified,
-        class_kind: lunco_modelica::index::map_class_type(&class_def.class_type),
-        description: class_def
-            .description
-            .iter()
-            .next()
-            .map(|t| t.text.as_ref().trim_matches('"').to_string())
-            .filter(|s| !s.is_empty()),
-        children,
+    if is_package && !children.is_empty() {
+        PackageNode::Category {
+            id,
+            name: short_name.to_string(),
+            package_path: qualified,
+            fs_path: std::path::PathBuf::new(),
+            children: Some(children),
+            is_loading: false,
+        }
+    } else {
+        PackageNode::Model {
+            id,
+            name: short_name.to_string(),
+            library: ModelLibrary::Bundled,
+            class_kind: Some(kind),
+        }
     }
 }
 

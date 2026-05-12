@@ -2,18 +2,22 @@
 
 use crate::ui::state::ModelLibrary;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum PackageNode {
     Category {
         id: String,
         name: String,
         /// Modelica dot-path (e.g. "Modelica.Electrical.Analog")
         package_path: String,
-        /// Real filesystem path
+        /// Real filesystem path. Empty for pre-baked bundled tree
+        /// nodes, which have no on-disk location.
+        #[serde(default)]
         fs_path: std::path::PathBuf,
         /// None means not yet scanned. Some(vec![]) means scanned and empty.
+        #[serde(default)]
         children: Option<Vec<PackageNode>>,
         /// Whether a background scan is currently in progress.
+        #[serde(default, skip)]
         is_loading: bool,
     },
     Model {

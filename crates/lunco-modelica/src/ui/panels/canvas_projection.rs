@@ -787,12 +787,12 @@ pub fn import_model_to_diagram_from_ast(
                 parameters: Vec::new(),
                 icon_graphics: None,
                 diagram_graphics: None,
-                is_expandable_connector: false,
                 short_description: None,
                 documentation_info: None,
                 is_example: false,
                 domain: String::new(),
                 class_kind: crate::index::ClassKind::Model,
+                partial: false,
             });
         }
 
@@ -1127,13 +1127,17 @@ fn register_local_class(
         return;
     }
     use rumoca_session::parsing::ast::ClassType;
-    let is_expandable_connector = matches!(class_def.class_type, ClassType::Connector)
-        && class_def.expandable;
     // Walk the class's connector sub-components into `PortDef`s.
     // Without this, locally-defined classes (Tank, Engine, …) have an
     // empty ports list, so wires from `connect()` statements have
     // nothing to anchor to and disappear.
     let ports = extract_local_class_ports(class_def, &class_context, ast);
+    // `expandable connector` lives on `class_kind` as
+    // `ClassKind::ExpandableConnector`; no separate flag.
+    let class_kind = match (&class_def.class_type, class_def.expandable) {
+        (ClassType::Connector, true) => crate::index::ClassKind::ExpandableConnector,
+        (t, _) => crate::index::map_class_type(t),
+    };
     out.insert(
         short_name.to_string(),
         MSLComponentDef {
@@ -1147,12 +1151,12 @@ fn register_local_class(
             parameters: Vec::new(),
             icon_graphics: icon,
             diagram_graphics: crate::annotations::extract_diagram(&class_def.annotation),
-            is_expandable_connector,
             short_description: None,
             documentation_info: None,
             is_example: false,
             domain: String::new(),
-            class_kind: crate::index::ClassKind::Class,
+            class_kind,
+            partial: class_def.partial,
         },
     );
 }

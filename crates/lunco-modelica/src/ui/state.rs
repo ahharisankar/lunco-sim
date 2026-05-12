@@ -42,7 +42,7 @@ use crate::document::{ModelicaDocument, ModelicaOp};
 // `display_name_for`.
 
 /// Which library a model belongs to.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ModelLibrary {
     /// Modelica Standard Library (read-only).
     MSL,

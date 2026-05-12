@@ -208,12 +208,6 @@ pub struct MSLComponentDef {
     /// renderer prefers this over `icon_graphics`.
     #[serde(default)]
     pub diagram_graphics: Option<crate::annotations::Diagram>,
-    /// `expandable connector` class type (MLS §9.1.3). Rendered with
-    /// a dashed border on the canvas so users can distinguish them
-    /// from regular connectors — they auto-collect variables across
-    /// connected instances and have very different semantics.
-    #[serde(default)]
-    pub is_expandable_connector: bool,
     /// Quoted string written after the Modelica class name, cleaned
     /// of surrounding `"…"`. Populated by `msl_indexer`. New code
     /// should prefer this over the `description` field (which stores
@@ -237,66 +231,48 @@ pub struct MSLComponentDef {
     /// Modelica class kind — typed enum, serialised as the
     /// lowercase keyword (`"model"`, `"block"`, `"connector"`,
     /// `"record"`, …) so legacy `msl_index.json` files keep
-    /// deserialising unchanged.
+    /// deserialising unchanged. Note: `expandable connector`
+    /// (MLS §9.1.3) lives here as
+    /// [`crate::index::ClassKind::ExpandableConnector`] — there is
+    /// no separate flag for it. Callers that care about the
+    /// dashed-border distinction match on the enum variant.
     #[serde(default)]
     pub class_kind: crate::index::ClassKind,
+    /// `partial` keyword on the class header. Partial classes can't
+    /// be instantiated standalone (only inherited via `extends`), so
+    /// the palette + simulation-candidate pickers exclude them. Old
+    /// `msl_index.json` files that predate this field deserialise as
+    /// `false` — re-run `msl_indexer` to populate properly.
+    #[serde(default)]
+    pub partial: bool,
 }
 
-/// One bundled `.mo` file's parsed class tree, captured at index
-/// time so the runtime Package Browser can render bundled examples
-/// with proper kind badges and expandable inner classes — same
-/// shape MSL files get from the disk scan, but pre-baked into
-/// `msl_index.json` since bundled sources are compiled into the
-/// binary (no runtime filesystem to scan).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BundledFileTree {
-    /// File name including extension, matches `BundledModel::filename`
-    /// so the runtime can pair the tree with its embedded source.
-    pub filename: String,
-    /// Top-level class declared in the file. For multi-class files
-    /// this is the outer `package`; for single-class files it's the
-    /// model/connector/record itself.
-    pub top: BundledClassTree,
-}
-
-/// Recursive class node inside a [`crate::visual_diagram::BundledFileTree`]. Mirrors what
-/// `package_browser::class_def_to_node` produces from a live AST,
-/// minus filesystem paths.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BundledClassTree {
-    /// Short name as it appears in the source (`AnnotatedRocketStage`,
-    /// `RocketStage`, `FluidPort_a`, …).
-    pub short_name: String,
-    /// Dotted path *within the file* — empty parent for the top
-    /// class, `<top>.<child>` for nested ones.
-    pub qualified_path: String,
-    /// Modelica class kind. Drives the kind badge. Serialised as
-    /// the lowercase keyword for on-disk JSON compat.
-    #[serde(default)]
-    pub class_kind: crate::index::ClassKind,
-    /// First-line description string from `class Foo "…"`. `None`
-    /// when the class has no doc comment.
-    #[serde(default)]
-    pub description: Option<String>,
-    /// Inner classes (non-empty for `package` rows).
-    #[serde(default)]
-    pub children: Vec<BundledClassTree>,
+impl MSLComponentDef {
+    /// `expandable connector` per MLS §9.1.3 — auto-collects
+    /// variables across connected instances and renders with a
+    /// dashed border. Replaces the legacy `is_expandable_connector:
+    /// bool` field; the truth lives in [`Self::class_kind`].
+    pub fn is_expandable_connector(&self) -> bool {
+        matches!(self.class_kind, crate::index::ClassKind::ExpandableConnector)
+    }
 }
 
 /// On-disk shape of `msl_index.json`. Wraps the legacy
-/// `Vec<MSLComponentDef>` payload alongside the bundled-tree
-/// extension so the indexer can ship both in a single artifact.
-/// The reader accepts both this struct *and* the bare-array
-/// legacy form for backward compatibility.
+/// `Vec<MSLComponentDef>` payload alongside the pre-baked
+/// bundled `PackageNode` tree so the indexer can ship both in
+/// a single artifact. The reader accepts both this struct *and*
+/// the bare-array legacy form for backward compatibility.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MslIndex {
     /// Palette / component metadata — what `MSLComponentDef` has
     /// always carried.
     pub components: Vec<MSLComponentDef>,
-    /// Per-bundled-file class tree for the Package Browser. Empty
-    /// when the indexer was run before bundled support landed.
+    /// Pre-baked `PackageNode` tree for the bundled-models root in
+    /// the Package Browser. Indexer emits these directly so the
+    /// runtime is a trivial deserialise — no shape conversion.
+    /// Empty when the indexer was run before this format landed.
     #[serde(default)]
-    pub bundled: Vec<BundledFileTree>,
+    pub bundled: Vec<crate::ui::panels::package_browser::types::PackageNode>,
 }
 
 /// A node instance placed on the visual canvas.
@@ -514,10 +490,10 @@ pub fn msl_component_library() -> &'static [MSLComponentDef] {
     msl_index().map(|i| i.components.as_slice()).unwrap_or(&[])
 }
 
-/// Per-bundled-file class trees from the indexer. Empty when the
-/// running `msl_index.json` predates the bundled-tree extension —
-/// callers should fall back to flat-leaf rendering in that case.
-pub fn msl_bundled_trees() -> &'static [BundledFileTree] {
+/// Pre-baked `PackageNode` tree for the bundled-models root in the
+/// Package Browser. Empty when the running `msl_index.json` predates
+/// this format — callers should fall back to flat-leaf rendering.
+pub fn msl_bundled_nodes() -> &'static [crate::ui::panels::package_browser::types::PackageNode] {
     msl_index().map(|i| i.bundled.as_slice()).unwrap_or(&[])
 }
 
@@ -564,8 +540,26 @@ fn try_load_msl_index() -> Option<MslIndex> {
 /// (with `bundled` left empty); freshly indexed caches use the
 /// object form.
 fn parse_msl_index(text: &str) -> Option<MslIndex> {
-    if let Ok(idx) = serde_json::from_str::<MslIndex>(text) {
-        return Some(idx);
+    // Tolerant load: parse components strictly, but treat the
+    // bundled tree as opaque — if it's the legacy `BundledFileTree`
+    // shape (pre-PR7) or any other unknown form, drop it silently
+    // and let the runtime fall back to flat leaves. The user reruns
+    // `msl_indexer` to repopulate it.
+    #[derive(Deserialize)]
+    struct Relaxed {
+        components: Vec<MSLComponentDef>,
+        #[serde(default)]
+        bundled: serde_json::Value,
+    }
+    if let Ok(relaxed) = serde_json::from_str::<Relaxed>(text) {
+        let bundled = serde_json::from_value::<
+            Vec<crate::ui::panels::package_browser::types::PackageNode>,
+        >(relaxed.bundled)
+        .unwrap_or_default();
+        return Some(MslIndex {
+            components: relaxed.components,
+            bundled,
+        });
     }
     if let Ok(components) = serde_json::from_str::<Vec<MSLComponentDef>>(text) {
         return Some(MslIndex {

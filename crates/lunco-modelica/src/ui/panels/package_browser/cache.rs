@@ -95,7 +95,7 @@ impl PackageTreeCache {
             is_loading: false,
         });
 
-        let bundled_tree_indexed = !crate::visual_diagram::msl_bundled_trees().is_empty();
+        let bundled_tree_indexed = !crate::visual_diagram::msl_bundled_nodes().is_empty();
 
         Self {
             roots,
@@ -117,55 +117,26 @@ impl Default for PackageTreeCache {
     }
 }
 
+/// Pre-baked bundled-models tree from `msl_index.json`. Indexer
+/// emits `Vec<PackageNode>` directly, so this is a trivial clone.
+/// Falls back to flat per-file leaves when the index predates the
+/// bundled-node format.
 fn build_bundled_tree() -> Vec<PackageNode> {
-    use crate::visual_diagram::{msl_bundled_trees, BundledClassTree};
-    use crate::models::bundled_models;
-    let trees = msl_bundled_trees();
-    let trees_by_filename: std::collections::HashMap<&str, &BundledClassTree> =
-        trees.iter().map(|t| (t.filename.as_str(), &t.top)).collect();
-    bundled_models()
+    let pre_baked = crate::visual_diagram::msl_bundled_nodes();
+    if !pre_baked.is_empty() {
+        return pre_baked.to_vec();
+    }
+    crate::models::bundled_models()
         .iter()
-        .map(|m| match trees_by_filename.get(m.filename) {
-            Some(tree) => bundled_class_to_node(m.filename, tree),
-            None => PackageNode::Model {
-                id: format!("bundled://{}", m.filename),
-                name: m
-                    .filename
-                    .strip_suffix(".mo")
-                    .unwrap_or(m.filename)
-                    .to_string(),
-                library: ModelLibrary::Bundled,
-                class_kind: Some(crate::index::ClassKind::Model),
-            },
+        .map(|m| PackageNode::Model {
+            id: format!("bundled://{}", m.filename),
+            name: m
+                .filename
+                .strip_suffix(".mo")
+                .unwrap_or(m.filename)
+                .to_string(),
+            library: ModelLibrary::Bundled,
+            class_kind: Some(crate::index::ClassKind::Model),
         })
         .collect()
-}
-
-fn bundled_class_to_node(
-    filename: &str,
-    tree: &crate::visual_diagram::BundledClassTree,
-) -> PackageNode {
-    let is_package = matches!(tree.class_kind, crate::index::ClassKind::Package);
-    if is_package && !tree.children.is_empty() {
-        let children: Vec<PackageNode> = tree
-            .children
-            .iter()
-            .map(|c| bundled_class_to_node(filename, c))
-            .collect();
-        PackageNode::Category {
-            id: format!("bundled://{filename}#{}", tree.qualified_path),
-            name: tree.short_name.clone(),
-            package_path: tree.qualified_path.clone(),
-            fs_path: std::path::PathBuf::new(),
-            children: Some(children),
-            is_loading: false,
-        }
-    } else {
-        PackageNode::Model {
-            id: format!("bundled://{filename}#{}", tree.qualified_path),
-            name: tree.short_name.clone(),
-            library: ModelLibrary::Bundled,
-            class_kind: Some(tree.class_kind),
-        }
-    }
 }

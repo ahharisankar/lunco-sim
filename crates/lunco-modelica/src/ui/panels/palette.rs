@@ -102,20 +102,22 @@ fn category_color(name: &str, theme: &lunco_theme::Theme) -> egui::Color32 {
 
 /// Should this entry be shown in the instantiable palette?
 ///
-/// Connectors are a real semantic distinction — they're ports, not
-/// standalone components, so dragging one onto a canvas is a
-/// category error. We filter them out.
+/// Two formal exclusions, both grounded in the Modelica language
+/// (not in MSL folder-naming conventions):
 ///
-/// The legacy filter also excluded anything under `.Interfaces.` or
-/// `.Internal.` packages, but those are *naming conventions*, not
-/// language-defined properties. `.Interfaces.` was a proxy for
-/// `partial`-keyword classes (which we'd surface formally via a
-/// `partial: bool` field on `MSLComponentDef` once the indexer
-/// emits it); `.Internal.` was MSL author lore with no formal
-/// marker. Dropped — users with a search box won't typically hit
-/// these by accident, and we don't get to pretend we know which
-/// helpers each library author wanted hidden.
+/// - **Connectors** are ports, not standalone components — dragging
+///   one onto a canvas is a category error.
+/// - **`partial` classes** can't be instantiated directly per
+///   MLS §4.4; they only exist to be inherited via `extends`. This
+///   replaces the legacy `.Interfaces.` path heuristic.
+///
+/// `.Internal.` (library-private convention) is not filtered — it's
+/// MSL author lore with no formal language marker, and users with a
+/// search box don't typically hit them by accident.
 pub(crate) fn is_instantiable(c: &MSLComponentDef) -> bool {
+    if c.partial {
+        return false;
+    }
     !matches!(
         c.class_kind,
         crate::index::ClassKind::Connector | crate::index::ClassKind::ExpandableConnector

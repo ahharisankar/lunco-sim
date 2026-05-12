@@ -222,7 +222,7 @@ pub(super) fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramN
                 icon_only: crate::ui::loaded_classes::is_icon_only_class(
                     &node.component_def.msl_path,
                 ),
-                expandable_connector: node.component_def.is_expandable_connector,
+                expandable_connector: node.component_def.is_expandable_connector(),
                 icon_graphics: node.component_def.icon_graphics.clone(),
                 diagram_graphics: if matches!(
                     node.component_def.class_kind,
