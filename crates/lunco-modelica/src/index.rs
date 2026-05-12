@@ -125,23 +125,29 @@ pub struct ComponentEndpoint {
     pub port: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClassEntry {
     pub name: String,
     pub kind: ClassKind,
+    #[serde(default)]
     pub source_range: Option<TextRange>,
+    #[serde(default)]
     pub extends: Vec<String>,
     /// Description string from the class header
     /// (`model X "description"`). Empty when none was authored.
+    #[serde(default)]
     pub description: String,
     /// Qualified names of nested classes declared inside this one,
     /// in declaration order. Used for tree assembly in browsers.
+    #[serde(default)]
     pub children: Vec<String>,
     /// Authored Icon annotation, if present. Populated from
     /// [`crate::annotations::extract_icon`] during rebuild.
+    #[serde(default)]
     pub icon: Option<crate::annotations::Icon>,
     /// `(info, revisions)` from the class's `Documentation(...)`
     /// annotation. Both are `None` when no documentation was authored.
+    #[serde(default)]
     pub documentation: (Option<String>, Option<String>),
     /// Count of declared equations in this class, excluding `Empty`
     /// placeholders and `connect(...)` (which is tracked separately
@@ -149,19 +155,92 @@ pub struct ClassEntry {
     /// When, If, FunctionCall, and Assert equations — anything the
     /// empty-diagram overlay should call out as "this class has
     /// equation content beyond just connections".
+    #[serde(default)]
     pub equation_count: usize,
     /// `partial` keyword on the class header. Partial classes can't
     /// be instantiated, so they're never valid simulation roots —
     /// `is_simulatable` (and the Compile / Fast Run picker) excludes
     /// them. Plain bases without `partial` are still simulatable
     /// even when used purely as `extends` targets.
+    #[serde(default)]
     pub partial: bool,
     /// Authored `experiment(...)` annotation, if present. The mere
     /// presence is the strongest "this class is a simulation root"
     /// signal we have — `simulation_candidates` ranks these above
     /// all other candidates so the Compile / Fast Run picker picks
     /// the author-tagged target by default.
+    #[serde(default)]
     pub experiment: Option<crate::annotations::Experiment>,
+    /// Extends-flattened port list. Populated by the indexer for
+    /// MSL classes (pre-baked into `msl_index.json`) and by the
+    /// projector for live user code on first paint. Empty by
+    /// default; live AST rebuilds don't fill this — the projector
+    /// or shape-flattening pass does.
+    #[serde(default)]
+    pub ports: Vec<crate::visual_diagram::PortDef>,
+    /// Extends-flattened parameter list. Same producer pattern as
+    /// [`Self::ports`].
+    #[serde(default)]
+    pub parameters: Vec<crate::visual_diagram::ParamDef>,
+    /// Authored `Diagram(graphics={...})` annotation, separate from
+    /// the icon used at port markers. Renderer prefers this for
+    /// connector instances at top-level when present.
+    #[serde(default)]
+    pub diagram_graphics: Option<crate::annotations::Diagram>,
+    /// Schematic text label authored on the class (e.g. `"cosh"` for
+    /// a hyperbolic-cosine block). Populated by the indexer.
+    #[serde(default)]
+    pub icon_text: Option<String>,
+    /// Category for grouping in the MSL palette — slash-separated
+    /// segments of the path inside the library
+    /// (`"Electrical/Analog/Basic"`). Populated by the indexer; empty
+    /// for non-MSL classes.
+    #[serde(default)]
+    pub category: String,
+}
+
+impl ClassEntry {
+    /// Short name (leaf segment of the qualified name).
+    pub fn short_name(&self) -> &str {
+        self.name.rsplit('.').next().unwrap_or(&self.name)
+    }
+
+    /// Second-level segment of the qualified name — e.g.
+    /// `"Modelica.Electrical.Analog.Examples.X"` → `"Electrical"`.
+    /// Empty when the name has fewer than two dotted segments.
+    pub fn domain(&self) -> &str {
+        self.name.split('.').nth(1).unwrap_or("")
+    }
+
+    /// `true` when the qualified name sits under any `Examples.`
+    /// segment.
+    pub fn is_example(&self) -> bool {
+        self.name.contains(".Examples.")
+    }
+
+    /// `true` when the class is an MLS §9.1.3 expandable connector.
+    pub fn is_expandable_connector(&self) -> bool {
+        matches!(self.kind, ClassKind::ExpandableConnector)
+    }
+
+    /// Convenience: `Some(&description)` when non-empty, `None`
+    /// otherwise. Mirrors the legacy `MSLComponentDef::short_description`
+    /// field semantics.
+    pub fn short_description(&self) -> Option<&str> {
+        if self.description.is_empty() {
+            None
+        } else {
+            Some(self.description.as_str())
+        }
+    }
+
+    /// First plain-text paragraph of the class's Documentation(info=…)
+    /// annotation, when authored. Same as `documentation.0` —
+    /// preserved as a method for symmetry with the deleted
+    /// `MSLComponentDef::documentation_info` field.
+    pub fn documentation_info(&self) -> Option<&str> {
+        self.documentation.0.as_deref()
+    }
 }
 
 #[derive(
@@ -520,6 +599,11 @@ impl ModelicaIndex {
                 equation_count: 0,
                 partial: false,
                 experiment: None,
+                ports: Vec::new(),
+                parameters: Vec::new(),
+                diagram_graphics: None,
+                icon_text: None,
+                category: String::new(),
             },
         );
     }
@@ -747,6 +831,11 @@ fn insert_class_recursive(idx: &mut ModelicaIndex, qualified: String, class_def:
         equation_count,
         partial: class_def.partial,
         experiment,
+        ports: Vec::new(),
+        parameters: Vec::new(),
+        diagram_graphics: None,
+        icon_text: None,
+        category: String::new(),
     };
     idx.classes.insert(qualified.clone(), entry);
 

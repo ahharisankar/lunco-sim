@@ -179,7 +179,7 @@ pub fn render_root_subtree(world: &mut World, ui: &mut egui::Ui, root_id: &str) 
             bevy::log::warn!("[PackageBrowser] unparseable tree id `{id}`");
         }
     } else if let Some(render::PackageAction::DragStart { msl_path }) = action {
-        if let Some(def) = crate::visual_diagram::msl_component_by_path(&msl_path) {
+        if let Some(def) = crate::visual_diagram::msl_class_by_path(&msl_path) {
             world
                 .get_resource_or_insert_with::<crate::ui::panels::palette::ComponentDragPayload>(
                     Default::default,

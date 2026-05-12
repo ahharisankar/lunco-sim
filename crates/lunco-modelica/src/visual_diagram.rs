@@ -174,99 +174,17 @@ pub struct ParamDef {
     pub unit: Option<String>,
 }
 
-/// An MSL component available in the palette.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MSLComponentDef {
-    /// Short name (e.g., "Resistor").
-    pub name: String,
-    /// Full MSL path (e.g., "Modelica.Electrical.Analog.Basic.Resistor").
-    pub msl_path: String,
-    /// Category for grouping (e.g., "Electrical/Analog/Basic").
-    pub category: String,
-    /// Icon/display name.
-    pub display_name: String,
-    /// Detailed description.
-    pub description: Option<String>,
-    /// Schematic text (e.g. "cosh").
-    pub icon_text: Option<String>,
-    /// Ports defined by this component.
-    pub ports: Vec<PortDef>,
-    /// Parameters that can be configured.
-    pub parameters: Vec<ParamDef>,
-    /// Decoded `Icon(graphics={...})` annotation for the class,
-    /// merged across the `extends` chain. Populated for every class
-    /// (MSL palette entries via `msl_indexer`, user-defined via the
-    /// projector). `None` only for classes with literally no `Icon`
-    /// in their inheritance chain — the canvas then falls back to a
-    /// type-label box.
-    #[serde(default)]
-    pub icon_graphics: Option<crate::annotations::Icon>,
-    /// Decoded `Diagram(graphics={...})` annotation. Connectors author
-    /// a separate Diagram annotation (with their `%name` Text label)
-    /// distinct from the Icon used at port markers — when a connector
-    /// instance appears at top-level on a parent's diagram, the
-    /// renderer prefers this over `icon_graphics`.
-    #[serde(default)]
-    pub diagram_graphics: Option<crate::annotations::Diagram>,
-    /// Quoted string written after the Modelica class name, cleaned
-    /// of surrounding `"…"`. Populated by `msl_indexer`. New code
-    /// should prefer this over the `description` field (which stores
-    /// a Debug-formatted token list for legacy reasons).
-    #[serde(default)]
-    pub short_description: Option<String>,
-    /// First plain-text paragraph of `annotation(Documentation(info=…))`,
-    /// HTML-stripped. Used by the Welcome / MSL Library browser for
-    /// richer card copy. `None` when the class has no Documentation.
-    #[serde(default)]
-    pub documentation_info: Option<String>,
-    /// True when `msl_path` contains `.Examples.` — cheap flag for
-    /// the example browser to filter on without re-scanning the path.
-    #[serde(default)]
-    pub is_example: bool,
-    /// Second-level MSL package name for navigation grouping —
-    /// `Modelica.Electrical.Analog.Examples.*` → `"Electrical"`.
-    /// Empty for non-MSL classes.
-    #[serde(default)]
-    pub domain: String,
-    /// Modelica class kind — typed enum, serialised as the
-    /// lowercase keyword (`"model"`, `"block"`, `"connector"`,
-    /// `"record"`, …) so legacy `msl_index.json` files keep
-    /// deserialising unchanged. Note: `expandable connector`
-    /// (MLS §9.1.3) lives here as
-    /// [`crate::index::ClassKind::ExpandableConnector`] — there is
-    /// no separate flag for it. Callers that care about the
-    /// dashed-border distinction match on the enum variant.
-    #[serde(default)]
-    pub class_kind: crate::index::ClassKind,
-    /// `partial` keyword on the class header. Partial classes can't
-    /// be instantiated standalone (only inherited via `extends`), so
-    /// the palette + simulation-candidate pickers exclude them. Old
-    /// `msl_index.json` files that predate this field deserialise as
-    /// `false` — re-run `msl_indexer` to populate properly.
-    #[serde(default)]
-    pub partial: bool,
-}
-
-impl MSLComponentDef {
-    /// `expandable connector` per MLS §9.1.3 — auto-collects
-    /// variables across connected instances and renders with a
-    /// dashed border. Replaces the legacy `is_expandable_connector:
-    /// bool` field; the truth lives in [`Self::class_kind`].
-    pub fn is_expandable_connector(&self) -> bool {
-        matches!(self.class_kind, crate::index::ClassKind::ExpandableConnector)
-    }
-}
 
 /// On-disk shape of `msl_index.json`. Wraps the legacy
-/// `Vec<MSLComponentDef>` payload alongside the pre-baked
+/// `Vec<crate::index::ClassEntry>` payload alongside the pre-baked
 /// bundled `PackageNode` tree so the indexer can ship both in
 /// a single artifact. The reader accepts both this struct *and*
 /// the bare-array legacy form for backward compatibility.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MslIndex {
-    /// Palette / component metadata — what `MSLComponentDef` has
+    /// Palette / component metadata — what `crate::index::ClassEntry` has
     /// always carried.
-    pub components: Vec<MSLComponentDef>,
+    pub components: Vec<crate::index::ClassEntry>,
     /// Pre-baked `PackageNode` tree for the bundled-models root in
     /// the Package Browser. Indexer emits these directly so the
     /// runtime is a trivial deserialise — no shape conversion.
@@ -282,7 +200,7 @@ pub struct DiagramNode {
     /// Instance name (e.g., "R1", "C1").
     pub instance_name: String,
     /// Component definition reference.
-    pub component_def: MSLComponentDef,
+    pub component_def: crate::index::ClassEntry,
     /// Parameter values (name → value).
     pub parameter_values: HashMap<String, String>,
     /// Canvas-world centre of the icon — kept as the authoritative
@@ -378,13 +296,13 @@ impl VisualDiagram {
     }
 
     /// Add a node to the diagram.
-    pub fn add_node(&mut self, def: MSLComponentDef, position: Pos2) -> DiagramNodeId {
+    pub fn add_node(&mut self, def: crate::index::ClassEntry, position: Pos2) -> DiagramNodeId {
         self.add_node_with_id(DiagramNodeId::new(), def, position)
     }
 
     /// Add a node with a specific ID.
-    pub fn add_node_with_id(&mut self, id: DiagramNodeId, def: MSLComponentDef, position: Pos2) -> DiagramNodeId {
-        let instance_name = self.next_instance_name(&def.name);
+    pub fn add_node_with_id(&mut self, id: DiagramNodeId, def: crate::index::ClassEntry, position: Pos2) -> DiagramNodeId {
+        let instance_name = self.next_instance_name(def.short_name());
         let mut parameter_values = HashMap::new();
         for param in &def.parameters {
             parameter_values.insert(param.name.clone(), param.default.clone());
@@ -486,7 +404,7 @@ static MSL_LIBRARY: OnceLock<MslIndex> = OnceLock::new();
 /// without permanently poisoning the cache. Subsequent calls retry the
 /// load until it succeeds, then memoize. Per-frame cost while empty is
 /// one `OnceLock::get` + one hashmap lookup — negligible.
-pub fn msl_component_library() -> &'static [MSLComponentDef] {
+pub fn msl_class_library() -> &'static [crate::index::ClassEntry] {
     msl_index().map(|i| i.components.as_slice()).unwrap_or(&[])
 }
 
@@ -547,7 +465,7 @@ fn parse_msl_index(text: &str) -> Option<MslIndex> {
     // `msl_indexer` to repopulate it.
     #[derive(Deserialize)]
     struct Relaxed {
-        components: Vec<MSLComponentDef>,
+        components: Vec<crate::index::ClassEntry>,
         #[serde(default)]
         bundled: serde_json::Value,
     }
@@ -561,7 +479,7 @@ fn parse_msl_index(text: &str) -> Option<MslIndex> {
             bundled,
         });
     }
-    if let Ok(components) = serde_json::from_str::<Vec<MSLComponentDef>>(text) {
+    if let Ok(components) = serde_json::from_str::<Vec<crate::index::ClassEntry>>(text) {
         return Some(MslIndex {
             components,
             bundled: Vec::new(),
@@ -572,7 +490,7 @@ fn parse_msl_index(text: &str) -> Option<MslIndex> {
 
 /// Get unique categories from the MSL library.
 pub fn msl_categories() -> Vec<String> {
-    let mut cats: Vec<String> = msl_component_library()
+    let mut cats: Vec<String> = msl_class_library()
         .iter()
         .map(|c| c.category.clone())
         .collect();
@@ -582,8 +500,8 @@ pub fn msl_categories() -> Vec<String> {
 }
 
 /// Get components in a category.
-pub fn msl_components_in_category(category: &str) -> Vec<MSLComponentDef> {
-    msl_component_library()
+pub fn msl_classes_in_category(category: &str) -> Vec<crate::index::ClassEntry> {
+    msl_class_library()
         .iter()
         .filter(|c| c.category == category)
         .cloned()
@@ -591,10 +509,10 @@ pub fn msl_components_in_category(category: &str) -> Vec<MSLComponentDef> {
 }
 
 /// Lookup a component definition by its MSL path.
-pub fn msl_component_by_path(path: &str) -> Option<MSLComponentDef> {
-    msl_component_library()
+pub fn msl_class_by_path(path: &str) -> Option<crate::index::ClassEntry> {
+    msl_class_library()
         .iter()
-        .find(|c| c.msl_path == path)
+        .find(|c| c.name == path)
         .cloned()
 }
 
@@ -616,7 +534,7 @@ pub fn generate_modelica_source(diagram: &VisualDiagram, model_name: &str) -> St
     let mut imports: Vec<String> = diagram
         .nodes
         .iter()
-        .map(|n| n.component_def.msl_path.clone())
+        .map(|n| n.component_def.name.clone())
         .collect();
     imports.sort();
     imports.dedup();
@@ -630,7 +548,7 @@ pub fn generate_modelica_source(diagram: &VisualDiagram, model_name: &str) -> St
 
     // Component declarations
     for node in &diagram.nodes {
-        let short_name = node.component_def.name.clone();
+        let short_name = node.component_def.short_name().to_string();
         let params: Vec<String> = node.parameter_values
             .iter()
             .map(|(k, v)| format!("{}={}", k, v))
@@ -687,11 +605,11 @@ mod tests {
     fn test_generate_rc_circuit() {
         let mut diagram = VisualDiagram::default();
 
-        let lib = msl_component_library();
-        let v1_def = lib.iter().find(|c| c.name == "ConstantVoltage").unwrap().clone();
-        let r1_def = lib.iter().find(|c| c.name == "Resistor").unwrap().clone();
-        let c1_def = lib.iter().find(|c| c.name == "Capacitor").unwrap().clone();
-        let gnd_def = lib.iter().find(|c| c.name == "Ground").unwrap().clone();
+        let lib = msl_class_library();
+        let v1_def = lib.iter().find(|c| c.short_name() == "ConstantVoltage").unwrap().clone();
+        let r1_def = lib.iter().find(|c| c.short_name() == "Resistor").unwrap().clone();
+        let c1_def = lib.iter().find(|c| c.short_name() == "Capacitor").unwrap().clone();
+        let gnd_def = lib.iter().find(|c| c.short_name() == "Ground").unwrap().clone();
 
         let v1 = diagram.add_node(v1_def, Pos2::new(0.0, 0.0));
         let r1 = diagram.add_node(r1_def, Pos2::new(200.0, 0.0));
@@ -714,9 +632,9 @@ mod tests {
 
     #[test]
     fn test_msl_library_not_empty() {
-        let lib = msl_component_library();
+        let lib = msl_class_library();
         assert!(!lib.is_empty());
-        assert!(lib.iter().any(|c| c.name == "Resistor"));
-        assert!(lib.iter().any(|c| c.name == "Ground"));
+        assert!(lib.iter().any(|c| c.short_name() == "Resistor"));
+        assert!(lib.iter().any(|c| c.short_name() == "Ground"));
     }
 }

@@ -1,7 +1,7 @@
 //! MSL package palette tree + render-as-context-menu.
 //!
 //! Builds a static [`MslPackageNode`] tree from
-//! [`crate::visual_diagram::msl_component_library`] and renders it as
+//! [`crate::visual_diagram::msl_class_library`] and renders it as
 //! a nested egui submenu so users can pick MSL components without
 //! leaving the canvas. Also houses the user-tunable [`PaletteSettings`]
 //! and [`crate::ui::panels::canvas_diagram::DiagramProjectionLimits`] resources.
@@ -10,7 +10,6 @@ use bevy::prelude::*;
 use bevy_egui::egui;
 
 use crate::document::ModelicaOp;
-use crate::visual_diagram::MSLComponentDef;
 
 use super::ops::{op_add_component_with_name, pick_add_instance_name};
 use super::CanvasDiagramState;
@@ -27,7 +26,7 @@ pub(super) struct MslPackageNode {
     /// every frame the pointer is over it; per-frame O(n log n)
     /// across nested submenus is the cause of the laggy right-click
     /// context-menu navigation).
-    classes: Vec<&'static MSLComponentDef>,
+    classes: Vec<&'static crate::index::ClassEntry>,
     /// Pre-computed: `true` if this subtree contains at least one
     /// non-icon-only class. Lets the menu skip empty branches in O(1)
     /// instead of recursively walking on every render.
@@ -111,7 +110,7 @@ pub(super) fn package_has_visible_classes(node: &MslPackageNode) -> bool {
 }
 
 /// Lazily-built package tree. Walks every entry in
-/// [`crate::visual_diagram::msl_component_library`] once and
+/// [`crate::visual_diagram::msl_class_library`] once and
 /// inserts it under its dotted package path. Cached for the life
 /// of the process — MSL content doesn't change at runtime.
 pub(super) fn msl_package_tree() -> &'static MslPackageNode {
@@ -119,13 +118,13 @@ pub(super) fn msl_package_tree() -> &'static MslPackageNode {
     static TREE: OnceLock<MslPackageNode> = OnceLock::new();
     TREE.get_or_init(|| {
         let mut root = MslPackageNode::new();
-        for comp in crate::visual_diagram::msl_component_library() {
+        for comp in crate::visual_diagram::msl_class_library() {
             // Split the qualified path into package segments + a
             // trailing class name. `Modelica.Electrical.Analog.
             // Basic.Resistor` → walk subpackages
             // [Modelica, Electrical, Analog, Basic], attach class
             // `Resistor`.
-            let mut parts: Vec<&str> = comp.msl_path.split('.').collect();
+            let mut parts: Vec<&str> = comp.name.split('.').collect();
             let Some(_class_name) = parts.pop() else { continue };
             let mut node = &mut root;
             for seg in parts {
@@ -151,7 +150,7 @@ pub(super) fn finalize_tree(node: &mut MslPackageNode) {
     let mut any_visible = node
         .classes
         .iter()
-        .any(|c| !crate::ui::loaded_classes::is_icon_only_class(&c.msl_path));
+        .any(|c| !crate::ui::loaded_classes::is_icon_only_class(&c.name));
     for child in node.subpackages.values_mut() {
         finalize_tree(child);
         any_visible = any_visible || child.has_non_icon_class;
@@ -202,7 +201,7 @@ pub(super) fn render_msl_package_menu(
         // Hide icon-only classes unless the user explicitly enabled
         // them in Settings. Path-based detection via `is_icon_only_class`
         // (currently `.Icons.` subpackage check).
-        if !show_icons && crate::ui::loaded_classes::is_icon_only_class(&comp.msl_path) {
+        if !show_icons && crate::ui::loaded_classes::is_icon_only_class(&comp.name) {
             continue;
         }
         // Display: icon character (if any) + short name. The
@@ -219,11 +218,11 @@ pub(super) fn render_msl_package_menu(
         };
         if ui
             .button(label)
-            .on_hover_text(
-                comp.description
-                    .clone()
-                    .unwrap_or_else(|| comp.msl_path.clone()),
-            )
+            .on_hover_text(if comp.description.is_empty() {
+                comp.name.clone()
+            } else {
+                comp.description.clone()
+            })
             .clicked()
         {
             if let Some(class) = editing_class {

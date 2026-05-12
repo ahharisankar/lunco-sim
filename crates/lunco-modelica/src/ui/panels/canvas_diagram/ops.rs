@@ -11,7 +11,6 @@ use bevy::prelude::*;
 use crate::document::ModelicaOp;
 use crate::pretty::{self, Placement};
 use crate::ui::state::ModelicaDocumentRegistry;
-use crate::visual_diagram::MSLComponentDef;
 
 use super::coords::{ModelicaPos, canvas_to_modelica};
 use super::projection::projection_relevant_source_hash;
@@ -416,7 +415,7 @@ pub(super) fn component_headers(
 /// `R2`, …). Walks `scene.nodes()` directly so the choice respects
 /// nodes the user has just optimistically synthesised but that
 /// haven't yet round-tripped through the AST.
-pub(super) fn pick_add_instance_name(comp: &MSLComponentDef, scene: &lunco_canvas::Scene) -> String {
+pub(super) fn pick_add_instance_name(comp: &crate::index::ClassEntry, scene: &lunco_canvas::Scene) -> String {
     let prefix = comp
         .name
         .chars()
@@ -442,7 +441,7 @@ pub(super) fn pick_add_instance_name(comp: &MSLComponentDef, scene: &lunco_canva
 /// lands at the right spot in both the source and any downstream
 /// re-projection.
 pub(super) fn op_add_component_with_name(
-    comp: &MSLComponentDef,
+    comp: &crate::index::ClassEntry,
     instance_name: &str,
     at_world: lunco_canvas::Pos,
     class: &str,
@@ -451,7 +450,7 @@ pub(super) fn op_add_component_with_name(
     ModelicaOp::AddComponent {
         class: class.to_string(),
         decl: pretty::ComponentDecl {
-            type_name: comp.msl_path.clone(),
+            type_name: comp.name.clone(),
             name: instance_name.to_string(),
             modifications: comp
                 .parameters

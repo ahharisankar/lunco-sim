@@ -250,9 +250,9 @@ pub(super) fn resolve_port_icons(
     parent_qualified: &str,
     ports: &[crate::visual_diagram::PortDef],
 ) -> Vec<Option<crate::annotations::Icon>> {
-    let palette = crate::visual_diagram::msl_component_library();
-    let palette_lookup: HashMap<&str, &crate::visual_diagram::MSLComponentDef> =
-        palette.iter().map(|d| (d.msl_path.as_str(), d)).collect();
+    let palette = crate::visual_diagram::msl_class_library();
+    let palette_lookup: HashMap<&str, &crate::index::ClassEntry> =
+        palette.iter().map(|d| (d.name.as_str(), d)).collect();
     let handle = crate::engine_resource::global_engine_handle();
     ports
         .iter()
@@ -278,7 +278,7 @@ pub(super) fn resolve_port_icons(
             };
             for c in &candidates {
                 if let Some(def) = palette_lookup.get(c.as_str()) {
-                    if let Some(icon) = def.icon_graphics.as_ref() {
+                    if let Some(icon) = def.icon.as_ref() {
                         return Some(icon.clone());
                     }
                 }

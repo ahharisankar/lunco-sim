@@ -204,6 +204,13 @@ fn close_drilled_tabs_on_class_removed(
 
 // `mirror_open_model_on_doc_changed` deleted cleanup.
 
+// `world` module deleted as part of the A2 single-struct migration:
+// `ClassEntry` is now the canonical class record consumed everywhere,
+// and per-doc `ModelicaIndex.classes` already holds it, so a separate
+// `ModelicaWorld` resource just duplicates state. The unified
+// read-side resolver (`class_metadata::resolve_metadata`) consults
+// the pre-baked MSL library + the live per-doc index directly.
+
 fn sync_workspace_on_doc_opened(
     trigger: On<lunco_doc_bevy::DocumentOpened>,
     registry: Res<ModelicaDocumentRegistry>,

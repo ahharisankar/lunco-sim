@@ -111,7 +111,7 @@ pub(super) struct IconNodeVisual {
     pub(super) is_conditional: bool,
     /// Pre-formatted `(parameter_name, value)` pairs for `%paramName`
     /// text substitution. Carries class defaults from
-    /// `MSLComponentDef.parameters` (instance-modification overlay
+    /// `crate::index::ClassEntry.parameters` (instance-modification overlay
     /// is a follow-up — most icons display defaults anyway when no
     /// instance modifications are set).
     pub(super) parameters: Vec<(String, String)>,

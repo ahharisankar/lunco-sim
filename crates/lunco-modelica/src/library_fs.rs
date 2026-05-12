@@ -9,7 +9,7 @@
 //!
 //! - [`class_to_file_index`] — `qualified → PathBuf` for every
 //!   class the visual palette knows about. Built from
-//!   [`crate::visual_diagram::msl_component_library`].
+//!   [`crate::visual_diagram::msl_class_library`].
 //! - [`library_fs_index`] — last-segment → `[qualified]` plus
 //!   `qualified → PathBuf` for short-form references like
 //!   `Rotational.Interfaces.Flange_a` that need prefix-rewrite.
@@ -33,12 +33,12 @@ pub fn class_to_file_index(
         return idx;
     }
     // On web, the palette library is empty until the MSL bundle has
-    // been fetched + decompressed (see `msl_component_library` for the
+    // been fetched + decompressed (see `msl_class_library` for the
     // same trick). If we'd `OnceLock::set` an empty map here, the
     // index would stay empty for the lifetime of the page even after
     // MSL lands. So: return an empty placeholder *without* memoising,
     // so the next caller retries the build.
-    let lib = crate::visual_diagram::msl_component_library();
+    let lib = crate::visual_diagram::msl_class_library();
     if lib.is_empty() {
         return EMPTY.get_or_init(std::collections::HashMap::new);
     }
@@ -48,11 +48,11 @@ pub fn class_to_file_index(
 fn build_class_to_file_index(
 ) -> std::collections::HashMap<String, std::path::PathBuf> {
     let start = web_time::Instant::now();
-    let lib = crate::visual_diagram::msl_component_library();
+    let lib = crate::visual_diagram::msl_class_library();
     let mut map = std::collections::HashMap::with_capacity(lib.len());
     for comp in lib {
-        if let Some(path) = locate_library_file(&comp.msl_path) {
-            map.insert(comp.msl_path.clone(), path);
+        if let Some(path) = locate_library_file(&comp.name) {
+            map.insert(comp.name.clone(), path);
         }
     }
     info!(

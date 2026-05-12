@@ -32,7 +32,7 @@ use lunco_workbench::{Panel, PanelId, PanelSlot};
 
 use crate::models::bundled_models;
 use crate::ui::welcome_progress::ExampleProgress;
-use crate::visual_diagram::{msl_component_library, MSLComponentDef};
+use crate::visual_diagram::msl_class_library;
 
 /// Panel id.
 pub const WELCOME_PANEL_ID: PanelId = PanelId("modelica_welcome");
@@ -200,27 +200,25 @@ fn domain_icon(domain: &str) -> &'static str {
     }
 }
 
-fn is_top_level_example(c: &MSLComponentDef) -> bool {
-    if !c.is_example {
+fn is_top_level_example(c: &crate::index::ClassEntry) -> bool {
+    if !c.is_example() {
         return false;
     }
-    let mut parts = c.msl_path.rsplit('.');
+    let mut parts = c.name.rsplit('.');
     let _leaf = parts.next();
     matches!(parts.next(), Some("Examples"))
 }
 
 
-fn card_subtitle(c: &MSLComponentDef) -> String {
-    if let Some(s) = c.short_description.as_ref() {
-        if !s.is_empty() {
-            return s.clone();
-        }
+fn card_subtitle(c: &crate::index::ClassEntry) -> String {
+    if !c.description.is_empty() {
+        return c.description.clone();
     }
-    if let Some(info) = c.documentation_info.as_ref() {
+    if let Some(info) = c.documentation_info() {
         if let Some(end) = info.find(". ") {
             return format!("{}.", &info[..end]);
         }
-        return info.clone();
+        return info.to_string();
     }
     String::new()
 }
@@ -586,9 +584,9 @@ impl Panel for WelcomePanel {
                             // Resolve index entry for path-exists
                             // validation (rare missing means label
                             // still renders but click is disabled).
-                            let exists = msl_component_library()
+                            let exists = msl_class_library()
                                 .iter()
-                                .any(|c| c.msl_path == step.qualified);
+                                .any(|c| c.name == step.qualified);
 
                             let step_h = 48.0;
                             let indent = 32.0;
@@ -688,8 +686,8 @@ impl Panel for WelcomePanel {
                 // left edge doesn't clip under the dock rail.
                 let w = ui.available_width().min(760.0);
                 ui.set_max_width(w);
-                let lib = msl_component_library();
-                let examples: Vec<&MSLComponentDef> =
+                let lib = msl_class_library();
+                let examples: Vec<&crate::index::ClassEntry> =
                     lib.iter().filter(|c| is_top_level_example(c)).collect();
 
                 egui::CollapsingHeader::new(
@@ -739,7 +737,7 @@ impl Panel for WelcomePanel {
                             usize,
                         > = std::collections::HashMap::new();
                         for c in &examples {
-                            *map.entry(c.domain.clone()).or_default() += 1;
+                            *map.entry(c.domain().to_string()).or_default() += 1;
                         }
                         map.into_iter().collect()
                     };
@@ -802,24 +800,24 @@ impl Panel for WelcomePanel {
                     ui.add_space(8.0);
 
                     let query_lc = wstate.browse_query.to_lowercase();
-                    let filtered: Vec<&MSLComponentDef> = examples
+                    let filtered: Vec<&crate::index::ClassEntry> = examples
                         .iter()
                         .copied()
                         .filter(|c| {
                             (wstate.browse_domain.is_empty()
-                                || c.domain == wstate.browse_domain)
+                                || c.domain() == wstate.browse_domain)
                                 && (query_lc.is_empty()
-                                    || c.name.to_lowercase().contains(&query_lc)
-                                    || c.msl_path
+                                    || c.short_name()
                                         .to_lowercase()
                                         .contains(&query_lc)
-                                    || c.short_description
-                                        .as_deref()
-                                        .is_some_and(|s| {
-                                            s.to_lowercase().contains(&query_lc)
-                                        })
-                                    || c.documentation_info
-                                        .as_deref()
+                                    || c.name
+                                        .to_lowercase()
+                                        .contains(&query_lc)
+                                    || (!c.description.is_empty()
+                                        && c.description
+                                            .to_lowercase()
+                                            .contains(&query_lc))
+                                    || c.documentation_info()
                                         .is_some_and(|s| {
                                             s.to_lowercase().contains(&query_lc)
                                         }))
@@ -859,11 +857,11 @@ impl Panel for WelcomePanel {
                                         .on_hover_text(format!(
                                             "{}\n\nOpens read-only — \
                                              duplicate to edit.",
-                                            c.msl_path
+                                            c.name
                                         ));
                                     let rect = resp.rect;
                                     let painter = ui.painter_at(rect).with_clip_rect(rect);
-                                    let dot = if progress.is_opened(&c.msl_path)
+                                    let dot = if progress.is_opened(&c.name)
                                     {
                                         ("●", success)
                                     } else {
@@ -881,8 +879,8 @@ impl Panel for WelcomePanel {
                                         egui::Align2::LEFT_TOP,
                                         format!(
                                             "{}  {}",
-                                            domain_icon(&c.domain),
-                                            c.name
+                                            domain_icon(c.domain()),
+                                            c.short_name()
                                         ),
                                         egui::FontId::proportional(13.0),
                                         title_tint,
@@ -907,13 +905,13 @@ impl Panel for WelcomePanel {
                                         rect.min
                                             + egui::vec2(28.0, row_h - 16.0),
                                         egui::Align2::LEFT_TOP,
-                                        &c.domain,
+                                        c.domain(),
                                         egui::FontId::proportional(9.5),
                                         muted,
                                     );
                                     if resp.clicked() {
                                         open_msl =
-                                            Some(c.msl_path.clone());
+                                            Some(c.name.clone());
                                     }
                                 }
                             });

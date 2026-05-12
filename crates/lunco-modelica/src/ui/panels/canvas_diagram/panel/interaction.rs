@@ -114,7 +114,7 @@ pub(crate) fn handle_drag_and_drop(
             let accent = egui::Color32::from_rgb(120, 180, 255);
             painter.rect_filled(ghost_rect, 4.0, egui::Color32::from_rgba_unmultiplied(120, 180, 255, 50));
             painter.rect_stroke(ghost_rect, 4.0, egui::Stroke::new(1.5, accent), egui::StrokeKind::Outside);
-            painter.text(egui::pos2(ghost_rect.center().x, ghost_rect.max.y + 4.0), egui::Align2::CENTER_TOP, &def.display_name, egui::FontId::proportional(11.0), accent);
+            painter.text(egui::pos2(ghost_rect.center().x, ghost_rect.max.y + 4.0), egui::Align2::CENTER_TOP, def.short_name(), egui::FontId::proportional(11.0), accent);
             ui.ctx().request_repaint();
         }
 

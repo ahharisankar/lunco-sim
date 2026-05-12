@@ -244,59 +244,55 @@ struct ParamDef {
     unit: Option<String>,
 }
 
+/// Local mirror of [`lunco_modelica::index::ClassEntry`]'s serde
+/// shape (the canonical class record post-A2). Field names + serde
+/// defaults must stay aligned with the upstream struct so the JSON
+/// round-trips losslessly — runtime deserialises into `ClassEntry`
+/// directly and consumers read it through the unified read API.
+///
+/// Indexer populates only the fields it can compute (name, kind,
+/// description, ports, parameters, icon, etc.); per-doc runtime
+/// fields (source_range, extends, children, equation_count,
+/// experiment) stay at their defaults and are filled by the live
+/// AST producer when a user opens the file.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct MSLComponentDef {
+    /// Fully-qualified name (`Modelica.Electrical.Analog.Basic.Resistor`).
     name: String,
-    msl_path: String,
-    category: String,
-    display_name: String,
-    description: Option<String>,
-    /// Short `"…"` string written after the class name in Modelica
-    /// source, cleaned of quotes. Distinct from `description` (which
-    /// historically stored the `{:?}` Debug form for compatibility);
-    /// UI code should prefer this field.
+    /// Modelica class kind — same lowercase-keyword wire format
+    /// `ClassEntry` uses.
+    kind: lunco_modelica::index::ClassKind,
+    /// Cleaned `"…"` class-header description string. Empty when
+    /// none was authored.
     #[serde(default)]
-    short_description: Option<String>,
-    /// First plain-text paragraph of
-    /// `annotation(Documentation(info="…"))`, HTML-stripped. `None`
-    /// when the class has no Documentation annotation (rare for
-    /// `Examples.*` classes). The Welcome / MSL Library browser
-    /// uses this for richer card copy.
+    description: String,
+    /// `(info, revisions)` from `Documentation(info=…, revisions=…)`.
+    /// Indexer only fills `.0` (info); `.1` stays `None` until the
+    /// live producer parses the AST.
     #[serde(default)]
-    documentation_info: Option<String>,
-    /// True when `msl_path` contains `.Examples.` — MSL convention
-    /// for runnable learning material. Cheap flag so the browser
-    /// doesn't have to re-check the path everywhere.
-    #[serde(default)]
-    is_example: bool,
-    /// Second-level MSL package name for navigation grouping —
-    /// `Modelica.Electrical.Analog.Examples.*` → `"Electrical"`.
-    /// Empty for non-MSL classes. Drives the domain-chip filter.
-    #[serde(default)]
-    domain: String,
-    /// Modelica class kind — typed enum, serialised as the lowercase
-    /// keyword (`"model"`, `"block"`, …) for legacy JSON compat.
-    #[serde(default)]
-    class_kind: lunco_modelica::index::ClassKind,
-    /// `partial` keyword on the class header (MLS §4.4). Partial
-    /// classes can't be instantiated directly — palette + sim-
-    /// candidate pickers skip them. Replaces the legacy
-    /// `.Interfaces.` path heuristic with a formal language-level
-    /// signal.
-    #[serde(default)]
-    partial: bool,
-    icon_text: Option<String>,
+    documentation: (Option<String>, Option<String>),
     /// Parsed `Icon(graphics={...})` annotation — already merged
-    /// across the `extends` chain via `extract_icon_inherited`. This
-    /// is the only icon source the runtime uses; the regex-on-Debug
-    /// SVG generator that used to live here was retired (it produced
-    /// spurious primitives because Debug-string regexing can't tell
-    /// graphics primitives apart reliably).
+    /// across the `extends` chain via `extract_icon_inherited`.
     #[serde(default)]
-    icon_graphics: Option<lunco_modelica::annotations::Icon>,
+    icon: Option<lunco_modelica::annotations::Icon>,
+    /// Parsed `Diagram(graphics={...})` annotation.
     #[serde(default)]
     diagram_graphics: Option<lunco_modelica::annotations::Diagram>,
+    /// Schematic text label authored on the class (e.g. `"cosh"`).
+    #[serde(default)]
+    icon_text: Option<String>,
+    /// Category path for grouping in the palette
+    /// (`"Electrical/Analog/Basic"`).
+    #[serde(default)]
+    category: String,
+    /// `partial` keyword on the class header (MLS §4.4).
+    #[serde(default)]
+    partial: bool,
+    /// Extends-flattened port list.
+    #[serde(default)]
     ports: Vec<PortDef>,
+    /// Extends-flattened parameter list.
+    #[serde(default)]
     parameters: Vec<ParamDef>,
 }
 
@@ -1074,25 +1070,17 @@ impl MSLIndexer {
                     (t, _) => lunco_modelica::index::map_class_type(t),
                 };
 
+                let _ = (is_example, domain, short_name);
                 all_comps.push(MSLComponentDef {
-                    name: short_name.clone(),
-                    msl_path: full_name.to_string(),
-                    category,
-                    display_name: format!("📦 {}", short_name),
-                    // Legacy Debug-formatted field. Kept for any caller
-                    // still reading `description`; new code should use
-                    // `short_description` which carries the cleaned
-                    // string.
-                    description: Some(format!("{:?}", class.description)),
-                    short_description,
-                    documentation_info,
-                    is_example,
-                    domain,
-                    class_kind,
-                    partial: class.partial,
-                    icon_text,
-                    icon_graphics,
+                    name: full_name.to_string(),
+                    kind: class_kind,
+                    description: short_description.unwrap_or_default(),
+                    documentation: (documentation_info, None),
+                    icon: icon_graphics,
                     diagram_graphics,
+                    icon_text,
+                    category,
+                    partial: class.partial,
                     ports,
                     parameters,
                 });

@@ -7,7 +7,7 @@
 //! asset-browser style.
 //!
 //! **What's in the palette**: every *leaf* component from
-//! [`crate::visual_diagram::msl_component_library`] — interfaces and
+//! [`crate::visual_diagram::msl_class_library`] — interfaces and
 //! package nodes are excluded. One row per component. Click a row to
 //! instantiate on the active Diagram tab (placement cycles through a
 //! 3-column grid to avoid overlap).
@@ -22,7 +22,7 @@ use bevy::prelude::*;
 use bevy_egui::egui;
 use lunco_workbench::{Panel, PanelId, PanelSlot};
 
-use crate::visual_diagram::{msl_component_library, MSLComponentDef};
+use crate::visual_diagram::msl_class_library;
 
 /// Panel id — registered as a singleton panel, slotted RightInspector.
 pub const PALETTE_PANEL_ID: PanelId = PanelId("modelica_component_palette");
@@ -33,14 +33,14 @@ pub const PALETTE_PANEL_ID: PanelId = PanelId("modelica_component_palette");
 /// stale payloads don't leak between gestures.
 #[derive(Resource, Default)]
 pub struct ComponentDragPayload {
-    pub def: Option<MSLComponentDef>,
+    pub def: Option<crate::index::ClassEntry>,
 }
 
 /// Per-frame UI state for the palette. Holds the search query + the
 /// active category filter chip.
 ///
 /// Everything else (the component catalog) is static, owned by
-/// `msl_component_library()`; we just filter over its slice.
+/// `msl_class_library()`; we just filter over its slice.
 #[derive(Resource, Default)]
 pub struct PaletteState {
     /// Current search query — normalized on compare (lowercase).
@@ -114,12 +114,12 @@ fn category_color(name: &str, theme: &lunco_theme::Theme) -> egui::Color32 {
 /// `.Internal.` (library-private convention) is not filtered — it's
 /// MSL author lore with no formal language marker, and users with a
 /// search box don't typically hit them by accident.
-pub(crate) fn is_instantiable(c: &MSLComponentDef) -> bool {
+pub(crate) fn is_instantiable(c: &crate::index::ClassEntry) -> bool {
     if c.partial {
         return false;
     }
     !matches!(
-        c.class_kind,
+        c.kind,
         crate::index::ClassKind::Connector | crate::index::ClassKind::ExpandableConnector
     )
 }
@@ -207,8 +207,8 @@ impl Panel for ComponentPalettePanel {
         // Pre-filter: drop connectors / Interfaces / Internal entries
         // before any scoring or counting so they don't pollute totals,
         // chip counts, or the search results.
-        let lib_all = msl_component_library();
-        let lib: Vec<&MSLComponentDef> = lib_all.iter().filter(|c| is_instantiable(c)).collect();
+        let lib_all = msl_class_library();
+        let lib: Vec<&crate::index::ClassEntry> = lib_all.iter().filter(|c| is_instantiable(c)).collect();
         let mut cat_counts: std::collections::HashMap<&'static str, usize> =
             std::collections::HashMap::new();
         let pre_filter_total = lib.len();
@@ -221,7 +221,7 @@ impl Panel for ComponentPalettePanel {
             };
             if matches {
                 pre_filter_matches += 1;
-                *cat_counts.entry(category_of(&c.msl_path)).or_insert(0) += 1;
+                *cat_counts.entry(category_of(&c.name)).or_insert(0) += 1;
             }
         }
 
@@ -308,12 +308,12 @@ impl Panel for ComponentPalettePanel {
         //   +1 category contains query
         //   +0.5 description contains query
         // Plus: category filter acts as a hard gate.
-        let mut scored: Vec<(&MSLComponentDef, f32)> = lib
+        let mut scored: Vec<(&crate::index::ClassEntry, f32)> = lib
             .iter()
             .filter_map(|c| {
-                let c: &MSLComponentDef = *c;
+                let c: &crate::index::ClassEntry = *c;
                 if let Some(cat) = selected_category {
-                    if category_of(&c.msl_path) != cat {
+                    if category_of(&c.name) != cat {
                         return None;
                     }
                 }
@@ -333,7 +333,7 @@ impl Panel for ComponentPalettePanel {
         scored.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.display_name.cmp(&b.0.display_name))
+                .then_with(|| a.0.short_name().cmp(&b.0.short_name()))
         });
 
         let shown_cap = 100;
@@ -346,13 +346,13 @@ impl Panel for ComponentPalettePanel {
         // into collapsible sections (Figma Assets style, OMEdit's
         // component-tree style). Each section is closed by default
         // except the first, keeping long category chains scannable.
-        let mut clicked: Option<MSLComponentDef> = None;
-        let mut drag_started_def: Option<MSLComponentDef> = None;
+        let mut clicked: Option<crate::index::ClassEntry> = None;
+        let mut drag_started_def: Option<crate::index::ClassEntry> = None;
         // Snapshot the currently-dragged def name so render_component_row
         // can dim the source row.
         let dragging_path: Option<String> = world
             .get_resource::<ComponentDragPayload>()
-            .and_then(|p| p.def.as_ref().map(|d| d.msl_path.clone()));
+            .and_then(|p| p.def.as_ref().map(|d| d.name.clone()));
         let is_searching = !query_lc.is_empty() || selected_category.is_some();
 
         egui::ScrollArea::vertical()
@@ -363,7 +363,7 @@ impl Panel for ComponentPalettePanel {
                     for (comp, _score) in scored.iter().take(shown) {
                         let being_dragged = dragging_path
                             .as_deref()
-                            .map(|p| p == comp.msl_path.as_str())
+                            .map(|p| p == comp.name.as_str())
                             .unwrap_or(false);
                         let action = render_component_row(ui, comp, &theme, being_dragged);
                         if action.clicked {
@@ -391,10 +391,10 @@ impl Panel for ComponentPalettePanel {
                     // immediately.
                     let mut groups: std::collections::BTreeMap<
                         &'static str,
-                        Vec<&MSLComponentDef>,
+                        Vec<&crate::index::ClassEntry>,
                     > = std::collections::BTreeMap::new();
                     for (comp, _score) in scored.iter() {
-                        let cat = category_of(&comp.msl_path);
+                        let cat = category_of(&comp.name);
                         groups.entry(cat).or_default().push(*comp);
                     }
                     // Render in CATEGORIES order so the color story is
@@ -415,7 +415,7 @@ impl Panel for ComponentPalettePanel {
                             for comp in list {
                                 let being_dragged = dragging_path
                                     .as_deref()
-                                    .map(|p| p == comp.msl_path.as_str())
+                                    .map(|p| p == comp.name.as_str())
                                     .unwrap_or(false);
                                 let action =
                                     render_component_row(ui, comp, &theme, being_dragged);
@@ -472,7 +472,7 @@ struct PalettePlacementCounter(u32);
 /// trigger live in one place.
 pub(crate) fn place_component(
     world: &mut World,
-    def: &MSLComponentDef,
+    def: &crate::index::ClassEntry,
     target_doc: Option<lunco_doc::DocumentId>,
     placement: Option<(f32, f32)>,
 ) {
@@ -487,7 +487,7 @@ pub(crate) fn place_component(
     let Some(doc_id) = active_doc else {
         bevy::log::info!(
             "[Palette] insert of `{}` ignored — no active document",
-            def.msl_path
+            def.name
         );
         return;
     };
@@ -518,7 +518,7 @@ pub(crate) fn place_component(
     if class.is_empty() {
         bevy::log::info!(
             "[Palette] click on `{}` ignored — could not resolve target class on doc {}",
-            def.msl_path,
+            def.name,
             doc_id.raw()
         );
         return;
@@ -563,7 +563,7 @@ pub(crate) fn place_component(
         .trigger(crate::api::component::AddModelicaComponent {
             doc: doc_id,
             class,
-            type_name: def.msl_path.clone(),
+            type_name: def.name.clone(),
             name,
             x,
             y,
@@ -596,11 +596,11 @@ struct RowAction {
 /// grouped-by-category list.
 fn render_component_row(
     ui: &mut egui::Ui,
-    comp: &MSLComponentDef,
+    comp: &crate::index::ClassEntry,
     theme: &lunco_theme::Theme,
     is_being_dragged: bool,
 ) -> RowAction {
-    let cat_name = category_of(&comp.msl_path);
+    let cat_name = category_of(&comp.name);
     let cat_color = category_color(cat_name, theme);
     let muted = theme.tokens.text_subdued;
 
@@ -627,7 +627,7 @@ fn render_component_row(
                 // a palette → canvas drag.
                 ui.add(
                     egui::Label::new(
-                        egui::RichText::new(&comp.display_name).size(12.0),
+                        egui::RichText::new(comp.short_name()).size(12.0),
                     )
                     .selectable(false),
                 );
@@ -648,13 +648,14 @@ fn render_component_row(
         ui.set_opacity(1.0);
     }
 
-    let tooltip = comp
-        .description
-        .as_deref()
-        .unwrap_or(comp.msl_path.as_str());
+    let tooltip = if comp.description.is_empty() {
+        comp.name.as_str()
+    } else {
+        comp.description.as_str()
+    };
     let resp = resp.on_hover_text(format!(
         "{}\n\n{}\n\nClick to add at grid · drag onto canvas to place at cursor.",
-        comp.msl_path, tooltip
+        comp.name, tooltip
     ));
 
     RowAction {
@@ -709,15 +710,11 @@ fn chip(
 
 /// Score a component against a lowercased query. Higher = better.
 /// Returns 0 for no match.
-fn score_component(c: &MSLComponentDef, query_lc: &str) -> f32 {
-    let name_lc = c.display_name.to_lowercase();
-    let path_lc = c.msl_path.to_lowercase();
+fn score_component(c: &crate::index::ClassEntry, query_lc: &str) -> f32 {
+    let name_lc = c.short_name().to_lowercase();
+    let path_lc = c.name.to_lowercase();
     let cat_lc = c.category.to_lowercase();
-    let desc_lc = c
-        .description
-        .as_deref()
-        .map(str::to_lowercase)
-        .unwrap_or_default();
+    let desc_lc = c.description.to_lowercase();
 
     if name_lc == query_lc {
         return 10.0;

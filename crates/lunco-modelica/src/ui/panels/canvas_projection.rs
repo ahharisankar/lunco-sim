@@ -18,7 +18,7 @@ use bevy_egui::egui;
 use bevy::log::warn;
 use std::collections::HashMap;
 
-use crate::visual_diagram::{msl_component_library, MSLComponentDef, VisualDiagram};
+use crate::visual_diagram::{msl_class_library, VisualDiagram};
 
 // ---------------------------------------------------------------------------
 // Design Tokens — all visual constants live here (Tunability Mandate).
@@ -215,10 +215,10 @@ fn build_visual_diagram_from_scan(
     layout: &DiagramAutoLayoutSettings,
 ) -> VisualDiagram {
     let mut diagram = VisualDiagram::default();
-    let msl_lib = msl_component_library();
-    let msl_lookup_by_path: HashMap<&str, &MSLComponentDef> = msl_lib
+    let msl_lib = msl_class_library();
+    let msl_lookup_by_path: HashMap<&str, &crate::index::ClassEntry> = msl_lib
         .iter()
-        .map(|c| (c.msl_path.as_str(), c))
+        .map(|c| (c.name.as_str(), c))
         .collect();
 
     for (idx, comp) in scanned.iter().enumerate() {
@@ -431,9 +431,9 @@ pub fn import_model_to_diagram_from_ast(
     // matching by suffix would silently pick the wrong one. If a
     // reference doesn't resolve via scope or path, we surface it as
     // unresolved (skipped) rather than guess.
-    let msl_lib = msl_component_library();
-    let msl_lookup_by_path: HashMap<&str, &MSLComponentDef> = msl_lib.iter()
-        .map(|c| (c.msl_path.as_str(), c))
+    let msl_lib = msl_class_library();
+    let msl_lookup_by_path: HashMap<&str, &crate::index::ClassEntry> = msl_lib.iter()
+        .map(|c| (c.name.as_str(), c))
         .collect();
 
     // Build the active class's import map so we can resolve
@@ -493,14 +493,14 @@ pub fn import_model_to_diagram_from_ast(
     // alongside the model (e.g. `Engine`/`Tank` inside an
     // `AnnotatedRocketStage` package) would otherwise resolve as
     // unknown and disappear from the diagram. We synthesise a
-    // [`MSLComponentDef`] for each top-level class and one nesting
+    // [`crate::index::ClassEntry`] for each top-level class and one nesting
     // level deeper, carrying the extracted `Icon` annotation so the
     // canvas can render the user's own graphics.
     //
     // Ports are intentionally empty here — connector extraction for
     // user classes is a follow-up; the icon-rendering slice doesn't
     // need them.
-    let mut local_classes_by_short: HashMap<String, MSLComponentDef> = HashMap::new();
+    let mut local_classes_by_short: HashMap<String, crate::index::ClassEntry> = HashMap::new();
     // Scope the local-class registration based on what we're projecting:
     //
     //  - **Drill-in into an MSL class** (`target_class = "Modelica.…"`):
@@ -689,7 +689,7 @@ pub fn import_model_to_diagram_from_ast(
         let resolved_path: Option<String> = if type_name.contains('.') {
             Some(type_name.to_string())
         } else { imports_by_short.get(type_name).map(|full| full.clone()) };
-        let mut component_def: Option<MSLComponentDef> = resolved_path
+        let mut component_def: Option<crate::index::ClassEntry> = resolved_path
             .as_deref()
             .and_then(|p| msl_lookup_by_path.get(p).map(|d| (*d).clone()))
             .or_else(|| local_classes_by_short.get(type_name).cloned());
@@ -766,7 +766,7 @@ pub fn import_model_to_diagram_from_ast(
         );
         let is_type_alias = component_def
             .as_ref()
-            .map(|d| matches!(d.class_kind, crate::index::ClassKind::Type))
+            .map(|d| matches!(d.kind, crate::index::ClassKind::Type))
             .unwrap_or(false)
             || type_name.contains(".SIunits.")
             || type_name.contains(".Units.SI.")
@@ -776,28 +776,29 @@ pub fn import_model_to_diagram_from_ast(
         }
         if component_def.is_none() && !type_name.is_empty() {
             let leaf = type_name.rsplit('.').next().unwrap_or(type_name);
-            component_def = Some(MSLComponentDef {
-                name: leaf.to_string(),
-                msl_path: type_name.to_string(),
-                category: "User".to_string(),
-                display_name: leaf.to_string(),
-                description: None,
-                icon_text: None,
+            let _ = leaf;
+            component_def = Some(crate::index::ClassEntry {
+                name: type_name.to_string(),
+                kind: crate::index::ClassKind::Model,
+                source_range: None,
+                extends: Vec::new(),
+                description: String::new(),
+                children: Vec::new(),
+                icon: None,
+                documentation: (None, None),
+                equation_count: 0,
+                partial: false,
+                experiment: None,
                 ports: Vec::new(),
                 parameters: Vec::new(),
-                icon_graphics: None,
                 diagram_graphics: None,
-                short_description: None,
-                documentation_info: None,
-                is_example: false,
-                domain: String::new(),
-                class_kind: crate::index::ClassKind::Model,
-                partial: false,
+                icon_text: None,
+                category: "User".to_string(),
             });
         }
 
         // Re-extract the icon at runtime via the unified workspace
-        // engine. The pre-baked `MSLComponentDef.icon_graphics` from
+        // engine. The pre-baked `crate::index::ClassEntry.icon_graphics` from
         // `msl_index.json` drops primitives whose `extends` base sits
         // in a sibling package the indexer's resolver doesn't reach
         // (SpeedSensor extends PartialAbsoluteSensor extends
@@ -808,7 +809,7 @@ pub fn import_model_to_diagram_from_ast(
         // views render the same primitives without per-base
         // resolver-lambda plumbing.
         if let Some(def) = component_def.as_mut() {
-            let qualified = def.msl_path.clone();
+            let qualified = def.name.clone();
             // Engine owns icon resolution + caching. One API,
             // memoised, never blocks on disk. Returns None when the
             // class isn't in the session yet (cold MSL); caller
@@ -817,7 +818,7 @@ pub fn import_model_to_diagram_from_ast(
             // class.
             if let Some(handle) = crate::engine_resource::global_engine_handle() {
                 if let Some(icon) = handle.lock().icon_for(&qualified) {
-                    def.icon_graphics = Some(icon);
+                    def.icon = Some(icon);
                 }
             }
         }
@@ -1051,7 +1052,7 @@ pub fn import_model_to_diagram_from_ast(
 /// the MSL palette doesn't know about. Skips classes that don't carry
 /// any of the data we'd render — i.e. no decoded `Icon` annotation.
 fn register_local_class(
-    out: &mut HashMap<String, MSLComponentDef>,
+    out: &mut HashMap<String, crate::index::ClassEntry>,
     short_name: &str,
     class_def: &rumoca_session::parsing::ast::ClassDef,
     ast: &rumoca_session::parsing::ast::StoredDefinition,
@@ -1140,23 +1141,23 @@ fn register_local_class(
     };
     out.insert(
         short_name.to_string(),
-        MSLComponentDef {
+        crate::index::ClassEntry {
             name: short_name.to_string(),
-            msl_path: short_name.to_string(),
-            category: "Local".to_string(),
-            display_name: short_name.to_string(),
-            description: None,
-            icon_text: None,
+            kind: class_kind,
+            source_range: None,
+            extends: Vec::new(),
+            description: String::new(),
+            children: Vec::new(),
+            icon,
+            documentation: (None, None),
+            equation_count: 0,
+            partial: class_def.partial,
+            experiment: None,
             ports,
             parameters: Vec::new(),
-            icon_graphics: icon,
             diagram_graphics: crate::annotations::extract_diagram(&class_def.annotation),
-            short_description: None,
-            documentation_info: None,
-            is_example: false,
-            domain: String::new(),
-            class_kind,
-            partial: class_def.partial,
+            icon_text: None,
+            category: "Local".to_string(),
         },
     );
 }

@@ -1,7 +1,7 @@
 //! Unified read-side view of "what does the workbench know about
 //! this class?".
 //!
-//! Both the pre-baked MSL palette index ([`MSLComponentDef`]) and
+//! Both the pre-baked MSL palette index ([`crate::index::ClassEntry`]) and
 //! the live per-document index ([`ClassEntry`]) carry the same
 //! conceptual fields — kind, description, documentation, icon —
 //! shaped differently because one is a serialised palette payload
@@ -25,12 +25,11 @@ use bevy::prelude::World;
 use crate::annotations::Icon;
 use crate::class_ref::{ClassRef, Library};
 use crate::index::{ClassEntry, ClassKind};
-use crate::visual_diagram::MSLComponentDef;
 
 /// Read-side metadata for a class, regardless of where the source
 /// of truth lives. Keep this minimal — it should *not* grow into
 /// every field of both backends. The projector keeps its own
-/// `MSLComponentDef` lookup for ports / parameters / graphics;
+/// `crate::index::ClassEntry` lookup for ports / parameters / graphics;
 /// callers that only want the display fields use this.
 #[derive(Clone, Debug)]
 pub struct ClassMetadata {
@@ -61,21 +60,6 @@ impl From<&ClassEntry> for ClassMetadata {
     }
 }
 
-impl From<&MSLComponentDef> for ClassMetadata {
-    fn from(c: &MSLComponentDef) -> Self {
-        Self {
-            qualified: c.msl_path.clone(),
-            kind: c.class_kind,
-            description: c
-                .short_description
-                .clone()
-                .unwrap_or_default(),
-            documentation: (c.documentation_info.clone(), None),
-            icon: c.icon_graphics.clone(),
-        }
-    }
-}
-
 /// Resolve metadata for `class` from whichever backend owns it.
 /// Returns `None` only when no backend has heard of the class yet
 /// (e.g. an MSL drill before the indexer ran, or a workspace doc
@@ -86,7 +70,7 @@ pub fn resolve_metadata(world: &World, class: &ClassRef) -> Option<ClassMetadata
             // 1. Pre-baked palette index — `msl_index.json` covers
             //    every indexed class with absolute qualified names.
             let qualified = class.qualified();
-            if let Some(def) = crate::visual_diagram::msl_component_by_path(&qualified) {
+            if let Some(def) = crate::visual_diagram::msl_class_by_path(&qualified) {
                 return Some(ClassMetadata::from(&def));
             }
             // 2. Fallback: if the user has the owning doc open

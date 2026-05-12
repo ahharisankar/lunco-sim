@@ -120,7 +120,7 @@ impl Panel for PackageBrowserPanel {
                     }
                 }
                 PackageAction::DragStart { msl_path } => {
-                    if let Some(def) = crate::visual_diagram::msl_component_by_path(&msl_path) {
+                    if let Some(def) = crate::visual_diagram::msl_class_by_path(&msl_path) {
                         world.get_resource_or_insert_with::<crate::ui::panels::palette::ComponentDragPayload>(Default::default).def = Some(def);
                     }
                 }

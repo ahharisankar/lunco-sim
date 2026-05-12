@@ -30,7 +30,7 @@ use crate::models::bundled_models;
 // `DrilledInClassNames` reads migrated to
 // `crate::ui::panels::model_view::drilled_class_for_doc`.
 use crate::ui::state::{CompileState, CompileStates, ModelicaDocumentRegistry};
-use crate::visual_diagram::{msl_component_library, MSLComponentDef};
+use crate::visual_diagram::msl_class_library;
 use lunco_doc::DocumentId;
 
 /// Plugin that registers the [`ApiQueryProvider`]s exposed by
@@ -291,15 +291,15 @@ impl ApiQueryProvider for ListMslProvider {
         // ms). The agent can preflight `MslStatus` to decide whether to
         // wait. We accept the blocking cost rather than returning an
         // empty result — better to be slow than to lie.
-        let lib = msl_component_library();
+        let lib = msl_class_library();
 
         // Apply filters in one pass over the static slice. The filter
         // closures are cheap; no allocation until we slice the
         // matching subset for the response.
-        let matched: Vec<&MSLComponentDef> = lib
+        let matched: Vec<&crate::index::ClassEntry> = lib
             .iter()
             .filter(|c| match prefix {
-                Some(p) => c.msl_path.starts_with(p),
+                Some(p) => c.name.starts_with(p),
                 None => true,
             })
             .filter(|c| match category {
@@ -309,15 +309,15 @@ impl ApiQueryProvider for ListMslProvider {
                     // categories the Welcome tab and palette already
                     // surface.
                     let after_modelica = c
-                        .msl_path
+                        .name
                         .strip_prefix("Modelica.")
-                        .unwrap_or(&c.msl_path);
+                        .unwrap_or(&c.name);
                     let top = after_modelica.split('.').next().unwrap_or("");
                     top.eq_ignore_ascii_case(cat)
                 }
                 None => true,
             })
-            .filter(|c| !examples_only || c.msl_path.contains(".Examples."))
+            .filter(|c| !examples_only || c.is_example())
             .collect();
 
         let total = matched.len();
@@ -332,11 +332,11 @@ impl ApiQueryProvider for ListMslProvider {
             .iter()
             .map(|c| {
                 serde_json::json!({
-                    "qualified": c.msl_path,
-                    "name": c.name,
+                    "qualified": c.name,
+                    "name": c.short_name(),
                     "category": c.category,
-                    "display_name": c.display_name,
-                    "description": c.description,
+                    "display_name": c.short_name(),
+                    "description": if c.description.is_empty() { None } else { Some(c.description.clone()) },
                 })
             })
             .collect();
@@ -942,16 +942,18 @@ impl ApiQueryProvider for FindModelProvider {
         // initialization here would block on the JSON parse, which
         // is acceptable since the result is cached after the first
         // call. Subsequent finds hit the warm cache.
-        for c in msl_component_library() {
-            if let Some(score) = score(&q, &c.display_name, &c.msl_path) {
+        for c in msl_class_library() {
+            if let Some(score) = score(&q, c.short_name(), &c.name) {
+                let label = c.short_name().to_string();
                 hits.push(FindHit {
-                    uri: c.msl_path.clone(),
-                    label: c.display_name.clone(),
+                    uri: c.name.clone(),
+                    label,
                     source: "msl",
-                    description: c
-                        .description
-                        .clone()
-                        .unwrap_or_else(|| c.msl_path.clone()),
+                    description: if c.description.is_empty() {
+                        c.name.clone()
+                    } else {
+                        c.description.clone()
+                    },
                     score,
                 });
             }

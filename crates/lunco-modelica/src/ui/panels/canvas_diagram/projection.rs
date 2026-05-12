@@ -218,14 +218,14 @@ pub(super) fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramN
             ),
             kind: "modelica.icon".into(),
             data: std::sync::Arc::new(IconNodeData {
-                qualified_type: node.component_def.msl_path.clone(),
+                qualified_type: node.component_def.name.clone(),
                 icon_only: crate::ui::loaded_classes::is_icon_only_class(
-                    &node.component_def.msl_path,
+                    &node.component_def.name,
                 ),
                 expandable_connector: node.component_def.is_expandable_connector(),
-                icon_graphics: node.component_def.icon_graphics.clone(),
+                icon_graphics: node.component_def.icon.clone(),
                 diagram_graphics: if matches!(
-                    node.component_def.class_kind,
+                    node.component_def.kind,
                     crate::index::ClassKind::Connector
                         | crate::index::ClassKind::ExpandableConnector
                 ) {
@@ -262,7 +262,7 @@ pub(super) fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramN
                     .map(|p| (p.name.clone(), p.msl_path.clone(), p.size_x, p.size_y, p.rotation_deg))
                     .collect(),
                 port_connector_icons: resolve_port_icons(
-                    &node.component_def.msl_path,
+                    &node.component_def.name,
                     &node.component_def.ports,
                 ),
                 is_conditional: node.is_conditional,
@@ -283,7 +283,7 @@ pub(super) fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramN
             // bbox so rotation / mirror are honoured.
             visual_rect: node
                 .component_def
-                .icon_graphics
+                .icon
                 .as_ref()
                 .and_then(|icon| icon.graphics_bbox())
                 .map(|e| {
