@@ -299,45 +299,22 @@ fn render_docs_view(ui: &mut egui::Ui, world: &mut World) {
         return;
     };
 
+    // Single lookup point — `resolve_metadata_for_doc` owns the
+    // within-prefix fallback chain so the docs view doesn't have to
+    // re-derive it (and drift from the badge / inspector lookups).
     let (class_name, class_description, info, revisions) = {
         let drilled = super::context::drilled_class_for_doc(world, doc);
-        world.resource::<ModelicaDocumentRegistry>().host(doc).and_then(|h| {
-            let index = h.document().index();
-            let fallback = || index.classes.values().find(|c| !matches!(c.kind, crate::index::ClassKind::Package)).or_else(|| index.classes.values().next());
-            // The index keys classes by the qualified name rumoca
-            // produced — which is the name *as declared in the file*,
-            // not the full path including the file's `within` scope.
-            // So `drilled = "Modelica.Blocks.Examples.BooleanNetwork1"`
-            // has to fall through to the `Blocks.Examples.BooleanNetwork1`
-            // form (within=`Modelica`) or even just the suffix when
-            // the within is multi-segment. Try the full path first,
-            // then progressively strip leading segments, then leaf
-            // name, then a within-aware suffix-match against the
-            // index keys as a last resort.
-            let entry = if let Some(q) = drilled.as_deref() {
-                let mut found = index.classes.get(q);
-                if found.is_none() {
-                    let mut remainder = q;
-                    while let Some((_, rest)) = remainder.split_once('.') {
-                        if let Some(e) = index.classes.get(rest) { found = Some(e); break; }
-                        remainder = rest;
-                    }
-                }
-                if found.is_none() {
-                    // Last-resort suffix scan: index key ends with
-                    // `.<leaf>` or equals `<leaf>`.
-                    let leaf = q.rsplit('.').next().unwrap_or(q);
-                    found = index.classes.iter()
-                        .find(|(k, _)| k.as_str() == leaf || k.ends_with(&format!(".{leaf}")))
-                        .map(|(_, v)| v);
-                }
-                found.or_else(fallback)
-            } else {
-                fallback()
-            }?;
-            let (info, revs) = entry.documentation.clone();
-            Some((Some(entry.name.clone()), (!entry.description.is_empty()).then(|| entry.description.clone()), info, revs))
-        }).unwrap_or((None, None, None, None))
+        crate::class_metadata::resolve_metadata_for_doc(world, doc, drilled.as_deref())
+            .map(|m| {
+                let (info, revs) = m.documentation;
+                (
+                    Some(m.qualified),
+                    (!m.description.is_empty()).then_some(m.description),
+                    info,
+                    revs,
+                )
+            })
+            .unwrap_or((None, None, None, None))
     };
 
     egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {

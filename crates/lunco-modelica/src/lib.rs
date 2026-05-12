@@ -47,6 +47,13 @@ use lunco_assets::msl_dir;
 /// migration map.
 pub mod class_ref;
 
+/// Unified read-side metadata for Modelica classes — folds the
+/// pre-baked palette index ([`visual_diagram::MSLComponentDef`]) and
+/// the live per-document [`index::ClassEntry`] into one
+/// [`class_metadata::ClassMetadata`] shape so docs view, badges,
+/// and inspector title all read through one path.
+pub mod class_metadata;
+
 /// AST-based extraction functions for Modelica source code.
 ///
 /// Walks the full Modelica AST (via `rumoca_phase_parse`) to extract model names,
