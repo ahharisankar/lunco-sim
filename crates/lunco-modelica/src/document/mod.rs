@@ -11,7 +11,7 @@ pub use ops::{ModelicaOp, ModelicaChange, OpKind, FreshAst, CHANGE_HISTORY_CAPAC
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lunco_doc::{DocumentHost, DocumentId};
+    use lunco_doc::{DocumentHost, DocumentId, Reject};
     use crate::pretty::{ComponentDecl, ConnectEquation};
 
     fn doc() -> DocumentHost<ModelicaDocument> {
@@ -26,7 +26,7 @@ mod tests {
         let host = doc();
         assert_eq!(host.generation(), 0);
         assert_eq!(host.document().source(), "model Empty end Empty;\n");
-        assert_eq!(host.document().id(), DocumentId::new(1));
+        assert_eq!(host.document().id_owned(), DocumentId::new(1));
         assert!(!host.can_undo());
         assert!(!host.can_redo());
         assert!(!host.document().is_empty());
@@ -192,7 +192,7 @@ mod tests {
                 replacement: String::new(),
             })
             .unwrap_err();
-        assert!(matches!(err, DocumentError::ValidationFailed(_)));
+        assert!(matches!(err, Reject::InvalidOp(_)));
         assert_eq!(host.document().source(), "model Empty end Empty;\n");
         assert_eq!(host.generation(), 0);
     }

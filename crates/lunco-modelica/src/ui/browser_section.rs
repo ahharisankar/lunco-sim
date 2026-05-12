@@ -294,15 +294,20 @@ fn classes_from_index(index: &crate::index::ModelicaIndex) -> (Vec<ClassEntry>, 
 // Test helpers
 // ---------------------------------------------------------------------------
 
-/// Test-only convenience: build a [`SyntaxCache`] from `source` and
-/// derive the class tree + error flag through the same path as the
-/// production renderer. Mirrors what `render` does, but starting
-/// from raw source (production gets the cache from
-/// [`crate::document::ModelicaDocument`] via the off-thread refresh).
+/// Test-only convenience: build a `ModelicaDocument` from `source`
+/// and derive the class tree through the same `classes_from_index`
+/// path the production renderer uses. Replaces the old
+/// `SyntaxCache → classes_from_syntax` shortcut that was deleted in
+/// the index-refactor.
 #[cfg(test)]
 fn parse_classes(source: &str) -> (Vec<ClassEntry>, bool) {
-    let syntax = SyntaxCache::from_source(source, 0);
-    classes_from_syntax(&syntax)
+    use lunco_doc::{DocumentId, DocumentOrigin};
+    let doc = crate::document::ModelicaDocument::with_origin(
+        DocumentId::new(1),
+        source.to_string(),
+        DocumentOrigin::untitled("test"),
+    );
+    classes_from_index(doc.index())
 }
 
 
