@@ -480,6 +480,26 @@ pub(crate) fn type_badge(kind: &ClassType, theme: &lunco_theme::Theme) -> Badge 
     }
 }
 
+/// Same badge mapping keyed by a lowercase `class_kind` string
+/// (`"model"`, `"block"`, `"connector"`, ...). Lets the package
+/// browser's flat-row renderer mint the same coloured M/B/X
+/// glyphs the workspace section uses, without duplicating the
+/// colour table. Unknown kinds fall through to `Class`.
+pub(crate) fn type_badge_from_str(class_kind: &str, theme: &lunco_theme::Theme) -> Badge {
+    let kind = match class_kind.to_ascii_lowercase().as_str() {
+        "model" => ClassType::Model,
+        "block" => ClassType::Block,
+        "connector" => ClassType::Connector,
+        "record" => ClassType::Record,
+        "type" => ClassType::Type,
+        "package" => ClassType::Package,
+        "function" => ClassType::Function,
+        "operator" => ClassType::Operator,
+        _ => ClassType::Class,
+    };
+    type_badge(&kind, theme)
+}
+
 pub(crate) fn paint_badge(ui: &mut egui::Ui, badge: Badge, theme: &lunco_theme::Theme) {
     use crate::ui::theme::ModelicaThemeExt;
     ui.add(

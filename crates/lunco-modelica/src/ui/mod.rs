@@ -805,7 +805,7 @@ impl Plugin for ModelicaUiPlugin {
             loaded.register(Box::new(loaded_classes::SystemLibraryClass::new(
                 format!("{cache_subdir}_root"),
                 package_dir,
-                false,
+                true,
             )));
         }
         loaded.register(Box::new(loaded_classes::SystemLibraryClass::new(

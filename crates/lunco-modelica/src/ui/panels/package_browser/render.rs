@@ -67,8 +67,10 @@ impl Panel for PackageBrowserPanel {
                 });
 
                 if let Some(twin) = cache.twin.as_mut() {
-                    if let Some(a) = render_twin_node(&mut twin.root_node, ui, active_path, &theme) {
-                        action = Some(a);
+                    for kid in &mut twin.root_node.children {
+                        if let Some(a) = render_twin_node(kid, ui, active_path, &theme) {
+                            action = Some(a);
+                        }
                     }
                 }
 
@@ -164,7 +166,7 @@ fn render_twin_node(
     }
 }
 
-fn render_node_single(
+pub(crate) fn render_node_single(
     node: &mut PackageNode,
     ui: &mut egui::Ui,
     active_path: Option<&str>,
@@ -208,18 +210,33 @@ fn render_node_single(
         }
         PackageNode::Model { id, name, library, class_kind } => {
             let is_active = active_path == Some(name.as_str());
-            let mut label = egui::RichText::new(format!("📄 {}", name));
-            if is_active {
-                label = label.strong().color(theme.tokens.accent);
-            }
-            let mut resp = ui.selectable_label(is_active, label);
+            let row = ui.horizontal(|ui| {
+                if let Some(kind) = class_kind.as_deref() {
+                    let badge = crate::ui::browser_section::type_badge_from_str(kind, theme);
+                    crate::ui::browser_section::paint_badge(ui, badge, theme);
+                } else {
+                    let icon = match library {
+                        crate::ui::state::ModelLibrary::MSL => "?",
+                        crate::ui::state::ModelLibrary::Bundled => "📦",
+                        crate::ui::state::ModelLibrary::User => "📁",
+                        crate::ui::state::ModelLibrary::InMemory => "💾",
+                    };
+                    ui.label(egui::RichText::new(icon).size(11.0));
+                }
+                let mut label = egui::RichText::new(name.as_str());
+                if is_active {
+                    label = label.strong().color(theme.tokens.accent);
+                }
+                ui.add(egui::Label::new(label).selectable(false).sense(egui::Sense::click()))
+            });
+            let mut resp = row.inner;
             if resp.clicked() {
                 action = Some(PackageAction::Open(id.clone(), name.clone(), library.clone(), ui.input(|i| i.modifiers.command)));
             }
             if let Some(kind) = class_kind {
                 resp = resp.on_hover_text(format!("Kind: {}", kind));
             }
-            
+
             if matches!(library, crate::ui::state::ModelLibrary::MSL) {
                 let msl_path = id.strip_prefix("msl_path:").unwrap_or(id).to_string();
                 if ui.rect_contains_pointer(resp.rect) && ui.input(|i| i.pointer.any_down()) {

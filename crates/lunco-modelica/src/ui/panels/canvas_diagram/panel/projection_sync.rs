@@ -120,14 +120,18 @@ pub(crate) fn trigger_projection_if_needed(
     let needs_project = {
         let state = world.resource::<CanvasDiagramState>();
         let docstate = match render_tab_id { Some(t) => state.get_for_tab(t), None => state.get(Some(doc_id)) };
+        // Don't respawn while a projection is already in flight —
+        // otherwise every frame cancels and re-spawns the task,
+        // it never gets to complete, and the canvas stays blank.
+        let task_in_flight = docstate.projection_task.is_some();
         let first_render = !match render_tab_id { Some(t) => state.has_entry_for_tab(t), None => state.has_entry(doc_id) };
         let gen_advanced = gen != docstate.last_seen_gen && gen > docstate.canvas_acked_gen;
         let live_target = render_target(world).filter(|(d, _)| *d == doc_id).and_then(|(_, drilled)| drilled).or_else(|| world.get_resource::<ModelTabs>().and_then(|t| t.drilled_class_for_doc(doc_id)));
         let target_changed = live_target != docstate.last_seen_target;
         let ast_stale = world.resource::<ModelicaDocumentRegistry>().host(doc_id).map(|h| h.document().ast_is_stale()).unwrap_or(false);
         if ast_stale { ui.ctx().request_repaint(); }
-        
-        !ast_stale && (first_render || target_changed || (gen_advanced && {
+
+        !ast_stale && !task_in_flight && (first_render || target_changed || (gen_advanced && {
             let new_hash = projection_relevant_source_hash(&current_source);
             new_hash != docstate.last_seen_source_hash
         }))

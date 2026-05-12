@@ -191,41 +191,32 @@ impl LeafKind {
     }
 }
 
+/// Build a tree node from a single `.mo` file using rumoca's AST —
+/// no line-scanning heuristics. Single-class files become a
+/// [`PackageNode::Model`] leaf with the parsed kind on the badge;
+/// inline-package files (`package Foo … model X … end Foo;`) become
+/// a [`PackageNode::Category`] whose children mirror the nested
+/// classes, so the user can drill into individual entries (the
+/// MSL `Modelica.Blocks.Continuous` case).
 fn node_from_modelica_file(path: &Path, qualified: &str, display_name: &str) -> PackageNode {
-    let kind = peek_class_kind_from_source_file(path);
-    PackageNode::Model {
+    let leaf_unknown = || PackageNode::Model {
         id: format!("msl_path:{}", qualified),
         name: display_name.to_string(),
         library: ModelLibrary::MSL,
-        class_kind: kind,
-    }
-}
-
-fn peek_class_kind_from_source_file(path: &Path) -> Option<String> {
-    let Ok(src) = std::fs::read_to_string(path) else { return None; };
-    peek_class_kind_from_source(&src)
+        class_kind: None,
+    };
+    let Ok(source) = std::fs::read_to_string(path) else { return leaf_unknown(); };
+    let ast = rumoca_phase_parse::parse_to_recovered_ast(&source, &path.display().to_string());
+    let Some((_, top_class)) = ast.classes.iter().next() else { return leaf_unknown(); };
+    class_def_to_node(path, qualified, display_name, top_class)
 }
 
 pub fn peek_class_kind_from_source(src: &str) -> Option<String> {
-    for line in src.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with("//") || line.starts_with("/*") {
-            continue;
-        }
-        for word in line.split_whitespace() {
-            match word {
-                "model" | "block" | "connector" | "package"
-                | "record" | "type" | "function" | "class" => {
-                    return Some(word.to_string());
-                }
-                "encapsulated" | "partial" | "operator" | "expandable"
-                | "pure" | "impure" | "redeclare" | "final"
-                | "inner" | "outer" | "replaceable" => continue,
-                _ => return None,
-            }
-        }
-    }
-    None
+    let ast = rumoca_phase_parse::parse_to_recovered_ast(src, "");
+    ast.classes
+        .iter()
+        .next()
+        .map(|(_, def)| format!("{:?}", def.class_type).to_lowercase())
 }
 
 fn class_def_to_node(

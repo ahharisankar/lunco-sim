@@ -607,7 +607,14 @@ pub fn drain_open_file_results(world: &mut bevy::prelude::World) {
     }
 }
 
-pub fn open_bundled_in_world(world: &mut World, filename: &str) {
+pub fn open_bundled_in_world(world: &mut World, tail: &str) {
+    // Bundled inner-class ids look like `<file>#<qualified>`; the
+    // filename portion drives source lookup, the fragment (if any)
+    // is the drill-in target for the canvas projector.
+    let (filename, drill_in) = match tail.split_once('#') {
+        Some((f, q)) => (f, Some(q.to_string())),
+        None => (tail, None),
+    };
     let Some(source) = crate::models::get_model(filename) else {
         bevy::log::warn!("[OpenFile] no bundled model named `{}`", filename);
         return;
@@ -627,6 +634,9 @@ pub fn open_bundled_in_world(world: &mut World, filename: &str) {
     let tab_id = tabs.ensure_for(doc_id, None);
     if let Some(tab) = tabs.get_mut(tab_id) {
         tab.view_mode = crate::ui::panels::model_view::ModelViewMode::Canvas;
+        if drill_in.is_some() {
+            tab.drilled_class = drill_in;
+        }
     }
     world.commands().trigger(lunco_workbench::OpenTab {
         kind: MODEL_VIEW_KIND,
