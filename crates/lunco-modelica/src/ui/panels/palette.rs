@@ -102,23 +102,24 @@ fn category_color(name: &str, theme: &lunco_theme::Theme) -> egui::Color32 {
 
 /// Should this entry be shown in the instantiable palette?
 ///
-/// `msl_index.json` includes connectors (`class_kind == "connector"`),
-/// partial classes, and other non-instantiable interface types — they
-/// were leaking into the search results, so users dragging "resistor"
-/// could hit `ACpin` instead of `Resistor`. This filter mirrors what
-/// OMEdit/Dymola's component browsers exclude:
+/// Connectors are a real semantic distinction — they're ports, not
+/// standalone components, so dragging one onto a canvas is a
+/// category error. We filter them out.
 ///
-///   - any `connector` class (ports/interfaces, not standalone parts)
-///   - anything under a `.Interfaces.` package (partial-models, ICs)
-///   - anything under `.Internal.` (library-private helpers)
+/// The legacy filter also excluded anything under `.Interfaces.` or
+/// `.Internal.` packages, but those are *naming conventions*, not
+/// language-defined properties. `.Interfaces.` was a proxy for
+/// `partial`-keyword classes (which we'd surface formally via a
+/// `partial: bool` field on `MSLComponentDef` once the indexer
+/// emits it); `.Internal.` was MSL author lore with no formal
+/// marker. Dropped — users with a search box won't typically hit
+/// these by accident, and we don't get to pretend we know which
+/// helpers each library author wanted hidden.
 pub(crate) fn is_instantiable(c: &MSLComponentDef) -> bool {
-    if c.class_kind.eq_ignore_ascii_case("connector") {
-        return false;
-    }
-    if c.msl_path.contains(".Interfaces.") || c.msl_path.contains(".Internal.") {
-        return false;
-    }
-    true
+    !matches!(
+        c.class_kind,
+        crate::index::ClassKind::Connector | crate::index::ClassKind::ExpandableConnector
+    )
 }
 
 /// Match a component's MSL path to one of our display categories.

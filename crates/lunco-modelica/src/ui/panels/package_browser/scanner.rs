@@ -156,7 +156,7 @@ fn omedit_sort_key(n: &PackageNode) -> (SortGroup, String) {
         _ => match n {
             PackageNode::Category { .. } => SortGroup::SubPackage,
             PackageNode::Model { class_kind, .. } => {
-                SortGroup::Leaf(LeafKind::from_str(class_kind.as_deref()))
+                SortGroup::Leaf(LeafKind::from_kind(*class_kind))
             }
         },
     };
@@ -173,19 +173,19 @@ enum SortGroup {
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 enum LeafKind {
-    Model, Block, Connector, Record, Function, Type, Constant, Other,
+    Model, Block, Connector, Record, Function, Type, Other,
 }
 
 impl LeafKind {
-    fn from_str(kind: Option<&str>) -> Self {
+    fn from_kind(kind: Option<crate::index::ClassKind>) -> Self {
+        use crate::index::ClassKind;
         match kind {
-            Some("model") => Self::Model,
-            Some("block") => Self::Block,
-            Some("connector") => Self::Connector,
-            Some("record") => Self::Record,
-            Some("function") => Self::Function,
-            Some("type") => Self::Type,
-            Some("constant") => Self::Constant,
+            Some(ClassKind::Model) => Self::Model,
+            Some(ClassKind::Block) => Self::Block,
+            Some(ClassKind::Connector) | Some(ClassKind::ExpandableConnector) => Self::Connector,
+            Some(ClassKind::Record) | Some(ClassKind::OperatorRecord) => Self::Record,
+            Some(ClassKind::Function) => Self::Function,
+            Some(ClassKind::Type) => Self::Type,
             _ => Self::Other,
         }
     }
@@ -211,12 +211,12 @@ fn node_from_modelica_file(path: &Path, qualified: &str, display_name: &str) -> 
     class_def_to_node(path, qualified, display_name, top_class)
 }
 
-pub fn peek_class_kind_from_source(src: &str) -> Option<String> {
+pub fn peek_class_kind_from_source(src: &str) -> Option<crate::index::ClassKind> {
     let ast = rumoca_phase_parse::parse_to_recovered_ast(src, "");
     ast.classes
         .iter()
         .next()
-        .map(|(_, def)| format!("{:?}", def.class_type).to_lowercase())
+        .map(|(_, def)| crate::index::map_class_type(&def.class_type))
 }
 
 fn class_def_to_node(
@@ -247,7 +247,7 @@ fn class_def_to_node(
             id: format!("msl_path:{}", qualified),
             name: short_name.to_string(),
             library: ModelLibrary::MSL,
-            class_kind: Some(format!("{:?}", def.class_type).to_lowercase()),
+            class_kind: Some(crate::index::map_class_type(&def.class_type)),
         }
     }
 }

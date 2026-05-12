@@ -135,7 +135,7 @@ fn build_bundled_tree() -> Vec<PackageNode> {
                     .unwrap_or(m.filename)
                     .to_string(),
                 library: ModelLibrary::Bundled,
-                class_kind: Some("model".to_string()),
+                class_kind: Some(crate::index::ClassKind::Model),
             },
         })
         .collect()
@@ -145,7 +145,7 @@ fn bundled_class_to_node(
     filename: &str,
     tree: &crate::visual_diagram::BundledClassTree,
 ) -> PackageNode {
-    let is_package = tree.class_kind == "package";
+    let is_package = matches!(tree.class_kind, crate::index::ClassKind::Package);
     if is_package && !tree.children.is_empty() {
         let children: Vec<PackageNode> = tree
             .children
@@ -165,7 +165,7 @@ fn bundled_class_to_node(
             id: format!("bundled://{filename}#{}", tree.qualified_path),
             name: tree.short_name.clone(),
             library: ModelLibrary::Bundled,
-            class_kind: Some(tree.class_kind.clone()),
+            class_kind: Some(tree.class_kind),
         }
     }
 }

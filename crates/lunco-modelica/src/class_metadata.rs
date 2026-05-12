@@ -65,7 +65,7 @@ impl From<&MSLComponentDef> for ClassMetadata {
     fn from(c: &MSLComponentDef) -> Self {
         Self {
             qualified: c.msl_path.clone(),
-            kind: kind_from_str(&c.class_kind),
+            kind: c.class_kind,
             description: c
                 .short_description
                 .clone()
@@ -73,22 +73,6 @@ impl From<&MSLComponentDef> for ClassMetadata {
             documentation: (c.documentation_info.clone(), None),
             icon: c.icon_graphics.clone(),
         }
-    }
-}
-
-fn kind_from_str(s: &str) -> ClassKind {
-    match s {
-        "model" => ClassKind::Model,
-        "block" => ClassKind::Block,
-        "connector" => ClassKind::Connector,
-        "package" => ClassKind::Package,
-        "function" => ClassKind::Function,
-        "record" => ClassKind::Record,
-        "type" => ClassKind::Type,
-        "operator" => ClassKind::Operator,
-        // Pre-baked palette stores lower-case keywords; legacy /
-        // missing entries default to `Class` (least-bad fallback).
-        _ => ClassKind::Class,
     }
 }
 

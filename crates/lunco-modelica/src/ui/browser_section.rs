@@ -518,24 +518,30 @@ pub(crate) fn type_badge(kind: &ClassType, theme: &lunco_theme::Theme) -> Badge 
     }
 }
 
-/// Same badge mapping keyed by a lowercase `class_kind` string
-/// (`"model"`, `"block"`, `"connector"`, ...). Lets the package
-/// browser's flat-row renderer mint the same coloured M/B/X
-/// glyphs the workspace section uses, without duplicating the
-/// colour table. Unknown kinds fall through to `Class`.
-pub(crate) fn type_badge_from_str(class_kind: &str, theme: &lunco_theme::Theme) -> Badge {
-    let kind = match class_kind.to_ascii_lowercase().as_str() {
-        "model" => ClassType::Model,
-        "block" => ClassType::Block,
-        "connector" => ClassType::Connector,
-        "record" => ClassType::Record,
-        "type" => ClassType::Type,
-        "package" => ClassType::Package,
-        "function" => ClassType::Function,
-        "operator" => ClassType::Operator,
-        _ => ClassType::Class,
+/// Badge mapping keyed by our typed [`crate::index::ClassKind`].
+/// Translates the workbench enum to rumoca's `ClassType` (the
+/// shape `type_badge` expects) at the one boundary instead of
+/// every consumer rolling its own string match.
+pub(crate) fn type_badge_for_kind(
+    kind: crate::index::ClassKind,
+    theme: &lunco_theme::Theme,
+) -> Badge {
+    use crate::index::ClassKind;
+    let ct = match kind {
+        ClassKind::Model => ClassType::Model,
+        ClassKind::Block => ClassType::Block,
+        // Expandable connectors share the connector badge —
+        // the dashed-border distinction lives in the canvas
+        // visual, not the tree icon.
+        ClassKind::Connector | ClassKind::ExpandableConnector => ClassType::Connector,
+        ClassKind::Record | ClassKind::OperatorRecord => ClassType::Record,
+        ClassKind::Type => ClassType::Type,
+        ClassKind::Package => ClassType::Package,
+        ClassKind::Function => ClassType::Function,
+        ClassKind::Operator => ClassType::Operator,
+        ClassKind::Class => ClassType::Class,
     };
-    type_badge(&kind, theme)
+    type_badge(&ct, theme)
 }
 
 pub(crate) fn paint_badge(ui: &mut egui::Ui, badge: Badge, theme: &lunco_theme::Theme) {

@@ -234,10 +234,12 @@ pub struct MSLComponentDef {
     /// Empty for non-MSL classes.
     #[serde(default)]
     pub domain: String,
-    /// Lower-case Modelica class keyword: `"model"`, `"block"`,
-    /// `"connector"`, `"record"`, …
+    /// Modelica class kind — typed enum, serialised as the
+    /// lowercase keyword (`"model"`, `"block"`, `"connector"`,
+    /// `"record"`, …) so legacy `msl_index.json` files keep
+    /// deserialising unchanged.
     #[serde(default)]
-    pub class_kind: String,
+    pub class_kind: crate::index::ClassKind,
 }
 
 /// One bundled `.mo` file's parsed class tree, captured at index
@@ -268,9 +270,10 @@ pub struct BundledClassTree {
     /// Dotted path *within the file* — empty parent for the top
     /// class, `<top>.<child>` for nested ones.
     pub qualified_path: String,
-    /// Lower-case Modelica class keyword: `"package"`, `"model"`,
-    /// `"connector"`, `"record"`, … Drives the kind badge.
-    pub class_kind: String,
+    /// Modelica class kind. Drives the kind badge. Serialised as
+    /// the lowercase keyword for on-disk JSON compat.
+    #[serde(default)]
+    pub class_kind: crate::index::ClassKind,
     /// First-line description string from `class Foo "…"`. `None`
     /// when the class has no doc comment.
     #[serde(default)]

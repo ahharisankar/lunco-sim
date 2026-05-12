@@ -164,18 +164,31 @@ pub struct ClassEntry {
     pub experiment: Option<crate::annotations::Experiment>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default,
+    serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum ClassKind {
     Model,
     Block,
     Connector,
     Package,
     Function,
+    /// Bare `class` keyword. Also the serde default so legacy
+    /// `msl_index.json` entries with missing / unknown `class_kind`
+    /// values don't fail to deserialise.
+    #[default]
     Class,
     Type,
     Record,
+    /// `expandable connector` (MLS §9.1.3) — two-word keyword
+    /// flattened to one identifier in serde to keep the on-disk
+    /// JSON readable.
+    #[serde(rename = "expandable_connector", alias = "expandableconnector")]
     ExpandableConnector,
     Operator,
+    #[serde(rename = "operator_record", alias = "operatorrecord")]
     OperatorRecord,
 }
 
@@ -188,6 +201,42 @@ impl ClassKind {
     /// avoid offering nonsense choices.
     pub fn is_simulatable(self) -> bool {
         matches!(self, ClassKind::Model | ClassKind::Block | ClassKind::Class)
+    }
+
+    /// Parse a lowercase Modelica class keyword. Adapter for legacy
+    /// callsites still holding `Option<String>`; unknown keywords
+    /// fold to [`ClassKind::Class`] (matches the serde default).
+    pub fn from_keyword(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "model" => ClassKind::Model,
+            "block" => ClassKind::Block,
+            "connector" => ClassKind::Connector,
+            "package" => ClassKind::Package,
+            "function" => ClassKind::Function,
+            "record" => ClassKind::Record,
+            "type" => ClassKind::Type,
+            "operator" => ClassKind::Operator,
+            "expandable_connector" | "expandableconnector" => ClassKind::ExpandableConnector,
+            "operator_record" | "operatorrecord" => ClassKind::OperatorRecord,
+            _ => ClassKind::Class,
+        }
+    }
+
+    /// Lowercase keyword string for badges and display.
+    pub fn as_keyword(self) -> &'static str {
+        match self {
+            ClassKind::Model => "model",
+            ClassKind::Block => "block",
+            ClassKind::Connector => "connector",
+            ClassKind::Package => "package",
+            ClassKind::Function => "function",
+            ClassKind::Class => "class",
+            ClassKind::Type => "type",
+            ClassKind::Record => "record",
+            ClassKind::ExpandableConnector => "expandable_connector",
+            ClassKind::Operator => "operator",
+            ClassKind::OperatorRecord => "operator_record",
+        }
     }
 }
 
@@ -837,7 +886,7 @@ fn annotation_placement_to_pretty(p: crate::annotations::Placement) -> Placement
     }
 }
 
-fn map_class_type(t: &AstClassType) -> ClassKind {
+pub fn map_class_type(t: &AstClassType) -> ClassKind {
     match t {
         AstClassType::Model => ClassKind::Model,
         AstClassType::Class => ClassKind::Class,

@@ -766,7 +766,7 @@ pub fn import_model_to_diagram_from_ast(
         );
         let is_type_alias = component_def
             .as_ref()
-            .map(|d| d.class_kind == "type")
+            .map(|d| matches!(d.class_kind, crate::index::ClassKind::Type))
             .unwrap_or(false)
             || type_name.contains(".SIunits.")
             || type_name.contains(".Units.SI.")
@@ -792,7 +792,7 @@ pub fn import_model_to_diagram_from_ast(
                 documentation_info: None,
                 is_example: false,
                 domain: String::new(),
-                class_kind: String::from("model"),
+                class_kind: crate::index::ClassKind::Model,
             });
         }
 
@@ -1152,7 +1152,7 @@ fn register_local_class(
             documentation_info: None,
             is_example: false,
             domain: String::new(),
-            class_kind: String::new(),
+            class_kind: crate::index::ClassKind::Class,
         },
     );
 }

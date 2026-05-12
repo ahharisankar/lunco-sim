@@ -20,10 +20,11 @@ pub enum PackageNode {
         id: String,
         name: String,
         library: ModelLibrary,
-        /// Modelica class kind (`"model"`, `"block"`, `"connector"`,
-        /// ...) peeked from the file's first non-comment, non-`within`
-        /// keyword.
-        class_kind: Option<String>,
+        /// Modelica class kind, derived from the rumoca-parsed AST
+        /// (or pre-baked from `msl_index.json` for bundled rows).
+        /// `None` for legacy / fallback entries where the kind
+        /// couldn't be determined.
+        class_kind: Option<crate::index::ClassKind>,
     },
 }
 

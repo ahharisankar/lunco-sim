@@ -217,8 +217,8 @@ pub(crate) fn render_node_single(
         PackageNode::Model { id, name, library, class_kind } => {
             let is_active = active_path == Some(name.as_str());
             let row = ui.horizontal(|ui| {
-                if let Some(kind) = class_kind.as_deref() {
-                    let badge = crate::ui::browser_section::type_badge_from_str(kind, theme);
+                if let Some(kind) = *class_kind {
+                    let badge = crate::ui::browser_section::type_badge_for_kind(kind, theme);
                     crate::ui::browser_section::paint_badge(ui, badge, theme);
                 } else {
                     let icon = match library {
@@ -240,7 +240,7 @@ pub(crate) fn render_node_single(
                 action = Some(PackageAction::Open(id.clone(), name.clone(), library.clone(), ui.input(|i| i.modifiers.command)));
             }
             if let Some(kind) = class_kind {
-                resp = resp.on_hover_text(format!("Kind: {}", kind));
+                resp = resp.on_hover_text(format!("Kind: {}", kind.as_keyword()));
             }
 
             if matches!(library, crate::ui::state::ModelLibrary::MSL) {

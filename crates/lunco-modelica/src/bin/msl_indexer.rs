@@ -274,11 +274,10 @@ struct MSLComponentDef {
     /// Empty for non-MSL classes. Drives the domain-chip filter.
     #[serde(default)]
     domain: String,
-    /// Kind of class: "model", "block", "connector", "record", "type",
-    /// "package", "function", "class", "operator". Lower-case to
-    /// match Modelica source keywords.
+    /// Modelica class kind — typed enum, serialised as the lowercase
+    /// keyword (`"model"`, `"block"`, …) for legacy JSON compat.
     #[serde(default)]
-    class_kind: String,
+    class_kind: lunco_modelica::index::ClassKind,
     icon_text: Option<String>,
     /// Parsed `Icon(graphics={...})` annotation — already merged
     /// across the `extends` chain via `extract_icon_inherited`. This
@@ -477,20 +476,6 @@ fn msl_domain(full_name: &str) -> String {
         parts.next().unwrap_or("").to_string()
     } else {
         String::new()
-    }
-}
-
-fn class_kind_str(kind: &ClassType) -> &'static str {
-    match kind {
-        ClassType::Model => "model",
-        ClassType::Class => "class",
-        ClassType::Block => "block",
-        ClassType::Connector => "connector",
-        ClassType::Record => "record",
-        ClassType::Type => "type",
-        ClassType::Package => "package",
-        ClassType::Function => "function",
-        ClassType::Operator => "operator",
     }
 }
 
@@ -1072,7 +1057,7 @@ impl MSLIndexer {
                 let documentation_info = self.doc_infos.get(&short_name).cloned();
                 let is_example = full_name.contains(".Examples.");
                 let domain = msl_domain(full_name);
-                let class_kind = class_kind_str(&class.class_type).to_string();
+                let class_kind = lunco_modelica::index::map_class_type(&class.class_type);
 
                 all_comps.push(MSLComponentDef {
                     name: short_name.clone(),
@@ -1345,7 +1330,7 @@ fn bundled_class_tree(
     BundledClassTree {
         short_name: short_name.to_string(),
         qualified_path: qualified,
-        class_kind: bundled_class_kind(&class_def.class_type).to_string(),
+        class_kind: lunco_modelica::index::map_class_type(&class_def.class_type),
         description: class_def
             .description
             .iter()
@@ -1353,20 +1338,6 @@ fn bundled_class_tree(
             .map(|t| t.text.as_ref().trim_matches('"').to_string())
             .filter(|s| !s.is_empty()),
         children,
-    }
-}
-
-fn bundled_class_kind(kind: &ClassType) -> &'static str {
-    match kind {
-        ClassType::Model => "model",
-        ClassType::Block => "block",
-        ClassType::Connector => "connector",
-        ClassType::Function => "function",
-        ClassType::Record => "record",
-        ClassType::Type => "type",
-        ClassType::Package => "package",
-        ClassType::Class => "class",
-        ClassType::Operator => "operator",
     }
 }
 

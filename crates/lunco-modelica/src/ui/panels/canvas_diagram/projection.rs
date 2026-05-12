@@ -224,7 +224,11 @@ pub(super) fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramN
                 ),
                 expandable_connector: node.component_def.is_expandable_connector,
                 icon_graphics: node.component_def.icon_graphics.clone(),
-                diagram_graphics: if node.component_def.class_kind == "connector" {
+                diagram_graphics: if matches!(
+                    node.component_def.class_kind,
+                    crate::index::ClassKind::Connector
+                        | crate::index::ClassKind::ExpandableConnector
+                ) {
                     node.component_def.diagram_graphics.clone()
                 } else {
                     None
