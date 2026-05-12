@@ -50,13 +50,14 @@ pub struct EditorBufferState {
     /// from the registry is faster and more authoritative than
     /// hashing the whole buffer.
     pub generation: u64,
-    /// The doc origin path the buffer was last synced from
-    /// (`bundled://…`, `mem://…`, file path).
-    pub model_path: String,
-    /// Typed doc identity for the current buffer contents.
-    /// B.3 phase 6 replacement for the `active_path == buffer.model_path`
-    /// stale-buffer check — comparing `Option<DocumentId>` is cheaper
-    /// and doesn't require deriving an origin-prefixed path string.
+    /// Typed doc identity for the current buffer contents. Single
+    /// source of truth for "which doc owns the live editor fields".
+    /// Tab-switch detection compares this against the tab's target
+    /// doc; per-doc snapshots are keyed by it. PR14 (2026-05-12)
+    /// removed the parallel `model_path: String` field that derived
+    /// the same identity from `canonical_path() / mem://{name}` —
+    /// it diverged across Save-As (untitled → file) and dropped
+    /// uncommitted edits.
     pub bound_doc: Option<lunco_doc::DocumentId>,
     /// The actual text content (persistent across frames for selection).
     pub text: String,
@@ -86,15 +87,14 @@ pub struct EditorBufferState {
     /// typing, the buffer is checkpointed into the document in one
     /// shot.
     pub pending_commit_at: Option<f64>,
-    /// Per-tab buffer snapshots keyed by `model_path`. Save on tab
-    /// switch (current `text` / detected_name / pending_commit_at /
-    /// cached_galley → `per_doc[old]`),
+    /// Per-tab buffer snapshots keyed by [`lunco_doc::DocumentId`].
+    /// Save on tab switch (current live fields → `per_doc[old]`),
     /// restore on tab switch back (`per_doc[new]` → live fields).
     /// Without this, switching to a new tab clobbered any
     /// uncommitted edits in the previous tab — the buffer is a
     /// singleton bound to egui's `TextEdit`, so two tabs can't share
     /// it without an off-screen save slot.
-    pub per_doc: HashMap<String, TabBuffer>,
+    pub per_doc: HashMap<lunco_doc::DocumentId, TabBuffer>,
 }
 
 /// Return the byte index of the newline character when `new` differs
@@ -133,7 +133,6 @@ impl Default for EditorBufferState {
     fn default() -> Self {
         Self {
             generation: 0,
-            model_path: String::new(),
             bound_doc: None,
             text: String::new(),
             detected_name: None,
@@ -147,15 +146,13 @@ impl Default for EditorBufferState {
 }
 
 impl EditorBufferState {
-    /// Save the live fields into `per_doc[model_path]`. Call before
+    /// Save the live fields into `per_doc[bound_doc]`. Call before
     /// overwriting them with another tab's content so uncommitted
-    /// edits aren't lost.
+    /// edits aren't lost. No-op when no doc is bound.
     pub fn snapshot_current(&mut self) {
-        if self.model_path.is_empty() {
-            return;
-        }
+        let Some(doc) = self.bound_doc else { return };
         self.per_doc.insert(
-            self.model_path.clone(),
+            doc,
             TabBuffer {
                 generation: self.generation,
                 text: self.text.clone(),
@@ -166,27 +163,21 @@ impl EditorBufferState {
         );
     }
 
-    /// Pull a previously-saved snapshot for `model_path` into the live
-    /// fields. Returns `true` if a snapshot was found (caller can skip
-    /// the registry-source re-sync), `false` otherwise.
-    pub fn restore_snapshot(&mut self, model_path: &str) -> bool {
-        if let Some(snap) = self.per_doc.remove(model_path) {
+    /// Pull a previously-saved snapshot for `doc` into the live
+    /// fields. Returns `true` if a snapshot was found (caller can
+    /// skip the registry-source re-sync), `false` otherwise.
+    pub fn restore_snapshot(&mut self, doc: lunco_doc::DocumentId) -> bool {
+        if let Some(snap) = self.per_doc.remove(&doc) {
             self.generation = snap.generation;
             self.text = snap.text;
             self.detected_name = snap.detected_name;
             self.cached_galley = snap.cached_galley;
             self.pending_commit_at = snap.pending_commit_at;
-            self.model_path = model_path.to_string();
+            self.bound_doc = Some(doc);
             true
         } else {
             false
         }
-    }
-
-    /// Drop a tab's snapshot when its document is closed. Prevents
-    /// unbounded `per_doc` growth across long sessions.
-    pub fn forget_doc(&mut self, model_path: &str) {
-        self.per_doc.remove(model_path);
     }
 }
 
@@ -269,18 +260,7 @@ pub fn editor_on_doc_changed(
 /// Per-tab routing (split views) requires the doc-id keyed lookup —
 /// the legacy active-doc-only variant returned
 /// whichever tab rendered last.
-fn sync_buffer_from_registry(world: &mut World, path: &str) {
-    // Resolve the rendering tab's doc the same way the editor body
-    // does — TabRenderContext first, active_document fallback.
-    let target_doc = world
-        .get_resource::<crate::ui::panels::model_view::TabRenderContext>()
-        .and_then(|c| c.doc)
-        .or_else(|| {
-            world
-                .get_resource::<lunco_workbench::WorkspaceResource>()
-                .and_then(|ws| ws.active_document)
-        });
-    let Some(doc) = target_doc else { return };
+fn sync_buffer_from_registry(world: &mut World, doc: lunco_doc::DocumentId) {
     let (source, detected_name, generation) = {
         let registry = world.resource::<ModelicaDocumentRegistry>();
         let Some(host) = registry.host(doc) else { return };
@@ -300,7 +280,6 @@ fn sync_buffer_from_registry(world: &mut World, path: &str) {
     // cost path tab-switch already takes. Cheap on text bodies.
     let mut buf_state = world.resource_mut::<EditorBufferState>();
     buf_state.text = source;
-    buf_state.model_path = path.to_string();
     buf_state.bound_doc = Some(doc);
     buf_state.generation = generation;
     buf_state.detected_name = detected_name;
@@ -342,24 +321,19 @@ impl Panel for CodeEditorPanel {
         // Pull display fields from the registry directly — this
         // bypasses the the registry-by-doc lookup snapshot which is
         // a singleton stamped by whichever tab rendered last.
-        let (display_name, is_read_only, model_path, source_len) = match tab_target
+        let (display_name, is_read_only, source_len) = match tab_target
             .and_then(|d| world.resource::<ModelicaDocumentRegistry>().host(d))
         {
             Some(host) => {
                 let document = host.document();
                 let display = document.origin().display_name();
-                let path_str = document
-                    .canonical_path()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| format!("mem://{display}"));
                 (
                     Some(display),
                     document.is_read_only(),
-                    Some(path_str),
                     document.source().len(),
                 )
             }
-            None => (None, false, None, 0),
+            None => (None, false, 0),
         };
         let (compilation_error, selected_entity, is_loading) = {
             let state = world.resource::<WorkbenchState>();
@@ -410,14 +384,14 @@ impl Panel for CodeEditorPanel {
         // runs sync logic when the user actually moves between
         // tabs.
         let mut model_switched = false;
-        if let Some(ref path) = model_path {
-            let path_changed = world.resource::<EditorBufferState>().model_path != *path;
-            model_switched = path_changed;
+        if let Some(doc) = tab_target {
+            let doc_changed = world.resource::<EditorBufferState>().bound_doc != Some(doc);
+            model_switched = doc_changed;
 
-            if path_changed {
+            if doc_changed {
                 let mut buf_state = world.resource_mut::<EditorBufferState>();
                 buf_state.snapshot_current();
-                let restored = buf_state.restore_snapshot(path);
+                let restored = buf_state.restore_snapshot(doc);
                 drop(buf_state);
                 // Restored snapshots may be stale if the doc was
                 // mutated while this tab was hidden — the observer
@@ -427,19 +401,20 @@ impl Panel for CodeEditorPanel {
                 // to the same sync.
                 let stale = {
                     let buf_gen = world.resource::<EditorBufferState>().generation;
-                    let external_gen = tab_target
-                        .and_then(|d| world.resource::<ModelicaDocumentRegistry>().host(d))
+                    let external_gen = world
+                        .resource::<ModelicaDocumentRegistry>()
+                        .host(doc)
                         .map(|h| h.generation())
                         .unwrap_or(0);
                     buf_gen != external_gen
                 };
                 if !restored || stale {
-                    sync_buffer_from_registry(world, path);
+                    sync_buffer_from_registry(world, doc);
                 }
             }
         }
 
-        if model_path.is_none() {
+        if tab_target.is_none() {
             ui.vertical_centered(|ui| {
                 ui.add_space(40.0);
                 ui.heading("📝 Code Editor");
