@@ -189,17 +189,17 @@ fn render_node_single(
             let _ = header_resp;
         }
         PackageNode::Model { id, name, library, class_kind } => {
-            let is_active = active_path == Some(name);
+            let is_active = active_path == Some(name.as_str());
             let mut label = egui::RichText::new(format!("📄 {}", name));
             if is_active {
                 label = label.strong().color(theme.tokens.accent);
             }
-            let resp = ui.selectable_label(is_active, label);
+            let mut resp = ui.selectable_label(is_active, label);
             if resp.clicked() {
                 action = Some(PackageAction::Open(id.clone(), name.clone(), library.clone(), ui.input(|i| i.modifiers.command)));
             }
             if let Some(kind) = class_kind {
-                resp.on_hover_text(format!("Kind: {}", kind));
+                resp = resp.on_hover_text(format!("Kind: {}", kind));
             }
             
             if matches!(library, crate::ui::state::ModelLibrary::MSL) {

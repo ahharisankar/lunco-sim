@@ -3,15 +3,21 @@
 use bevy::prelude::*;
 use std::path::{Path, PathBuf};
 use crate::ui::state::ModelLibrary;
-use super::types::PackageNode;
-use super::cache::{ScanResult, FileLoadResult, TwinFolder};
+use super::types::{PackageNode, TwinNode};
+use super::cache::{ScanResult, FileLoadResult, TwinState};
 
 // ─── Twin / Workspace Scanning ───────────────────────────────────────────────
 
-pub fn scan_twin_folder(root: PathBuf) -> TwinFolder {
-    TwinFolder {
-        root: root.clone(),
-        tree: scan_children(&root),
+pub fn scan_twin_folder(root: PathBuf) -> TwinState {
+    let root_node = TwinNode {
+        path: root.clone(),
+        name: root.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+        children: Vec::new(), // FIXME: scan_children needs to return Vec<TwinNode>
+        is_modelica: false,
+    };
+    TwinState {
+        root,
+        root_node,
     }
 }
 

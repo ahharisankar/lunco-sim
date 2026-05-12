@@ -1,0 +1,579 @@
+//! The core Document representation of one Modelica source file.
+
+use std::collections::VecDeque;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use lunco_doc::{Document, DocumentError, DocumentId, DocumentOrigin};
+use rumoca_phase_parse::parse_to_syntax;
+use rumoca_session::parsing::ast::StoredDefinition;
+
+use super::ops::{ModelicaChange, ModelicaOp, FreshAst, CHANGE_HISTORY_CAPACITY};
+use crate::index::ModelicaIndex;
+
+// ---------------------------------------------------------------------------
+// SyntaxCache
+// ---------------------------------------------------------------------------
+
+/// Single parse cache attached to a [`ModelicaDocument`].
+#[derive(Debug, Clone)]
+pub struct SyntaxCache {
+    /// Document generation at which this cache was produced.
+    pub generation: u64,
+    /// Best-effort parsed AST.
+    pub ast: Arc<StoredDefinition>,
+    /// Diagnostic strings from the parse.
+    pub errors: Vec<String>,
+}
+
+pub type AstCache = SyntaxCache;
+
+impl SyntaxCache {
+    pub fn empty(generation: u64) -> Self {
+        Self {
+            generation,
+            ast: Arc::new(StoredDefinition::default()),
+            errors: Vec::new(),
+        }
+    }
+
+    pub fn from_source(source: &str, generation: u64) -> Self {
+        if std::env::var_os("LUNCO_NO_PARSE").is_some() {
+            return Self::empty(generation);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = source;
+            return Self::empty(generation);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let recovery = parse_to_syntax(source, "model.mo");
+            let errors = recovery
+                .parse_errors()
+                .iter()
+                .map(|e| format!("{e:?}"))
+                .collect();
+            let ast = Arc::new(recovery.best_effort().clone());
+            Self {
+                generation,
+                ast,
+                errors,
+            }
+        }
+    }
+
+    pub fn install_from_worker(
+        &mut self,
+        ast: Arc<StoredDefinition>,
+        errors: Vec<String>,
+    ) {
+        self.ast = ast;
+        self.errors = errors;
+    }
+
+    pub fn has_errors(&self) -> bool {
+        !self.errors.is_empty()
+    }
+
+    pub fn first_error(&self) -> Option<&str> {
+        self.errors.first().map(|s| s.as_str())
+    }
+
+    pub fn ast(&self) -> &StoredDefinition {
+        &self.ast
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ModelicaDocument
+// ---------------------------------------------------------------------------
+
+/// The canonical Document representation of one Modelica source file.
+#[derive(Debug, Clone)]
+pub struct ModelicaDocument {
+    id: DocumentId,
+    source: String,
+    syntax: Arc<SyntaxCache>,
+    index: ModelicaIndex,
+    generation: u64,
+    origin: DocumentOrigin,
+    last_saved_generation: Option<u64>,
+    changes: VecDeque<(u64, ModelicaChange)>,
+    last_source_edit_at: Option<web_time::Instant>,
+}
+
+impl ModelicaDocument {
+    pub fn new(id: DocumentId, source: impl Into<String>) -> Self {
+        Self::with_origin(
+            id,
+            source,
+            DocumentOrigin::untitled(format!("Untitled-{}", id.raw())),
+        )
+    }
+
+    pub fn with_origin(
+        id: DocumentId,
+        source: impl Into<String>,
+        origin: DocumentOrigin,
+    ) -> Self {
+        let source = source.into();
+        let syntax = Arc::new(SyntaxCache::empty(0));
+        let mut doc = Self::from_parts(id, source, origin, syntax);
+        doc.last_source_edit_at = Some(web_time::Instant::now());
+        doc.generation = 1;
+        doc
+    }
+
+    pub fn load_msl_class(
+        id: DocumentId,
+        path: &Path,
+        qualified: &str,
+    ) -> Result<Self, String> {
+        let full_source = if let Some(bytes) = lunco_assets::msl::global_msl_source()
+            .and_then(|s| s.read(path))
+        {
+            String::from_utf8(bytes)
+                .map_err(|e| format!("non-utf8 source `{}`: {e}", path.display()))?
+        } else {
+            std::fs::read_to_string(path).map_err(|e| {
+                format!("read failed `{}`: {e}", path.display())
+            })?
+        };
+
+        let short_name = qualified.rsplit('.').next().unwrap_or(qualified);
+        let parent_pkg: String = {
+            let mut parts: Vec<&str> = qualified.split('.').collect();
+            parts.pop();
+            parts.join(".")
+        };
+
+        #[cfg(target_arch = "wasm32")]
+        let ast: StoredDefinition = {
+            let key = path.to_string_lossy().to_string();
+            crate::msl_remote::global_parsed_msl()
+                .and_then(|b| b.iter().find(|(k, _)| k == &key).map(|(_, a)| a.clone()))
+                .ok_or_else(|| format!(
+                    "load_msl_class: pre-parsed AST missing for `{key}`"
+                ))?
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let ast: StoredDefinition = {
+            let mut parsed = rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()])
+                .map_err(|e| format!("parse failed `{}`: {e}", path.display()))?;
+            let (_uri, ast) = parsed
+                .drain(..)
+                .next()
+                .ok_or_else(|| format!("rumoca returned no parse result for `{}`", path.display()))?;
+            ast
+        };
+
+        let class_def = super::apply::find_class_by_short_name_recursive(&ast, short_name)
+            .ok_or_else(|| format!("class `{qualified}` not found in `{}`", path.display()))?;
+        let (full_start, full_end) = class_def
+            .full_span_with_leading_comments(&full_source)
+            .ok_or_else(|| format!("could not slice class `{qualified}` from `{}`", path.display()))?;
+        let class_slice = &full_source[full_start..full_end];
+
+        let source = if parent_pkg.is_empty() {
+            class_slice.to_string()
+        } else {
+            format!("within {parent_pkg};\n{class_slice}")
+        };
+
+        let origin = DocumentOrigin::File {
+            path: path.to_path_buf(),
+            writable: false,
+        };
+        Ok(Self::with_origin(id, source, origin))
+    }
+
+    pub fn load_msl_file(
+        id: DocumentId,
+        path: &Path,
+    ) -> Result<Self, String> {
+        let source = if let Some(bytes) = lunco_assets::msl::global_msl_source()
+            .and_then(|s| s.read(path))
+        {
+            String::from_utf8(bytes)
+                .map_err(|e| format!("non-utf8 source `{}`: {e}", path.display()))?
+        } else {
+            std::fs::read_to_string(path).map_err(|e| {
+                format!("read failed `{}`: {e}", path.display())
+            })?
+        };
+
+        let parsed: Result<Arc<StoredDefinition>, String> =
+            if std::env::var_os("LUNCO_NO_PARSE").is_some() {
+                Err("LUNCO_NO_PARSE diagnostic — parse skipped".into())
+            } else {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let key = path.to_string_lossy().to_string();
+                    crate::msl_remote::global_parsed_msl()
+                        .and_then(|b| b.iter()
+                            .find(|(k, _)| k == &key)
+                            .map(|(_, a)| Arc::new(a.clone())))
+                        .ok_or_else(|| format!(
+                            "load_msl_file: pre-parsed AST missing for `{key}`"
+                        ))
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    match rumoca_session::parsing::parse_files_parallel(&[path.to_path_buf()]) {
+                        Ok(mut pairs) if !pairs.is_empty() => {
+                            let (_, stored) = pairs.remove(0);
+                            Ok(Arc::new(stored))
+                        }
+                        Ok(_) => Err("rumoca returned no parse result".into()),
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
+            };
+
+        let syntax = Arc::new(match parsed {
+            Ok(strict) => SyntaxCache {
+                generation: 0,
+                ast: strict,
+                errors: Vec::new(),
+            },
+            Err(msg) => SyntaxCache {
+                generation: 0,
+                ast: Arc::new(StoredDefinition::default()),
+                errors: vec![msg],
+            },
+        });
+
+        let origin = DocumentOrigin::File {
+            path: path.to_path_buf(),
+            writable: false,
+        };
+        Ok(Self::from_parts(id, source, origin, syntax))
+    }
+
+    pub fn from_parts(
+        id: DocumentId,
+        source: String,
+        origin: DocumentOrigin,
+        syntax: Arc<SyntaxCache>,
+    ) -> Self {
+        debug_assert_eq!(
+            syntax.generation, 0,
+            "from_parts expects a freshly-parsed SyntaxCache"
+        );
+        let last_saved_generation = if origin.is_untitled() {
+            None
+        } else {
+            Some(0)
+        };
+        let has_errors = syntax.has_errors();
+        let mut index = ModelicaIndex::new();
+        index.rebuild_with_errors(&syntax.ast, &source, has_errors);
+        Self {
+            id,
+            source,
+            syntax,
+            index,
+            generation: 0,
+            origin,
+            last_saved_generation,
+            changes: VecDeque::with_capacity(CHANGE_HISTORY_CAPACITY),
+            last_source_edit_at: None,
+        }
+    }
+
+    pub fn id_owned(&self) -> DocumentId { self.id }
+    pub fn generation_owned(&self) -> u64 { self.generation }
+
+    pub fn index(&self) -> &ModelicaIndex { &self.index }
+    pub fn source(&self) -> &str { &self.source }
+    pub fn ast(&self) -> &SyntaxCache { &self.syntax }
+    pub fn ast_is_stale(&self) -> bool { self.syntax.generation != self.generation }
+    pub fn last_source_edit_at(&self) -> Option<web_time::Instant> { self.last_source_edit_at }
+
+    pub fn waive_ast_debounce(&mut self) {
+        if self.last_source_edit_at.is_some() {
+            let backdate_ms = (crate::engine_resource::AST_DEBOUNCE_MS as u64).saturating_add(1);
+            self.last_source_edit_at = Some(
+                web_time::Instant::now() - std::time::Duration::from_millis(backdate_ms),
+            );
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxCache { &self.syntax }
+    pub fn syntax_arc(&self) -> &Arc<SyntaxCache> { &self.syntax }
+
+    pub fn strict_ast(&self) -> Option<Arc<StoredDefinition>> {
+        if !self.syntax.has_errors() {
+            Some(Arc::clone(&self.syntax.ast))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax_is_stale(&self) -> bool { self.syntax.generation != self.generation }
+
+    pub fn install_parse_results(&mut self, syntax: SyntaxCache) {
+        if syntax.generation != self.generation {
+            return;
+        }
+        self.syntax = Arc::new(syntax);
+        self.rebuild_index();
+        self.last_source_edit_at = None;
+    }
+
+    pub fn install_fresh_ast(&mut self, ast: Arc<StoredDefinition>) {
+        self.syntax = Arc::new(SyntaxCache {
+            generation: self.generation,
+            ast,
+            errors: Vec::new(),
+        });
+        self.last_source_edit_at = None;
+    }
+
+    fn rebuild_index(&mut self) {
+        self.index.rebuild_with_errors(
+            &self.syntax.ast,
+            &self.source,
+            self.syntax.has_errors(),
+        );
+    }
+
+    pub fn source_snapshot(&self) -> String { self.source.clone() }
+
+    pub fn refresh_ast_now(&mut self) {
+        if !self.ast_is_stale() && !self.syntax_is_stale() {
+            return;
+        }
+        let Some(handle) = crate::engine_resource::global_engine_handle() else { return };
+        
+        let bundle_ast: Option<Arc<StoredDefinition>> = match &self.origin {
+            DocumentOrigin::File { path, .. } => {
+                let key = path.to_string_lossy().to_string();
+                crate::msl_remote::global_parsed_msl().and_then(|b| {
+                    b.iter()
+                        .find(|(k, _)| k == &key)
+                        .map(|(_, ast)| Arc::new(ast.clone()))
+                })
+            }
+            _ => None,
+        };
+
+        let arc_ast: Option<Arc<StoredDefinition>> = {
+            let mut engine = handle.lock();
+            if let Some(ast) = bundle_ast.as_ref() {
+                engine.upsert_document_with_ast(self.id, (**ast).clone());
+                Some(Arc::clone(ast))
+            } else {
+                #[cfg(target_arch = "wasm32")]
+                { None }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    match rumoca_phase_parse::parse_to_ast(&self.source, "model.mo") {
+                        Ok(parsed) => {
+                            engine.upsert_document_with_ast(self.id, parsed.clone());
+                            Some(Arc::new(parsed))
+                        }
+                        Err(_) => None,
+                    }
+                }
+            }
+        };
+
+        match arc_ast {
+            Some(ast) => {
+                self.syntax = Arc::new(SyntaxCache {
+                    generation: self.generation,
+                    ast,
+                    errors: Vec::new(),
+                });
+            }
+            None => {
+                self.syntax = Arc::new(SyntaxCache {
+                    generation: self.generation,
+                    ast: Arc::new(StoredDefinition::default()),
+                    errors: vec!["strict parse failed".into()],
+                });
+            }
+        }
+        self.rebuild_index();
+        self.last_source_edit_at = None;
+    }
+
+    pub fn changes_since(
+        &self,
+        last_seen: u64,
+    ) -> Option<impl Iterator<Item = &(u64, ModelicaChange)>> {
+        if let Some((earliest, _)) = self.changes.front() {
+            if *earliest > last_seen + 1 {
+                return None;
+            }
+        }
+        Some(self.changes.iter().filter(move |(g, _)| *g > last_seen))
+    }
+
+    pub fn earliest_retained_generation(&self) -> u64 {
+        self.changes
+            .front()
+            .map(|(g, _)| *g)
+            .unwrap_or(self.generation)
+    }
+
+    fn push_change(&mut self, change: ModelicaChange) {
+        if self.changes.len() >= CHANGE_HISTORY_CAPACITY {
+            self.changes.pop_front();
+        }
+        self.changes.push_back((self.generation, change));
+    }
+
+    pub fn len(&self) -> usize { self.source.len() }
+    pub fn is_empty(&self) -> bool { self.source.is_empty() }
+    pub fn origin(&self) -> &DocumentOrigin { &self.origin }
+    pub fn canonical_path(&self) -> Option<&Path> { self.origin.canonical_path() }
+    pub fn is_read_only(&self) -> bool { !self.origin.accepts_mutations() }
+    pub fn set_origin(&mut self, origin: DocumentOrigin) { self.origin = origin; }
+
+    pub fn set_canonical_path(&mut self, path: Option<PathBuf>) {
+        match path {
+            Some(p) => {
+                let writable = self.origin.is_writable() || self.origin.is_untitled();
+                self.origin = DocumentOrigin::File { path: p, writable };
+            }
+            None => {
+                self.origin = DocumentOrigin::untitled(self.origin.display_name());
+            }
+        }
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        match self.last_saved_generation {
+            Some(g) => g != self.generation,
+            None => true,
+        }
+    }
+
+    pub fn mark_saved(&mut self) {
+        self.last_saved_generation = Some(self.generation);
+    }
+
+    pub(crate) fn apply_patch(
+        &mut self,
+        range: Range<usize>,
+        replacement: String,
+        change: ModelicaChange,
+        fresh_ast: FreshAst,
+    ) -> Result<ModelicaOp, DocumentError> {
+        if range.start > range.end || range.end > self.source.len() {
+            return Err(DocumentError::ValidationFailed(format!(
+                "text range {}..{} out of bounds (len={})",
+                range.start,
+                range.end,
+                self.source.len()
+            )));
+        }
+        if !self.source.is_char_boundary(range.start)
+            || !self.source.is_char_boundary(range.end)
+        {
+            return Err(DocumentError::ValidationFailed(format!(
+                "text range {}..{} not on char boundaries",
+                range.start, range.end
+            )));
+        }
+        let removed: String = self.source[range.clone()].to_string();
+        self.source.replace_range(range.clone(), &replacement);
+        self.generation = self.generation.saturating_add(1);
+        self.last_source_edit_at = Some(web_time::Instant::now());
+
+        if let FreshAst::Mutated(ast) = fresh_ast {
+            self.install_fresh_ast(ast);
+        }
+
+        match &change {
+            ModelicaChange::ComponentAdded { class, name } => {
+                self.index.patch_component_added(class, name, "");
+            }
+            ModelicaChange::ComponentRemoved { class, name } => {
+                self.index.patch_component_removed(class, name);
+            }
+            ModelicaChange::PlacementChanged {
+                class,
+                component,
+                placement,
+            } => {
+                self.index
+                    .patch_placement_changed(class, component, *placement);
+            }
+            ModelicaChange::ConnectionAdded { class, from, to } => {
+                let from_port = if from.port.is_empty() { None } else { Some(from.port.as_str()) };
+                let to_port = if to.port.is_empty() { None } else { Some(to.port.as_str()) };
+                self.index.patch_connection_added(
+                    class,
+                    &from.component,
+                    from_port,
+                    &to.component,
+                    to_port,
+                );
+            }
+            ModelicaChange::ConnectionRemoved { class, from, to } => {
+                let from_port = if from.port.is_empty() { None } else { Some(from.port.as_str()) };
+                let to_port = if to.port.is_empty() { None } else { Some(to.port.as_str()) };
+                self.index.patch_connection_removed(
+                    class,
+                    &from.component,
+                    from_port,
+                    &to.component,
+                    to_port,
+                );
+            }
+            ModelicaChange::ParameterChanged {
+                class,
+                component,
+                param,
+                value,
+            } => {
+                self.index.patch_parameter_changed(class, component, param, value);
+            }
+            ModelicaChange::ClassAdded { qualified, kind } => {
+                self.index
+                    .patch_class_added(qualified, super::apply::class_kind_spec_to_index_kind(*kind));
+            }
+            ModelicaChange::ClassRemoved { qualified } => {
+                self.index.patch_class_removed(qualified);
+            }
+            _ => {}
+        }
+        self.push_change(change);
+        let inverse_range = range.start..(range.start + replacement.len());
+        Ok(ModelicaOp::EditText {
+            range: inverse_range,
+            replacement: removed,
+        })
+    }
+}
+
+impl Document for ModelicaDocument {
+    type Op = ModelicaOp;
+
+    fn id(&self) -> DocumentId { self.id }
+    fn generation(&self) -> u64 { self.generation }
+
+    fn apply(&mut self, op: Self::Op) -> Result<Self::Op, DocumentError> {
+        if !self.origin.accepts_mutations() {
+            return Err(DocumentError::ReadOnly);
+        }
+        let kind = op.classify();
+        let (range, replacement, change, fresh_ast) =
+            super::apply::op_to_patch(&self.source, &self.syntax, &self.syntax.ast, op)?;
+        
+        debug_assert!(
+            match (&fresh_ast, kind) {
+                (FreshAst::Mutated(_), super::ops::OpKind::Structured) => true,
+                (FreshAst::TextEdit, super::ops::OpKind::Text) => true,
+                _ => false,
+            },
+            "ModelicaOp classification mismatch with FreshAst variant"
+        );
+        self.apply_patch(range, replacement, change, fresh_ast)
+    }
+}
