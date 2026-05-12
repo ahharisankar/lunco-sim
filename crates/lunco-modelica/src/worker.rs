@@ -116,20 +116,42 @@ pub enum ModelicaCommand {
     /// (`source_roots::ensure_loaded`) when a doc references a
     /// library/package that isn't yet in the session.
     ///
-    /// Worker handles by calling
-    /// `compiler.session.load_source_root_tolerant(id, DurableExternal,
-    /// &root_dir, None)`. Idempotent: rumoca dedups by id; calling
-    /// twice is cheap. **Blocks the worker thread** for the duration
-    /// of the parse (MSL: ~10-60s cold, ~1-3s warm-bundle); other
-    /// commands queue behind it. That's the trade-off the user
-    /// accepted in the PR-C design discussion.
+    /// Worker handles by routing on `payload`:
+    /// - [`LoadSourceRootPayload::Disk`] → system libraries; calls
+    ///   `compiler.load_source_root(id, &root_dir)`.
+    /// - [`LoadSourceRootPayload::InMemory`] → bundled examples +
+    ///   single workspace files; calls
+    ///   `compiler.load_source_root_in_memory(id, &label, files)`.
+    ///
+    /// Idempotent: rumoca dedups by id. **Blocks the worker thread**
+    /// for the duration of the parse (MSL: ~10-60s cold, ~1-3s
+    /// warm-bundle); other commands queue behind it.
     LoadSourceRoot {
-        /// Library id, e.g. `"Modelica"` or `"ThermofluidStream"`.
-        /// Used both as the rumoca source-root key and as the
-        /// correlation id on the result message.
+        /// Library id, e.g. `"Modelica"` or `"AnnotatedRocketStage"`.
         id: String,
-        /// On-disk root directory containing `package.mo`.
-        root_dir: PathBuf,
+        /// What to load and how to load it.
+        payload: LoadSourceRootPayload,
+    },
+}
+
+/// Payload for [`ModelicaCommand::LoadSourceRoot`]. Distinguishes
+/// disk-rooted libraries from in-memory sources so the worker can
+/// dispatch to the right rumoca-session API without losing the
+/// source bytes on the way.
+#[derive(Serialize, Deserialize)]
+pub enum LoadSourceRootPayload {
+    /// Disk-rooted library (MSL, third-party). `root_dir` contains
+    /// `package.mo`. Loaded via
+    /// `Session::load_source_root_tolerant`.
+    Disk { root_dir: PathBuf },
+    /// In-memory `(uri, source)` pairs. Used for bundled examples
+    /// (source comes from the embedded binary via
+    /// `crate::models::get_model`) and workspace files (source
+    /// read from disk by the main thread). `label` shows up in
+    /// rumoca diagnostics.
+    InMemory {
+        label: String,
+        files: Vec<(String, String)>,
     },
 }
 
@@ -686,24 +708,36 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                         cached_models.remove(&entity);
                         sim_streams.remove(&entity);
                     }
-                    ModelicaCommand::LoadSourceRoot { id, root_dir } => {
-                        // Ensure the compiler exists (`new()` is cheap
-                        // — an empty session). Then merge the requested
-                        // library into it. Subsequent Compile commands
-                        // in this worker see the populated session.
+                    ModelicaCommand::LoadSourceRoot { id, payload } => {
                         let compiler = compiler
                             .get_or_insert_with(ModelicaCompiler::new);
                         let t0 = web_time::Instant::now();
-                        let report = compiler.load_source_root(&id, &root_dir);
+                        let report = match payload {
+                            LoadSourceRootPayload::Disk { root_dir } => {
+                                log::info!(
+                                    "[worker] LoadSourceRoot `{}` (disk: {})",
+                                    id,
+                                    root_dir.display(),
+                                );
+                                compiler.load_source_root(&id, &root_dir)
+                            }
+                            LoadSourceRootPayload::InMemory { label, files } => {
+                                log::info!(
+                                    "[worker] LoadSourceRoot `{}` (in-memory: {}, {} file(s))",
+                                    id,
+                                    label,
+                                    files.len(),
+                                );
+                                compiler.load_source_root_in_memory(&id, &label, files)
+                            }
+                        };
                         log::info!(
-                            "[worker] LoadSourceRoot `{}` from `{}`: \
-                             {} parsed / {} inserted in {:.2}s (cache {:?})",
+                            "[worker] LoadSourceRoot `{}` done: {} parsed / {} \
+                             inserted in {:.2}s",
                             id,
-                            root_dir.display(),
                             report.parsed_file_count,
                             report.inserted_file_count,
                             t0.elapsed().as_secs_f64(),
-                            report.cache_status,
                         );
                     }
                 }
@@ -1193,18 +1227,24 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
             w.steppers.remove(&entity);
             w.cached_models.remove(&entity);
         }
-        ModelicaCommand::LoadSourceRoot { id, root_dir } => {
+        ModelicaCommand::LoadSourceRoot { id, payload } => {
             // Wasm path: matches the native handler. Worker thread
             // (whether off-main Web Worker or inline) merges the
             // library into its session. Idempotent.
             let compiler = w.compiler.get_or_insert_with(ModelicaCompiler::new);
             let t0 = web_time::Instant::now();
-            let report = compiler.load_source_root(&id, &root_dir);
+            let report = match payload {
+                LoadSourceRootPayload::Disk { root_dir } => {
+                    compiler.load_source_root(&id, &root_dir)
+                }
+                LoadSourceRootPayload::InMemory { label, files } => {
+                    compiler.load_source_root_in_memory(&id, &label, files)
+                }
+            };
             log::info!(
-                "[inline-worker] LoadSourceRoot `{}` from `{}`: \
-                 {} parsed / {} inserted in {:.2}s",
+                "[inline-worker] LoadSourceRoot `{}`: {} parsed / {} \
+                 inserted in {:.2}s",
                 id,
-                root_dir.display(),
                 report.parsed_file_count,
                 report.inserted_file_count,
                 t0.elapsed().as_secs_f64(),

@@ -549,6 +549,32 @@ impl ModelicaCompiler {
             None,
         )
     }
+
+    /// Merge an in-memory source root (e.g. a bundled `.mo` file or
+    /// a single workspace file) into the live session. Same
+    /// idempotency + blocking semantics as
+    /// [`Self::load_source_root`], but bytes are passed inline so
+    /// callers without a real on-disk path can still install
+    /// sources.
+    ///
+    /// `label` shows up in diagnostics as the "source root path"
+    /// (rumoca convention: `"in-memory:<id>"`). `files` is a list
+    /// of `(uri, source)` pairs; each `uri` is the filename rumoca
+    /// will report errors against.
+    pub fn load_source_root_in_memory(
+        &mut self,
+        id: &str,
+        label: &str,
+        files: Vec<(String, String)>,
+    ) -> rumoca_session::compile::SourceRootLoadReport {
+        self.session.load_source_root_in_memory(
+            id,
+            rumoca_session::compile::SourceRootKind::Workspace,
+            label,
+            files,
+            None,
+        )
+    }
 }
 
 

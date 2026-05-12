@@ -333,64 +333,98 @@ pub fn ensure_loaded(
         LoadState::Failed(_) => return false,
         LoadState::NotLoaded => {}
     }
-    match &entry.kind {
+    // Build the payload + the human-readable summary for logging.
+    // Each branch can fail early (e.g. missing bundled blob, unreadable
+    // workspace file); on failure mark `Failed` and bail.
+    let (payload, summary) = match &entry.kind {
         SourceRootKind::SystemLibrary { cache_subdir: _, root_dir } => {
-            // Dispatch a `LoadSourceRoot` worker command so the
-            // compiler's existing session is mutated in place.
-            // Mark `Loading`; PR-D will transition to `Ready` based
-            // on a load-completion message from the worker. For now
-            // the worker queue is FIFO so a Compile sent right after
-            // this guaranteedly sees the populated session.
-            let cmd = crate::worker::ModelicaCommand::LoadSourceRoot {
-                id: id.to_string(),
-                root_dir: root_dir.clone(),
-            };
-            if channels.tx.send(cmd).is_err() {
-                bevy::log::warn!(
-                    "[source-roots] failed to dispatch LoadSourceRoot for `{}`: \
-                     worker channel closed",
-                    id,
-                );
-                entry.state = LoadState::Failed("worker channel closed".into());
-                return false;
-            }
-            bevy::log::info!(
-                "[source-roots] dispatched LoadSourceRoot `{}` from {} to worker",
-                id,
-                root_dir.display(),
-            );
-            entry.state = LoadState::Loading {
-                progress: 0.0,
-                started: Instant::now(),
-            };
-            true
+            let summary = format!("disk {}", root_dir.display());
+            (
+                crate::worker::LoadSourceRootPayload::Disk {
+                    root_dir: root_dir.clone(),
+                },
+                summary,
+            )
         }
         SourceRootKind::Bundled { filename } => {
-            bevy::log::warn!(
-                "[source-roots] bundled dep `{}` (file {}) lazy-load not \
-                 yet supported; compile will surface unresolved-type errors \
-                 unless the user has opened the bundled doc separately.",
-                id,
-                filename,
-            );
-            entry.state = LoadState::Failed(
-                "bundled lazy-load not yet implemented".into(),
-            );
-            false
+            let Some(source) = crate::models::get_model(filename) else {
+                bevy::log::warn!(
+                    "[source-roots] bundled dep `{}` (file {}): not found \
+                     in embedded models — leaving Failed",
+                    id, filename,
+                );
+                entry.state = LoadState::Failed(format!(
+                    "bundled file `{}` missing from embedded models",
+                    filename
+                ));
+                return false;
+            };
+            let summary = format!("bundled {}, {}B", filename, source.len());
+            (
+                crate::worker::LoadSourceRootPayload::InMemory {
+                    label: format!("bundled:{filename}"),
+                    files: vec![(filename.clone(), source.to_string())],
+                },
+                summary,
+            )
         }
         SourceRootKind::WorkspaceFile { path } => {
-            bevy::log::warn!(
-                "[source-roots] workspace file dep `{}` (path {}) lazy-load \
-                 not yet supported.",
-                id,
-                path.display(),
-            );
-            entry.state = LoadState::Failed(
-                "workspace lazy-load not yet implemented".into(),
-            );
-            false
+            let source = match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(e) => {
+                    bevy::log::warn!(
+                        "[source-roots] workspace file dep `{}` (path {}): \
+                         read failed: {e} — leaving Failed",
+                        id, path.display(),
+                    );
+                    entry.state = LoadState::Failed(format!(
+                        "workspace file read failed: {e}"
+                    ));
+                    return false;
+                }
+            };
+            let uri = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("workspace.mo")
+                .to_string();
+            let summary = format!("workspace {}, {}B", path.display(), source.len());
+            (
+                crate::worker::LoadSourceRootPayload::InMemory {
+                    label: format!("workspace:{}", path.display()),
+                    files: vec![(uri, source)],
+                },
+                summary,
+            )
         }
+    };
+
+    // Dispatch + mark Loading. Worker is FIFO so a Compile sent
+    // immediately after this is guaranteed to see the loaded
+    // session. PR-D will add a result message to transition
+    // Loading → Ready based on actual worker progress.
+    let cmd = crate::worker::ModelicaCommand::LoadSourceRoot {
+        id: id.to_string(),
+        payload,
+    };
+    if channels.tx.send(cmd).is_err() {
+        bevy::log::warn!(
+            "[source-roots] failed to dispatch LoadSourceRoot for `{}`: \
+             worker channel closed",
+            id,
+        );
+        entry.state = LoadState::Failed("worker channel closed".into());
+        return false;
     }
+    bevy::log::info!(
+        "[source-roots] dispatched LoadSourceRoot `{}` ({}) to worker",
+        id, summary,
+    );
+    entry.state = LoadState::Loading {
+        progress: 0.0,
+        started: Instant::now(),
+    };
+    true
 }
 
 /// Diagnostic log: walk the given AST, find every source-root
