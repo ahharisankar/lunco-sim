@@ -194,7 +194,7 @@ pub fn on_duplicate_model_from_read_only(
                 after_top
             }).filter(|s| !s.is_empty())
         });
-        (doc.source().to_string(), top_short, fqn, inner_drill)
+        (doc.source_arc(), top_short, fqn, inner_drill)
     };
 
     let taken: std::collections::HashSet<String> = cache
@@ -234,18 +234,18 @@ pub fn on_duplicate_model_from_read_only(
     let name_for_task = name.clone();
     let origin_fqn_for_task = origin_fqn;
     let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
-        let class_src = source_full;
+        let class_src: &str = &*source_full;
         let imports = origin_fqn_for_task
             .as_deref()
             .and_then(crate::library_fs::resolve_class_path_indexed)
             .map(|p| collect_parent_imports(&p))
             .unwrap_or_default();
-        let renamed = match extract_class_spans_inline(&class_src, &origin_short_for_task) {
+        let renamed = match extract_class_spans_inline(class_src, &origin_short_for_task) {
             Some(spans) => {
-                rewrite_inject_in_one_pass(&class_src, &name_for_task, &imports, &spans)
-                    .unwrap_or_else(|| class_src.clone())
+                rewrite_inject_in_one_pass(class_src, &name_for_task, &imports, &spans)
+                    .unwrap_or_else(|| class_src.to_string())
             }
-            None => class_src.clone(),
+            None => class_src.to_string(),
         };
         let copy_src = match origin_fqn_for_task.as_deref() {
             Some(fqn) => {

@@ -91,10 +91,16 @@ impl SyntaxCache {
 // ---------------------------------------------------------------------------
 
 /// The canonical Document representation of one Modelica source file.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ModelicaDocument {
     id: DocumentId,
     source: String,
+    /// Lazy `Arc<str>` view of [`Self::source`]. Populated on first
+    /// call to [`Self::source_arc`]; invalidated by every source
+    /// mutation. Lets bg-task spawn sites move source ownership
+    /// across thread boundaries with an O(1) `Arc` clone instead of
+    /// an O(n) string copy.
+    source_arc: std::sync::OnceLock<Arc<str>>,
     syntax: Arc<SyntaxCache>,
     index: ModelicaIndex,
     generation: u64,
@@ -273,6 +279,7 @@ impl ModelicaDocument {
         Self {
             id,
             source,
+            source_arc: std::sync::OnceLock::new(),
             syntax,
             index,
             generation: 0,
@@ -288,6 +295,16 @@ impl ModelicaDocument {
 
     pub fn index(&self) -> &ModelicaIndex { &self.index }
     pub fn source(&self) -> &str { &self.source }
+    /// Shared `Arc<str>` view of the current source. First call after
+    /// any edit performs one `Arc::from(self.source.as_str())`
+    /// allocation; subsequent calls before the next edit are free
+    /// clones. Use this in bg-task spawn sites instead of
+    /// `source().to_string()` to skip the per-spawn buffer copy.
+    pub fn source_arc(&self) -> Arc<str> {
+        self.source_arc
+            .get_or_init(|| Arc::from(self.source.as_str()))
+            .clone()
+    }
     pub fn ast(&self) -> &SyntaxCache { &self.syntax }
     pub fn ast_is_stale(&self) -> bool { self.syntax.generation != self.generation }
     pub fn last_source_edit_at(&self) -> Option<web_time::Instant> { self.last_source_edit_at }
@@ -482,6 +499,8 @@ impl ModelicaDocument {
         }
         let removed: String = self.source[range.clone()].to_string();
         self.source.replace_range(range.clone(), &replacement);
+        // Cached Arc<str> view is now stale.
+        self.source_arc = std::sync::OnceLock::new();
         self.generation = self.generation.saturating_add(1);
         self.last_source_edit_at = Some(web_time::Instant::now());
 

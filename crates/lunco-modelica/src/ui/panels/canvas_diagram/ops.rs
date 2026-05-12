@@ -1057,7 +1057,7 @@ pub(super) fn apply_ops(
         .and_then(|r| r.host(doc_id))
         .map(|h| {
             (
-                h.document().source().to_string(),
+                h.document().source_arc(),
                 <crate::document::ModelicaDocument as lunco_doc::Document>::generation(
                     h.document(),
                 ),
@@ -1075,7 +1075,7 @@ pub(super) fn apply_ops(
         // the same doc (splits) have stale scenes and *do* need to
         // reproject; leaving their `last_seen_gen` untouched lets
         // the gen-advance check fire on their next render.
-        let new_hash = projection_relevant_source_hash(&src);
+        let new_hash = projection_relevant_source_hash(&*src);
         let editing_tab = world
             .resource::<crate::ui::panels::model_view::TabRenderContext>()
             .tab_id;

@@ -119,7 +119,7 @@ pub(crate) fn trigger_projection_if_needed(
     let Some(doc_id) = active_doc_from_world(world) else { return; };
     let gen = world.resource::<ModelicaDocumentRegistry>().host(doc_id).map(|h| h.document().generation()).unwrap_or(0);
     
-    let current_source = world.resource::<ModelicaDocumentRegistry>().host(doc_id).map(|h| h.document().source().to_string()).unwrap_or_default();
+    let current_source = world.resource::<ModelicaDocumentRegistry>().host(doc_id).map(|h| h.document().source_arc()).unwrap_or_else(|| std::sync::Arc::<str>::from(""));
 
     let needs_project = {
         let state = world.resource::<CanvasDiagramState>();
@@ -136,7 +136,7 @@ pub(crate) fn trigger_projection_if_needed(
         if ast_stale { ui.ctx().request_repaint(); }
 
         !ast_stale && !task_in_flight && (first_render || target_changed || (gen_advanced && {
-            let new_hash = projection_relevant_source_hash(&current_source);
+            let new_hash = projection_relevant_source_hash(&*current_source);
             new_hash != docstate.last_seen_source_hash
         }))
     };
@@ -144,7 +144,7 @@ pub(crate) fn trigger_projection_if_needed(
     if needs_project {
         spawn_projection_task(world, doc_id, gen, render_tab_id);
     } else {
-        let new_hash = projection_relevant_source_hash(&current_source);
+        let new_hash = projection_relevant_source_hash(&*current_source);
         let mut state = world.resource_mut::<CanvasDiagramState>();
         let docstate = match render_tab_id { Some(t) => state.get_mut_for_tab(t, doc_id), None => state.get_mut(Some(doc_id)) };
         if gen != docstate.last_seen_gen && gen > docstate.canvas_acked_gen && new_hash == docstate.last_seen_source_hash {
@@ -158,7 +158,7 @@ fn spawn_projection_task(world: &mut World, doc_id: lunco_doc::DocumentId, gen: 
         let registry = world.resource::<ModelicaDocumentRegistry>();
         let Some(host) = registry.host(doc_id) else { return; };
         let Some(ast) = host.document().strict_ast() else { return; };
-        (host.document().source().to_string(), ast)
+        (host.document().source_arc(), ast)
     };
     let (max_nodes, max_duration) = world.get_resource::<DiagramProjectionLimits>().map(|l| (l.max_nodes, l.max_duration)).unwrap_or((crate::ui::panels::canvas_projection::DEFAULT_MAX_DIAGRAM_NODES, std::time::Duration::from_secs(60)));
     let target_class = render_target(world).filter(|(d, _)| *d == doc_id).and_then(|(_, drilled)| drilled).or_else(|| world.get_resource::<ModelTabs>().and_then(|t| t.drilled_class_for_doc(doc_id)));
@@ -180,14 +180,14 @@ fn spawn_projection_task(world: &mut World, doc_id: lunco_doc::DocumentId, gen: 
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let cancel_for_task = std::sync::Arc::clone(&cancel);
     let target_for_log = target_class.clone();
-    let source_hash = projection_relevant_source_hash(&source);
+    let source_hash = projection_relevant_source_hash(&*source);
     
     let task = pool.spawn(async move {
         use std::sync::atomic::Ordering;
         if cancel_for_task.load(Ordering::Relaxed) { return Scene::new(); }
         futures_lite::future::yield_now().await;
         let ast_for_recover = std::sync::Arc::clone(&ast_arc);
-        let mut diagram = crate::ui::panels::canvas_projection::import_model_to_diagram_from_ast(ast_arc, &source, max_nodes, target_for_log.as_deref(), &layout).unwrap_or_default();
+        let mut diagram = crate::ui::panels::canvas_projection::import_model_to_diagram_from_ast(ast_arc, &*source, max_nodes, target_for_log.as_deref(), &layout).unwrap_or_default();
         futures_lite::future::yield_now().await;
         recover_edges_from_ast(&ast_for_recover, &mut diagram);
         futures_lite::future::yield_now().await;

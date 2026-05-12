@@ -143,7 +143,7 @@ impl ModelicaEngineHandle {
         &self,
         doc_id: DocumentId,
         gen: u64,
-        source: String,
+        source: std::sync::Arc<str>,
         spawn_fn: F,
     ) where
         F: FnOnce(Box<dyn FnOnce() + Send + 'static>),
@@ -164,7 +164,7 @@ impl ModelicaEngineHandle {
             let t_total = web_time::Instant::now();
             // Lenient parser: always produces a usable tree.
             let t_parse = web_time::Instant::now();
-            let recovery = rumoca_phase_parse::parse_to_syntax(&source, &uri);
+            let recovery = rumoca_phase_parse::parse_to_syntax(&*source, &uri);
             let parse_ms = t_parse.elapsed().as_secs_f64() * 1000.0;
             let has_errors = recovery.has_errors();
             let ast = recovery.best_effort().clone();
@@ -301,7 +301,7 @@ pub fn drive_engine_sync(
     // and async path (no AST or stale).
     enum SyncPlan {
         Sync(std::sync::Arc<rumoca_session::parsing::ast::StoredDefinition>),
-        Async(String),
+        Async(std::sync::Arc<str>),
     }
     let mut to_upsert: Vec<(DocumentId, u64, SyncPlan)> = Vec::new();
     let mut alive: HashSet<DocumentId> = HashSet::new();
@@ -328,7 +328,7 @@ pub fn drive_engine_sync(
         };
         let plan = match fresh_ast {
             Some(ast) => SyncPlan::Sync(ast),
-            None => SyncPlan::Async(doc.source().to_string()),
+            None => SyncPlan::Async(doc.source_arc()),
         };
         to_upsert.push((doc_id, gen, plan));
     }
@@ -345,7 +345,7 @@ pub fn drive_engine_sync(
 
     // ── 3. Apply sync upserts + spawn async parses ────────────────────
     let mut sync_only: Vec<(DocumentId, u64, std::sync::Arc<rumoca_session::parsing::ast::StoredDefinition>)> = Vec::new();
-    let mut async_only: Vec<(DocumentId, u64, String)> = Vec::new();
+    let mut async_only: Vec<(DocumentId, u64, std::sync::Arc<str>)> = Vec::new();
     for (doc_id, gen, plan) in to_upsert {
         match plan {
             SyncPlan::Sync(ast) => sync_only.push((doc_id, gen, ast)),
