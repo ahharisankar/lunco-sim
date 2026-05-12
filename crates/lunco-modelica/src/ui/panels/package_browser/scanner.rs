@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use std::path::{Path, PathBuf};
 use crate::ui::state::ModelLibrary;
 use super::types::{PackageNode, TwinNode};
-use super::cache::{ScanResult, FileLoadResult, TwinState};
+use super::cache::TwinState;
 
 // ─── Twin / Workspace Scanning ───────────────────────────────────────────────
 
@@ -12,7 +12,7 @@ pub fn scan_twin_folder(root: PathBuf) -> TwinState {
     let root_node = TwinNode {
         path: root.clone(),
         name: root.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
-        children: Vec::new(), // FIXME: scan_children needs to return Vec<TwinNode>
+        children: scan_twin_children(&root),
         is_modelica: false,
     };
     TwinState {
@@ -21,7 +21,7 @@ pub fn scan_twin_folder(root: PathBuf) -> TwinState {
     }
 }
 
-fn scan_children(dir: &Path) -> Vec<PackageNode> {
+fn scan_twin_children(dir: &Path) -> Vec<TwinNode> {
     let Ok(iter) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -41,29 +41,25 @@ fn scan_children(dir: &Path) -> Vec<PackageNode> {
                 .unwrap_or(false);
         
         if is_dir {
-            let children = scan_children(&path);
-            out.push(PackageNode::Category {
-                id: format!("twin_{}", path.display()),
+            let children = scan_twin_children(&path);
+            out.push(TwinNode {
+                path,
                 name,
-                package_path: String::new(), // Not used for Twin today
-                fs_path: path,
-                children: Some(children),
-                is_loading: false,
+                children,
+                is_modelica: false,
             });
         } else if is_modelica {
             let display_name = name.strip_suffix(".mo").unwrap_or(&name).to_string();
-            out.push(PackageNode::Model {
-                id: format!("file://{}", path.display()),
+            out.push(TwinNode {
+                path,
                 name: display_name,
-                library: ModelLibrary::User,
-                class_kind: None, // Will be filled on demand or lazy
+                children: Vec::new(),
+                is_modelica: true,
             });
         }
     }
     out.sort_by(|a, b| {
-        let a_is_dir = matches!(a, PackageNode::Category { .. });
-        let b_is_dir = matches!(b, PackageNode::Category { .. });
-        b_is_dir.cmp(&a_is_dir).then_with(|| a.name().cmp(b.name()))
+        b.is_modelica.cmp(&a.is_modelica).then_with(|| a.name.cmp(&b.name))
     });
     out
 }
@@ -82,7 +78,8 @@ pub fn scan_msl_dir(dir: &Path, package_path: String) -> Vec<PackageNode> {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = dir;
-        return scan_msl_inmem(&package_path);
+        let _ = package_path;
+        Vec::new() // FIXME: scan_msl_inmem missing
     }
     #[cfg(not(target_arch = "wasm32"))]
     {

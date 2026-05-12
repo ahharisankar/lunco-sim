@@ -5,7 +5,7 @@ use bevy_egui::egui;
 use lunco_workbench::{Panel, PanelId, PanelSlot};
 
 use crate::ui::state::{ModelLibrary};
-use super::types::PackageNode;
+use super::types::{PackageNode, TwinNode};
 use super::cache::{PackageTreeCache, ScanResult};
 use super::scanner::{scan_msl_dir};
 
@@ -67,7 +67,7 @@ impl Panel for PackageBrowserPanel {
                 });
 
                 if let Some(twin) = cache.twin.as_mut() {
-                    if let Some(a) = render_node(&mut twin.root_node.children, ui, active_path, None, 0, &mut cache.tasks, &theme) {
+                    if let Some(a) = render_twin_node(&mut twin.root_node, ui, active_path, &theme) {
                         action = Some(a);
                     }
                 }
@@ -128,22 +128,40 @@ fn section_header(ui: &mut egui::Ui, title: &str, buttons: impl FnOnce(&mut egui
     });
 }
 
-fn render_node(
-    nodes: &mut [PackageNode],
+fn render_twin_node(
+    node: &mut TwinNode,
     ui: &mut egui::Ui,
     active_path: Option<&str>,
-    active_drill: Option<&str>,
-    depth: usize,
-    tasks: &mut Vec<bevy::tasks::Task<ScanResult>>,
     theme: &lunco_theme::Theme,
 ) -> Option<PackageAction> {
-    let mut action = None;
-    for node in nodes {
-        if let Some(a) = render_node_single(node, ui, active_path, active_drill, depth, tasks, theme) {
-            action = Some(a);
+    if node.is_modelica {
+        let is_active = active_path == Some(node.name.as_str());
+        let mut label = egui::RichText::new(format!("📄 {}", node.name));
+        if is_active {
+            label = label.strong().color(theme.tokens.accent);
         }
+        if ui.selectable_label(is_active, label).clicked() {
+            return Some(PackageAction::Open(
+                format!("file://{}", node.path.display()),
+                node.name.clone(),
+                ModelLibrary::User,
+                ui.input(|i| i.modifiers.command),
+            ));
+        }
+        None
+    } else {
+        let mut action = None;
+        egui::CollapsingHeader::new(format!("📁 {}", node.name))
+            .id_salt(node.path.to_string_lossy().to_string())
+            .show(ui, |ui| {
+                for kid in &mut node.children {
+                    if let Some(a) = render_twin_node(kid, ui, active_path, theme) {
+                        action = Some(a);
+                    }
+                }
+            });
+        action
     }
-    action
 }
 
 fn render_node_single(
@@ -160,7 +178,7 @@ fn render_node_single(
     match node {
         PackageNode::Category { id, name, package_path, fs_path, children, is_loading } => {
             let header_resp = egui::CollapsingHeader::new(format!("📁 {}", name))
-                .id_salt(id.as_str()) // Corrected method name
+                .id_salt(id.as_str())
                 .show(ui, |ui| {
                     if let Some(kids) = children {
                         for kid in kids {

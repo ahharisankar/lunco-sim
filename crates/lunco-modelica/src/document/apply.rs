@@ -5,7 +5,7 @@ use lunco_doc::DocumentError;
 use rumoca_session::parsing::ast::StoredDefinition;
 
 use super::ops::{ModelicaChange, ModelicaOp, FreshAst};
-use super::document::AstCache;
+use super::core::AstCache;
 use crate::pretty;
 
 /// Map the op-layer's [`pretty::ClassKindSpec`] to the Index's

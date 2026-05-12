@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use lunco_doc::DocumentId;
 use crate::ui::panels::code_editor::EditorBufferState;
 use crate::ui::{ModelicaDocumentRegistry, WorkbenchState};
-use super::types::{TabId, TabRenderContext};
+use super::types::{TabRenderContext};
 use super::tabs::ModelTabs;
 
 pub fn drilled_class_for_doc(
