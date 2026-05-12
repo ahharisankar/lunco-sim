@@ -1,0 +1,106 @@
+//! Data snapshots for canvas-visual consumption.
+
+use bevy::prelude::*;
+use bevy_egui::egui;
+use crate::ui::state::{ModelicaDocumentRegistry};
+use crate::ModelicaModel;
+
+pub(crate) fn stash_snapshots(ui: &egui::Context, world: &mut World, doc_id: Option<lunco_doc::DocumentId>) {
+    // ─── Signals ───
+    if let Some(sig_reg) = world.get_resource::<lunco_viz::SignalRegistry>() {
+        let mut snapshot = lunco_viz::kinds::canvas_plot_node::SignalSnapshot::default();
+        for (sig_ref, hist) in sig_reg.iter_scalar() {
+            let pts: Vec<[f64; 2]> = hist.samples.iter().map(|s| [s.time, s.value]).collect();
+            snapshot.samples.insert((sig_ref.entity, sig_ref.path.clone()), pts);
+        }
+        lunco_viz::kinds::canvas_plot_node::stash_signal_snapshot(ui, snapshot);
+    }
+
+    let canvas_sim = doc_id.and_then(|d| crate::ui::state::simulator_for(world, d));
+
+    // ─── Live Values ───
+    {
+        let mut state = lunco_viz::kinds::canvas_plot_node::NodeStateSnapshot::default();
+        seed_state_from_latest_experiment(world, &mut state);
+        if let Some(entity) = canvas_sim {
+            if let Some(model) = world.get::<ModelicaModel>(entity) {
+                for (k, v) in &model.parameters { state.values.insert(k.to_string(), *v); }
+                for (k, v) in &model.inputs { state.values.insert(k.to_string(), *v); }
+                for (k, v) in &model.variables { state.values.insert(k.to_string(), *v); }
+            }
+        }
+        lunco_viz::kinds::canvas_plot_node::stash_node_state(ui, state);
+        
+        let any_unpaused = canvas_sim
+            .and_then(|e| world.get::<ModelicaModel>(e))
+            .map(|m| !m.paused)
+            .unwrap_or(false);
+        let dt = ui.input(|i| i.stable_dt as f64);
+        let prev = ui.data(|d| d.get_temp::<f64>(egui::Id::new("lunco_modelica_flow_anim_time"))).unwrap_or(0.0);
+        let next = if any_unpaused { prev + dt } else { prev };
+        ui.data_mut(|d| {
+            d.insert_temp(egui::Id::new("lunco_modelica_flow_anim_time"), next);
+            d.insert_temp(egui::Id::new("lunco_modelica_sim_stepping"), any_unpaused);
+        });
+    }
+
+    // ─── Input Controls ───
+    {
+        let mut control_snapshot = lunco_viz::kinds::canvas_plot_node::InputControlSnapshot::default();
+        if let Some(entity) = canvas_sim {
+            if let Some(model) = world.get::<ModelicaModel>(entity) {
+                let index_ref = world.get_resource::<ModelicaDocumentRegistry>()
+                    .and_then(|r| r.host(model.document))
+                    .map(|h| h.document().index());
+                for (qualified, value) in &model.inputs {
+                    let (mn, mx) = index_ref
+                        .and_then(|idx| idx.find_component_by_leaf(qualified))
+                        .map(|entry| (
+                            entry.modifications.get("min").and_then(|s| s.parse().ok()),
+                            entry.modifications.get("max").and_then(|s| s.parse().ok()),
+                        ))
+                        .unwrap_or((None, None));
+                    control_snapshot.inputs.insert(qualified.to_string(), (*value, mn, mx));
+                }
+            }
+        }
+        lunco_viz::kinds::canvas_plot_node::stash_input_control_snapshot(ui, control_snapshot);
+    }
+}
+
+fn seed_state_from_latest_experiment(
+    world: &World,
+    state: &mut lunco_viz::kinds::canvas_plot_node::NodeStateSnapshot,
+) {
+    use lunco_experiments::{ExperimentRegistry, TwinId};
+    let twin = TwinId("default".into());
+    let visibility = world.get_resource::<crate::ui::panels::experiments::ExperimentVisibility>();
+    let active_plot = world.get_resource::<crate::ui::panels::experiments::ActivePlot>().copied().unwrap_or_default().or_default();
+    let plot_states = world.get_resource::<crate::ui::panels::experiments::PlotPanelStates>();
+    let Some(registry) = world.get_resource::<ExperimentRegistry>() else { return; };
+    let exps = registry.list_for_twin(&twin);
+    let chosen = exps.iter().rev().find(|e| {
+        e.result.is_some() && visibility.map(|v| v.visible.contains(&e.id)).unwrap_or(true)
+    });
+    let Some(exp) = chosen else { return };
+    let Some(result) = &exp.result else { return };
+    if result.times.is_empty() { return; }
+    let scrub_time = plot_states.and_then(|s| s.scrub(active_plot));
+    let idx = match scrub_time {
+        Some(t) => {
+            let mut best = 0usize;
+            let mut best_d = f64::INFINITY;
+            for (i, ti) in result.times.iter().enumerate() {
+                let d = (ti - t).abs();
+                if d < best_d { best_d = d; best = i; }
+            }
+            best
+        }
+        None => result.times.len() - 1,
+    };
+    for (name, samples) in &result.series {
+        if let Some(v) = samples.get(idx) {
+            if v.is_finite() { state.values.insert(name.clone(), *v); }
+        }
+    }
+}

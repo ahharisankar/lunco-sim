@@ -611,7 +611,7 @@ impl Plugin for ModelicaUiPlugin {
         // inside the plugin via `ApiVisibility` (off by default; pass
         // `--api-expose-edits` to expose). See
         // `crates/lunco-modelica/src/api_edits.rs` for the rationale.
-        app.add_plugins(crate::api_edits::ModelicaApiEditPlugin);
+        app.add_plugins(crate::api::ModelicaApiEditPlugin);
 
         app.init_resource::<WorkbenchState>()
             .init_resource::<ModelicaDocumentRegistry>()

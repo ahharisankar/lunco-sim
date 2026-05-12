@@ -544,7 +544,8 @@ pub mod api_queries;
 // `ApplyModelicaOps` Reflect events directly. The module is named `api_*`
 // because external HTTP callers also use it when `lunco-api` is enabled,
 // but the events themselves carry no `lunco-api` dependency.
-pub mod api_edits;
+/// External JSON-RPC API handlers.
+pub mod api;
 pub use sim_stream::{new_sim_stream, SimSnapshot, SimStream, VarHistory, SimSample};
 
 /// UI-thread registry of per-entity lock-free sim streams (Phase A

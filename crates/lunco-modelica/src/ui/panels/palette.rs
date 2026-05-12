@@ -557,7 +557,7 @@ pub(crate) fn place_component(
 
     world
         .commands()
-        .trigger(crate::api_edits::AddModelicaComponent {
+        .trigger(crate::api::component::AddModelicaComponent {
             doc: doc_id,
             class,
             type_name: def.msl_path.clone(),

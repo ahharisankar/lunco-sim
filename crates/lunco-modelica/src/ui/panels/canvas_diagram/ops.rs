@@ -909,7 +909,7 @@ pub(super) fn apply_ops(
         .pin_all_for_doc(doc_id);
     // Stamp the post-apply window so the canvas frame logger
     // captures every subsequent frame's timing for ~2 seconds.
-    if let Ok(mut guard) = super::panel::LAST_APPLY_AT.lock() {
+    if let Ok(mut guard) = crate::ui::panels::canvas_diagram::panel::util::LAST_APPLY_AT.lock() {
         *guard = Some(t_start);
     }
     // Stamp the GLOBAL frame-time probe so every Bevy Update tick
@@ -1274,7 +1274,7 @@ pub(super) fn auto_arrange_now(world: &mut World, doc_id: lunco_doc::DocumentId)
         ops.len()
     );
     #[cfg(feature = "lunco-api")]
-    crate::api_edits::trigger_apply_ops(world, doc_id, ops);
+    crate::api::trigger_apply_ops(world, doc_id, ops);
     #[cfg(not(feature = "lunco-api"))]
     apply_ops_public(world, doc_id, ops);
 }

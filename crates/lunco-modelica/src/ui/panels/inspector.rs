@@ -31,7 +31,7 @@ use bevy_egui::egui;
 use lunco_canvas::SelectItem;
 use lunco_workbench::{Panel, PanelId, PanelSlot};
 
-use crate::api_edits::{ApiOp, ApplyModelicaOps};
+use crate::api::{ApiOp, ApplyModelicaOps};
 
 pub struct InspectorPanel;
 
