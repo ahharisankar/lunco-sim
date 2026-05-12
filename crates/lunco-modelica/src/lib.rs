@@ -144,6 +144,7 @@ pub mod text_diff;
 /// type references, then primes the engine's icon cache via a single
 /// off-thread task. Drill-in projection sees a populated cache.
 pub mod icon_warmer;
+pub mod source_roots;
 
 /// Simple wrapper around rumoca-session for compiling Modelica models.
 ///
@@ -525,6 +526,29 @@ impl ModelicaCompiler {
     pub fn session(&self) -> &Session {
         &self.session
     }
+
+    /// Merge a Modelica source root into the live session so
+    /// subsequent compiles can resolve its types. Used by the
+    /// `LoadSourceRoot` worker command (`source_roots` lazy-load
+    /// pipeline) — main thread sends this command before a Compile
+    /// that depends on the library. Idempotent: rumoca dedups by
+    /// `id`, so re-issuing for an already-loaded root is cheap.
+    ///
+    /// Blocks the worker thread for the duration of the parse:
+    /// MSL warm-bundle ~1–3 s; cold parse 10–60 s. Other queued
+    /// commands wait behind it.
+    pub fn load_source_root(
+        &mut self,
+        id: &str,
+        root_dir: &std::path::Path,
+    ) -> rumoca_session::compile::SourceRootLoadReport {
+        self.session.load_source_root_tolerant(
+            id,
+            rumoca_session::compile::SourceRootKind::DurableExternal,
+            root_dir,
+            None,
+        )
+    }
 }
 
 
@@ -638,6 +662,10 @@ impl Plugin for ModelicaCorePlugin {
 impl Plugin for ModelicaPlugin {
     fn build(&self, app: &mut App) {
         build_modelica_core(app);
+        // PR-A: inventory every source root the workbench can load
+        // into a rumoca compile session. No loads yet — the registry
+        // just enumerates so PR-B's gate has something to look up.
+        app.insert_resource(source_roots::SourceRootRegistry::build());
         app.add_plugins(ui::ModelicaUiPlugin);
         app.add_plugins(lunco_doc_bevy::ViewSyncPlugin);
         // Self-register with the workbench's plugin-driven document-

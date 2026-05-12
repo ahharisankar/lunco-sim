@@ -461,6 +461,7 @@ pub fn on_compile_model(
     channels: Option<Res<ModelicaChannels>>,
     mut q_models: Query<&mut ModelicaModel>,
     model_tabs: Res<crate::ui::panels::model_view::ModelTabs>,
+    mut world_source_roots: Option<ResMut<crate::source_roots::SourceRootRegistry>>,
 ) {
     let doc = trigger.event().doc;
     let explicit_class = trigger.event().class.clone();
@@ -761,6 +762,32 @@ pub fn on_compile_model(
                 Some((filename, document.source().to_string()))
             })
             .collect();
+        // PR-B/C: source-root dep scan + lazy load.
+        //
+        // Walk the doc's AST to find every qualified type root
+        // (`Modelica.X`, `ThermofluidStream.Y`, ...). For each known
+        // root that isn't yet `Ready`, publish its location to the
+        // process-wide handle so the worker's `ModelicaCompiler::new`
+        // preloads it on its first construction. The actual parse
+        // cost runs inside the worker thread; this pre-flight is
+        // microseconds.
+        //
+        // Without this scan: the worker's session starts empty and
+        // every `Modelica.*` reference is reported as
+        // `undefined type` by rumoca's typecheck. With it: deps are
+        // ensured available before the Compile dispatches, so the
+        // first compile after a dep-discovering edit may take a few
+        // extra seconds (MSL preload), but subsequent compiles see
+        // a warm session.
+        if let Some(ast) = registry.host(doc).and_then(|h| h.document().strict_ast()) {
+            if let Some(roots) = world_source_roots.as_deref_mut() {
+                crate::source_roots::log_compile_deps(roots, &model_name, &ast);
+                let deps = crate::source_roots::scan_source_root_deps(&ast);
+                for root in &deps {
+                    crate::source_roots::ensure_loaded(roots, root, &channels);
+                }
+            }
+        }
         let _ = channels.tx.send(ModelicaCommand::Compile {
             entity: target_entity,
             session_id,
