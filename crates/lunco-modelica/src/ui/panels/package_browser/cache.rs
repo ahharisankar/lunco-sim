@@ -40,8 +40,6 @@ pub struct RenameState {
 pub struct PackageTreeCache {
     pub roots: Vec<PackageNode>,
     pub tasks: Vec<Task<ScanResult>>,
-    pub file_tasks: Vec<Task<FileLoadResult>>,
-    pub loading_ids: std::collections::HashMap<String, lunco_doc::DocumentId>,
     pub in_memory_models: Vec<InMemoryEntry>,
     pub twin: Option<TwinState>,
     pub twin_scan_task: Option<Task<TwinState>>,
@@ -50,10 +48,6 @@ pub struct PackageTreeCache {
 }
 
 impl PackageTreeCache {
-    pub fn is_loading(&self, doc: lunco_doc::DocumentId) -> bool {
-        self.loading_ids.values().any(|d| *d == doc)
-    }
-
     pub fn new() -> Self {
         let msl_root = lunco_assets::msl_dir();
         let modelica_dir = msl_root.join("Modelica");
@@ -100,8 +94,6 @@ impl PackageTreeCache {
         Self {
             roots,
             tasks: Vec::new(),
-            file_tasks: Vec::new(),
-            loading_ids: std::collections::HashMap::new(),
             in_memory_models: Vec::new(),
             twin: None,
             twin_scan_task: None,

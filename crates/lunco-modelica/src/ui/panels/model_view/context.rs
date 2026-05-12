@@ -138,40 +138,34 @@ pub fn sync_active_tab_to_doc(
     };
 
     let snapshot = snapshot.or_else(|| {
-        if let Some(loads) = world
-            .get_resource::<crate::ui::panels::canvas_diagram::DrillInLoads>()
-        {
-            if let Some(qualified) = loads.detail(doc) {
-                let qualified = qualified.to_string();
-                let short = qualified
-                    .rsplit('.')
-                    .next()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| qualified.clone());
-                return Some((
-                    format!("msl://{qualified}"),
-                    short.clone(),
-                    String::new(),
-                    true,
-                    crate::ui::state::ModelLibrary::Bundled,
-                    Some(short),
-                ));
-            }
+        let openings = world
+            .get_resource::<crate::ui::document_openings::DocumentOpenings>()?;
+        if let Some(qualified) = openings.drill_in_qualified(doc) {
+            let qualified = qualified.to_string();
+            let short = qualified
+                .rsplit('.')
+                .next()
+                .map(str::to_string)
+                .unwrap_or_else(|| qualified.clone());
+            return Some((
+                format!("msl://{qualified}"),
+                short.clone(),
+                String::new(),
+                true,
+                crate::ui::state::ModelLibrary::Bundled,
+                Some(short),
+            ));
         }
-        if let Some(dup) = world
-            .get_resource::<crate::ui::panels::canvas_diagram::DuplicateLoads>()
-        {
-            if let Some(display) = dup.detail(doc) {
-                let display = display.to_string();
-                return Some((
-                    format!("mem://{display}"),
-                    display.clone(),
-                    String::new(),
-                    false,
-                    crate::ui::state::ModelLibrary::InMemory,
-                    Some(display),
-                ));
-            }
+        if let Some(display) = openings.duplicate_display(doc) {
+            let display = display.to_string();
+            return Some((
+                format!("mem://{display}"),
+                display.clone(),
+                String::new(),
+                false,
+                crate::ui::state::ModelLibrary::InMemory,
+                Some(display),
+            ));
         }
         None
     });

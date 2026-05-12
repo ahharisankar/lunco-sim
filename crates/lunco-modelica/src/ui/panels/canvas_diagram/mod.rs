@@ -42,7 +42,7 @@ pub const CANVAS_DIAGRAM_PANEL_ID: PanelId = PanelId("modelica_canvas_diagram");
 
 mod theme;
 mod paint;
-mod loads;
+pub mod loads;
 mod port;
 mod edge;
 mod node;
@@ -68,7 +68,7 @@ pub use pulse::{
 };
 use pulse::{EdgePulseLayer, PulseGlowLayer};
 pub use palette::{DiagramProjectionLimits, PaletteSettings};
-pub use loads::{DrillInBinding, DrillInLoads, DuplicateBinding, DuplicateLoads, drill_into_class, drive_drill_in_loads, drive_duplicate_loads};
+pub use loads::{DrillInBinding, DuplicateBinding, drill_into_class, drive_drill_in_loads, drive_duplicate_loads};
 pub use edge::ConnectionEdgeData;
 pub use node::IconNodeData;
 pub use projection::ProjectionTask;

@@ -64,9 +64,8 @@ pub(crate) fn render_diagram_canvas(
             let projecting = docstate.projection_task.is_some();
             let parse_pending = active_doc.and_then(|d| world.resource::<crate::ui::state::ModelicaDocumentRegistry>().host(d).map(|h| h.document().ast_is_stale())).unwrap_or(false);
             
-            let loads = world.resource::<super::super::loads::DrillInLoads>();
-            let dup_loads = world.resource::<super::super::loads::DuplicateLoads>();
-            let loading = active_doc.map(|d| loads.is_loading(d) || dup_loads.is_loading(d)).unwrap_or(false);
+            let openings = world.resource::<crate::ui::document_openings::DocumentOpenings>();
+            let loading = active_doc.map(|d| openings.is_loading(d)).unwrap_or(false);
 
             (err, !has_content && (loading || parse_pending || projecting), !has_content && !loading && !parse_pending && !projecting)
         };

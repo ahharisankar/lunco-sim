@@ -157,7 +157,7 @@ pub fn on_duplicate_model_from_read_only(
     mut registry: ResMut<ModelicaDocumentRegistry>,
     mut cache: ResMut<PackageTreeCache>,
     mut model_tabs: ResMut<ModelTabs>,
-    mut duplicate_loads: ResMut<crate::ui::panels::canvas_diagram::DuplicateLoads>,
+    mut openings: ResMut<crate::ui::document_openings::DocumentOpenings>,
     mut bus: ResMut<lunco_workbench::status_bus::StatusBus>,
     mut console: ResMut<crate::ui::panels::console::ConsoleLog>,
     mut commands: Commands,
@@ -272,16 +272,18 @@ pub fn on_duplicate_model_from_read_only(
         "duplicate",
         format!("Duplicating {origin_class_short} → {name}"),
     );
-    duplicate_loads.insert(
+    openings.insert(
         doc_id,
-        crate::ui::panels::canvas_diagram::DuplicateBinding {
-            display_name: name.clone(),
-            origin_short: origin_class_short.clone(),
-            inner_drill: inner_drill,
-            started: web_time::Instant::now(),
-            task,
-            _busy: busy,
-        },
+        crate::ui::document_openings::OpeningState::Duplicate(
+            crate::ui::panels::canvas_diagram::DuplicateBinding {
+                display_name: name.clone(),
+                origin_short: origin_class_short.clone(),
+                inner_drill: inner_drill,
+                started: web_time::Instant::now(),
+                task,
+                _busy: busy,
+            },
+        ),
     );
     console.info(format!(
         "📄 Duplicating `{origin_class_short}` → `{name}` (building…)"
@@ -451,17 +453,19 @@ pub fn spawn_duplicate_class_task(world: &mut World, qualified: String, name_hin
             format!("Opening {qualified} → {name}"),
         );
     world
-        .resource_mut::<crate::ui::panels::canvas_diagram::DuplicateLoads>()
+        .resource_mut::<crate::ui::document_openings::DocumentOpenings>()
         .insert(
             doc_id,
-            crate::ui::panels::canvas_diagram::DuplicateBinding {
-                display_name: name.clone(),
-                origin_short: origin_short,
-                inner_drill: None,
-                started: web_time::Instant::now(),
-                task,
-                _busy: busy,
-            },
+            crate::ui::document_openings::OpeningState::Duplicate(
+                crate::ui::panels::canvas_diagram::DuplicateBinding {
+                    display_name: name.clone(),
+                    origin_short: origin_short,
+                    inner_drill: None,
+                    started: web_time::Instant::now(),
+                    task,
+                    _busy: busy,
+                },
+            ),
         );
     world
         .resource_mut::<crate::ui::panels::console::ConsoleLog>()

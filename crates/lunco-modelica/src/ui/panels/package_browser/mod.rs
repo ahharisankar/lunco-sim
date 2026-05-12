@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 use bevy_egui::egui;
 use crate::class_ref::{ClassRef, Library};
-use crate::ui::state::{ModelicaDocumentRegistry, ModelLibrary, WorkbenchState};
+use crate::ui::state::{ModelicaDocumentRegistry, ModelLibrary};
 use std::path::{PathBuf};
 
 pub mod types;
@@ -27,9 +27,6 @@ impl Plugin for PackageBrowserPlugin {
 
 pub fn handle_package_loading_tasks(
     mut cache: ResMut<PackageTreeCache>,
-    mut workbench: ResMut<WorkbenchState>,
-    mut registry: ResMut<ModelicaDocumentRegistry>,
-    mut workspace: ResMut<lunco_workbench::WorkspaceResource>,
 ) {
     use futures_lite::future;
 
@@ -47,35 +44,12 @@ pub fn handle_package_loading_tasks(
         find_and_update_node(&mut cache.roots, &result.parent_id, result.children);
     }
 
-    let mut finished_files = Vec::new();
-    cache.file_tasks.retain_mut(|task| {
-        if let Some(result) = future::block_on(future::poll_once(task)) {
-            finished_files.push(result);
-            false
-        } else {
-            true
-        }
-    });
-
     if let Some(mut task) = cache.twin_scan_task.take() {
         if let Some(scanned) = future::block_on(future::poll_once(&mut task)) {
             cache.twin = Some(scanned);
         } else {
             cache.twin_scan_task = Some(task);
         }
-    }
-
-    for result in finished_files {
-        cache.loading_ids.remove(&result.id);
-        let doc_id = result.doc_id;
-        registry.install_prebuilt(doc_id, result.doc);
-
-        // Drill-in target is already on the tab — `open_class` set it
-        // via `ensure_for(doc, drilled)` synchronously before the load
-        // task was spawned. No post-install patching needed.
-
-        workbench.diagram_dirty = true;
-        workspace.active_document = Some(doc_id);
     }
 }
 
@@ -218,7 +192,7 @@ pub(crate) fn open_class(world: &mut World, class: ClassRef, pinned: bool) {
             // The slim-slice drill-in path is exactly what we need
             // for system libraries: it owns the file lookup, the
             // class-slice extraction, the tab plumbing, and the
-            // `DrillInLoads` busy state. Pass the absolute qualified
+            // `DocumentOpenings` busy state. Pass the absolute qualified
             // name so its `library_fs::resolve_class_path_indexed`
             // can find the owning .mo file.
             crate::ui::panels::canvas_diagram::drill_into_class(world, &class.qualified());
@@ -275,7 +249,6 @@ fn open_bundled_class(world: &mut World, class: &ClassRef) {
     }
 
     let reserved_doc_id = world.resource_mut::<ModelicaDocumentRegistry>().reserve_id();
-    world.resource_mut::<PackageTreeCache>().loading_ids.insert(dedup_key.clone(), reserved_doc_id);
     let tab_id = world
         .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
         .ensure_for(reserved_doc_id, drilled_for_tab.clone());
@@ -285,6 +258,7 @@ fn open_bundled_class(world: &mut World, class: &ClassRef) {
     let origin = lunco_doc::DocumentOrigin::File { path: path_marker.clone(), writable: false };
     let dedup_for_task = dedup_key.clone();
     let filename_for_task = filename.clone();
+    let display_for_task = display_name.clone();
     let task = AsyncComputeTaskPool::get().spawn(async move {
         let source_text = crate::models::get_model(&filename_for_task)
             .unwrap_or("")
@@ -293,7 +267,7 @@ fn open_bundled_class(world: &mut World, class: &ClassRef) {
         crate::ui::panels::package_browser::cache::FileLoadResult {
             id: dedup_for_task.clone(),
             dedup_key: dedup_for_task,
-            name: display_name,
+            name: display_for_task,
             library: ModelLibrary::Bundled,
             source: source_text.into(),
             line_starts: vec![0].into(),
@@ -303,7 +277,18 @@ fn open_bundled_class(world: &mut World, class: &ClassRef) {
             doc,
         }
     });
-    world.resource_mut::<PackageTreeCache>().file_tasks.push(task);
+    world
+        .resource_mut::<crate::ui::document_openings::DocumentOpenings>()
+        .insert(
+            reserved_doc_id,
+            crate::ui::document_openings::OpeningState::FileLoad {
+                dedup_key,
+                display_name,
+                library: ModelLibrary::Bundled,
+                started: web_time::Instant::now(),
+                task,
+            },
+        );
 }
 
 fn open_user_file_class(world: &mut World, path: PathBuf, class: &ClassRef) {
@@ -322,7 +307,6 @@ fn open_user_file_class(world: &mut World, path: PathBuf, class: &ClassRef) {
 
     let dedup_key = path.display().to_string();
     let reserved_doc_id = world.resource_mut::<ModelicaDocumentRegistry>().reserve_id();
-    world.resource_mut::<PackageTreeCache>().loading_ids.insert(dedup_key.clone(), reserved_doc_id);
     let tab_id = world
         .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
         .ensure_for(reserved_doc_id, drilled.clone());
@@ -332,13 +316,14 @@ fn open_user_file_class(world: &mut World, path: PathBuf, class: &ClassRef) {
     let origin = lunco_doc::DocumentOrigin::File { path: path.clone(), writable: true };
     let path_for_task = path.clone();
     let dedup_for_task = dedup_key.clone();
+    let display_for_task = display_name.clone();
     let task = AsyncComputeTaskPool::get().spawn(async move {
         let source_text = std::fs::read_to_string(&path_for_task).unwrap_or_default();
         let doc = crate::document::ModelicaDocument::with_origin(reserved_doc_id, source_text.clone(), origin);
         crate::ui::panels::package_browser::cache::FileLoadResult {
             id: dedup_for_task.clone(),
             dedup_key: dedup_for_task,
-            name: display_name,
+            name: display_for_task,
             library: ModelLibrary::User,
             source: source_text.into(),
             line_starts: vec![0].into(),
@@ -348,7 +333,18 @@ fn open_user_file_class(world: &mut World, path: PathBuf, class: &ClassRef) {
             doc,
         }
     });
-    world.resource_mut::<PackageTreeCache>().file_tasks.push(task);
+    world
+        .resource_mut::<crate::ui::document_openings::DocumentOpenings>()
+        .insert(
+            reserved_doc_id,
+            crate::ui::document_openings::OpeningState::FileLoad {
+                dedup_key,
+                display_name,
+                library: ModelLibrary::User,
+                started: web_time::Instant::now(),
+                task,
+            },
+        );
 }
 
 fn focus_existing_doc_tab(world: &mut World, doc: lunco_doc::DocumentId, qualified: String) {

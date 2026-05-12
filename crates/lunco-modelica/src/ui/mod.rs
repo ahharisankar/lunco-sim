@@ -61,6 +61,7 @@ use bevy::prelude::*;
 use lunco_workbench::{Perspective, PerspectiveId, WorkbenchAppExt, WorkbenchLayout, PanelId};
 
 pub mod state;
+pub mod document_openings;
 pub use state::*;
 
 pub mod commands;
@@ -711,9 +712,9 @@ impl Plugin for ModelicaUiPlugin {
             .init_resource::<panels::canvas_diagram::CanvasDiagramState>()
             .init_resource::<panels::canvas_diagram::PaletteSettings>()
             .init_resource::<panels::canvas_diagram::DiagramProjectionLimits>()
-            .init_resource::<panels::canvas_diagram::DrillInLoads>()
+            .init_resource::<document_openings::DocumentOpenings>()
             .init_resource::<panels::canvas_diagram::CanvasSnapSettings>()
-            .init_resource::<panels::canvas_diagram::DuplicateLoads>()
+            .add_systems(Update, document_openings::drive_file_load_openings)
             .add_systems(Update, panels::canvas_diagram::drive_drill_in_loads)
             .add_systems(Update, panels::canvas_diagram::drive_duplicate_loads)
             // Flip `cancel` on every non-active tab's in-flight

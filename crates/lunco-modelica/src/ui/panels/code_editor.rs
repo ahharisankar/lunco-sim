@@ -383,25 +383,15 @@ impl Panel for CodeEditorPanel {
         let (compilation_error, selected_entity, is_loading) = {
             let state = world.resource::<WorkbenchState>();
             let entity = state.selected_entity;
-            // load resources (drill-in / duplicate /
-            // package-tree). Singleton `WorkbenchState.is_loading`
-            // retired.
+            // Unified in-flight table covers drill-in, duplicate,
+            // and bundled/user-file reads.
             let loading = source_len == 0
                 && tab_target
                     .map(|d| {
-                        let drill = world
-                            .get_resource::<crate::ui::panels::canvas_diagram::DrillInLoads>()
-                            .map(|l| l.is_loading(d))
-                            .unwrap_or(false);
-                        let dup = world
-                            .get_resource::<crate::ui::panels::canvas_diagram::DuplicateLoads>()
-                            .map(|l| l.is_loading(d))
-                            .unwrap_or(false);
-                        let pkg = world
-                            .get_resource::<crate::ui::panels::package_browser::PackageTreeCache>()
-                            .map(|c| c.is_loading(d))
-                            .unwrap_or(false);
-                        drill || dup || pkg
+                        world
+                            .get_resource::<crate::ui::document_openings::DocumentOpenings>()
+                            .map(|o| o.is_loading(d))
+                            .unwrap_or(false)
                     })
                     .unwrap_or(false);
             let err = tab_target.and_then(|d| {
