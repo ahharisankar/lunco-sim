@@ -23,7 +23,6 @@ use web_time::Instant;
 
 use crate::ui::panels::canvas_diagram::loads::{DrillInBinding, DuplicateBinding};
 use crate::ui::panels::package_browser::cache::FileLoadResult;
-use crate::ui::state::ModelLibrary;
 
 /// One in-flight document open. Each variant carries the typed
 /// `Task<...>` plus the metadata that variant's driver needs to
@@ -34,11 +33,7 @@ pub enum OpeningState {
     /// task returns a fully-built [`FileLoadResult`]; the driver
     /// installs `result.doc` against `result.doc_id`.
     FileLoad {
-        /// Original `bundled://...` or absolute path used as the
-        /// dedup key by the package browser.
-        dedup_key: String,
         display_name: String,
-        library: ModelLibrary,
         started: Instant,
         task: Task<FileLoadResult>,
     },

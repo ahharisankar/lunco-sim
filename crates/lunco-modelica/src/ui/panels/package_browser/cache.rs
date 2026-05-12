@@ -10,14 +10,12 @@ pub struct ScanResult {
     pub children: Vec<PackageNode>,
 }
 
+/// Output of a bundled or user-file load task. Carries just enough
+/// to install the prebuilt document into the registry — display
+/// name / library / dedup key live in [`crate::ui::document_openings::OpeningState::FileLoad`]
+/// for the duration of the load, so this result is `doc_id + doc`
+/// only.
 pub struct FileLoadResult {
-    pub id: String,
-    pub dedup_key: String,
-    pub name: String,
-    pub library: ModelLibrary,
-    pub source: std::sync::Arc<str>,
-    pub detected_name: Option<String>,
-    pub layout_job: Option<bevy_egui::egui::text::LayoutJob>,
     pub doc_id: lunco_doc::DocumentId,
     pub doc: crate::document::ModelicaDocument,
 }

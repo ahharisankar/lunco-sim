@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 use bevy_egui::egui;
 use crate::class_ref::{ClassRef, Library};
-use crate::ui::state::{ModelicaDocumentRegistry, ModelLibrary};
+use crate::ui::state::ModelicaDocumentRegistry;
 use std::path::{PathBuf};
 
 pub mod types;
@@ -232,8 +232,7 @@ fn open_bundled_class(world: &mut World, class: &ClassRef) {
         Some(stem) => format!("{stem}.mo"),
         None => return, // Library root click — no class to open.
     };
-    let dedup_key = format!("bundled://{filename}");
-    let path_marker = PathBuf::from(&dedup_key);
+    let path_marker = PathBuf::from(format!("bundled://{filename}"));
     let drilled = class.qualified();
     let drilled_for_tab = if class.path.len() > 1 { Some(drilled.clone()) } else { None };
 
@@ -256,22 +255,13 @@ fn open_bundled_class(world: &mut World, class: &ClassRef) {
 
     let display_name = class.short_name().to_string();
     let origin = lunco_doc::DocumentOrigin::File { path: path_marker.clone(), writable: false };
-    let dedup_for_task = dedup_key.clone();
     let filename_for_task = filename.clone();
-    let display_for_task = display_name.clone();
     let task = AsyncComputeTaskPool::get().spawn(async move {
         let source_text = crate::models::get_model(&filename_for_task)
             .unwrap_or("")
             .to_string();
-        let doc = crate::document::ModelicaDocument::with_origin(reserved_doc_id, source_text.clone(), origin);
+        let doc = crate::document::ModelicaDocument::with_origin(reserved_doc_id, source_text, origin);
         crate::ui::panels::package_browser::cache::FileLoadResult {
-            id: dedup_for_task.clone(),
-            dedup_key: dedup_for_task,
-            name: display_for_task,
-            library: ModelLibrary::Bundled,
-            source: source_text.into(),
-            detected_name: None,
-            layout_job: None,
             doc_id: reserved_doc_id,
             doc,
         }
@@ -281,9 +271,7 @@ fn open_bundled_class(world: &mut World, class: &ClassRef) {
         .insert(
             reserved_doc_id,
             crate::ui::document_openings::OpeningState::FileLoad {
-                dedup_key,
                 display_name,
-                library: ModelLibrary::Bundled,
                 started: web_time::Instant::now(),
                 task,
             },
@@ -304,7 +292,6 @@ fn open_user_file_class(world: &mut World, path: PathBuf, class: &ClassRef) {
         return;
     }
 
-    let dedup_key = path.display().to_string();
     let reserved_doc_id = world.resource_mut::<ModelicaDocumentRegistry>().reserve_id();
     let tab_id = world
         .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
@@ -314,19 +301,10 @@ fn open_user_file_class(world: &mut World, path: PathBuf, class: &ClassRef) {
     let display_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Opened").to_string();
     let origin = lunco_doc::DocumentOrigin::File { path: path.clone(), writable: true };
     let path_for_task = path.clone();
-    let dedup_for_task = dedup_key.clone();
-    let display_for_task = display_name.clone();
     let task = AsyncComputeTaskPool::get().spawn(async move {
         let source_text = std::fs::read_to_string(&path_for_task).unwrap_or_default();
-        let doc = crate::document::ModelicaDocument::with_origin(reserved_doc_id, source_text.clone(), origin);
+        let doc = crate::document::ModelicaDocument::with_origin(reserved_doc_id, source_text, origin);
         crate::ui::panels::package_browser::cache::FileLoadResult {
-            id: dedup_for_task.clone(),
-            dedup_key: dedup_for_task,
-            name: display_for_task,
-            library: ModelLibrary::User,
-            source: source_text.into(),
-            detected_name: None,
-            layout_job: None,
             doc_id: reserved_doc_id,
             doc,
         }
@@ -336,9 +314,7 @@ fn open_user_file_class(world: &mut World, path: PathBuf, class: &ClassRef) {
         .insert(
             reserved_doc_id,
             crate::ui::document_openings::OpeningState::FileLoad {
-                dedup_key,
                 display_name,
-                library: ModelLibrary::User,
                 started: web_time::Instant::now(),
                 task,
             },
