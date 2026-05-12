@@ -16,7 +16,6 @@ pub struct FileLoadResult {
     pub name: String,
     pub library: ModelLibrary,
     pub source: std::sync::Arc<str>,
-    pub line_starts: std::sync::Arc<[usize]>,
     pub detected_name: Option<String>,
     pub layout_job: Option<bevy_egui::egui::text::LayoutJob>,
     pub doc_id: lunco_doc::DocumentId,

@@ -150,14 +150,7 @@ pub fn sync_editor_buffer_to_source(
     editor: &mut EditorBufferState,
     workbench: &mut WorkbenchState,
 ) {
-    let mut new_starts = vec![0usize];
-    for (i, b) in source.as_bytes().iter().enumerate() {
-        if *b == b'\n' {
-            new_starts.push(i + 1);
-        }
-    }
     editor.text = source.to_string();
-    editor.line_starts = new_starts.into();
     editor.generation = registry
         .host(doc)
         .map(|h| h.generation())

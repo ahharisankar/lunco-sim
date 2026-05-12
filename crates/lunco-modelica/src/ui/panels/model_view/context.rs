@@ -175,13 +175,6 @@ pub fn sync_active_tab_to_doc(
         return;
     };
 
-    let mut line_starts: Vec<usize> = vec![0];
-    for (i, b) in source.as_bytes().iter().enumerate() {
-        if *b == b'\n' {
-            line_starts.push(i + 1);
-        }
-    }
-
     let _ = (display_name, read_only, library);
     {
         let source_arc: std::sync::Arc<str> = source.clone().into();
@@ -198,11 +191,11 @@ pub fn sync_active_tab_to_doc(
     // Editor buffer sync removed.
     //
     // This function used to overwrite `EditorBufferState.{text,
-    // line_starts, detected_name, model_path, bound_doc}` from
-    // `doc.source()` every frame. That was the legacy push-from-
-    // doc-to-buffer pipeline; it ran *before* `CodeEditorPanel::
-    // render` and clobbered any uncommitted typing whenever the
-    // mismatch condition tripped. The new pipeline is:
+    // detected_name, model_path, bound_doc}` from `doc.source()`
+    // every frame. That was the legacy push-from-doc-to-buffer
+    // pipeline; it ran *before* `CodeEditorPanel::render` and
+    // clobbered any uncommitted typing whenever the mismatch
+    // condition tripped. The new pipeline is:
     //
     // - `editor_on_doc_changed` observer — push-driven, fires on
     //   `DocumentChanged`, syncs the bound doc's buffer from
@@ -213,7 +206,7 @@ pub fn sync_active_tab_to_doc(
     //
     // Both paths track `generation` correctly; this site doesn't
     // need to participate.
-    let _ = (path_str, line_starts, detected_name);
+    let _ = (path_str, detected_name);
 
     refresh_selected_entity_for(world, doc);
 }

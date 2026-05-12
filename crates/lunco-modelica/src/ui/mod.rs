@@ -623,7 +623,7 @@ impl Plugin for ModelicaUiPlugin {
             .add_systems(Update, drain_document_changes)
             .add_systems(Update, commands::drain_open_file_results)
             // Mirror the active document's volatile fields (source,
-            // line_starts, detected_name) into the registry-by-doc lookup
+            // detected_name) into the registry-by-doc lookup
             // B.3 phase 6 (2026-05-08): the
             // `mirror_active_open_model` Update system + the
             // `mirror_open_model_on_doc_changed` observer were

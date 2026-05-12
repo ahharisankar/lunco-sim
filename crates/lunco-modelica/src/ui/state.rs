@@ -31,7 +31,7 @@ use crate::document::{ModelicaDocument, ModelicaOp};
 
 // `OpenModel` retired (2026-05-08). The cache held
 // fields all derivable from the document host:
-//   - `source` / `line_starts` → `host.document().source()` + Index.
+//   - `source` → `host.document().source()` + Index.
 //   - `display_name` → `host.document().origin().display_name()`.
 //   - `read_only` → `host.document().is_read_only()`.
 //   - `detected_name` → `extract_model_name_from_ast(host.document().strict_ast()?)`.

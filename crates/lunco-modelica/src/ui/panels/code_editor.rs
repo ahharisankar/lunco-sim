@@ -22,7 +22,6 @@ use crate::ui::{ModelicaDocumentRegistry, WorkbenchState};
 pub struct TabBuffer {
     pub generation: u64,
     pub text: String,
-    pub line_starts: Arc<[usize]>,
     pub detected_name: Option<String>,
     pub cached_galley: Option<Arc<egui::Galley>>,
     pub pending_commit_at: Option<f64>,
@@ -61,8 +60,6 @@ pub struct EditorBufferState {
     pub bound_doc: Option<lunco_doc::DocumentId>,
     /// The actual text content (persistent across frames for selection).
     pub text: String,
-    /// Byte offsets of the start of each line.
-    pub line_starts: Arc<[usize]>,
     /// Memoized detected name to avoid per-frame regex on large strings.
     pub detected_name: Option<String>,
     /// Pre-computed text layout for high-performance rendering.
@@ -90,7 +87,8 @@ pub struct EditorBufferState {
     /// shot.
     pub pending_commit_at: Option<f64>,
     /// Per-tab buffer snapshots keyed by `model_path`. Save on tab
-    /// switch (current `text`/`line_starts`/etc → `per_doc[old]`),
+    /// switch (current `text` / detected_name / pending_commit_at /
+    /// cached_galley → `per_doc[old]`),
     /// restore on tab switch back (`per_doc[new]` → live fields).
     /// Without this, switching to a new tab clobbered any
     /// uncommitted edits in the previous tab — the buffer is a
@@ -138,7 +136,6 @@ impl Default for EditorBufferState {
             model_path: String::new(),
             bound_doc: None,
             text: String::new(),
-            line_starts: vec![0].into(),
             detected_name: None,
             cached_galley: None,
             word_wrap: false,
@@ -162,7 +159,6 @@ impl EditorBufferState {
             TabBuffer {
                 generation: self.generation,
                 text: self.text.clone(),
-                line_starts: self.line_starts.clone(),
                 detected_name: self.detected_name.clone(),
                 cached_galley: self.cached_galley.clone(),
                 pending_commit_at: self.pending_commit_at,
@@ -177,7 +173,6 @@ impl EditorBufferState {
         if let Some(snap) = self.per_doc.remove(model_path) {
             self.generation = snap.generation;
             self.text = snap.text;
-            self.line_starts = snap.line_starts;
             self.detected_name = snap.detected_name;
             self.cached_galley = snap.cached_galley;
             self.pending_commit_at = snap.pending_commit_at;
@@ -256,12 +251,6 @@ pub fn editor_on_doc_changed(
 
     let document = host.document();
     let src = document.source().to_string();
-    let mut starts: Vec<usize> = vec![0];
-    for (i, b) in src.as_bytes().iter().enumerate() {
-        if *b == b'\n' {
-            starts.push(i + 1);
-        }
-    }
     let detected = document
         .index()
         .classes
@@ -270,7 +259,6 @@ pub fn editor_on_doc_changed(
         .map(|c| c.name.clone());
 
     buf_state.text = src;
-    buf_state.line_starts = starts.into();
     buf_state.generation = current_gen;
     buf_state.detected_name = detected;
     buf_state.cached_galley = None;
@@ -293,17 +281,11 @@ fn sync_buffer_from_registry(world: &mut World, path: &str) {
                 .and_then(|ws| ws.active_document)
         });
     let Some(doc) = target_doc else { return };
-    let (source, line_starts, detected_name, generation) = {
+    let (source, detected_name, generation) = {
         let registry = world.resource::<ModelicaDocumentRegistry>();
         let Some(host) = registry.host(doc) else { return };
         let document = host.document();
         let src = document.source().to_string();
-        let mut starts: Vec<usize> = vec![0];
-        for (i, b) in src.as_bytes().iter().enumerate() {
-            if *b == b'\n' {
-                starts.push(i + 1);
-            }
-        }
         // Cheap per-doc detected name from the AST index (no parse).
         let detected = document
             .index()
@@ -311,14 +293,13 @@ fn sync_buffer_from_registry(world: &mut World, path: &str) {
             .values()
             .find(|c| !matches!(c.kind, crate::index::ClassKind::Package))
             .map(|c| c.name.clone());
-        (src, starts.into(), detected, host.generation())
+        (src, detected, host.generation())
     };
     // Galley cache is layout-tied; can't pull it from the registry.
     // Letting it be None here forces a one-frame relayout — same
     // cost path tab-switch already takes. Cheap on text bodies.
     let mut buf_state = world.resource_mut::<EditorBufferState>();
     buf_state.text = source;
-    buf_state.line_starts = line_starts;
     buf_state.model_path = path.to_string();
     buf_state.bound_doc = Some(doc);
     buf_state.generation = generation;
@@ -1007,14 +988,6 @@ impl Panel for CodeEditorPanel {
         if buffer_changed {
             let mut buf_state = world.resource_mut::<EditorBufferState>();
             buf_state.text = new_text.clone();
-            // Recompute line starts for the editor buffer if changed
-            let mut new_starts = vec![0];
-            for (i, byte) in buf_state.text.as_bytes().iter().enumerate() {
-                if *byte == b'\n' {
-                    new_starts.push(i + 1);
-                }
-            }
-            buf_state.line_starts = new_starts.into();
             // NOTE: do NOT call `extract_model_name(&buf_state.text)`
             // here. That function runs a full rumoca parse which
             // takes seconds on a non-trivial source and visibly
