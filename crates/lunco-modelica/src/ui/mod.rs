@@ -129,45 +129,6 @@ fn drain_document_changes(
     }
 }
 
-/// Shadow-sync observer: a Modelica doc was added → if it's writable
-/// (User-saved) or Untitled (in-memory draft), register it as a
-/// top-level [`LoadedClass`](crate::ui::loaded_classes::LoadedClass)
-/// in the Twin panel. Read-only library reference docs (MSL classes
-/// the user clicked through to inspect) skip — they're already
-/// reachable through the system-library trees.
-fn register_workspace_class_on_doc_opened(
-    trigger: On<lunco_doc_bevy::DocumentOpened>,
-    registry: Res<crate::ui::state::ModelicaDocumentRegistry>,
-    mut loaded: ResMut<loaded_classes::LoadedModelicaClasses>,
-) {
-    let doc_id = trigger.event().doc;
-    let Some(host) = registry.host(doc_id) else {
-        return;
-    };
-    let origin = host.document().origin();
-    if !(origin.is_writable() || origin.is_untitled()) {
-        return;
-    }
-    // Dedupe — DocumentOpened can fire several times per doc id
-    // during the open-pipeline races.
-    let new_id = format!("workspace:{}", doc_id.raw());
-    if loaded.entries.iter().any(|c| c.id() == new_id) {
-        return;
-    }
-    loaded.register(Box::new(loaded_classes::WorkspaceClass::new(doc_id)));
-}
-
-/// Shadow-sync observer: a Modelica doc closed → drop its
-/// `WorkspaceClass` entry.
-fn drop_workspace_class_on_doc_closed(
-    trigger: On<lunco_doc_bevy::DocumentClosed>,
-    mut loaded: ResMut<loaded_classes::LoadedModelicaClasses>,
-) {
-    let doc_id = trigger.event().doc;
-    let id = format!("workspace:{}", doc_id.raw());
-    loaded.unregister(&id);
-}
-
 /// Shadow-sync observer: Modelica doc opened → register entry in the
 /// Workspace session.
 ///
@@ -692,11 +653,9 @@ impl Plugin for ModelicaUiPlugin {
                 panels::canvas_diagram::drain_pending_structural_ops,
             )
             .add_systems(Update, derive_doc_title)
-            // Twin-panel: keep the loaded-classes list in sync with
-            // the document registry. One `WorkspaceClass` per
-            // writable / Untitled Modelica doc, dropped on close.
-            .add_observer(register_workspace_class_on_doc_opened)
-            .add_observer(drop_workspace_class_on_doc_closed)
+            // Twin panel reads docs directly from `ModelicaDocumentRegistry`
+            // now (PR4); no separate `LoadedModelicaClasses` registry +
+            // observer pair to keep in sync.
             // Kick off a background scan whenever the workbench
             // announces a new Twin (Open Folder / Open Twin / "Save
             // as Twin" promotion). The scan populates the package
@@ -769,49 +728,16 @@ impl Plugin for ModelicaUiPlugin {
         // section; we just append. ensure it exists first to avoid
         // panics during mixed-mode or deferred plugin builds.
         app.init_resource::<lunco_workbench::BrowserSectionRegistry>();
-        // One section per domain — `ModelicaSection` iterates a
-        // live `LoadedModelicaClasses` registry. Each entry is one
-        // top-level Modelica class (system library, twin.toml
-        // external, workspace document, future remote source) —
-        // OMEdit's flat-list-of-libraries shape. Future domain
-        // crates (`UsdSection`, `SysmlSection`, ...) follow the
-        // same outer pattern with their own per-domain registry.
+        // One section per domain — `ModelicaSection` reads system
+        // libraries straight from `PackageTreeCache::roots` and
+        // workspace docs from `ModelicaDocumentRegistry`. No parallel
+        // registry to keep in sync. Adding a new library is a one-line
+        // `roots.push(...)` in `PackageTreeCache::new`; future domain
+        // crates (`UsdSection`, `SysmlSection`, ...) follow the same
+        // outer pattern with their own per-domain section.
         app.world_mut()
             .resource_mut::<lunco_workbench::BrowserSectionRegistry>()
             .register(browser_section::ModelicaSection::default());
-        app.init_resource::<loaded_classes::LoadedModelicaClasses>();
-        // Default-libraries set: always loaded, not bound to any
-        // Twin. MSL anchors the top, third-party libraries are
-        // discovered dynamically from the `lunco-assets` cache (see
-        // `package_browser::discover_third_party_libs`), and the
-        // bundled "LunCo Examples" row is registered last so newly
-        // downloaded libs surface above it without touching this
-        // file. Adding a library is data-only (`Assets.toml` entry
-        // + download); palette indexing in `msl_indexer.rs` and
-        // drill-in resolution in `class_cache.rs` still need their
-        // own entries.
-        let mut loaded = app
-            .world_mut()
-            .resource_mut::<loaded_classes::LoadedModelicaClasses>();
-        loaded.register(Box::new(loaded_classes::SystemLibraryClass::new(
-            "msl_root",
-            "Modelica",
-            false,
-        )));
-        for (cache_subdir, package_dir) in
-            panels::package_browser::scanner::discover_third_party_libs()
-        {
-            loaded.register(Box::new(loaded_classes::SystemLibraryClass::new(
-                format!("{cache_subdir}_root"),
-                package_dir,
-                true,
-            )));
-        }
-        loaded.register(Box::new(loaded_classes::SystemLibraryClass::new(
-            "bundled_root",
-            "LunCo Examples",
-            false,
-        )));
     }
 }
 

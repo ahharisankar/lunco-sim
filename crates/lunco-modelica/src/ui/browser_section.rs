@@ -74,53 +74,86 @@ impl BrowserSection for ModelicaSection {
     }
 
     fn render(&mut self, ui: &mut egui::Ui, ctx: &mut BrowserCtx<'_>) {
-        // OMEdit-style flat list of loaded Modelica top-level
-        // classes — system libraries (MSL, future ModelicaServices,
-        // twin.toml externals), bundled examples, and one entry
-        // per writable / Untitled workspace document. Each entry
-        // gets its own `CollapsingHeader`; `LoadedClass`
-        // implementations own their inner rendering. The list is a
-        // live registry mutated by lifecycle observers as Twins and
-        // documents come and go — see `loaded_classes.rs`.
-        let mut entries = match ctx
-            .world
-            .remove_resource::<crate::ui::loaded_classes::LoadedModelicaClasses>()
-        {
-            Some(r) => r,
-            None => {
-                ui.label(
-                    egui::RichText::new("(LoadedModelicaClasses resource missing)")
-                        .weak()
-                        .italics(),
-                );
-                return;
-            }
+        // OMEdit-style flat list — system libraries on top, then
+        // writable workspace documents. Both source-of-truth reads:
+        //   * libraries come from `PackageTreeCache::roots` (the
+        //     same tree the Package Browser panel renders);
+        //   * workspace docs come from `ModelicaDocumentRegistry`
+        //     filtered for writable / untitled origins.
+        // No parallel `LoadedModelicaClasses` registry, no observer
+        // wiring — what's in the cache + registry IS what we show.
+
+        // ── System library roots ─────────────────────────────────
+        // Pull `(id, name)` pairs first so we can re-borrow `world`
+        // mutably inside `render_root_subtree` without overlapping
+        // an immutable cache borrow.
+        let library_rows: Vec<(String, String)> = {
+            let cache = ctx
+                .world
+                .resource::<crate::ui::panels::package_browser::PackageTreeCache>();
+            cache
+                .roots
+                .iter()
+                .filter_map(|root| match root {
+                    crate::ui::panels::package_browser::PackageNode::Category {
+                        id,
+                        name,
+                        ..
+                    } => Some((id.clone(), name.clone())),
+                    _ => None,
+                })
+                .collect()
         };
 
-        if entries.entries.is_empty() {
+        for (root_id, root_name) in &library_rows {
+            // MSL is huge — start collapsed. Bundled / third-party
+            // start open so the user can see their contents right away.
+            let default_open = root_id != "msl_root";
+            let label = format!("🔒  {}", root_name);
+            let resp = egui::CollapsingHeader::new(label)
+                .id_salt(("twin.modelica.library", root_id))
+                .default_open(default_open)
+                .show(ui, |ui| {
+                    crate::ui::panels::package_browser::render_root_subtree(
+                        ctx.world, ui, root_id,
+                    );
+                });
+            resp.header_response
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+        }
+
+        // ── Writable / untitled workspace documents ──────────────
+        let workspace_docs: Vec<(DocumentId, String)> = {
+            let registry = ctx.world.resource::<ModelicaDocumentRegistry>();
+            registry
+                .iter()
+                .filter_map(|(doc_id, host)| {
+                    let origin = host.document().origin();
+                    if origin.is_writable() || origin.is_untitled() {
+                        Some((doc_id, origin.display_name()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        if library_rows.is_empty() && workspace_docs.is_empty() {
             ui.label(
                 egui::RichText::new("No Modelica classes loaded.")
                     .weak()
                     .italics(),
             );
-        } else {
-            for class in &mut entries.entries {
-                let name = class.name(ctx);
-                let label = if class.writable() {
-                    name
-                } else {
-                    format!("🔒  {}", name)
-                };
-                let resp = egui::CollapsingHeader::new(label)
-                    .id_salt(("loaded_modelica_class", class.id()))
-                    .default_open(class.default_open())
-                    .show(ui, |ui| class.render_children(ui, ctx));
-                resp.header_response
-                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-            }
         }
 
-        ctx.world.insert_resource(entries);
+        for (doc_id, doc_name) in workspace_docs {
+            let resp = egui::CollapsingHeader::new(doc_name)
+                .id_salt(("twin.modelica.workspace_doc", doc_id.raw()))
+                .default_open(true)
+                .show(ui, |ui| render_workspace_doc(ui, ctx, doc_id));
+            resp.header_response
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+        }
     }
 }
 
