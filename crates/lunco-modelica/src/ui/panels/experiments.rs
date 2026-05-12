@@ -1341,9 +1341,6 @@ pub fn render_experiments_plot(
     let mut reset_clicked = false;
     let mut fit_clicked = false;
     let mut new_plot_clicked = false;
-    let scrub_time = world
-        .get_resource::<PlotPanelStates>()
-        .and_then(|s| s.scrub(viz_id));
     if !all_vars.is_empty() {
         let mut groups: std::collections::BTreeMap<String, Vec<String>> =
             std::collections::BTreeMap::new();

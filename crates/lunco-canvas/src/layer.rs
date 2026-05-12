@@ -215,7 +215,19 @@ impl Layer for EdgesLayer {
                 .unwrap_or_else(|| Box::new(crate::visual::PlaceholderEdgeVisual));
             let selected =
                 selection.contains(crate::selection::SelectItem::Edge(*eid));
-            visual.draw(ctx, from_s, to_s, selected);
+            // Project the live waypoints (mid-drag this is what the
+            // tool just mutated) into screen space, with the same
+            // pixel-snap as the endpoints so the polyline stays
+            // aligned across zoom levels.
+            let waypoints_screen: Vec<crate::scene::Pos> = edge
+                .waypoints
+                .iter()
+                .map(|w| {
+                    let s = ctx.viewport.world_to_screen(*w, sr);
+                    crate::scene::Pos::new(s.x.round(), s.y.round())
+                })
+                .collect();
+            visual.draw(ctx, from_s, to_s, &waypoints_screen, selected);
         }
         // Post-pass: junction dots. A small filled circle at any
         // port that hosts ≥3 incident wires. Drawn on top of the
@@ -355,6 +367,110 @@ impl Layer for ToolPreviewLayer {
                         egui::pos2(s.x, s.y),
                         8.0,
                         egui::Stroke::new(2.0, theme.snap_target),
+                    );
+                }
+            }
+            crate::tool::ToolPreview::GhostEdgeWithBends {
+                from_world,
+                bends,
+                to_world,
+                snap_target,
+            } => {
+                // Build the screen-space control polyline:
+                // [from] → user-placed bends → [to]. Then auto-insert
+                // an L-bend on the trailing segment so the cursor-end
+                // of the preview matches the orthogonal routing the
+                // final wire will use. With no user bends, this gives
+                // the classic L: horizontal-then-vertical (or the
+                // reverse, choosing whichever has the larger initial
+                // delta).
+                let mut pts: Vec<egui::Pos2> =
+                    Vec::with_capacity(3 + bends.len());
+                let a = ctx.viewport.world_to_screen(*from_world, sr);
+                pts.push(egui::pos2(a.x, a.y));
+                for b in bends {
+                    let s = ctx.viewport.world_to_screen(*b, sr);
+                    pts.push(egui::pos2(s.x, s.y));
+                }
+                let b = ctx.viewport.world_to_screen(*to_world, sr);
+                // Auto-L between the last placed point and the
+                // pointer.
+                let last = *pts.last().unwrap();
+                let dx = (b.x - last.x).abs();
+                let dy = (b.y - last.y).abs();
+                if dx > 0.5 && dy > 0.5 {
+                    // Choose pivot orientation so the first leg of
+                    // the L runs along the dominant axis — feels
+                    // natural and matches Dymola's "first segment
+                    // follows the port stub axis" convention.
+                    let pivot = if dx >= dy {
+                        egui::pos2(b.x, last.y)
+                    } else {
+                        egui::pos2(last.x, b.y)
+                    };
+                    pts.push(pivot);
+                }
+                pts.push(egui::pos2(b.x, b.y));
+                let stroke = egui::Stroke::new(2.0, theme.ghost_edge);
+                for w in pts.windows(2) {
+                    painter.line_segment([w[0], w[1]], stroke);
+                }
+                painter.circle_filled(pts[0], 4.0, theme.ghost_edge);
+                for p in &pts[1..pts.len().saturating_sub(1)] {
+                    painter.circle_filled(*p, 3.0, theme.ghost_edge);
+                }
+                if let Some(t) = snap_target {
+                    let s = ctx.viewport.world_to_screen(*t, sr);
+                    painter.circle_stroke(
+                        egui::pos2(s.x, s.y),
+                        8.0,
+                        egui::Stroke::new(2.0, theme.snap_target),
+                    );
+                }
+            }
+            crate::tool::ToolPreview::SnapGuides { x, y } => {
+                // Thin dashed lines through the snapped coordinate
+                // span the visible viewport. World-space x/y; clip to
+                // screen bounds via the viewport transform.
+                let screen_min = ctx.viewport.screen_to_world(
+                    crate::scene::Pos::new(sr.min.x, sr.min.y),
+                    sr,
+                );
+                let screen_max = ctx.viewport.screen_to_world(
+                    crate::scene::Pos::new(sr.max.x, sr.max.y),
+                    sr,
+                );
+                let guide_color = egui::Color32::from_rgba_unmultiplied(255, 196, 60, 180);
+                let stroke = egui::Stroke::new(1.0, guide_color);
+                if let Some(gx) = x {
+                    let top = ctx.viewport.world_to_screen(
+                        crate::scene::Pos::new(*gx, screen_min.y),
+                        sr,
+                    );
+                    let bot = ctx.viewport.world_to_screen(
+                        crate::scene::Pos::new(*gx, screen_max.y),
+                        sr,
+                    );
+                    painter.line_segment(
+                        [egui::pos2(top.x, top.y), egui::pos2(bot.x, bot.y)],
+                        stroke,
+                    );
+                }
+                if let Some(gy) = y {
+                    let left = ctx.viewport.world_to_screen(
+                        crate::scene::Pos::new(screen_min.x, *gy),
+                        sr,
+                    );
+                    let right = ctx.viewport.world_to_screen(
+                        crate::scene::Pos::new(screen_max.x, *gy),
+                        sr,
+                    );
+                    painter.line_segment(
+                        [
+                            egui::pos2(left.x, left.y),
+                            egui::pos2(right.x, right.y),
+                        ],
+                        stroke,
                     );
                 }
             }

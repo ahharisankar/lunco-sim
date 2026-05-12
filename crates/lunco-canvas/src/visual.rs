@@ -117,6 +117,11 @@ pub trait NodeVisual: Send + Sync {
     }
 }
 
+/// Hit-test result for edges — re-export of [`crate::scene::EdgeHitKind`]
+/// under the more idiomatic visual-layer name. Sub-region info enables
+/// Dymola-style waypoint editing.
+pub use crate::scene::EdgeHitKind as EdgeHit;
+
 /// How an edge is rendered and hit-tested.
 ///
 /// `from_screen` / `to_screen` are precomputed by the canvas — the
@@ -128,6 +133,7 @@ pub trait EdgeVisual: Send + Sync {
         ctx: &mut DrawCtx,
         from_screen: Pos,
         to_screen: Pos,
+        waypoints_screen: &[Pos],
         selected: bool,
     );
 
@@ -140,6 +146,33 @@ pub trait EdgeVisual: Send + Sync {
     /// for selection; exotic shapes override.
     fn hit(&self, world_pos: Pos, from_world: Pos, to_world: Pos) -> bool {
         perpendicular_dist_sq(world_pos, from_world, to_world) <= 16.0
+    }
+
+    /// Like [`Self::hit`] but reports *which part* of the edge the
+    /// pointer is over (waypoint, segment midpoint, or plain body).
+    /// Returns `None` when the pointer is not close enough to count
+    /// as a hit at all. `waypoints` are the edge's interior bend
+    /// points in world coords (from [`crate::scene::Edge::waypoints`]);
+    /// `from_world` / `to_world` are the port endpoints. `selected`
+    /// is true when the edge is currently selected — visuals may want
+    /// to expose handles only on selected edges, so handle hits should
+    /// only be reported when `selected` is true.
+    ///
+    /// Default impl returns `Body` whenever [`Self::hit`] is true, no
+    /// waypoint handles. Override to expose editable waypoints.
+    fn hit_kind(
+        &self,
+        world_pos: Pos,
+        from_world: Pos,
+        to_world: Pos,
+        _waypoints: &[Pos],
+        _selected: bool,
+    ) -> Option<EdgeHit> {
+        if self.hit(world_pos, from_world, to_world) {
+            Some(EdgeHit::Body)
+        } else {
+            None
+        }
     }
 }
 
@@ -288,6 +321,7 @@ impl EdgeVisual for PlaceholderEdgeVisual {
         ctx: &mut DrawCtx,
         from_screen: Pos,
         to_screen: Pos,
+        _waypoints_screen: &[Pos],
         selected: bool,
     ) {
         let col = if selected {

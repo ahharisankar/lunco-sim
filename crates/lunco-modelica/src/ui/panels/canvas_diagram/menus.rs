@@ -16,6 +16,38 @@ use super::palette::{self, PaletteSettings};
 use super::{CanvasDiagramState, active_doc_from_world};
 use crate::ui::panels::model_view::TabRenderContext;
 
+/// Build a `SetConnectionLine` op from the current edge's waypoints
+/// after applying `mutate` to a fresh copy. `mutate` may insert,
+/// remove, or move waypoints freely (canvas coords). Returns `None`
+/// if the edge or its endpoints can't be resolved. Used by the
+/// right-click bend insert/delete entries.
+fn op_modify_waypoints(
+    world: &mut World,
+    edge_id: lunco_canvas::EdgeId,
+    class: &str,
+    mutate: impl FnOnce(&mut Vec<lunco_canvas::Pos>),
+) -> Option<ModelicaOp> {
+    let active_doc = active_doc_from_world(world);
+    let tab = render_tab_id(world);
+    let state = world.resource::<CanvasDiagramState>();
+    let scene = &state.get_for_render(tab, active_doc).canvas.scene;
+    let edge = scene.edge(edge_id)?;
+    let from_node = scene.node(edge.from.node)?;
+    let to_node = scene.node(edge.to.node)?;
+    let from_instance = from_node.origin.clone()?;
+    let to_instance = to_node.origin.clone()?;
+    let mut pts: Vec<lunco_canvas::Pos> = edge.waypoints.clone();
+    mutate(&mut pts);
+    // Canvas Y is +down; Modelica is +up. Flip on the way to source.
+    let modelica_pts: Vec<(f32, f32)> = pts.iter().map(|p| (p.x, -p.y)).collect();
+    Some(ModelicaOp::SetConnectionLine {
+        class: class.to_string(),
+        from: crate::pretty::PortRef::new(&from_instance, edge.from.port.as_str()),
+        to: crate::pretty::PortRef::new(&to_instance, edge.to.port.as_str()),
+        points: modelica_pts,
+    })
+}
+
 /// Read the active tab id from `TabRenderContext`. `None` when called
 /// outside a panel render call (observers, off-render systems);
 /// callers fall back to first-tab semantics in that case via
@@ -217,11 +249,61 @@ pub(super) fn render_edge_menu(
     ui: &mut egui::Ui,
     world: &mut World,
     id: lunco_canvas::EdgeId,
+    hit: lunco_canvas::EdgeHitKind,
+    click_world: lunco_canvas::Pos,
     editing_class: Option<&str>,
     out: &mut Vec<ModelicaOp>,
 ) {
     ui.label(egui::RichText::new("Connection").strong());
     ui.separator();
+    // ── Bend insert / delete (hit-kind dependent) ───────────────────
+    if let Some(class) = editing_class {
+        match hit {
+            lunco_canvas::EdgeHitKind::Corner(idx) => {
+                if ui.button("✕ Delete bend").clicked() {
+                    if let Some(op) = op_modify_waypoints(
+                        world,
+                        id,
+                        class,
+                        |pts| {
+                            if idx < pts.len() {
+                                pts.remove(idx);
+                            }
+                        },
+                    ) {
+                        out.push(op);
+                    }
+                    ui.close();
+                }
+            }
+            lunco_canvas::EdgeHitKind::Segment(seg_idx) => {
+                if ui.button("➕ Add bend here").clicked() {
+                    if let Some(op) = op_modify_waypoints(
+                        world,
+                        id,
+                        class,
+                        |pts| {
+                            // Segment seg_idx spans (seg_idx-1, seg_idx)
+                            // within the interior list, where indices
+                            // outside that span correspond to the port
+                            // endpoints. Insert the click position as
+                            // a fresh interior bend at position seg_idx.
+                            let insert_at = seg_idx.min(pts.len());
+                            pts.insert(
+                                insert_at,
+                                lunco_canvas::Pos::new(click_world.x, click_world.y),
+                            );
+                        },
+                    ) {
+                        out.push(op);
+                    }
+                    ui.close();
+                }
+            }
+            lunco_canvas::EdgeHitKind::Body => {}
+        }
+        ui.separator();
+    }
     if ui.button("✂ Delete").clicked() {
         if let Some(class) = editing_class {
             if let Some(op) = op_remove_edge(world, id, class) {
@@ -236,7 +318,119 @@ pub(super) fn render_edge_menu(
         ui.close();
     }
     if ui.button("↺ Reverse direction").clicked() {
+        if let Some(class) = editing_class {
+            let active_doc = active_doc_from_world(world);
+            let tab = render_tab_id(world);
+            let state = world.resource::<CanvasDiagramState>();
+            let scene = &state.get_for_render(tab, active_doc).canvas.scene;
+            if let Some(edge) = scene.edge(id) {
+                if let (Some(from_node), Some(to_node)) = (
+                    scene.node(edge.from.node),
+                    scene.node(edge.to.node),
+                ) {
+                    if let (Some(from_inst), Some(to_inst)) = (
+                        from_node.origin.clone(),
+                        to_node.origin.clone(),
+                    ) {
+                        out.push(ModelicaOp::ReverseConnection {
+                            class: class.to_string(),
+                            from: crate::pretty::PortRef::new(
+                                &from_inst,
+                                edge.from.port.as_str(),
+                            ),
+                            to: crate::pretty::PortRef::new(
+                                &to_inst,
+                                edge.to.port.as_str(),
+                            ),
+                        });
+                    }
+                }
+            }
+        }
         ui.close();
+    }
+    // ── Wire properties submenu ─────────────────────────────────────
+    // Inline color/thickness/smooth controls. Each change emits a
+    // separate `SetConnectionLineStyle` op so the source-level
+    // surgical update only touches the field the user actually
+    // changed (`Phase D` infrastructure handles preservation).
+    let Some(class) = editing_class else { return };
+    let active_doc = active_doc_from_world(world);
+    let tab = render_tab_id(world);
+    let scene_state = world.resource::<CanvasDiagramState>();
+    let scene = &scene_state.get_for_render(tab, active_doc).canvas.scene;
+    let Some(edge) = scene.edge(id) else { return };
+    let Some(from_node) = scene.node(edge.from.node) else { return };
+    let Some(to_node) = scene.node(edge.to.node) else { return };
+    let Some(from_instance) = from_node.origin.clone() else { return };
+    let Some(to_instance) = to_node.origin.clone() else { return };
+    let from_port = edge.from.port.as_str().to_string();
+    let to_port = edge.to.port.as_str().to_string();
+    // Pull seed values from the live edge data. Color: ConnectionEdge
+    // icon_color (per-connector tint); smooth: smooth_bezier flag.
+    // Thickness has no plumbed scene-side mirror — seed at the
+    // Modelica default (0.25). The surgical writer preserves any
+    // existing thickness in source until the user actively drags
+    // the slider, so a wrong seed doesn't lose user data.
+    let data = edge
+        .data
+        .downcast_ref::<super::edge::ConnectionEdgeData>();
+    let (mut color_rgb, mut smooth, default_thickness) = match data {
+        Some(d) => {
+            let c = d
+                .icon_color
+                .map(|c| [c.r(), c.g(), c.b()])
+                .unwrap_or([0, 0, 0]);
+            (c, d.smooth_bezier, 0.25_f64)
+        }
+        None => ([0u8, 0, 0], false, 0.25_f64),
+    };
+    // Egui keeps in-flight slider state across frames; we mirror the
+    // last-emitted thickness into ctx data so the slider doesn't
+    // snap back to the seed mid-edit.
+    let thickness_id = egui::Id::new(("wire-thickness", id));
+    let mut thickness: f64 = ui
+        .ctx()
+        .data(|d| d.get_temp::<f64>(thickness_id))
+        .unwrap_or(default_thickness);
+    ui.separator();
+    ui.label(egui::RichText::new("Properties").strong());
+    let mk_op = |color: Option<[u8; 3]>,
+                 thickness: Option<f64>,
+                 smooth_bezier: Option<bool>| {
+        ModelicaOp::SetConnectionLineStyle {
+            class: class.to_string(),
+            from: crate::pretty::PortRef::new(&from_instance, &from_port),
+            to: crate::pretty::PortRef::new(&to_instance, &to_port),
+            color,
+            thickness,
+            smooth_bezier,
+        }
+    };
+    ui.horizontal(|ui| {
+        ui.label("Color");
+        if ui.color_edit_button_srgb(&mut color_rgb).changed() {
+            out.push(mk_op(Some(color_rgb), None, None));
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Thickness");
+        let r = ui.add(
+            egui::Slider::new(&mut thickness, 0.05..=2.0).step_by(0.05),
+        );
+        if r.changed() {
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(thickness_id, thickness));
+        }
+        if r.drag_stopped() || (r.changed() && !r.dragged()) {
+            out.push(mk_op(None, Some(thickness), None));
+        }
+    });
+    if ui
+        .checkbox(&mut smooth, "Smooth (Bezier)")
+        .changed()
+    {
+        out.push(mk_op(None, None, Some(smooth)));
     }
 }
 

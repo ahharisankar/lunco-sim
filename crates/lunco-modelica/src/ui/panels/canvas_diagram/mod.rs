@@ -173,6 +173,8 @@ fn build_registry() -> VisualRegistry {
             flow_vars: d.flow_vars.clone(),
             connector_leaf: leaf,
             flow_lookup_keys,
+            smooth_bezier: d.smooth_bezier,
+            thickness_scale: d.thickness_scale,
         }
     });
     reg
@@ -697,7 +699,13 @@ pub struct PendingContextMenu {
 #[derive(Debug, Clone)]
 pub enum ContextMenuTarget {
     Node(lunco_canvas::NodeId),
-    Edge(lunco_canvas::EdgeId),
+    /// Right-click on an edge. `hit` classifies which part of the wire
+    /// the click landed on — Body for plain wire body (delete /
+    /// properties / etc.), Corner for an interior waypoint handle
+    /// (delete bend), Segment for a segment midpoint (insert bend).
+    /// `world_pos` is the click position in world coords; the
+    /// insert-bend handler uses it as the new waypoint's location.
+    Edge(lunco_canvas::EdgeId, lunco_canvas::EdgeHitKind),
     Empty,
 }
 

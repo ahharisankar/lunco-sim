@@ -179,6 +179,78 @@ pub(super) fn build_ops_from_events(
                         height: icon_h,
                     },
                 });
+                // Rubber-band: incident *authored* wires get their
+                // port-side interior waypoint slid by the node's
+                // delta so hand-routed bends still meet the moved
+                // port. Auto-routed wires (`waypoints_authored=false`)
+                // skip — re-projection re-runs A* with the new port
+                // positions, no annotation persistence needed.
+                let old_min = match ev {
+                    SceneEvent::NodeMoved { old_min, .. } => *old_min,
+                    _ => continue,
+                };
+                let dx = new_min.x - old_min.x;
+                let dy = new_min.y - old_min.y;
+                if dx.abs() < 0.001 && dy.abs() < 0.001 {
+                    // no-op move (snap-back) — skip
+                } else {
+                    let moved_node_id = *id;
+                    let incident: Vec<(lunco_canvas::EdgeId, bool, bool)> = scene
+                        .edges()
+                        .filter_map(|(eid, e)| {
+                            if !e.waypoints_authored || e.waypoints.is_empty() {
+                                return None;
+                            }
+                            if e.kind.as_str() != "modelica.connection" {
+                                return None;
+                            }
+                            let is_from = e.from.node == moved_node_id;
+                            let is_to = e.to.node == moved_node_id;
+                            if is_from || is_to {
+                                Some((*eid, is_from, is_to))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    for (eid, is_from, is_to) in incident {
+                        let Some(edge) = scene.edge(eid) else { continue };
+                        let mut pts = edge.waypoints.clone();
+                        if is_from && !pts.is_empty() {
+                            pts[0] = lunco_canvas::Pos::new(
+                                pts[0].x + dx,
+                                pts[0].y + dy,
+                            );
+                        }
+                        if is_to && !pts.is_empty() {
+                            let last = pts.len() - 1;
+                            pts[last] = lunco_canvas::Pos::new(
+                                pts[last].x + dx,
+                                pts[last].y + dy,
+                            );
+                        }
+                        let Some(from_node) = scene.node(edge.from.node) else { continue };
+                        let Some(to_node) = scene.node(edge.to.node) else { continue };
+                        let Some(from_instance) = from_node.origin.clone() else { continue };
+                        let Some(to_instance) = to_node.origin.clone() else { continue };
+                        let modelica_points: Vec<(f32, f32)> = pts
+                            .iter()
+                            .map(|p| (p.x, -p.y))
+                            .collect();
+                        ops.push(ModelicaOp::SetConnectionLine {
+                            class: class.to_string(),
+                            from: pretty::PortRef::new(
+                                &from_instance,
+                                edge.from.port.as_str(),
+                            ),
+                            to: pretty::PortRef::new(
+                                &to_instance,
+                                edge.to.port.as_str(),
+                            ),
+                            points: modelica_points,
+                        });
+                    }
+                }
             }
             SceneEvent::NodeResized { id, new_rect, .. } => {
                 let Some(node) = scene.node(*id) else { continue };
@@ -244,19 +316,30 @@ pub(super) fn build_ops_from_events(
                     },
                 });
             }
-            SceneEvent::EdgeCreated { from, to } => {
+            SceneEvent::EdgeCreated { from, to, points } => {
                 // Resolve canvas port refs → Modelica (instance,
                 // port) pairs via node.origin + port.id.
                 let Some(from_node) = scene.node(from.node) else { continue };
                 let Some(to_node) = scene.node(to.node) else { continue };
                 let Some(from_instance) = from_node.origin.clone() else { continue };
                 let Some(to_instance) = to_node.origin.clone() else { continue };
+                // Click-to-bend during creation → annotation(Line(...))
+                // with the captured points (Y-flipped into Modelica
+                // coords). Empty list = quick drag, no annotation,
+                // domain layer auto-routes.
+                let line = if points.is_empty() {
+                    None
+                } else {
+                    Some(pretty::Line {
+                        points: points.iter().map(|p| (p.x, -p.y)).collect(),
+                    })
+                };
                 ops.push(ModelicaOp::AddConnection {
                     class: class.to_string(),
                     eq: pretty::ConnectEquation {
                         from: pretty::PortRef::new(&from_instance, from.port.as_str()),
                         to: pretty::PortRef::new(&to_instance, to.port.as_str()),
-                        line: None,
+                        line,
                     },
                 });
             }
@@ -277,6 +360,29 @@ pub(super) fn build_ops_from_events(
                 if let Some(op) = op_remove_node_inner(scene, *id, class) {
                     ops.push(op);
                 }
+            }
+            SceneEvent::EdgeWaypointsChanged { id, points } => {
+                let Some(edge) = scene.edge(*id) else { continue };
+                if edge.kind.as_str() != "modelica.connection" {
+                    continue;
+                }
+                let Some(from_node) = scene.node(edge.from.node) else { continue };
+                let Some(to_node) = scene.node(edge.to.node) else { continue };
+                let Some(from_instance) = from_node.origin.clone() else { continue };
+                let Some(to_instance) = to_node.origin.clone() else { continue };
+                // Canvas Y is +down; Modelica diagram Y is +up. Flip
+                // so the round-trip back through `extract_line_points`
+                // lands at the same canvas positions.
+                let modelica_points: Vec<(f32, f32)> = points
+                    .iter()
+                    .map(|p| (p.x, -p.y))
+                    .collect();
+                ops.push(ModelicaOp::SetConnectionLine {
+                    class: class.to_string(),
+                    from: pretty::PortRef::new(&from_instance, edge.from.port.as_str()),
+                    to: pretty::PortRef::new(&to_instance, edge.to.port.as_str()),
+                    points: modelica_points,
+                });
             }
             _ => {}
         }

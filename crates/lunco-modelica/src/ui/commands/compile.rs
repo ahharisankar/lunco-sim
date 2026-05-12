@@ -448,7 +448,7 @@ pub(crate) fn render_compile_class_picker(
 // ─── on_compile_model ─────────────────────────────────────────────────────
 
 #[on_command(CompileModel)]
-fn on_compile_model(
+pub fn on_compile_model(
     trigger: On<CompileModel>,
     mut commands: Commands,
     mut registry: ResMut<ModelicaDocumentRegistry>,
@@ -813,7 +813,7 @@ pub struct ResetActiveModel {
 }
 
 #[on_command(PauseActiveModel)]
-fn on_pause_active_model(trigger: On<PauseActiveModel>, mut commands: Commands) {
+pub fn on_pause_active_model(trigger: On<PauseActiveModel>, mut commands: Commands) {
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
         let Some(doc) = (if raw.is_unassigned() {
@@ -832,7 +832,7 @@ fn on_pause_active_model(trigger: On<PauseActiveModel>, mut commands: Commands) 
 }
 
 #[on_command(ResumeActiveModel)]
-fn on_resume_active_model(trigger: On<ResumeActiveModel>, mut commands: Commands) {
+pub fn on_resume_active_model(trigger: On<ResumeActiveModel>, mut commands: Commands) {
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
         let Some(doc) = (if raw.is_unassigned() {
@@ -860,7 +860,7 @@ pub struct FastRunActiveModel {
 }
 
 #[on_command(FastRunActiveModel)]
-fn on_fast_run_active_model(trigger: On<FastRunActiveModel>, mut commands: Commands) {
+pub fn on_fast_run_active_model(trigger: On<FastRunActiveModel>, mut commands: Commands) {
     use lunco_experiments::ExperimentRunner;
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
@@ -1026,7 +1026,7 @@ fn on_fast_run_active_model(trigger: On<FastRunActiveModel>, mut commands: Comma
 }
 
 #[on_command(ResetActiveModel)]
-fn on_reset_active_model(trigger: On<ResetActiveModel>, mut commands: Commands) {
+pub fn on_reset_active_model(trigger: On<ResetActiveModel>, mut commands: Commands) {
     let raw = trigger.event().doc;
     commands.queue(move |world: &mut World| {
         let Some(doc) = (if raw.is_unassigned() {
@@ -1083,7 +1083,7 @@ pub struct CompileActiveModel {
 }
 
 #[on_command(CompileActiveModel)]
-fn on_compile_active_model(trigger: On<CompileActiveModel>, mut commands: Commands) {
+pub fn on_compile_active_model(trigger: On<CompileActiveModel>, mut commands: Commands) {
     let raw = trigger.event().doc;
     let class = trigger.event().class.clone();
     commands.queue(move |world: &mut World| {

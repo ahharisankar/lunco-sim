@@ -411,7 +411,7 @@ fn scan_twin_on_added(
     };
     let folder = twin.root.clone();
     let pool = bevy::tasks::AsyncComputeTaskPool::get();
-    let task = pool.spawn(async move { panels::package_browser::scan_twin_folder(folder) });
+    let task = pool.spawn(async move { panels::package_browser::scanner::scan_twin_folder(folder) });
     cache.twin = None;
     cache.twin_scan_task = Some(task);
 }
@@ -800,7 +800,7 @@ impl Plugin for ModelicaUiPlugin {
             false,
         )));
         for (cache_subdir, package_dir) in
-            panels::package_browser::discover_third_party_libs()
+            panels::package_browser::scanner::discover_third_party_libs()
         {
             loaded.register(Box::new(loaded_classes::SystemLibraryClass::new(
                 format!("{cache_subdir}_root"),

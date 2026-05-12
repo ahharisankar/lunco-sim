@@ -337,11 +337,18 @@ pub(super) fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramN
         // Wire color sourced from the connector class's Icon
         // (populated by the projector for both local & MSL types).
         // Falls back to `null` so the edge factory uses the leaf-name
-        // palette in `wire_color_for`.
-        let icon_color = src_port_def
-            .as_ref()
-            .and_then(|p| p.color)
-            .or_else(|| tgt_port_def.as_ref().and_then(|p| p.color));
+        // palette in `wire_color_for`. The source-level
+        // `Line(color={r,g,b})` annotation wins over the
+        // connector-derived colour so the wire properties dialog's
+        // colour pick lands immediately in the visual.
+        let icon_color = edge
+            .color
+            .or_else(|| {
+                src_port_def
+                    .as_ref()
+                    .and_then(|p| p.color)
+                    .or_else(|| tgt_port_def.as_ref().and_then(|p| p.color))
+            });
         // Stub direction = which edge the port sits on in *screen*
         // space. Apply the owning instance's transform's linear part
         // (no translation — directions don't have a position). One
@@ -370,6 +377,7 @@ pub(super) fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramN
         // wrap-around routes that the per-frame Z-bend heuristic
         // can't manage. Authored waypoints win — preserves user
         // intent on hand-routed connections.
+        let waypoints_authored = !edge.waypoints.is_empty();
         let waypoints_world: Vec<CanvasPos> = if !edge.waypoints.is_empty() {
             edge.waypoints
                 .iter()
@@ -443,6 +451,18 @@ pub(super) fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramN
                 port: CanvasPortId::new(edge.target_port.clone()),
             },
             kind: "modelica.connection".into(),
+            // Mirror the interior polyline (authored or auto-routed)
+            // into the scene's first-class waypoints field so the
+            // canvas tool can hit-test + mutate it during drag without
+            // reaching into per-domain edge data. Renderer keeps a
+            // separate copy in `ConnectionEdgeData` for its own draw
+            // path until the visual is refactored to read from
+            // `Edge::waypoints` directly. `waypoints_authored`
+            // distinguishes user-authored bends (from source
+            // annotation) from auto-router output so rubber-band on
+            // node move only persists what the user actually authored.
+            waypoints: waypoints_world.clone(),
+            waypoints_authored,
             data: std::sync::Arc::new(ConnectionEdgeData {
                 connector_type: connector_type.clone(),
                 from_dir,
@@ -464,6 +484,17 @@ pub(super) fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramN
                     .as_ref()
                     .map(|p| p.flow_vars.clone())
                     .unwrap_or_default(),
+                smooth_bezier: edge.smooth_bezier,
+                // Modelica default thickness is 0.25; we expose it as
+                // a multiplier on the renderer's base stroke width so
+                // the existing zoom/causality math stays untouched.
+                // Source-level overrides map ~1.0…8.0 ⇒ visually
+                // distinguishable wires; clamp to keep extreme
+                // values from making wires unreadable.
+                thickness_scale: edge
+                    .thickness
+                    .map(|t| (t / 0.25).clamp(0.5, 6.0))
+                    .unwrap_or(1.0),
             }),
             origin: None,
         });

@@ -762,6 +762,18 @@ pub enum ApiOp {
         to_component: String,
         to_port: String,
     },
+    /// Set or clear the `Line(points=…)` annotation of an existing
+    /// `connect(…)` equation. Empty `line_points` clears the annotation
+    /// (wire reverts to auto-route). Coordinates are Modelica diagram
+    /// (Y up), flattened as `[x0, y0, x1, y1, …]`.
+    SetConnectionLine {
+        class: String,
+        from_component: String,
+        from_port: String,
+        to_component: String,
+        to_port: String,
+        line_points: Vec<f32>,
+    },
     SetPlacement {
         class: String,
         name: String,
@@ -1177,6 +1189,28 @@ fn api_op_to_internal(op: &ApiOp) -> Option<ModelicaOp> {
                 to,
             })
         }
+        ApiOp::SetConnectionLine {
+            class,
+            from_component,
+            from_port,
+            to_component,
+            to_port,
+            line_points,
+        } => {
+            let from = port_ref_or_none(from_component, from_port)?;
+            let to = port_ref_or_none(to_component, to_port)?;
+            let points: Vec<(f32, f32)> = line_points
+                .chunks(2)
+                .filter(|c| c.len() == 2)
+                .map(|c| (c[0], c[1]))
+                .collect();
+            Some(ModelicaOp::SetConnectionLine {
+                class: class.clone(),
+                from,
+                to,
+                points,
+            })
+        }
         ApiOp::SetPlacement {
             class,
             name,
@@ -1463,6 +1497,17 @@ pub(crate) fn internal_op_to_api(op: &ModelicaOp) -> Option<ApiOp> {
             to_component: to.component.clone(),
             to_port: to.port.clone(),
         }),
+        ModelicaOp::SetConnectionLine { class, from, to, points } => {
+            let line_points: Vec<f32> = points.iter().flat_map(|(x, y)| [*x, *y]).collect();
+            Some(ApiOp::SetConnectionLine {
+                class: class.clone(),
+                from_component: from.component.clone(),
+                from_port: from.port.clone(),
+                to_component: to.component.clone(),
+                to_port: to.port.clone(),
+                line_points,
+            })
+        }
         ModelicaOp::SetPlacement {
             class,
             name,
@@ -1546,7 +1591,9 @@ pub(crate) fn internal_op_to_api(op: &ModelicaOp) -> Option<ApiOp> {
         | ModelicaOp::AddEquation { .. }
         | ModelicaOp::AddIconGraphic { .. }
         | ModelicaOp::AddDiagramGraphic { .. }
-        | ModelicaOp::SetExperimentAnnotation { .. } => None,
+        | ModelicaOp::SetExperimentAnnotation { .. }
+        | ModelicaOp::SetConnectionLineStyle { .. }
+        | ModelicaOp::ReverseConnection { .. } => None,
     }
 }
 

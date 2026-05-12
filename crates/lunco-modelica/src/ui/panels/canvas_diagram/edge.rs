@@ -31,6 +31,16 @@ pub struct ConnectionEdgeData {
     pub target_path: String,
     pub kind: crate::visual_diagram::PortKind,
     pub flow_vars: Vec<crate::visual_diagram::FlowVarMeta>,
+    /// True when the source `Line` annotation carried
+    /// `smooth=Smooth.Bezier`. Renderer switches from straight
+    /// orthogonal segments to a Catmull-Rom-style curve through the
+    /// polyline points.
+    pub smooth_bezier: bool,
+    /// `Line(thickness=…)` override from source. `1.0` = default; the
+    /// renderer multiplies its base stroke width by this. The
+    /// Modelica default 0.25 round-trips as `1.0` here (it's the
+    /// "leave alone" sentinel).
+    pub thickness_scale: f32,
 }
 
 /// Which edge of the icon a port sits on. Determines which axis the
@@ -106,6 +116,12 @@ pub(super) struct OrthogonalEdgeVisual {
     /// does zero allocation on the lookup path. `None` when the edge
     /// has no flow vars.
     pub(super) flow_lookup_keys: Option<(String, String)>,
+    /// Render the wire as a smooth curve when set — mirrors the
+    /// `smooth=Smooth.Bezier` source annotation.
+    pub(super) smooth_bezier: bool,
+    /// Multiplier on the base stroke width; 1.0 = default. Derived
+    /// from `Line(thickness=…)` in source.
+    pub(super) thickness_scale: f32,
 }
 
 impl Default for OrthogonalEdgeVisual {
@@ -121,6 +137,8 @@ impl Default for OrthogonalEdgeVisual {
             flow_vars: Vec::new(),
             connector_leaf: String::new(),
             flow_lookup_keys: None,
+            smooth_bezier: false,
+            thickness_scale: 1.0,
         }
     }
 }
@@ -133,6 +151,7 @@ impl EdgeVisual for OrthogonalEdgeVisual {
         ctx: &mut DrawCtx,
         from: CanvasPos,
         to: CanvasPos,
+        waypoints_screen: &[CanvasPos],
         selected: bool,
     ) {
         let palette = modelica_icon_palette_from_ctx(ctx.ui.ctx());
@@ -155,7 +174,7 @@ impl EdgeVisual for OrthogonalEdgeVisual {
         let zoom_norm = (ctx.viewport.zoom / 3.0).sqrt().clamp(0.7, 1.6);
         let _w0 = base_width * zoom_norm;
         let scale = zoom_norm;
-        let width = base_width * scale;
+        let width = base_width * scale * self.thickness_scale.max(0.1);
         let stroke = egui::Stroke::new(width, col);
         let painter = ctx.ui.painter();
 
@@ -166,11 +185,22 @@ impl EdgeVisual for OrthogonalEdgeVisual {
         // of inventing a straight from→to line that ignores stubs
         // and waypoints.
         let polyline: Vec<egui::Pos2> = 'route: {
-            if !self.waypoints_world.is_empty() {
-                let from_screen = egui::pos2(from.x, from.y);
-                let to_screen = egui::pos2(to.x, to.y);
-                let way_screen: Vec<egui::Pos2> = self
-                    .waypoints_world
+            // Prefer the live waypoints provided by the caller — these
+            // come straight from `Edge::waypoints` (mutated live by the
+            // canvas tool during a waypoint drag), so the wire follows
+            // the cursor without waiting for a re-projection. Fall back
+            // to the visual's frozen `waypoints_world` only if the live
+            // list is empty (defends against any caller that doesn't
+            // pass them).
+            let from_screen = egui::pos2(from.x, from.y);
+            let to_screen = egui::pos2(to.x, to.y);
+            let way_screen: Vec<egui::Pos2> = if !waypoints_screen.is_empty() {
+                waypoints_screen
+                    .iter()
+                    .map(|p| egui::pos2(p.x, p.y))
+                    .collect()
+            } else {
+                self.waypoints_world
                     .iter()
                     .map(|p| {
                         let s = ctx
@@ -178,7 +208,9 @@ impl EdgeVisual for OrthogonalEdgeVisual {
                             .world_to_screen(*p, ctx.screen_rect);
                         egui::pos2(s.x, s.y)
                     })
-                    .collect();
+                    .collect()
+            };
+            if !way_screen.is_empty() {
                 const ALIGN_TOL: f32 = 1.0;
                 let first_far = way_screen
                     .first()
@@ -210,8 +242,19 @@ impl EdgeVisual for OrthogonalEdgeVisual {
                 STUB_PX * scale,
             )
         };
-        for w in polyline.windows(2) {
-            painter.line_segment([w[0], w[1]], stroke);
+        if self.smooth_bezier && polyline.len() >= 3 {
+            // Catmull-Rom-style smoothing: sample a cubic spline
+            // through the polyline points and emit a path of short
+            // line segments approximating the curve. Cheap enough at
+            // typical wire complexity (≤ 8 segments × 16 samples).
+            let smoothed = sample_catmull_rom(&polyline, 16);
+            for w in smoothed.windows(2) {
+                painter.line_segment([w[0], w[1]], stroke);
+            }
+        } else {
+            for w in polyline.windows(2) {
+                painter.line_segment([w[0], w[1]], stroke);
+            }
         }
 
         // ── API edge-add pulse overlay ──────────────────────────────
@@ -343,6 +386,73 @@ impl EdgeVisual for OrthogonalEdgeVisual {
                 );
                 let text = edge_hover_text(self, &state);
                 paint_wire_tooltip(painter, p, &text, col);
+            }
+        }
+
+        // ── Editable waypoint handles ────────────────────────────────────
+        // Dymola/OMEdit: when a wire is selected, paint a filled square
+        // at every interior corner and an outlined square at the
+        // midpoint of every reasonably-long segment. The canvas tool
+        // hit-tests these geometrically against `Edge::waypoints`, so
+        // the paint here only needs to mirror that hit geometry.
+        if selected {
+            let handle_size = (4.0 * scale).max(3.0);
+            let fill = egui::Color32::from_rgb(255, 196, 60);
+            let outline = egui::Stroke::new(1.0, egui::Color32::BLACK);
+            let hover_pos = ctx.ui.ctx().pointer_hover_pos();
+            let mut cursor: Option<egui::CursorIcon> = None;
+            // Corner handles — one per interior waypoint.
+            for w in waypoints_screen {
+                let r = egui::Rect::from_center_size(
+                    egui::pos2(w.x, w.y),
+                    egui::vec2(handle_size, handle_size),
+                );
+                painter.rect_filled(r, 0.0, fill);
+                painter.rect_stroke(r, 0.0, outline, egui::StrokeKind::Outside);
+                if let Some(p) = hover_pos {
+                    if r.expand(2.0).contains(p) {
+                        cursor = Some(egui::CursorIcon::Move);
+                    }
+                }
+            }
+            // Segment midpoint handles — outlined squares; skip
+            // segments shorter than ~3× the handle so they don't
+            // overlap corner handles or each other. Hover sets a
+            // resize-N/S or resize-E/W cursor depending on the
+            // segment's dominant axis (perpendicular slide).
+            let min_seg = handle_size * 3.0;
+            for w in polyline.windows(2) {
+                let a = w[0];
+                let b = w[1];
+                let dx = b.x - a.x;
+                let dy = b.y - a.y;
+                let len = (dx * dx + dy * dy).sqrt();
+                if len < min_seg {
+                    continue;
+                }
+                let mid = egui::pos2((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+                let r = egui::Rect::from_center_size(
+                    mid,
+                    egui::vec2(handle_size, handle_size),
+                );
+                painter.rect_stroke(
+                    r,
+                    0.0,
+                    egui::Stroke::new(1.2, fill),
+                    egui::StrokeKind::Outside,
+                );
+                if let Some(p) = hover_pos {
+                    if r.expand(2.0).contains(p) && cursor.is_none() {
+                        cursor = Some(if dx.abs() >= dy.abs() {
+                            egui::CursorIcon::ResizeVertical
+                        } else {
+                            egui::CursorIcon::ResizeHorizontal
+                        });
+                    }
+                }
+            }
+            if let Some(c) = cursor {
+                ctx.ui.ctx().set_cursor_icon(c);
             }
         }
     }
@@ -479,6 +589,44 @@ pub(super) fn route_orthogonal(
 
     pts.dedup_by(|a, b| (a.x - b.x).abs() < 0.5 && (a.y - b.y).abs() < 0.5);
     pts
+}
+
+/// Sample a Catmull-Rom spline through the control points, emitting
+/// `samples_per_segment` straight line segments per pair of control
+/// points so egui's stroke pipeline can render the curve. Endpoint
+/// handling uses the doubled-endpoint trick (P[-1] = P[0], P[N] =
+/// P[N-1]) so the curve starts and ends exactly at the port stubs.
+fn sample_catmull_rom(pts: &[egui::Pos2], samples_per_segment: usize) -> Vec<egui::Pos2> {
+    if pts.len() < 2 {
+        return pts.to_vec();
+    }
+    let n = pts.len();
+    let mut out: Vec<egui::Pos2> = Vec::with_capacity((n - 1) * samples_per_segment + 1);
+    out.push(pts[0]);
+    for i in 0..n - 1 {
+        let p0 = if i == 0 { pts[0] } else { pts[i - 1] };
+        let p1 = pts[i];
+        let p2 = pts[i + 1];
+        let p3 = if i + 2 < n { pts[i + 2] } else { pts[i + 1] };
+        for s in 1..=samples_per_segment {
+            let t = s as f32 / samples_per_segment as f32;
+            let t2 = t * t;
+            let t3 = t2 * t;
+            // Standard Catmull-Rom basis with tension 0.5.
+            let x = 0.5
+                * ((2.0 * p1.x)
+                    + (-p0.x + p2.x) * t
+                    + (2.0 * p0.x - 5.0 * p1.x + 4.0 * p2.x - p3.x) * t2
+                    + (-p0.x + 3.0 * p1.x - 3.0 * p2.x + p3.x) * t3);
+            let y = 0.5
+                * ((2.0 * p1.y)
+                    + (-p0.y + p2.y) * t
+                    + (2.0 * p0.y - 5.0 * p1.y + 4.0 * p2.y - p3.y) * t2
+                    + (-p0.y + 3.0 * p1.y - 3.0 * p2.y + p3.y) * t3);
+            out.push(egui::pos2(x, y));
+        }
+    }
+    out
 }
 
 /// Build the wire hover tooltip text from AST-derived semantics —

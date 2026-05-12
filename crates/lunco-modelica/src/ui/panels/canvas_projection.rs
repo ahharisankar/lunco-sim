@@ -118,11 +118,26 @@ fn scan_component_declarations_from_ast(
 /// only one part, its instance string is empty and the port string
 /// holds the identifier — matches the way `canonical_edge_key`
 /// indexes those endpoints.
+/// Per-edge routing data lifted from `connect(...)` annotations:
+/// interior polyline + the `smooth=Bezier` flag. Future fields
+/// (color, thickness) slot in here without changing the scan signature.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ConnectRoute {
+    pub points: Vec<(f32, f32)>,
+    pub smooth_bezier: bool,
+    /// `Line(color={r,g,b})` override — when present, overrides the
+    /// connector-derived wire colour.
+    pub color: Option<[u8; 3]>,
+    /// `Line(thickness=…)` override — present only when source
+    /// explicitly set a non-default value.
+    pub thickness: Option<f32>,
+}
+
 pub(crate) fn scan_connect_annotations(
     ast: &rumoca_session::parsing::ast::StoredDefinition,
 ) -> std::collections::HashMap<
     ((String, String), (String, String)),
-    Vec<(f32, f32)>,
+    ConnectRoute,
 > {
     let mut out = std::collections::HashMap::new();
     for class in ast.classes.values() {
@@ -135,16 +150,21 @@ fn collect_connect_waypoints_recursive(
     class: &rumoca_session::parsing::ast::ClassDef,
     out: &mut std::collections::HashMap<
         ((String, String), (String, String)),
-        Vec<(f32, f32)>,
+        ConnectRoute,
     >,
 ) {
     use rumoca_session::parsing::ast::Equation;
     for eq in &class.equations {
         let Equation::Connect { lhs, rhs, annotation } = eq else { continue };
-        let waypoints = crate::annotations::extract_line_points(annotation);
-        if waypoints.len() < 2 {
+        let Some(line) = crate::annotations::extract_line_full(annotation)
+        else { continue };
+        if line.points.len() < 2 {
             continue;
         }
+        let waypoints = line.points;
+        let smooth_bezier = line.smooth_bezier;
+        let color = line.color;
+        let thickness = line.thickness;
         // ComponentReference parts: 2-part is `inst.port`,
         // 1-part is bare `port` (treat inst as empty).
         let split = |cr: &rumoca_session::parsing::ast::ComponentReference| -> (String, String) {
@@ -160,7 +180,12 @@ fn collect_connect_waypoints_recursive(
         let (a_inst, a_port) = split(lhs);
         let (b_inst, b_port) = split(rhs);
         let key = canonical_edge_key(&a_inst, &a_port, &b_inst, &b_port);
-        out.entry(key).or_insert(waypoints);
+        out.entry(key).or_insert(ConnectRoute {
+            points: waypoints,
+            smooth_bezier,
+            color,
+            thickness,
+        });
     }
     for nested in class.classes.values() {
         collect_connect_waypoints_recursive(nested, out);
@@ -926,9 +951,12 @@ pub fn import_model_to_diagram_from_ast(
             diagram.add_edge(src_id, src_port.clone(), tgt_id, tgt_port.clone());
             // Attach authored waypoints if the source had them.
             let key = canonical_edge_key(src_short, &src_port, tgt_short, &tgt_port);
-            if let Some(waypoints) = waypoint_map.get(&key) {
+            if let Some(route) = waypoint_map.get(&key) {
                 if let Some(last) = diagram.edges.last_mut() {
-                    last.waypoints = waypoints.clone();
+                    last.waypoints = route.points.clone();
+                    last.smooth_bezier = route.smooth_bezier;
+                    last.color = route.color;
+                    last.thickness = route.thickness;
                 }
             }
         }
@@ -956,8 +984,11 @@ pub fn import_model_to_diagram_from_ast(
         crate::visual_diagram::DiagramNodeId,
         String,
         Vec<(f32, f32)>,
+        bool,
+        Option<[u8; 3]>,
+        Option<f32>,
     )> = Vec::new();
-    for (key, waypoints) in &waypoint_map {
+    for (key, route) in &waypoint_map {
         let ((a_inst, a_port), (b_inst, b_port)) = key;
         let a_match = if a_inst.is_empty() { a_port.as_str() } else { a_inst.as_str() };
         let b_match = if b_inst.is_empty() { b_port.as_str() } else { b_inst.as_str() };
@@ -973,7 +1004,10 @@ pub fn import_model_to_diagram_from_ast(
                     || (edge.source_node == b_id && edge.target_node == a_id);
             if same {
                 if edge.waypoints.is_empty() {
-                    edge.waypoints = waypoints.clone();
+                    edge.waypoints = route.points.clone();
+                    edge.smooth_bezier = route.smooth_bezier;
+                    edge.color = route.color;
+                    edge.thickness = route.thickness;
                 }
                 found = true;
                 break;
@@ -982,12 +1016,26 @@ pub fn import_model_to_diagram_from_ast(
         if found { continue; }
         let a_port_str = if a_inst.is_empty() { String::new() } else { a_port.clone() };
         let b_port_str = if b_inst.is_empty() { String::new() } else { b_port.clone() };
-        to_add.push((a_id, a_port_str, b_id, b_port_str, waypoints.clone()));
+        to_add.push((
+            a_id,
+            a_port_str,
+            b_id,
+            b_port_str,
+            route.points.clone(),
+            route.smooth_bezier,
+            route.color,
+            route.thickness,
+        ));
     }
-    for (a_id, a_port, b_id, b_port, waypoints) in to_add {
+    for (a_id, a_port, b_id, b_port, waypoints, smooth_bezier, color, thickness) in
+        to_add
+    {
         diagram.add_edge(a_id, a_port, b_id, b_port);
         if let Some(last) = diagram.edges.last_mut() {
             last.waypoints = waypoints;
+            last.smooth_bezier = smooth_bezier;
+            last.color = color;
+            last.thickness = thickness;
         }
     }
 

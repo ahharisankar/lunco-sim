@@ -72,8 +72,8 @@ pub use renderer::{
 };
 pub use theme::CanvasLayerTheme;
 pub use scene::{
-    empty_node_data, Edge, EdgeId, Node, NodeData, NodeId, Port, PortId, PortRef, Pos, Rect,
-    Scene,
+    empty_node_data, Edge, EdgeHitKind, EdgeId, Node, NodeData, NodeId, NodeHitKind, Port,
+    PortId, PortRef, Pos, Rect, Scene,
 };
 pub use selection::{SelectItem, Selection};
 pub use tool::{CanvasOps, DefaultTool, Tool, ToolOutcome};

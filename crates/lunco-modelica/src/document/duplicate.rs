@@ -39,27 +39,6 @@ pub(crate) struct DuplicateExtract {
 /// Replaces an earlier regex-on-text approach that mis-extracted when
 /// the source contained a docstring with a literal `block <Name>` line.
 /// The AST has no such hazard.
-pub(crate) fn find_class_byte_range(
-    ast: &rumoca_session::parsing::ast::StoredDefinition,
-    short_name: &str,
-) -> Option<(usize, usize)> {
-    fn walk(
-        classes: &indexmap::IndexMap<String, rumoca_session::parsing::ast::ClassDef>,
-        target: &str,
-    ) -> Option<(usize, usize)> {
-        for (name, class) in classes.iter() {
-            if name == target {
-                return Some((class.location.start as usize, class.location.end as usize));
-            }
-            if let Some(hit) = walk(&class.classes, target) {
-                return Some(hit);
-            }
-        }
-        None
-    }
-    walk(&ast.classes, short_name)
-}
-
 /// Path-aware variant that also returns the class-name-token span and
 /// the end-token span (both **absolute** in `source`), so the bg
 /// duplicate flow can splice without re-parsing the same bytes a

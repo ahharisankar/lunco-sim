@@ -42,8 +42,9 @@
 use std::collections::HashMap;
 
 use crate::event::{InputEvent, MouseButton, SceneEvent};
-use crate::scene::{NodeHitKind, NodeId, PortRef, Pos, Rect, Scene};
+use crate::scene::{EdgeId, NodeHitKind, NodeId, PortRef, Pos, Rect, Scene};
 use crate::selection::{SelectItem, Selection};
+use crate::visual::EdgeHit;
 use crate::viewport::Viewport;
 
 /// Result of a tool handling one event.
@@ -152,8 +153,24 @@ pub enum ToolPreview {
         /// the layer can highlight the snap.
         snap_target: Option<Pos>,
     },
+    /// Same as [`Self::GhostEdge`] but with intermediate bend points
+    /// the user has placed via click-to-bend. Layers render the
+    /// polyline `from_world → bends[0] → … → bends[N-1] → to_world`.
+    GhostEdgeWithBends {
+        from_world: Pos,
+        bends: Vec<Pos>,
+        to_world: Pos,
+        snap_target: Option<Pos>,
+    },
     /// Rubber-band selection rectangle, world-space.
     RubberBand(Rect),
+    /// Alignment guide lines drawn while a waypoint snaps to another
+    /// wire's bend coordinate. `x`/`y` are world-space lines; either
+    /// can be `None` (only the matching axis drew a guide).
+    SnapGuides {
+        x: Option<f32>,
+        y: Option<f32>,
+    },
 }
 
 // ─── DefaultTool ────────────────────────────────────────────────────
@@ -195,10 +212,19 @@ enum State {
     /// origin port; `pointer_world` is the tip of the ghost edge,
     /// updated each PointerMove. On release over a valid target
     /// port we emit `EdgeCreated`.
+    ///
+    /// `points` is the list of bends the user placed mid-creation by
+    /// clicking in empty space (Dymola/OMEdit-style click-to-bend).
+    /// `mode` distinguishes the two ways to enter this state — `Drag`
+    /// commits on release (the original press-and-drag flow), while
+    /// `Click` only commits on a port-click (the new click-to-bend
+    /// flow entered via a bare port-click).
     ConnectingFromPort {
         from: PortRef,
         from_world: Pos,
         pointer_world: Pos,
+        points: Vec<Pos>,
+        mode: ConnectMode,
     },
 
     /// Resizing a node by its bottom-right handle. Mutates
@@ -220,6 +246,44 @@ enum State {
         extend: bool,
         toggle: bool,
     },
+
+    /// Dragging a corner or segment handle of an edge's polyline.
+    /// `original` is the interior-waypoints list at press time —
+    /// preserved so Escape can revert and the on-up event carries the
+    /// pre-drag → post-drag delta cleanly. `current` is mutated each
+    /// PointerMove and mirrored into `scene.edge_mut(edge).waypoints`
+    /// so the visual reflects the drag without per-frame events.
+    DraggingEdgeWaypoint {
+        edge: EdgeId,
+        hit: EdgeHit,
+        origin_world: Pos,
+        /// Edge endpoint positions captured at press time — used so
+        /// segment-drag math stays consistent even if a parent node
+        /// jitters during the drag.
+        from_world: Pos,
+        to_world: Pos,
+        original: Vec<Pos>,
+        current: Vec<Pos>,
+        /// Most recent snap-to-other-wire alignment hit, in world
+        /// coords — `(Some(x), _)` means we snapped to vertical line
+        /// `x`. Renderer reads this to draw guide lines.
+        snap_x: Option<f32>,
+        snap_y: Option<f32>,
+    },
+}
+
+/// How a wire-creation gesture was entered. The two modes have
+/// different release semantics — see [`State::ConnectingFromPort`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectMode {
+    /// Entered via press-and-drag from a port. Release on a port
+    /// commits; release on empty space cancels (legacy behaviour).
+    Drag,
+    /// Entered via a bare port click (press + release on the same
+    /// port without moving). The wire follows the cursor; subsequent
+    /// clicks in empty space place bends; a click on a target port
+    /// commits.
+    Click,
 }
 
 /// Which scene element the primary press landed on — recorded at
@@ -231,6 +295,10 @@ enum PressTarget {
     ResizeHandle(NodeId),
     NodeBody(NodeId),
     Port(PortRef, Pos), // port world-space position for ghost edge origin
+    /// On an edge's waypoint or segment handle. Drag promotes to
+    /// `DraggingEdgeWaypoint`. `Body` hits do *not* land here — those
+    /// are handled inline at press time as a select-and-stay.
+    EdgeHandle(EdgeId, EdgeHit),
     Empty,
 }
 
@@ -292,6 +360,14 @@ impl Tool for DefaultTool {
                             *landed_on = PressTarget::Empty;
                         }
                     }
+                    PressTarget::EdgeHandle(_, _) => {
+                        // EdgeIds aren't remapped by this helper —
+                        // the caller only deals with NodeId remapping
+                        // after a re-projection. Drop the press
+                        // target to be safe; the user will need to
+                        // re-press if the projection landed mid-press.
+                        *landed_on = PressTarget::Empty;
+                    }
                 }
             }
             State::ResizingNode { id, .. } => {
@@ -310,7 +386,7 @@ impl Tool for DefaultTool {
                     .collect();
                 *original_rects = remapped;
             }
-            State::ConnectingFromPort { from, .. } => {
+            State::ConnectingFromPort { from, points: _, .. } => {
                 if let Some(new_id) = find_new_id(from.node) {
                     from.node = new_id;
                 } else {
@@ -330,11 +406,21 @@ impl Tool for DefaultTool {
                 ..
             } => {
                 self.last_pointer_world = Some(*world);
+                // Special-case: when wire-drawing is already active
+                // (entered via drag-promote or bare-port-click), a
+                // press on a port commits, a press in empty space
+                // appends a bend, and a press on the source port
+                // cancels. Don't fall through to `on_primary_down`,
+                // which would reset state to PrimaryPressed.
+                if matches!(self.state, State::ConnectingFromPort { .. }) {
+                    self.on_wire_drawing_click(*world, ops);
+                    return ToolOutcome::Consumed;
+                }
                 self.on_primary_down(*world, modifiers.shift, modifiers.ctrl, ops);
                 ToolOutcome::Consumed
             }
 
-            InputEvent::PointerMove { world, .. } => {
+            InputEvent::PointerMove { world, modifiers, .. } => {
                 self.last_pointer_world = Some(*world);
                 // A move might promote Pressed → Dragging, or feed
                 // an in-flight drag. Pan (middle-drag) lives in
@@ -342,7 +428,7 @@ impl Tool for DefaultTool {
                 if matches!(self.state, State::Idle) {
                     ToolOutcome::Passthrough
                 } else {
-                    self.on_pointer_move(*world, ops);
+                    self.on_pointer_move(*world, *modifiers, ops);
                     ToolOutcome::Consumed
                 }
             }
@@ -393,10 +479,36 @@ impl Tool for DefaultTool {
                     ToolOutcome::Consumed
                 }
                 "Escape" => {
-                    // Abort any in-flight drag/connect. Don't clear
-                    // the selection — Escape in most editors cancels
-                    // the interaction, not the selection.
-                    self.state = State::Idle;
+                    // Abort any in-flight drag/connect. Revert
+                    // mid-drag mutations so the scene looks like the
+                    // user never started the gesture (Figma-style).
+                    let state = std::mem::replace(&mut self.state, State::Idle);
+                    match state {
+                        State::DraggingNodes {
+                            original_rects, ..
+                        } => {
+                            for (nid, orig) in original_rects {
+                                if let Some(n) = ops.scene.node_mut(nid) {
+                                    n.rect = orig;
+                                }
+                            }
+                        }
+                        State::ResizingNode {
+                            id, original_rect, ..
+                        } => {
+                            if let Some(n) = ops.scene.node_mut(id) {
+                                n.rect = original_rect;
+                            }
+                        }
+                        State::DraggingEdgeWaypoint {
+                            edge, original, ..
+                        } => {
+                            if let Some(e) = ops.scene.edge_mut(edge) {
+                                e.waypoints = original;
+                            }
+                        }
+                        _ => {}
+                    }
                     ToolOutcome::Consumed
                 }
                 _ => ToolOutcome::Passthrough,
@@ -415,11 +527,13 @@ impl Tool for DefaultTool {
             State::ConnectingFromPort {
                 from_world,
                 pointer_world,
+                points,
                 ..
-            } => Some(ToolPreview::GhostEdge {
+            } => Some(ToolPreview::GhostEdgeWithBends {
                 from_world: *from_world,
+                bends: points.clone(),
                 to_world: *pointer_world,
-                snap_target: None, // filled in by future enhancement
+                snap_target: None,
             }),
             State::RubberBand {
                 origin_world,
@@ -436,6 +550,14 @@ impl Tool for DefaultTool {
                 );
                 Some(ToolPreview::RubberBand(Rect::from_min_max(min, max)))
             }
+            State::DraggingEdgeWaypoint { snap_x, snap_y, .. }
+                if snap_x.is_some() || snap_y.is_some() =>
+            {
+                Some(ToolPreview::SnapGuides {
+                    x: *snap_x,
+                    y: *snap_y,
+                })
+            }
             _ => None,
         }
     }
@@ -444,6 +566,73 @@ impl Tool for DefaultTool {
 impl DefaultTool {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Handle a primary click while already in `ConnectingFromPort`
+    /// state — implements Dymola/OMEdit click-to-bend during wire
+    /// creation. Click on a different node's port = commit; click
+    /// on the source port or empty space inside the source node =
+    /// cancel; click in empty world space = append a bend.
+    fn on_wire_drawing_click(&mut self, world: Pos, ops: &mut CanvasOps) {
+        let State::ConnectingFromPort { from, from_world, points, mode, .. } =
+            std::mem::replace(&mut self.state, State::Idle)
+        else {
+            return;
+        };
+        // Hit test: port → commit / cancel; body → ignore (don't
+        // commit through a node body that isn't a port); empty → bend.
+        let target = ops.scene.hit_node(world, PORT_HIT_RADIUS);
+        match target {
+            Some((nid, NodeHitKind::Port(pid))) => {
+                if nid == from.node && pid == from.port {
+                    // Clicked the source port again — cancel.
+                    return;
+                }
+                if nid != from.node {
+                    let to = PortRef { node: nid, port: pid };
+                    ops.events.push(SceneEvent::EdgeCreated {
+                        from,
+                        to,
+                        points,
+                    });
+                    return;
+                }
+                // Same-node port — keep drawing.
+                self.state = State::ConnectingFromPort {
+                    from,
+                    from_world,
+                    pointer_world: world,
+                    points,
+                    mode,
+                };
+            }
+            Some((_, NodeHitKind::Body)) => {
+                // Clicking on a node body without hitting a port
+                // doesn't commit (Dymola requires a port hit) — stay
+                // in wire-drawing mode.
+                self.state = State::ConnectingFromPort {
+                    from,
+                    from_world,
+                    pointer_world: world,
+                    points,
+                    mode,
+                };
+            }
+            None => {
+                // Empty space — append a bend at the click position
+                // (grid-snap so the bend lands cleanly).
+                let (sx, sy) = snap_point(world.x, world.y, ops.snap);
+                let mut new_points = points;
+                new_points.push(Pos::new(sx, sy));
+                self.state = State::ConnectingFromPort {
+                    from,
+                    from_world,
+                    pointer_world: world,
+                    points: new_points,
+                    mode,
+                };
+            }
+        }
     }
 
     fn on_primary_down(
@@ -507,14 +696,74 @@ impl DefaultTool {
             Some((id, NodeHitKind::Body)) => PressTarget::NodeBody(id),
             None => {
                 // Could still hit an edge — edges need a larger
-                // click tolerance than ports.
-                if let Some(eid) = ops.scene.hit_edge(world, 4.0) {
+                // click tolerance than ports. When the press lands on
+                // a handle (corner/segment midpoint) of an ALREADY-
+                // selected edge, promote to an edge-waypoint drag;
+                // otherwise this is a plain click-to-select.
+                const EDGE_BODY_TOL: f32 = 4.0;
+                const EDGE_HANDLE_RADIUS: f32 = 5.0;
+                // Two-phase test: first, try handles only on selected
+                // edges; then, fall back to body hits across all edges.
+                let mut press_target = PressTarget::Empty;
+                let mut handle_hit: Option<(EdgeId, EdgeHit)> = None;
+                for eid in ops.selection.edges() {
+                    let Some(edge) = ops.scene.edge(eid) else { continue };
+                    let Some((from, to)) = ops.scene.edge_endpoint_positions(edge) else { continue };
+                    // Corner handles.
+                    let mut found = None;
+                    for (i, w) in edge.waypoints.iter().enumerate() {
+                        let dx = world.x - w.x;
+                        let dy = world.y - w.y;
+                        if dx * dx + dy * dy
+                            <= EDGE_HANDLE_RADIUS * EDGE_HANDLE_RADIUS
+                        {
+                            found = Some(EdgeHit::Corner(i));
+                            break;
+                        }
+                    }
+                    // Segment-midpoint handles (skip very short
+                    // segments to avoid overlap with the corner
+                    // handles).
+                    if found.is_none() {
+                        let mut pts: Vec<Pos> =
+                            Vec::with_capacity(2 + edge.waypoints.len());
+                        pts.push(from);
+                        pts.extend(edge.waypoints.iter().copied());
+                        pts.push(to);
+                        for i in 0..pts.len() - 1 {
+                            let sx = pts[i + 1].x - pts[i].x;
+                            let sy = pts[i + 1].y - pts[i].y;
+                            if sx * sx + sy * sy
+                                <= 4.0 * EDGE_HANDLE_RADIUS * EDGE_HANDLE_RADIUS
+                            {
+                                continue;
+                            }
+                            let mx = (pts[i].x + pts[i + 1].x) * 0.5;
+                            let my = (pts[i].y + pts[i + 1].y) * 0.5;
+                            let dx = world.x - mx;
+                            let dy = world.y - my;
+                            if dx * dx + dy * dy
+                                <= EDGE_HANDLE_RADIUS * EDGE_HANDLE_RADIUS
+                            {
+                                found = Some(EdgeHit::Segment(i));
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(hit) = found {
+                        handle_hit = Some((eid, hit));
+                        break;
+                    }
+                }
+                if let Some((eid, hit)) = handle_hit {
+                    if !ops.read_only {
+                        press_target = PressTarget::EdgeHandle(eid, hit);
+                    }
+                } else if let Some(eid) = ops.scene.hit_edge(world, EDGE_BODY_TOL) {
                     let item = SelectItem::Edge(eid);
                     self.apply_click_selection(item, extend, toggle, ops);
-                    PressTarget::Empty
-                } else {
-                    PressTarget::Empty
                 }
+                press_target
             }
         };
         self.state = State::PrimaryPressed {
@@ -525,7 +774,12 @@ impl DefaultTool {
         };
     }
 
-    fn on_pointer_move(&mut self, world: Pos, ops: &mut CanvasOps) {
+    fn on_pointer_move(
+        &mut self,
+        world: Pos,
+        modifiers: crate::event::Modifiers,
+        ops: &mut CanvasOps,
+    ) {
         // Promote Pressed → Dragging once the pointer has moved past
         // the click threshold.
         if let State::PrimaryPressed {
@@ -593,6 +847,8 @@ impl DefaultTool {
                         from,
                         from_world,
                         pointer_world: world,
+                        points: Vec::new(),
+                        mode: ConnectMode::Drag,
                     };
                 }
                 PressTarget::Empty => {
@@ -619,6 +875,39 @@ impl DefaultTool {
                         id,
                         original_rect,
                         origin_world,
+                    };
+                }
+                PressTarget::EdgeHandle(edge, hit) => {
+                    if ops.read_only {
+                        self.state = State::Idle;
+                        return;
+                    }
+                    let (from_world, to_world, original) =
+                        match ops.scene.edge(edge) {
+                            Some(e) => {
+                                match ops.scene.edge_endpoint_positions(e) {
+                                    Some((f, t)) => (f, t, e.waypoints.clone()),
+                                    None => {
+                                        self.state = State::Idle;
+                                        return;
+                                    }
+                                }
+                            }
+                            None => {
+                                self.state = State::Idle;
+                                return;
+                            }
+                        };
+                    self.state = State::DraggingEdgeWaypoint {
+                        edge,
+                        hit,
+                        origin_world,
+                        from_world,
+                        to_world,
+                        original: original.clone(),
+                        current: original,
+                        snap_x: None,
+                        snap_y: None,
                     };
                 }
             }
@@ -695,6 +984,153 @@ impl DefaultTool {
                     );
                 }
             }
+            State::DraggingEdgeWaypoint {
+                edge,
+                hit,
+                origin_world,
+                from_world,
+                to_world,
+                original,
+                current,
+                snap_x,
+                snap_y,
+            } => {
+                *snap_x = None;
+                *snap_y = None;
+                let mut dx = world.x - origin_world.x;
+                let mut dy = world.y - origin_world.y;
+                // Shift = constrain to the dominant axis (locks to
+                // pure horizontal or vertical motion). Useful for
+                // keeping a wire orthogonal while dragging a corner.
+                if modifiers.shift {
+                    if dx.abs() >= dy.abs() {
+                        dy = 0.0;
+                    } else {
+                        dx = 0.0;
+                    }
+                }
+                // Alt bypasses grid snap (Dymola convention).
+                let active_snap = if modifiers.alt { None } else { ops.snap };
+                // Recompute `current` from `original + delta` each
+                // frame so the math is drift-free even after many
+                // PointerMoves.
+                let mut new_pts = original.clone();
+                match hit {
+                    EdgeHit::Corner(i) => {
+                        if let Some(p) = new_pts.get_mut(*i) {
+                            let (mut sx, mut sy) =
+                                snap_point(p.x + dx, p.y + dy, active_snap);
+                            // Wire-alignment snap: when nearby (within
+                            // tolerance) bend coords on other wires
+                            // share x/y, lock to them. Cheap O(W·B)
+                            // scan; W and B are small at typical
+                            // schematic complexity. Alt bypasses
+                            // (mirrors the grid-snap bypass).
+                            if !modifiers.alt {
+                                const ALIGN_TOL: f32 = 3.0;
+                                let mut best_dx: Option<(f32, f32)> = None;
+                                let mut best_dy: Option<(f32, f32)> = None;
+                                for (eid, other) in ops.scene.edges() {
+                                    if *eid == *edge { continue; }
+                                    for w in &other.waypoints {
+                                        let dx_to = (w.x - sx).abs();
+                                        if dx_to < ALIGN_TOL
+                                            && best_dx.map_or(true, |(d, _)| dx_to < d)
+                                        {
+                                            best_dx = Some((dx_to, w.x));
+                                        }
+                                        let dy_to = (w.y - sy).abs();
+                                        if dy_to < ALIGN_TOL
+                                            && best_dy.map_or(true, |(d, _)| dy_to < d)
+                                        {
+                                            best_dy = Some((dy_to, w.y));
+                                        }
+                                    }
+                                }
+                                if let Some((_, x)) = best_dx {
+                                    sx = x;
+                                    *snap_x = Some(x);
+                                }
+                                if let Some((_, y)) = best_dy {
+                                    sy = y;
+                                    *snap_y = Some(y);
+                                }
+                            }
+                            *p = Pos::new(sx, sy);
+                        }
+                    }
+                    EdgeHit::Segment(i) => {
+                        // Build the full polyline (port → interior →
+                        // port) so segment endpoints are addressable
+                        // uniformly. Segment i spans indices i..i+1.
+                        let n = new_pts.len();
+                        let pre = if *i == 0 { *from_world } else { new_pts[*i - 1] };
+                        let post = if *i + 1 > n {
+                            *to_world
+                        } else if *i == n {
+                            *to_world
+                        } else {
+                            new_pts[*i]
+                        };
+                        // Dymola: slide the segment perpendicular to
+                        // its own axis. If the segment is horizontal
+                        // (|sx| > |sy|), apply Δy to both endpoints;
+                        // if vertical, apply Δx. The endpoints of the
+                        // interior polyline that belong to this
+                        // segment must be inserted if they're the
+                        // port endpoints (i == 0 or i == n).
+                        let sx = post.x - pre.x;
+                        let sy = post.y - pre.y;
+                        let perpendicular_dy =
+                            sx.abs() >= sy.abs();
+                        let (qdx, qdy) = if perpendicular_dy {
+                            (0.0_f32, dy)
+                        } else {
+                            (dx, 0.0_f32)
+                        };
+                        // Move whichever endpoints of segment i are
+                        // interior bends.
+                        if *i >= 1 && *i - 1 < new_pts.len() {
+                            let p = new_pts[*i - 1];
+                            let (nx, ny) =
+                                snap_point(p.x + qdx, p.y + qdy, active_snap);
+                            new_pts[*i - 1] = Pos::new(nx, ny);
+                        } else {
+                            // Segment 0 starts at the from-port — we
+                            // can't move the port, so insert a fresh
+                            // bend right next to it that captures the
+                            // perpendicular slide. Subsequent frames
+                            // keep nudging that same bend.
+                            let (nx, ny) = snap_point(
+                                from_world.x + qdx,
+                                from_world.y + qdy,
+                                active_snap,
+                            );
+                            new_pts.insert(0, Pos::new(nx, ny));
+                        }
+                        if *i < new_pts.len() {
+                            let p = new_pts[*i];
+                            let (nx, ny) =
+                                snap_point(p.x + qdx, p.y + qdy, active_snap);
+                            new_pts[*i] = Pos::new(nx, ny);
+                        } else {
+                            // Last segment ends at the to-port — same
+                            // trick: insert a bend at the port end.
+                            let (nx, ny) = snap_point(
+                                to_world.x + qdx,
+                                to_world.y + qdy,
+                                active_snap,
+                            );
+                            new_pts.push(Pos::new(nx, ny));
+                        }
+                    }
+                    EdgeHit::Body => { /* shouldn't reach here */ }
+                }
+                *current = new_pts.clone();
+                if let Some(e) = ops.scene.edge_mut(*edge) {
+                    e.waypoints = new_pts;
+                }
+            }
             _ => {}
         }
     }
@@ -720,9 +1156,22 @@ impl DefaultTool {
                             ops,
                         );
                     }
-                    PressTarget::Port(_, _) => {
-                        // A bare port-click with no drag does
-                        // nothing — we don't select ports.
+                    PressTarget::Port(from, from_world) => {
+                        // Bare port-click → enter click-to-bend wire
+                        // mode. Subsequent clicks in empty space
+                        // append bends; a click on a target port
+                        // commits the wire. Esc cancels. Read-only
+                        // tabs bail (mirrors the drag path).
+                        if ops.read_only {
+                            return;
+                        }
+                        self.state = State::ConnectingFromPort {
+                            from,
+                            from_world,
+                            pointer_world: from_world,
+                            points: Vec::new(),
+                            mode: ConnectMode::Click,
+                        };
                     }
                     PressTarget::Empty => {
                         // Click on empty space — clear selection
@@ -746,6 +1195,12 @@ impl DefaultTool {
                             toggle,
                             ops,
                         );
+                    }
+                    PressTarget::EdgeHandle(_, _) => {
+                        // Bare click on a waypoint/segment handle with
+                        // no drag: keep the edge selected, no other
+                        // mutation. (A right-click context menu on the
+                        // handle is the future home of "Delete bend".)
                     }
                 }
             }
@@ -786,13 +1241,27 @@ impl DefaultTool {
                 }
             }
 
-            State::ConnectingFromPort { from, .. } => {
-                // Commit the edge if the release landed on a
-                // different node. First try a direct port hit;
-                // if the release is on the body (between ports or
-                // past them slightly), snap to that node's closest
-                // port. Saves users from pixel-perfecting every
-                // drop, matching Dymola / OMEdit behaviour.
+            State::ConnectingFromPort { from, points, mode, .. } => {
+                // `Click` mode releases (between click-to-bend
+                // events) are not commit signals — they're just the
+                // pointer button coming back up after each individual
+                // click. Restore the state and bail. Only an
+                // explicit port-click during a PointerDown commits
+                // a Click-mode wire (handled in `on_primary_down`).
+                if mode == ConnectMode::Click {
+                    self.state = State::ConnectingFromPort {
+                        from,
+                        from_world: self
+                            .last_pointer_world
+                            .unwrap_or(world),
+                        pointer_world: world,
+                        points,
+                        mode,
+                    };
+                    return;
+                }
+                // Drag mode: commit on release-over-a-port (snap to
+                // body if close enough). Empty-space release cancels.
                 let target_node_and_port =
                     match ops.scene.hit_node(world, PORT_HIT_RADIUS) {
                         Some((nid, NodeHitKind::Port(pid))) => Some((nid, pid)),
@@ -808,14 +1277,47 @@ impl DefaultTool {
                             node: target_node,
                             port: target_port,
                         };
-                        ops.events
-                            .push(SceneEvent::EdgeCreated { from, to });
+                        ops.events.push(SceneEvent::EdgeCreated {
+                            from,
+                            to,
+                            points,
+                        });
                     }
                 }
                 // Note: when release lands on pure empty space,
                 // no edge is emitted. A future "dropped-wire menu"
                 // (Snarl-style) can hook this path by emitting a
                 // different SceneEvent — leave the slot open.
+            }
+
+            State::DraggingEdgeWaypoint {
+                edge,
+                original,
+                current,
+                ..
+            } => {
+                // Collinear cleanup: drop interior points P[i] where
+                // P[i-1], P[i], P[i+1] are collinear within eps. Lets
+                // segment-drag-then-back-to-line restore the cleaner
+                // shape instead of leaving a redundant kink. Mirror
+                // the cleaned polyline back into the scene so the
+                // next render reflects it, then emit the change for
+                // the host to translate into a domain op.
+                let cleaned = cleanup_collinear(&current);
+                if let Some(e) = ops.scene.edge_mut(edge) {
+                    e.waypoints = cleaned.clone();
+                    // First edit on an auto-routed wire captures its
+                    // path into source — flip the authored flag so
+                    // future rubber-band passes treat the wire as
+                    // user-authored.
+                    e.waypoints_authored = true;
+                }
+                if cleaned != original {
+                    ops.events.push(SceneEvent::EdgeWaypointsChanged {
+                        id: edge,
+                        points: cleaned,
+                    });
+                }
             }
 
             State::RubberBand {
@@ -848,11 +1350,54 @@ impl DefaultTool {
                         }
                     })
                     .collect();
+                // Also collect edges whose polyline (endpoints +
+                // interior waypoints) intersects the band — wires can
+                // now be box-selected for batch delete / re-style.
+                let hit_edges: Vec<EdgeId> = ops
+                    .scene
+                    .edges()
+                    .filter_map(|(eid, e)| {
+                        let Some((from, to)) =
+                            ops.scene.edge_endpoint_positions(e)
+                        else {
+                            return None;
+                        };
+                        let any_in = |p: Pos| -> bool {
+                            band.contains(p)
+                        };
+                        if any_in(from)
+                            || any_in(to)
+                            || e.waypoints.iter().any(|w| any_in(*w))
+                        {
+                            return Some(*eid);
+                        }
+                        // Final fallback: any segment crosses the band.
+                        let mut pts: Vec<Pos> =
+                            Vec::with_capacity(2 + e.waypoints.len());
+                        pts.push(from);
+                        pts.extend(e.waypoints.iter().copied());
+                        pts.push(to);
+                        for w in pts.windows(2) {
+                            if segment_rect_intersects(w[0], w[1], band) {
+                                return Some(*eid);
+                            }
+                        }
+                        None
+                    })
+                    .collect();
                 if !extend && !toggle {
                     ops.selection.clear();
                 }
                 for id in hit_ids {
                     let it = SelectItem::Node(id);
+                    if toggle {
+                        ops.selection.toggle(it);
+                    } else {
+                        ops.selection.add(it);
+                    }
+                }
+                for id in hit_edges {
+                    let it = SelectItem::Edge(id);
                     if toggle {
                         ops.selection.toggle(it);
                     } else {
@@ -948,6 +1493,87 @@ fn nearest_port_on_node(
 /// Axis-aligned rectangle intersection test (including touch).
 fn rects_intersect(a: Rect, b: Rect) -> bool {
     a.min.x <= b.max.x && a.max.x >= b.min.x && a.min.y <= b.max.y && a.max.y >= b.min.y
+}
+
+/// True when the segment `(a, b)` crosses or lies inside the
+/// axis-aligned rectangle `r`. Used so a rubber-band that doesn't
+/// enclose either wire endpoint but crosses a long segment still
+/// selects the wire.
+fn segment_rect_intersects(a: Pos, b: Pos, r: Rect) -> bool {
+    // Trivial accept: either endpoint inside.
+    if r.contains(a) || r.contains(b) {
+        return true;
+    }
+    // Clip the segment to the rect on each axis using the Liang-
+    // Barsky parametric approach. If the resulting t-interval is
+    // non-empty within [0, 1], the segment intersects the rect.
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let mut t_enter: f32 = 0.0;
+    let mut t_exit: f32 = 1.0;
+    let clip = |p: f32, q: f32, t_enter: &mut f32, t_exit: &mut f32| -> bool {
+        if p.abs() < f32::EPSILON {
+            // Parallel to clip edge: accept iff inside.
+            return q >= 0.0;
+        }
+        let t = q / p;
+        if p < 0.0 {
+            if t > *t_exit { return false; }
+            if t > *t_enter { *t_enter = t; }
+        } else {
+            if t < *t_enter { return false; }
+            if t < *t_exit { *t_exit = t; }
+        }
+        true
+    };
+    clip(-dx, a.x - r.min.x, &mut t_enter, &mut t_exit)
+        && clip(dx, r.max.x - a.x, &mut t_enter, &mut t_exit)
+        && clip(-dy, a.y - r.min.y, &mut t_enter, &mut t_exit)
+        && clip(dy, r.max.y - a.y, &mut t_enter, &mut t_exit)
+}
+
+/// Quantise `(x, y)` to the canvas grid when snap is enabled. No-op
+/// when snap is `None` or its step is non-positive. Mirrors what the
+/// node-drag path does so waypoint drags land on the same grid as
+/// node placements.
+fn snap_point(x: f32, y: f32, snap: Option<crate::canvas::SnapSettings>) -> (f32, f32) {
+    if let Some(s) = snap {
+        if s.step > 0.0 {
+            let q = |v: f32| (v / s.step).round() * s.step;
+            return (q(x), q(y));
+        }
+    }
+    (x, y)
+}
+
+/// Drop interior points that are collinear with their neighbours
+/// (within `eps`). Lets the waypoint editor return to a cleaner shape
+/// when the user drags a corner back onto its neighbours' line. Port
+/// endpoints are not part of `pts` (interior-only invariant of
+/// [`crate::scene::Edge::waypoints`]).
+fn cleanup_collinear(pts: &[Pos]) -> Vec<Pos> {
+    if pts.len() < 3 {
+        return pts.to_vec();
+    }
+    const EPS: f32 = 0.5;
+    let mut out: Vec<Pos> = Vec::with_capacity(pts.len());
+    out.push(pts[0]);
+    for i in 1..pts.len() - 1 {
+        let prev = *out.last().unwrap();
+        let cur = pts[i];
+        let next = pts[i + 1];
+        let ax = cur.x - prev.x;
+        let ay = cur.y - prev.y;
+        let bx = next.x - cur.x;
+        let by = next.y - cur.y;
+        // Cross product magnitude = 2 * triangle area; small ⇒ collinear.
+        let cross = (ax * by - ay * bx).abs();
+        if cross > EPS {
+            out.push(cur);
+        }
+    }
+    out.push(pts[pts.len() - 1]);
+    out
 }
 
 // ─── tests ──────────────────────────────────────────────────────────
@@ -1236,6 +1862,8 @@ mod tests {
             kind: "t".into(),
             data: empty_node_data(),
             origin: None,
+            waypoints: Vec::new(),
+            waypoints_authored: false,
         });
         sel.set(SelectItem::Node(NodeId(0)));
         run(

@@ -44,13 +44,28 @@ pub enum SceneEvent {
     /// The canvas has already validated that a connection makes sense
     /// (same node ≠, ports exist); domain validity (connector kinds)
     /// is the caller's call via the tool's hook.
+    ///
+    /// `points` are interior bends the user placed mid-creation
+    /// (click-to-bend), in world coords. Empty = quick drag with no
+    /// authored bends; the domain layer should auto-route.
     EdgeCreated {
         from: PortRef,
         to: PortRef,
+        points: Vec<Pos>,
     },
     /// Existing edge was deleted (Delete key, context menu, etc.).
     EdgeDeleted {
         id: EdgeId,
+    },
+    /// User finished editing an edge's polyline (drag of a corner or
+    /// segment handle ended). Carries the final list of *interior*
+    /// waypoints in world coords (port endpoints excluded). Emitted
+    /// once on drag-end, matching `NodeMoved`'s cadence — no per-frame
+    /// events during the drag, so consumers translate one user gesture
+    /// to one domain op + one undo entry.
+    EdgeWaypointsChanged {
+        id: EdgeId,
+        points: Vec<Pos>,
     },
     /// Node was deleted. `orphaned_edges` lists edges that the scene
     /// had to remove because they pointed at the gone node — so the
