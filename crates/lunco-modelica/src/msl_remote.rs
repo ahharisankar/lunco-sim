@@ -136,14 +136,16 @@ impl Plugin for MslRemotePlugin {
                 info!("[MSL] no on-disk root — starting background install");
                 let slot: NativeInstallSlot =
                     Arc::new(Mutex::new(NativeInstallSlotInner::default()));
+                let cancel = MslInstallCancel::default();
                 app.insert_resource(MslLoadState::Loading {
                     phase: MslLoadPhase::FetchingBundle,
                     bytes_done: 0,
                     bytes_total: 0,
                 });
                 app.insert_resource(NativeMslInstallSlot(slot.clone()));
+                app.insert_resource(cancel.clone());
                 app.add_systems(Update, drain_native_msl_install);
-                spawn_native_install(slot);
+                spawn_native_install(slot, cancel.0);
             }
         }
 
@@ -219,7 +221,14 @@ const PARSE_LOG_INTERVAL_SECS: u64 = 10;
 /// Bundled copy of `crates/lunco-modelica/Assets.toml`. Packaged
 /// binaries don't have the source tree, so we compile the manifest in.
 #[cfg(not(target_arch = "wasm32"))]
-const BUNDLED_ASSETS_TOML: &str = include_str!("../Assets.toml");
+pub const BUNDLED_ASSETS_TOML: &str = include_str!("../Assets.toml");
+
+/// Cooperative cancel flag for the in-flight MSL install task. The
+/// download polls it between chunks; the indexer polls it between
+/// phases. Settings → Assets exposes a "Cancel" button that flips it.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Resource, Clone, Default)]
+pub struct MslInstallCancel(pub Arc<std::sync::atomic::AtomicBool>);
 
 #[cfg(not(target_arch = "wasm32"))]
 type NativeInstallSlot = Arc<Mutex<NativeInstallSlotInner>>;
@@ -241,10 +250,11 @@ struct NativeInstallSlotInner {
 struct NativeMslInstallSlot(NativeInstallSlot);
 
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_native_install(slot: NativeInstallSlot) {
+fn spawn_native_install(slot: NativeInstallSlot, cancel: Arc<std::sync::atomic::AtomicBool>) {
     use lunco_assets::download::AssetManifest;
 
     let pool = bevy::tasks::AsyncComputeTaskPool::get();
+    let cancel_for_task = cancel.clone();
     pool.spawn(async move {
         // Parse the bundled Assets.toml to recover the `[msl]` entry.
         let manifest = match AssetManifest::from_str(BUNDLED_ASSETS_TOML) {
@@ -278,11 +288,40 @@ fn spawn_native_install(slot: NativeInstallSlot) {
                 bytes_total: 0,
             },
         );
-        if let Err(e) = lunco_assets::download::download_asset(entry, "msl") {
-            set_install_state(
-                &slot,
-                MslLoadState::Failed(format!("MSL download: {e}")),
-            );
+        // Per-chunk download progress and per-entry extract progress
+        // both feed the shared slot so `drain_native_msl_install`
+        // picks them up next frame.
+        let progress_slot = slot.clone();
+        let extract_slot = slot.clone();
+        let control = lunco_assets::download::DownloadControl {
+            progress: Some(Box::new(move |done, total| {
+                if let Ok(mut inner) = progress_slot.lock() {
+                    inner.pending_state = Some(MslLoadState::Loading {
+                        phase: MslLoadPhase::FetchingBundle,
+                        bytes_done: done,
+                        bytes_total: total,
+                    });
+                }
+            })),
+            extracting: Some(Box::new(move |entries_done| {
+                if let Ok(mut inner) = extract_slot.lock() {
+                    inner.pending_state = Some(MslLoadState::Loading {
+                        phase: MslLoadPhase::Decompressing,
+                        bytes_done: entries_done,
+                        bytes_total: 0,
+                    });
+                }
+            })),
+            cancel: Some(cancel_for_task.clone()),
+        };
+        if let Err(e) =
+            lunco_assets::download::download_asset_with_control(entry, "msl", control)
+        {
+            let msg = match e {
+                lunco_assets::download::DownloadError::Cancelled => "cancelled".to_string(),
+                other => format!("MSL download: {other}"),
+            };
+            set_install_state(&slot, MslLoadState::Failed(msg));
             return;
         }
 
@@ -298,35 +337,78 @@ fn spawn_native_install(slot: NativeInstallSlot) {
             return;
         };
 
-        // Make MSL usable for compilation *now* — the indexer below is
-        // a bincode cache acceleration, not a correctness gate. The
-        // first compile after a fresh download will pay the parse
-        // cost; the indexer makes subsequent launches fast.
-        let file_count = count_mo_files(&root);
+        // MSL is usable for compilation as soon as the tree is on
+        // disk, but the workbench's bincode cache (`parsed-msl.bin`)
+        // is built by the indexer below. Publish the source now so
+        // any compile dispatched in parallel resolves correctly, but
+        // *don't* flip to `Ready` yet — the chip stays at
+        // `Loading { phase: Parsing }` while the indexer runs so the
+        // user sees one continuous indicator instead of "ready"
+        // followed by 30 s of silence.
         let source = MslAssetSource::Filesystem(root.clone());
         if let Ok(mut inner) = slot.lock() {
             inner.pending_source = Some(source);
-            inner.pending_state = Some(MslLoadState::Ready {
-                file_count,
-                compressed_bytes: 0,
-                uncompressed_bytes: 0,
+            inner.pending_state = Some(MslLoadState::Loading {
+                phase: MslLoadPhase::Parsing,
+                bytes_done: 0,
+                bytes_total: 0,
             });
             inner.pending_version = version;
         }
 
         // ── Indexer (best-effort, in-process) ─────────────────────
-        // Runs `lunco_modelica::indexer::run` on the same
-        // AsyncComputeTaskPool task — no subprocess, no PATH lookup,
-        // same workflow the `msl_indexer` binary uses. The runtime
-        // parse path still works without the cache, just slower, so
-        // any panic / error inside `run` is logged and swallowed
-        // rather than surfaced through `MslLoadState`.
+        // Same workflow the `msl_indexer` binary uses. The runtime
+        // parse path still works without the bincode cache, just
+        // slower; any panic inside `run` is logged and swallowed.
         bevy::log::info!("[MSL] running indexer to warm parsed-msl.bin cache…");
+        let cancel_for_indexer = cancel_for_task.clone();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::indexer::run(crate::indexer::Options::default());
+            crate::indexer::run_with_cancel(
+                crate::indexer::Options::default(),
+                Some(cancel_for_indexer),
+            );
         }));
+
+        // Indexer done — flip the chip to Ready.
+        let file_count = count_mo_files(&root);
+        set_install_state(
+            &slot,
+            MslLoadState::Ready {
+                file_count,
+                compressed_bytes: 0,
+                uncompressed_bytes: 0,
+            },
+        );
     })
     .detach();
+}
+
+/// Restart the MSL install task. Used by Reinstall / Retry buttons.
+/// Cancels any in-flight task, wipes the cache, clears the published
+/// source, reseeds the cancel flag and slot, and spawns a fresh task.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn reinstall_msl(world: &mut World) {
+    if let Some(old) = world.get_resource::<MslInstallCancel>() {
+        old.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    let dir = lunco_assets::cache_subdir("msl");
+    if let Err(e) = std::fs::remove_dir_all(&dir) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            bevy::log::warn!("[MSL] could not clear cache at {}: {e}", dir.display());
+        }
+    }
+    world.remove_resource::<MslAssetSource>();
+    world.insert_resource(MslLoadState::Loading {
+        phase: MslLoadPhase::FetchingBundle,
+        bytes_done: 0,
+        bytes_total: 0,
+    });
+    let slot: NativeInstallSlot = Arc::new(Mutex::new(NativeInstallSlotInner::default()));
+    let cancel = MslInstallCancel::default();
+    world.insert_resource(NativeMslInstallSlot(slot.clone()));
+    world.insert_resource(cancel.clone());
+    spawn_native_install(slot, cancel.0);
+    bevy::log::info!("[MSL] reinstall requested by user");
 }
 
 #[cfg(not(target_arch = "wasm32"))]

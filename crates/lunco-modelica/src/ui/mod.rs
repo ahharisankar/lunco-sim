@@ -968,7 +968,63 @@ fn render_assets_settings(ui: &mut bevy_egui::egui::Ui, world: &mut World) {
     drop(settings);
 
     // Actions.
+    let load_state = world
+        .get_resource::<lunco_assets::msl::MslLoadState>()
+        .cloned();
+    let install_running = matches!(
+        load_state,
+        Some(lunco_assets::msl::MslLoadState::Loading { .. })
+    );
+    let install_failed = matches!(
+        load_state,
+        Some(lunco_assets::msl::MslLoadState::Failed(_))
+    );
+    let install_ready = matches!(
+        load_state,
+        Some(lunco_assets::msl::MslLoadState::Ready { .. })
+    );
     ui.horizontal(|ui| {
+        // While an install is in flight, show Cancel. When it's
+        // finished (Ready/Failed) show Reinstall/Retry instead so the
+        // user can always pick "do it again" without restarting.
+        if install_running {
+            if let Some(cancel) = world.get_resource::<crate::msl_remote::MslInstallCancel>() {
+                if ui
+                    .button("Cancel")
+                    .on_hover_text(
+                        "Stop the in-flight MSL download/index. The \
+                         download aborts within one chunk; the indexer \
+                         aborts at the next phase boundary.",
+                    )
+                    .clicked()
+                {
+                    cancel.0.store(true, std::sync::atomic::Ordering::Relaxed);
+                    bevy::log::info!("[MSL] cancel requested by user");
+                }
+            }
+        } else if install_failed {
+            if ui
+                .button("Retry")
+                .on_hover_text(
+                    "Re-run the MSL download + indexer. Clears the \
+                     previous cache so a partial install is wiped.",
+                )
+                .clicked()
+            {
+                crate::msl_remote::reinstall_msl(world);
+            }
+        } else if install_ready {
+            if ui
+                .button("Reinstall")
+                .on_hover_text(
+                    "Force-redownload MSL and rebuild the bincode cache. \
+                     Wipes the current cache directory first.",
+                )
+                .clicked()
+            {
+                crate::msl_remote::reinstall_msl(world);
+            }
+        }
         if ui
             .button("Open cache folder")
             .on_hover_text("Reveal the MSL cache directory in the system file manager.")
@@ -996,6 +1052,115 @@ fn render_assets_settings(ui: &mut bevy_egui::egui::Ui, world: &mut World) {
             }
         }
     });
+
+    // ── Optional libraries ────────────────────────────────────────
+    // Other entries in Assets.toml (e.g. ThermofluidStream). Each row
+    // shows current state (installed / missing) and an Install /
+    // Reinstall button. Click fires `download_asset` on
+    // AsyncComputeTaskPool — no fine-grained progress, just a log
+    // line on completion. The indexer picks these up on its next
+    // run (or on app restart).
+    #[cfg(not(target_arch = "wasm32"))]
+    render_optional_libraries(ui, world);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn render_optional_libraries(ui: &mut bevy_egui::egui::Ui, _world: &mut World) {
+    use bevy_egui::egui;
+    use lunco_assets::download::AssetManifest;
+
+    let manifest = match AssetManifest::from_str(crate::msl_remote::BUNDLED_ASSETS_TOML) {
+        Ok(m) => m,
+        Err(e) => {
+            ui.colored_label(
+                egui::Color32::LIGHT_RED,
+                format!("Could not parse Assets.toml: {e}"),
+            );
+            return;
+        }
+    };
+    let optional: Vec<_> = manifest
+        .assets
+        .iter()
+        .filter(|(k, _)| k.as_str() != "msl")
+        .collect();
+    if optional.is_empty() {
+        return;
+    }
+    ui.add_space(8.0);
+    ui.label(
+        egui::RichText::new("Assets — Optional libraries")
+            .weak()
+            .small(),
+    );
+    for (key, entry) in optional {
+        let dest = lunco_assets::cache_dir().join(&entry.dest);
+        let installed = dest.exists()
+            && std::fs::read_dir(&dest)
+                .map(|mut d| d.next().is_some())
+                .unwrap_or(false);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(&entry.name).strong());
+            if let Some(v) = entry.version.as_ref() {
+                ui.label(egui::RichText::new(format!("v{v}")).weak().small());
+            }
+            ui.label(
+                egui::RichText::new(if installed {
+                    "installed"
+                } else {
+                    "not installed"
+                })
+                .weak()
+                .small(),
+            );
+            let label = if installed { "Reinstall" } else { "Install" };
+            if ui
+                .button(label)
+                .on_hover_text(format!(
+                    "Download {} from {}.\nLanding zone: {}",
+                    entry.name,
+                    entry.url,
+                    dest.display()
+                ))
+                .clicked()
+            {
+                spawn_optional_library_install(key.clone(), entry.clone(), installed);
+            }
+        });
+    }
+}
+
+/// Kick off a one-shot download for a non-MSL library entry. No state
+/// is published to ECS — the next render of the panel re-reads the
+/// disk to determine "installed". Errors are logged via bevy::log.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_optional_library_install(
+    key: String,
+    entry: lunco_assets::download::AssetEntry,
+    is_reinstall: bool,
+) {
+    let pool = bevy::tasks::AsyncComputeTaskPool::get();
+    pool.spawn(async move {
+        // For a reinstall, wipe the existing dest first so the
+        // version-file cache-hit check doesn't short-circuit.
+        if is_reinstall {
+            let dest = lunco_assets::cache_dir().join(&entry.dest);
+            if let Err(e) = std::fs::remove_dir_all(&dest) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    bevy::log::warn!(
+                        "[Assets] could not clear {} before reinstall: {e}",
+                        dest.display()
+                    );
+                }
+            }
+        }
+        bevy::log::info!("[Assets] installing {}…", entry.name);
+        match lunco_assets::download::download_asset(&entry, &key) {
+            Ok(()) => bevy::log::info!("[Assets] {} installed", entry.name),
+            Err(e) => bevy::log::warn!("[Assets] {} install failed: {e}", entry.name),
+        }
+    })
+    .detach();
 }
 
 /// Best-effort "reveal in file manager" — spawns the platform's

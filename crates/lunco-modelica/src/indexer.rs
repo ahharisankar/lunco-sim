@@ -1105,7 +1105,38 @@ impl MSLIndexer {
 /// invoke from inside the workbench (e.g. on a startup task that
 /// follows a successful MSL download). Prints progress to stdout —
 /// callers that want structured progress should redirect stdout.
+///
+/// Non-cancellable; the workbench should call [`run_with_cancel`]
+/// when it wants to be able to interrupt a long indexing pass.
 pub fn run(opts: Options) {
+    run_with_cancel(opts, None);
+}
+
+/// Like [`run`] but checks `cancel` at phase boundaries and returns
+/// early when it observes `true`. The granularity is per-phase
+/// (`scan Modelica`, `scan companions`, `index_all`, `bundle write`),
+/// so a cancel during the long initial scan still waits for the
+/// directory walk to finish. Real per-file cancel would need
+/// instrumenting `MSLIndexer::scan_dir`; phase-level is enough for
+/// the Settings → Assets → Cancel button.
+pub fn run_with_cancel(
+    opts: Options,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) {
+    let cancelled = || {
+        cancel
+            .as_ref()
+            .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+    };
+    macro_rules! bail_if_cancelled {
+        () => {
+            if cancelled() {
+                println!("[indexer] cancelled");
+                return;
+            }
+        };
+    }
+    bail_if_cancelled!();
     // Point rumoca at the same on-disk parse cache the workbench
     // uses (`<workspace>/.cache/rumoca`), so a run here warms the
     // cache for the app and vice versa. Same one-liner as
@@ -1130,6 +1161,7 @@ pub fn run(opts: Options) {
     let mut indexer = MSLIndexer::new();
     indexer.verbose = opts.verbose;
     indexer.scan_dir(&msl_path, "Modelica");
+    bail_if_cancelled!();
     // Top-level companion libraries that ship alongside `Modelica/` and
     // are required by it — `Complex.mo` is referenced by Modelica.Fluid
     // (medium models) and Modelica.ComplexBlocks; `ModelicaServices/`
@@ -1207,6 +1239,7 @@ pub fn run(opts: Options) {
         indexer.files_scanned, scan_mb, scan_secs,
     );
 
+    bail_if_cancelled!();
     println!("[indexer] indexing components (resolving inheritance)...");
     let t_index = Instant::now();
     // Bulk-install all parsed defs into the engine session BEFORE
@@ -1262,6 +1295,7 @@ pub fn run(opts: Options) {
     // `Vec<(uri, StoredDefinition)>` that the workbench installs
     // directly via `Session::replace_parsed_source_set`, bypassing
     // every per-file cache key concern.
+    bail_if_cancelled!();
     let bundle_path = lunco_assets::msl_dir().join("parsed-msl.bin");
     let t_bundle = Instant::now();
     match bincode::serialize(&indexer.parsed_bundle) {

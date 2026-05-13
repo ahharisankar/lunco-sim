@@ -98,15 +98,29 @@ impl AssetManifest {
     }
 }
 
-/// Downloads an asset from the manifest entry.
+/// Downloads an asset from the manifest entry. Equivalent to
+/// [`download_asset_with_control`] with no progress callback and no
+/// cancellation flag — keeps existing CLI/test call sites unchanged.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn download_asset(entry: &AssetEntry, key: &str) -> Result<(), DownloadError> {
+    download_asset_with_control(entry, key, DownloadControl::default())
+}
+
+/// Downloads an asset from the manifest entry with caller-supplied
+/// progress reporting and cooperative cancellation.
 ///
 /// 1. Checks if already installed (version + path exist).
-/// 2. Downloads to temp file.
+/// 2. Streams bytes from the URL, calling `control.progress` per chunk
+///    and aborting if `control.cancel` flips to `true`.
 /// 3. Verifies or computes SHA-256.
 /// 4. Extracts (if tarball) or writes (if single file).
 /// 5. Prints the computed SHA-256 for the user to fill in.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn download_asset(entry: &AssetEntry, key: &str) -> Result<(), DownloadError> {
+pub fn download_asset_with_control(
+    entry: &AssetEntry,
+    key: &str,
+    mut control: DownloadControl<'_>,
+) -> Result<(), DownloadError> {
     let dest = cache_dir().join(&entry.dest);
 
     // Cache-hit check #1 — versioned install (used by libraries like
@@ -155,12 +169,48 @@ pub fn download_asset(entry: &AssetEntry, key: &str) -> Result<(), DownloadError
 
     println!("  ↓ downloading {} ({})...", entry.name, entry.url);
 
-    // Download
+    // Cancel probe — caller may have flipped the flag before we even
+    // hit the network.
+    let cancelled = || {
+        control
+            .cancel
+            .as_ref()
+            .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+    };
+    if cancelled() {
+        return Err(DownloadError::Cancelled);
+    }
+
+    // Download in chunks so progress can tick and cancellation is
+    // responsive (within one chunk's read latency).
     let response = ureq::get(&entry.url).call()
         .map_err(|e| DownloadError::DownloadFailed(entry.url.clone(), e.to_string()))?;
-    let mut bytes = Vec::new();
-    response.into_reader().read_to_end(&mut bytes)
-        .map_err(|e| DownloadError::ReadFailed(e.to_string()))?;
+    let total: u64 = response
+        .header("content-length")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let mut reader = response.into_reader();
+    let mut bytes: Vec<u8> = if total > 0 {
+        Vec::with_capacity(total as usize)
+    } else {
+        Vec::new()
+    };
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        if cancelled() {
+            return Err(DownloadError::Cancelled);
+        }
+        let n = reader
+            .read(&mut chunk)
+            .map_err(|e| DownloadError::ReadFailed(e.to_string()))?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..n]);
+        if let Some(cb) = control.progress.as_mut() {
+            cb(bytes.len() as u64, total);
+        }
+    }
 
     // Compute SHA-256
     use sha2::{Sha256, Digest};
@@ -204,8 +254,34 @@ pub fn download_asset(entry: &AssetEntry, key: &str) -> Result<(), DownloadError
             Box::new(bzip2::read::BzDecoder::new(file))
         };
         let mut archive = tar::Archive::new(reader);
-        archive.unpack(&temp_dir)
+        // Initial "0 extracted" tick so callers can flip phase state
+        // before the first entry is unpacked.
+        if let Some(cb) = control.extracting.as_mut() {
+            cb(0);
+        }
+        let entries_iter = archive
+            .entries()
             .map_err(|e| DownloadError::ExtractFailed(e.to_string()))?;
+        let mut extracted: u64 = 0;
+        for entry in entries_iter {
+            if cancelled() {
+                return Err(DownloadError::Cancelled);
+            }
+            let mut entry = entry
+                .map_err(|e| DownloadError::ExtractFailed(e.to_string()))?;
+            entry
+                .unpack_in(&temp_dir)
+                .map_err(|e| DownloadError::ExtractFailed(e.to_string()))?;
+            extracted += 1;
+            if extracted.is_multiple_of(64) {
+                if let Some(cb) = control.extracting.as_mut() {
+                    cb(extracted);
+                }
+            }
+        }
+        if let Some(cb) = control.extracting.as_mut() {
+            cb(extracted);
+        }
 
         // Find extracted dir
         let entries: Vec<_> = std::fs::read_dir(&temp_dir)
@@ -425,6 +501,37 @@ pub enum DownloadError {
     ExtractFailed(String),
     #[error("SHA-256 mismatch: expected {0}, got {1}")]
     HashMismatch(String, String),
+    #[error("cancelled by caller")]
+    Cancelled,
+}
+
+/// Caller-supplied control surface for a download. Three optional
+/// signals: HTTP read progress, tar-extraction progress, and a cancel
+/// flag. All default to "do nothing" so callers opt in to each
+/// independently.
+///
+/// - `progress` runs from the read loop on every chunk (~64 KiB) with
+///   `(bytes_done, bytes_total)`. `bytes_total = 0` means the server
+///   didn't advertise Content-Length.
+/// - `extracting` runs from the tar walk every few entries with
+///   `entries_done`. Total file count is not known up-front (we
+///   stream the archive), so callers should display a count or a
+///   spinner rather than a percentage. Fires once with `0` before
+///   the first entry so callers can flip phase state.
+/// - `cancel` is checked between chunks during download and between
+///   entries during extract; flipping it to `true` aborts with
+///   [`DownloadError::Cancelled`].
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+pub struct DownloadControl<'a> {
+    /// Called as bytes stream in. Keep the closure cheap — it runs on
+    /// the read loop's hot path.
+    pub progress: Option<Box<dyn FnMut(u64, u64) + Send + 'a>>,
+    /// Called while a tarball is being unpacked. Argument is the
+    /// running count of unpacked entries.
+    pub extracting: Option<Box<dyn FnMut(u64) + Send + 'a>>,
+    /// Cancellation flag shared with the caller.
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
