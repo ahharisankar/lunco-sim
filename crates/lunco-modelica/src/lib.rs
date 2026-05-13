@@ -542,6 +542,49 @@ impl ModelicaCompiler {
         id: &str,
         root_dir: &std::path::Path,
     ) -> rumoca_session::compile::SourceRootLoadReport {
+        // MSL fast path: a pre-parsed bundle (`parsed-msl.bin`,
+        // ~316 MB) sits next to the MSL source tree, produced by
+        // `msl_indexer`. Installing it via
+        // `Session::replace_parsed_source_set` takes ~1–3 s vs the
+        // 30+ s cold-parse path of `load_source_root_tolerant` over
+        // 2847 .mo files. The same fast path already runs inside
+        // [`ModelicaCompiler::new`]'s `preload_from_global`; we
+        // duplicate it here so the lazy `LoadSourceRoot` worker
+        // command also benefits when MSL is loaded on-demand
+        // (i.e. after the compiler was created empty for non-MSL
+        // models like Balloon).
+        if id == "Modelica" {
+            let bundle_path = lunco_assets::msl_dir().join("parsed-msl.bin");
+            if let Ok(bytes) = std::fs::read(&bundle_path) {
+                if let Ok(docs) = bincode::deserialize::<
+                    Vec<(String, rumoca_session::parsing::StoredDefinition)>,
+                >(&bytes)
+                {
+                    let pair_count = docs.len();
+                    let inserted = self.session.replace_parsed_source_set(
+                        id,
+                        rumoca_session::compile::SourceRootKind::DurableExternal,
+                        docs,
+                        None,
+                    );
+                    log::info!(
+                        "[ModelicaCompiler] installed pre-parsed MSL bundle \
+                         ({} of {} docs)",
+                        inserted, pair_count,
+                    );
+                    return rumoca_session::compile::SourceRootLoadReport {
+                        source_set_id: id.to_string(),
+                        source_root_path: bundle_path.display().to_string(),
+                        parsed_file_count: pair_count,
+                        inserted_file_count: inserted,
+                        cache_status: None,
+                        cache_key: None,
+                        cache_file: None,
+                        diagnostics: Vec::new(),
+                    };
+                }
+            }
+        }
         self.session.load_source_root_tolerant(
             id,
             rumoca_session::compile::SourceRootKind::DurableExternal,
