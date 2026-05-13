@@ -44,7 +44,13 @@ impl Panel for FilesPanel {
     }
 
     fn default_slot(&self) -> PanelSlot {
-        PanelSlot::SideBrowser
+        // Hidden by default: the Twin Browser panel now renders the
+        // Files section inline as a sibling of the Modelica section,
+        // CATIA-style. FilesPanel remains registered (Floating slot =
+        // registered-but-not-docked) so users / a future View menu
+        // can still surface it as its own dock tab if they prefer the
+        // separate-panel layout.
+        PanelSlot::Floating
     }
 
     fn render(&mut self, ui: &mut egui::Ui, world: &mut World) {

@@ -311,6 +311,14 @@ pub trait BrowserSection: Send + Sync + 'static {
         true
     }
 
+    /// Render order within the panel — lower numbers render first.
+    /// Conventional values: Modelica/domain catalogs ~100, Files ~200,
+    /// Library/system ~300. Sections with equal `order` fall back to
+    /// registration order. Avoids relying on plugin add order.
+    fn order(&self) -> u32 {
+        0
+    }
+
     /// Paint the section body.
     fn render(&mut self, ui: &mut egui::Ui, ctx: &mut BrowserCtx);
 }
@@ -354,18 +362,14 @@ impl Panel for TwinBrowserPanel {
             .unwrap_or_default();
         let workspace = world.remove_resource::<crate::WorkspaceResource>();
 
-        // Twin panel renders only `Models`-scoped sections — typed
-        // domain content (Modelica classes, drafts, future USD/SysML
-        // sections). Files- and Library-scoped sections are rendered
-        // by [`crate::FilesPanel`] and [`crate::LibraryPanel`]
-        // respectively; they're sibling tabs in the side dock, not
-        // sub-tabs of this one.
-        let visible: Vec<usize> = registry
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.scope() == BrowserScope::Models)
-            .map(|(i, _)| i)
-            .collect();
+        // Single-panel model: every registered section renders in this
+        // panel, ordered by `BrowserSection::order()`. The standalone
+        // [`crate::FilesPanel`] still exists (registered floating, off
+        // by default) for users who want the files view in its own
+        // dock tab. `BrowserScope` is kept for grouping/filtering
+        // semantics elsewhere; it no longer gates visibility here.
+        let mut visible: Vec<usize> = registry.iter().enumerate().map(|(i, _)| i).collect();
+        visible.sort_by_key(|&i| (registry.iter().nth(i).unwrap().order(), i));
 
         if visible.is_empty() {
             ui.label(

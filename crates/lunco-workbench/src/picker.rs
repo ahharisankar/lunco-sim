@@ -62,6 +62,12 @@ pub enum PickFollowUp {
     /// Resolve → trigger `OpenTwin { path }` (strict: errors if the
     /// chosen folder lacks a `twin.toml`).
     OpenTwin,
+    /// Resolve → trigger `AddFolderToWorkspace { path }` (VS Code-style
+    /// multi-root: keeps existing folder Twins, adds this one).
+    AddFolderToWorkspace,
+    /// Resolve → trigger `AddTwin { path }` (strict variant of
+    /// [`Self::AddFolderToWorkspace`]; requires a `twin.toml`).
+    AddTwin,
     /// Resolve → trigger `SaveAsDocument { doc, path }` for the doc
     /// whose typed id is carried here.
     SaveAs(DocumentId),

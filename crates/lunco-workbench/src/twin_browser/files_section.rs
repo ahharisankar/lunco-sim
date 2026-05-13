@@ -15,6 +15,32 @@ use bevy_egui::egui;
 
 use super::{BrowserAction, BrowserCtx, BrowserScope, BrowserSection};
 
+/// Map a domain kind id to its canonical file extension. Used to
+/// append `.mo`, `.usda`, … to display names for unsaved drafts that
+/// carry no on-disk path yet. Saved docs already include their
+/// extension in `display_name`; we only synthesize when missing.
+fn extension_for_kind(kind: &str) -> Option<&'static str> {
+    match kind {
+        "Modelica" | "modelica" => Some("mo"),
+        "USD" | "usd" => Some("usda"),
+        _ => None,
+    }
+}
+
+/// `display_name` with the appropriate extension appended when the
+/// name doesn't already have one — so an Untitled Modelica draft
+/// renders as `Untitled.mo`, not bare `Untitled`. Saved files keep
+/// their stored name unchanged.
+fn display_name_with_ext(entry: &super::UnsavedDocEntry) -> String {
+    if entry.display_name.contains('.') {
+        return entry.display_name.clone();
+    }
+    match extension_for_kind(&entry.kind) {
+        Some(ext) => format!("{}.{}", entry.display_name, ext),
+        None => entry.display_name.clone(),
+    }
+}
+
 /// The built-in Files section impl.
 #[derive(Default)]
 pub struct FilesSection;
@@ -42,46 +68,54 @@ impl BrowserSection for FilesSection {
         true
     }
 
+    fn order(&self) -> u32 {
+        // Renders below Modelica (100) in the unified Twin panel; the
+        // standalone FilesPanel (when summoned) shows the same section.
+        200
+    }
+
     fn render(&mut self, ui: &mut egui::Ui, ctx: &mut BrowserCtx) {
         // Render workspace documents (saved + unsaved) so the list
         // stays stable across Save — a Save shouldn't make a doc
         // disappear from the user's view of "what am I working on."
-        // Unsaved drafts get a `●` orange dirty-dot + italic name;
-        // saved docs render as plain rows with the same kind badge.
+        // Unsaved drafts get a dirty dot in the theme warning colour
+        // plus an italic name; saved docs render plain. Kind badges
+        // are intentionally omitted — file extensions in the display
+        // name carry that information for the user.
         let docs: Vec<super::UnsavedDocEntry> = ctx
             .world
             .get_resource::<super::UnsavedDocs>()
             .map(|r| r.entries.clone())
             .unwrap_or_default();
-        if !docs.is_empty() {
-            ui.label(
-                egui::RichText::new("Workspace")
-                    .small()
-                    .weak()
-                    .strong(),
-            );
-            for entry in &docs {
-                ui.horizontal(|ui| {
-                    if entry.is_unsaved {
-                        ui.label(
-                            egui::RichText::new("●")
-                                .color(egui::Color32::from_rgb(220, 160, 60)),
-                        );
-                        ui.label(
-                            egui::RichText::new(&entry.display_name).italics(),
-                        );
-                    } else {
-                        ui.label(egui::RichText::new("  "));
-                        ui.label(egui::RichText::new(&entry.display_name));
-                    }
+        let warning = ctx.world.resource::<lunco_theme::Theme>().tokens.warning;
+        // Dirty marker is intentionally subtle — same hue as warning
+        // but small and semi-transparent so it reads as a hint, not a
+        // siren. The full-strength warning colour is for actual
+        // problems (lints, parse errors), not unsaved drafts.
+        let dirty_dot_color = egui::Color32::from_rgba_unmultiplied(
+            warning.r(),
+            warning.g(),
+            warning.b(),
+            110,
+        );
+
+        for entry in &docs {
+            ui.horizontal(|ui| {
+                if entry.is_unsaved {
                     ui.label(
-                        egui::RichText::new(format!("({})", entry.kind))
-                            .small()
-                            .weak(),
+                        egui::RichText::new("•")
+                            .color(dirty_dot_color)
+                            .size(8.0),
                     );
-                });
-            }
-            ui.separator();
+                    ui.label(
+                        egui::RichText::new(display_name_with_ext(entry))
+                            .italics(),
+                    );
+                } else {
+                    ui.label(egui::RichText::new("  "));
+                    ui.label(egui::RichText::new(display_name_with_ext(entry)));
+                }
+            });
         }
 
         let Some(twin) = ctx.twin else {
@@ -107,14 +141,25 @@ impl BrowserSection for FilesSection {
             return;
         }
 
-        // Plain flat list keyed by relative path. A future iteration can
-        // add directory grouping; flat is the right shape for slice 1
-        // (matches `Twin::files()` and exercises every action path).
+        // Divider only appears between the workspace docs and the
+        // folder file list — if either is empty, no line to draw.
+        if !docs.is_empty() {
+            ui.separator();
+        }
+
+        // Virtualised: only the visible rows are materialised. Critical
+        // for folders with thousands of entries (e.g. `~/.cargo`) —
+        // a non-virtual loop would allocate a row per file every
+        // frame and blow the frame budget regardless of off-thread
+        // scanning. Recursive directory grouping is Slice 2 work;
+        // flat keeps Slice 1 small.
+        let row_h = ui.text_style_height(&egui::TextStyle::Body);
         egui::ScrollArea::vertical()
             .id_salt("twin_browser_files_scroll")
             .auto_shrink([false; 2])
-            .show(ui, |ui| {
-                for entry in files {
+            .show_rows(ui, row_h, files.len(), |ui, range| {
+                for i in range {
+                    let entry = &files[i];
                     let label = entry.relative_path.display().to_string();
                     let resp = ui.selectable_label(false, label);
                     if resp.clicked() {

@@ -73,6 +73,10 @@ impl BrowserSection for ModelicaSection {
         true
     }
 
+    fn order(&self) -> u32 {
+        100
+    }
+
     fn render(&mut self, ui: &mut egui::Ui, ctx: &mut BrowserCtx<'_>) {
         // OMEdit-style flat list — system libraries on top, then
         // writable workspace documents. Both source-of-truth reads:
