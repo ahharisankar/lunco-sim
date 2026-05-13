@@ -403,12 +403,14 @@ fn cleanup_removed_documents(
     canvas_state: Option<ResMut<panels::canvas_diagram::CanvasDiagramState>>,
     signals: Option<ResMut<lunco_viz::SignalRegistry>>,
     viz_registry: Option<ResMut<lunco_viz::VisualizationRegistry>>,
+    bus: Option<ResMut<lunco_workbench::status_bus::StatusBus>>,
 ) {
     let Some(mut registry) = registry else { return };
     let mut compile_states = compile_states;
     let mut canvas_state = canvas_state;
     let mut signals = signals;
     let mut viz_registry = viz_registry;
+    let mut bus = bus;
     for entity in removed.read() {
         if let Some(doc) = registry.unlink_entity(entity) {
             registry.remove_document(doc);
@@ -420,6 +422,15 @@ fn cleanup_removed_documents(
             // id starts fresh. Matches how CompileStates is cleaned.
             if let Some(canvas) = canvas_state.as_mut() {
                 canvas.drop_doc(doc);
+            }
+            // Drop the bus's terminal-outcome cache for this doc so
+            // `last_outcome` doesn't accumulate dead entries across
+            // long sessions. The doc id is monotonic — won't be
+            // reused — but bounded growth is the right hygiene.
+            if let Some(b) = bus.as_mut() {
+                b.clear_outcomes_for(
+                    lunco_workbench::status_bus::BusyScope::Document(doc.0),
+                );
             }
             // tab-removal handled by `ModelTabs::close` /
             // `close_all_for_doc` already.

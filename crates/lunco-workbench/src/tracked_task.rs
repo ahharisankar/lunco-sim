@@ -15,7 +15,7 @@ use std::future::Future;
 
 use bevy::tasks::{AsyncComputeTaskPool, Task};
 
-use crate::status_bus::{BusyScope, StatusBus};
+use crate::status_bus::{BusyOutcome, BusyScope, StatusBus};
 
 /// Wrapper around [`bevy::tasks::Task`] whose lifetime is tied to a
 /// [`BusyHandle`] held inside the spawned future. Dropping the
@@ -74,9 +74,16 @@ pub fn spawn_tracked_cancellable<T: Send + 'static>(
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     fut: impl Future<Output = T> + Send + 'static,
 ) -> TrackedTask<T> {
-    let handle = bus.begin_cancellable(scope, source, label, cancel);
+    let mut handle = bus.begin_cancellable(scope, source, label, std::sync::Arc::clone(&cancel));
     let task = AsyncComputeTaskPool::get().spawn(async move {
         let out = fut.await;
+        // Record `Cancelled` if the cooperative cancel flag was
+        // tripped by the time the future finished. Distinct from
+        // `Succeeded` so panels can render a neutral affordance
+        // (e.g. "Cancelled" vs the usual empty-result overlay).
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            handle.set_outcome(BusyOutcome::Cancelled);
+        }
         drop(handle);
         out
     });

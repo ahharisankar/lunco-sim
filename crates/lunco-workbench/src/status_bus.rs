@@ -82,12 +82,14 @@ pub struct BusyId(u64);
 /// Terminal state of a unit of work, recorded on the bus when the
 /// owning [`BusyHandle`] drops. Lets panels distinguish "no content
 /// because the task succeeded with an empty result" from "no content
-/// because the task failed" without each panel keeping its own
-/// per-error state.
+/// because the task failed" — or was cancelled — without each panel
+/// keeping its own per-error state.
 ///
-/// Default on plain `Drop` is [`BusyOutcome::Succeeded`]; callers
-/// that detect failure should call [`BusyHandle::set_outcome`] with
-/// [`BusyOutcome::Failed`] before dropping.
+/// Default on plain `Drop` is [`BusyOutcome::Succeeded`]; failure
+/// paths call [`BusyHandle::set_outcome`] with [`BusyOutcome::Failed`].
+/// [`spawn_tracked_cancellable`](crate::tracked_task::spawn_tracked_cancellable)
+/// records [`BusyOutcome::Cancelled`] automatically when the
+/// cooperative cancel flag was set at the time the future finished.
 #[derive(Debug, Clone)]
 pub enum BusyOutcome {
     /// Work ran to completion. Empty results are still `Succeeded` —
@@ -95,6 +97,11 @@ pub enum BusyOutcome {
     Succeeded,
     /// Work terminated with a user-visible error.
     Failed(String),
+    /// Work short-circuited because the caller (or the user via the
+    /// cancel button) flipped the cancel token. Distinct from
+    /// `Succeeded` so panels can choose a neutral affordance
+    /// instead of an "empty result" overlay.
+    Cancelled,
 }
 
 /// RAII guard for an in-flight busy entry. Move into the task / per-tab
@@ -444,6 +451,21 @@ impl StatusBus {
                 self.active_progress.remove(&key);
                 self.seq = self.seq.wrapping_add(1);
             }
+        }
+    }
+
+    /// Drop every recorded outcome whose `(scope, _)` matches
+    /// `target` exactly. Use on resource teardown (document close,
+    /// tab close, panel close) so `last_outcome` doesn't grow
+    /// unboundedly across a long-running session. Scope hierarchy
+    /// is NOT walked here — `Global` only clears `Global` entries,
+    /// not all descendants — because callers know the precise scope
+    /// they're tearing down.
+    pub fn clear_outcomes_for(&mut self, target: BusyScope) {
+        let before = self.last_outcome.len();
+        self.last_outcome.retain(|(s, _), _| *s != target);
+        if self.last_outcome.len() != before {
+            self.seq = self.seq.wrapping_add(1);
         }
     }
 
