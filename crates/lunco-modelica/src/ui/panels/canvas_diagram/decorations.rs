@@ -163,15 +163,20 @@ pub(super) fn emit_diagram_decorations(
     // placeholder Rectangle/Text from `graphics`, giving Lunica
     // users a real-time graph where OMEdit shows a labelled region.
     for (idx, plot) in plot_nodes.iter().enumerate() {
+        // Source-backed tiles use the Doc binding: resolved to the
+        // document's current sim entity every frame via the
+        // snapshot's `doc_to_entity` table. Falls back to a Pinned
+        // unbound state (`entity = 0`) if there's no document
+        // context — defensive, doesn't happen in practice since
+        // projection is always doc-scoped.
+        let binding = match doc_id {
+            Some(d) => lunco_viz::kinds::canvas_plot_node::PlotBinding::Doc {
+                doc_id: d.raw(),
+            },
+            None => lunco_viz::kinds::canvas_plot_node::PlotBinding::Pinned { entity: 0 },
+        };
         let payload = lunco_viz::kinds::canvas_plot_node::PlotNodeData {
-            // Source-backed tiles bind via `doc_id`, not `entity`:
-            // the runtime sim entity isn't known at projection time
-            // and rotates on every play/stop. The plot widget
-            // resolves `doc_id → entity` per frame from the snapshot
-            // table populated in `snapshots.rs`. `entity = 0` here
-            // is unused — the `doc_id = Some(_)` branch wins.
-            entity: 0,
-            doc_id: doc_id.map(|d| d.raw()),
+            binding,
             signal_path: plot.signal.clone(),
             title: plot.title.clone(),
         };

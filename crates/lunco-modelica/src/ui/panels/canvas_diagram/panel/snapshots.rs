@@ -18,9 +18,27 @@ pub(crate) fn stash_snapshots(ui: &egui::Context, world: &mut World, doc_id: Opt
         // parse / projection time). Populate the per-frame
         // `doc → entity` table from the document registry so those
         // tiles can resolve at fetch time.
+        //
+        // Cosim caveat: a single doc can be linked to multiple sim
+        // entities (>1 element in `entities_linked_to`). A plain
+        // `insert` would let HashMap iteration order decide which
+        // sim wins, flipping the bound entity frame-to-frame. We
+        // pick the lowest entity bits as a *deterministic* tie-
+        // break — not necessarily the right one in cosim, but
+        // stable. When real cosim plot scenarios land, extend
+        // `PlotBinding::Doc` with a role/index and resolve
+        // `(doc, role) → entity` instead.
         if let Some(reg) = world.get_resource::<ModelicaDocumentRegistry>() {
             for (e, d) in reg.iter_doc_for_entity() {
-                snapshot.doc_to_entity.insert(d.raw(), e);
+                snapshot
+                    .doc_to_entity
+                    .entry(d.raw())
+                    .and_modify(|cur| {
+                        if e.to_bits() < cur.to_bits() {
+                            *cur = e;
+                        }
+                    })
+                    .or_insert(e);
             }
         }
         lunco_viz::kinds::canvas_plot_node::stash_signal_snapshot(ui, snapshot);
