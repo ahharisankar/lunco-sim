@@ -736,7 +736,7 @@ impl MSLIndexer {
                 let mut current_scope = class_name.to_string();
                 while !current_scope.is_empty() {
                     let candidate = if current_scope.contains('.') {
-                        format!("{}.{}", current_scope.rsplitn(2, '.').nth(1).unwrap_or(""), base_short_name)
+                        format!("{}.{}", crate::ast_extract::parent_qualified(&current_scope), base_short_name)
                     } else {
                         base_short_name.clone()
                     };
@@ -941,7 +941,7 @@ impl MSLIndexer {
                                 let candidate = if current_scope.contains('.') {
                                     format!(
                                         "{}.{}",
-                                        current_scope.rsplitn(2, '.').nth(1).unwrap_or(""),
+                                        crate::ast_extract::parent_qualified(&current_scope),
                                         type_str,
                                     )
                                 } else {
@@ -1010,7 +1010,7 @@ impl MSLIndexer {
                 self.resolve_inheritance(full_name, &mut ports, &mut parameters, &mut visited);
 
                 let short_name = crate::ast_extract::short_name(full_name).to_string();
-                let category = full_name.rsplitn(2, '.').nth(1).unwrap_or("").replace('.', "/");
+                let category = crate::ast_extract::parent_qualified(full_name).replace('.', "/");
 
                 // Inheritance-merged icon. The merge logic lives in
                 // `extract_icon_inherited`; the resolver does

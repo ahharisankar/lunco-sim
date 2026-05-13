@@ -392,7 +392,7 @@ impl NodeVisual for IconNodeVisual {
                 let mut out = Vec::new();
                 let mut scope = parent_qualified.to_string();
                 while scope.contains('.') {
-                    let pkg = scope.rsplitn(2, '.').nth(1).unwrap_or("").to_string();
+                    let pkg = crate::ast_extract::parent_qualified(&scope).to_string();
                     if !pkg.is_empty() {
                         out.push(format!("{pkg}.Interfaces.{connector_path}"));
                         out.push(format!("{pkg}.{connector_path}"));

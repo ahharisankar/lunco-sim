@@ -285,7 +285,7 @@ pub(super) fn resolve_port_icons(
                 let mut out = Vec::new();
                 let mut scope = parent_qualified.to_string();
                 while scope.contains('.') {
-                    let pkg = scope.rsplitn(2, '.').nth(1).unwrap_or("").to_string();
+                    let pkg = crate::ast_extract::parent_qualified(&scope).to_string();
                     if !pkg.is_empty() {
                         out.push(format!("{pkg}.Interfaces.{path}"));
                         out.push(format!("{pkg}.{path}"));

@@ -814,7 +814,7 @@ fn flatten_class_parameters(
             if cur.is_empty() {
                 break;
             }
-            cur = cur.rsplit_once('.').map(|(h, _)| h).unwrap_or("");
+            cur = crate::ast_extract::parent_qualified(cur);
         }
         if let Some(w) = index.within_path.as_ref() {
             let q = format!("{w}.{type_name}");

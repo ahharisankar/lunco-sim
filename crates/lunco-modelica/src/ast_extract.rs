@@ -96,6 +96,20 @@ pub fn short_name(qualified: &str) -> &str {
     qualified.rsplit('.').next().unwrap_or(qualified)
 }
 
+/// Return the qualified-name prefix *before* the last dotted segment
+/// — the parent scope. `"Modelica.Blocks.PID"` → `"Modelica.Blocks"`.
+/// Names without any `.` (single-segment, e.g. `"PID"`) return `""`
+/// — the implicit top-level scope. Empty input → `""`.
+///
+/// Centralised so callers stop reinventing it inline. The codebase
+/// previously had two competing idioms (`rsplit_once('.').map(...)`
+/// and `rsplitn(2, '.').nth(1).unwrap_or("")`) at ~12 sites; the
+/// latter is one typo away from "first segment" instead of "all but
+/// last". Same subscript caveat as [`short_name`].
+pub fn parent_qualified(qualified: &str) -> &str {
+    qualified.rsplit_once('.').map(|(parent, _)| parent).unwrap_or("")
+}
+
 /// Return ALL non-package classes (qualified) reachable from the
 /// top-level classes, depth-first. Used by the Compile handler to
 /// decide whether to auto-pick (length 0–1) or open a picker modal

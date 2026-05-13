@@ -348,23 +348,25 @@ pub(super) fn empty_overlay_class_info(
     (icon, class_type, description, params, inputs, outputs)
 }
 
-/// Find a class by short name in the AST — top-level first, then one
-/// level of nested classes (the same scope `register_local_class`
-/// uses for the Twin Browser).
+/// Resolve `name` (short or fully-qualified) to a class in `ast`,
+/// falling back to the first non-package class when nothing matches.
+///
+/// Lookup is delegated to `crate::diagram::find_class_by_qualified_name`,
+/// which handles both short names (`"PID"`) and qualified names with
+/// within-clause tolerance (`"Modelica.Blocks.PID"`). The previous
+/// hand-rolled walk only matched literal IndexMap keys, so qualified
+/// input always fell through to the picker silently — the lookup
+/// half of the function was effectively dead. The fallback (first
+/// non-package class) is kept explicit because callers do pass it
+/// `extract_model_name_from_ast`'s output and rely on the picker
+/// when that name isn't structurally findable.
 pub(super) fn locate_class<'a>(
     ast: &'a rumoca_session::parsing::ast::StoredDefinition,
     name: &str,
 ) -> Option<&'a rumoca_session::parsing::ast::ClassDef> {
-    if let Some((_, c)) = ast.classes.iter().find(|(n, _)| n.as_str() == name) {
+    if let Some(c) = crate::diagram::find_class_by_qualified_name(ast, name) {
         return Some(c);
     }
-    for (_, top) in ast.classes.iter() {
-        if let Some(c) = top.classes.get(name) {
-            return Some(c);
-        }
-    }
-    // Final fallback: first non-package class (matches the workbench's
-    // "active class on first open" picker).
     use rumoca_session::parsing::ClassType;
     ast.classes
         .iter()
