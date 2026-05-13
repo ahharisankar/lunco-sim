@@ -38,16 +38,70 @@ use serde::{Deserialize, Serialize};
 /// `VisualRegistry` and when authoring `Node::kind` for a plot node.
 pub const PLOT_NODE_KIND: &str = "lunco.viz.plot";
 
+/// How a plot tile chooses its sim entity. Two distinct policies,
+/// kept as an enum (rather than two optional fields) so the type
+/// system enforces "exactly one mode is active" — there is no
+/// representable state for a tile that's both pinned and per-doc.
+///
+/// * [`PlotBinding::Pinned`] — Telemetry-bound. The user explicitly
+///   chose a specific sim entity; samples come from that entity
+///   only, even if other sims publish the same signal name.
+/// * [`PlotBinding::Doc`] — Source-backed. The tile belongs to a
+///   document, not to a specific sim. Resolved to the document's
+///   currently-bound sim entity each frame via the snapshot's
+///   `doc_to_entity` table; survives sim restart, tab switches, and
+///   re-projection without needing a rebind op.
+///
+/// JSON encoding uses `#[serde(untagged)]`: discrimination is by
+/// field presence, not a tag — `{ "entity": 42 }` → `Pinned`,
+/// `{ "doc_id": 7 }` → `Doc`. Pre-enum scenes (which carried only
+/// `entity`) read back as `Pinned` unchanged.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PlotBinding {
+    /// Pinned to a specific Bevy entity (Telemetry path). `entity`
+    /// is the raw `Entity::to_bits()` value; `0` is the unbound
+    /// sentinel (`Entity::try_from_bits(0)` returns `None`).
+    Pinned { entity: u64 },
+    /// Resolved at fetch time from the document's bound sim entity.
+    /// `doc_id` is `DocumentId::raw()` — kept as bare `u64` so
+    /// `lunco-viz` doesn't depend on `lunco-doc`.
+    Doc { doc_id: u64 },
+}
+
+impl Default for PlotBinding {
+    fn default() -> Self {
+        // Backwards-compatible default: legacy scenes deserialised
+        // without a binding land here, matching the old `entity = 0`
+        // unbound behaviour.
+        PlotBinding::Pinned { entity: 0 }
+    }
+}
+
+impl PlotBinding {
+    /// Entity bits if this binding is [`PlotBinding::Pinned`], else
+    /// `None`. Used by "is this signal the currently-pinned one?"
+    /// checkmark UI which only makes sense in pinned mode — a Doc-
+    /// bound tile has no specific entity to compare against from
+    /// the user's perspective.
+    pub fn pinned_entity(&self) -> Option<u64> {
+        match self {
+            PlotBinding::Pinned { entity } => Some(*entity),
+            PlotBinding::Doc { .. } => None,
+        }
+    }
+}
+
 /// Per-node persisted payload. Stored in `Node::data` as JSON so the
 /// scene serialiser handles round-trips without knowing about plots.
+/// The [`PlotBinding`] enum is flattened so the JSON keys stay
+/// top-level (`entity` or `doc_id` alongside `signal_path`/`title`)
+/// — same wire shape as before the refactor.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PlotNodeData {
-    /// Bevy entity that produced the signal samples. Encoded
-    /// alongside the path because `SignalRef` is `(entity, path)`-
-    /// keyed; the host fills this in when constructing the node.
-    /// Stored as `u64` so the JSON shape doesn't depend on Bevy
-    /// internals.
-    pub entity: u64,
+    /// How this tile picks its sim entity. See [`PlotBinding`].
+    #[serde(flatten)]
+    pub binding: PlotBinding,
     /// Signal path (e.g. `"P.y"`).
     pub signal_path: String,
     /// Display label. Defaults to `signal_path` when empty.
@@ -66,6 +120,14 @@ pub type SamplePoint = [f64; 2];
 #[derive(Debug, Default, Clone)]
 pub struct SignalSnapshot {
     pub samples: HashMap<(Entity, String), Vec<SamplePoint>>,
+    /// Document → currently-bound sim entity. Populated by the host
+    /// from `ModelicaDocumentRegistry`. Per-doc plot tiles
+    /// (`PlotNodeData.doc_id = Some(_)`) use this to recover the
+    /// runtime sim entity at fetch time instead of baking it in at
+    /// projection. Survives sim restart and tab switches without a
+    /// re-projection — the same scene Node tracks whatever sim is
+    /// active for its document right now.
+    pub doc_to_entity: HashMap<u64, Entity>,
 }
 
 /// Stash a snapshot in the egui context so any plot node visual
@@ -272,11 +334,17 @@ impl NodeVisual for PlotNodeVisual {
         } else {
             "(unbound plot)"
         };
-        // Unbound plots store `entity = 0` (invalid bit pattern in
-        // bevy 0.18). `try_from_bits` returns `None` instead of
-        // panicking, and an unbound plot naturally has no samples.
+        // Sample lookup — dispatch on the typed binding. See
+        // `PlotBinding` for the policy semantics. Either path can
+        // return `None` (unbound tile, sim not running, etc.) — the
+        // tile degrades to "no curve, just the title" instead of
+        // panicking.
         let snapshot = fetch_signal_snapshot(ctx.ui.ctx());
-        let points: Vec<SamplePoint> = Entity::try_from_bits(self.data.entity)
+        let resolved_entity: Option<Entity> = match &self.data.binding {
+            PlotBinding::Pinned { entity } => Entity::try_from_bits(*entity),
+            PlotBinding::Doc { doc_id } => snapshot.doc_to_entity.get(doc_id).copied(),
+        };
+        let points: Vec<SamplePoint> = resolved_entity
             .and_then(|e| {
                 snapshot
                     .samples

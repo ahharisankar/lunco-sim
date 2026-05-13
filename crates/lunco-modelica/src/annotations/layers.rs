@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use super::types::{Extent, Point, CoordinateSystem};
-use super::graphics::GraphicItem;
+use super::graphics::{GraphicItem, LunCoPlotNode};
 
 /// Decoded `Icon(coordinateSystem=..., graphics={...})` annotation.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -50,7 +50,6 @@ impl Icon {
                     merge(b.extent.p2.x + b.origin.x, b.extent.p2.y + b.origin.y);
                 }
                 GraphicItem::Text(_) => continue,
-                GraphicItem::LunCoPlotNode(_) => continue,
             }
         }
         if found {
@@ -104,7 +103,6 @@ impl Icon {
                     merge(t.extent.p1.x + t.origin.x, t.extent.p1.y + t.origin.y);
                     merge(t.extent.p2.x + t.origin.x, t.extent.p2.y + t.origin.y);
                 }
-                GraphicItem::LunCoPlotNode(_) => continue,
             }
         }
         if found {
@@ -118,11 +116,24 @@ impl Icon {
     }
 }
 
-/// Decoded `Diagram(coordinateSystem=..., graphics={...})` annotation.
+/// Decoded `Diagram(coordinateSystem=..., graphics={...})` annotation,
+/// plus LunCo vendor plot tiles parsed from the sibling
+/// `__LunCo(plotNodes={...})` annotation. The split is intentional:
+///
+/// * `graphics` is what OMEdit (and every standards-compliant
+///   Modelica editor) renders — typically a `Rectangle` + `Text`
+///   placeholder for each plot region. Static fallback.
+/// * `plot_nodes` is Lunica-only: each entry carries a `signal=`
+///   binding the live runtime sample to a rectangular plot tile
+///   painted on the canvas. Lunica draws this on top of the static
+///   placeholder, so users see a real graph while OMEdit users see
+///   a labelled region.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Diagram {
     pub coordinate_system: CoordinateSystem,
     pub graphics: Vec<GraphicItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plot_nodes: Vec<LunCoPlotNode>,
 }
 
 /// Decoded `experiment(StartTime=..., StopTime=..., Tolerance=..., Interval=...)`

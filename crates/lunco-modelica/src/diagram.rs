@@ -24,7 +24,7 @@
 use lunco_core::diagram::{
     ComponentGraph, ComponentPort, EdgeKind, NodeId, NodeKind,
 };
-use rumoca_session::parsing::ast::{ClassDef, Component, Equation, Expression, StoredDefinition, Variability, Causality};
+use rumoca_session::parsing::ast::{ClassDef, Component, Equation, Expression, Name, StoredDefinition, Variability, Causality};
 use rumoca_session::parsing::ClassType;
 use std::collections::HashMap;
 
@@ -338,7 +338,7 @@ impl ModelicaComponentBuilder {
 
         // Create nodes
         for (qualified_name, class_type) in &all_classes {
-            let short_name = qualified_name.split('.').last().unwrap_or(qualified_name);
+            let short_name = crate::ast_extract::short_name(qualified_name);
             let _parent = qualified_name.rsplit_once('.').map(|(p, _)| p.to_string());
 
             let kind = match class_type {
@@ -418,11 +418,7 @@ impl ModelicaComponentBuilder {
             .map(|w| w.to_string())
             .unwrap_or_default();
         let qualify = |short: &str| -> String {
-            if within_prefix.is_empty() {
-                short.to_string()
-            } else {
-                format!("{within_prefix}.{short}")
-            }
+            crate::ast_extract::qualify(&within_prefix, short)
         };
         // Models are the canonical "open this in the canvas" choice;
         // connectors and types alone have no diagram. Walk in order:
@@ -447,7 +443,7 @@ impl ModelicaComponentBuilder {
             }
             for (inner_name, inner) in &pkg.classes {
                 if is_diagrammable(inner.class_type.clone()) {
-                    return qualify(&format!("{pkg_name}.{inner_name}"));
+                    return qualify(&crate::ast_extract::qualify(pkg_name, inner_name));
                 }
             }
         }
@@ -493,6 +489,27 @@ impl ModelicaComponentBuilder {
 ///    with the AST's `within` clause, strip it before walking.
 ///    Lets drill-in callers pass `"Modelica.Blocks.Continuous.CriticalDamping"`
 ///    without knowing the file's internal rooting.
+/// Strip the AST's `within` clause prefix from `qualified`, when it
+/// appears at a **segment boundary** (followed by `.`). Returns the
+/// path that's safe to split on `.` and walk against `ast.classes`.
+///
+/// Centralised here so the read path (`find_class_by_qualified_name`)
+/// and the write path (`ast_mut::lookup_class_mut`) can't silently
+/// disagree on within handling — the exact divergence that shipped
+/// the `walk_qualified` bug (string-prefix vs segment-prefix). The
+/// `and_then(strip_prefix('.'))` is the load-bearing part: it
+/// guarantees the prefix match ends at a Modelica name boundary, so
+/// `within = "AnnotatedRocketStage"` does *not* strip the leading
+/// `AnnotatedRocketStage` out of `AnnotatedRocketStageCopy.X`.
+pub fn strip_within_prefix<'a>(qualified: &'a str, within: Option<&Name>) -> &'a str {
+    let Some(within) = within else { return qualified };
+    let within_str = within.to_string();
+    qualified
+        .strip_prefix(&within_str)
+        .and_then(|s| s.strip_prefix('.'))
+        .unwrap_or(qualified)
+}
+
 pub fn find_class_by_qualified_name<'a>(
     ast: &'a StoredDefinition,
     name: &str,
@@ -509,16 +526,7 @@ pub fn find_class_by_qualified_name<'a>(
         return None;
     }
 
-    let mut path: &str = name;
-    if let Some(within) = ast.within.as_ref() {
-        let within_str = within.to_string();
-        if let Some(rest) = path
-            .strip_prefix(&within_str)
-            .and_then(|s| s.strip_prefix('.'))
-        {
-            path = rest;
-        }
-    }
+    let path = strip_within_prefix(name, ast.within.as_ref());
     let mut segments = path.split('.');
     let first = segments.next()?;
     let mut current = ast.classes.get(first)?;

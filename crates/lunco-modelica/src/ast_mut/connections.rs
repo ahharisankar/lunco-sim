@@ -2,7 +2,7 @@
 
 use rumoca_session::parsing::ast::{ClassDef, Equation, Expression};
 use super::errors::AstMutError;
-use super::parsing::parse_connect_equation_fragment;
+use super::parsing::{parse_connect_equation_fragment, FRAGMENT_CLASS_NAME};
 use super::util::{matches_port_ref, expression_is_line_call, extract_points_named_argument, named_arg_name, ref_is_simple, fmt_f64};
 use crate::pretty;
 
@@ -176,12 +176,12 @@ pub fn set_connection_line_style(
         stub_args.join(", ")
     );
     let stub = format!(
-        "model __LunCoFragment\nequation\n  {stub_body}end __LunCoFragment;\n",
+        "model {FRAGMENT_CLASS_NAME}\nequation\n  {stub_body}end {FRAGMENT_CLASS_NAME};\n",
     );
     let parsed = super::parsing::parse_stub_cached(&stub).ok_or_else(|| {
         AstMutError::ValueParseFailed { value: stub_body.clone() }
     })?;
-    let parsed_cls = parsed.classes.get("__LunCoFragment").ok_or_else(|| {
+    let parsed_cls = parsed.classes.get(FRAGMENT_CLASS_NAME).ok_or_else(|| {
         AstMutError::ValueParseFailed { value: stub_body.clone() }
     })?;
     let parsed_eq = parsed_cls.equations.first().ok_or_else(|| {

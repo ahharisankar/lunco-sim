@@ -1009,7 +1009,7 @@ impl MSLIndexer {
 
                 self.resolve_inheritance(full_name, &mut ports, &mut parameters, &mut visited);
 
-                let short_name = full_name.rsplit('.').next().unwrap_or(full_name).to_string();
+                let short_name = crate::ast_extract::short_name(full_name).to_string();
                 let category = full_name.rsplitn(2, '.').nth(1).unwrap_or("").replace('.', "/");
 
                 // Inheritance-merged icon. The merge logic lives in
@@ -1366,11 +1366,7 @@ fn bundled_class_node(
     use crate::ui::panels::package_browser::types::PackageNode;
     use crate::ui::state::ModelLibrary;
 
-    let qualified = if parent_path.is_empty() {
-        short_name.to_string()
-    } else {
-        format!("{parent_path}.{short_name}")
-    };
+    let qualified = crate::ast_extract::qualify(parent_path, short_name);
     let kind = crate::index::map_class_type(&class_def.class_type);
     let id = format!("bundled://{filename}#{qualified}");
     let is_package = matches!(kind, ClassKind::Package);

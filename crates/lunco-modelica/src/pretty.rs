@@ -252,19 +252,17 @@ pub struct LunCoPlotNodeSpec {
     pub title: String,
 }
 
-/// Render a `__LunCo_PlotNode(extent={{…}}, signal="…", title="…")`
-/// fragment as it appears inside a `Diagram(graphics={…})` array.
-/// `title` is omitted entirely when empty so round-tripping a plot
-/// without a custom label leaves a clean source line.
+/// Render a single
+/// `LunCoAnnotations.PlotNode(extent={{…}}, signal="…", title="…")`
+/// record as it appears inside `__LunCo(plotNodes={…})`. `title` is
+/// omitted entirely when empty so round-tripping a plot without a
+/// custom label leaves a clean source line.
 pub fn lunco_plot_node_inner(p: &LunCoPlotNodeSpec) -> String {
     let mut s = format!(
-        "__LunCo_PlotNode(extent={{{},{}}}, signal=\"{}\"",
+        "LunCoAnnotations.PlotNode(extent={{{},{}}}, signal=\"{}\"",
         fmt_point(p.x1, p.y1),
         fmt_point(p.x2, p.y2),
-        // Modelica strings: backslash + quote escapes only. Plot
-        // signal paths are dotted identifiers — neither is expected
-        // here in practice, but escaping keeps the writer robust
-        // against unusual user input (`"foo\"bar"` / `"a\\b"`).
+        // Modelica strings: backslash + quote escapes only.
         p.signal.replace('\\', "\\\\").replace('"', "\\\""),
     );
     if !p.title.is_empty() {

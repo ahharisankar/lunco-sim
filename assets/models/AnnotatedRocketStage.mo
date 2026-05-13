@@ -9,6 +9,14 @@
 
 package AnnotatedRocketStage
 
+  package LunCoAnnotations "Vendor-specific metadata records for the LunCo toolchain"
+    record PlotNode "Region in the diagram canvas that hosts a live-signal plot"
+      Real extent[2,2] "Diagram-coordinate rectangle of the plot region";
+      String signal "Fully qualified Modelica variable to plot";
+      String title "Human-readable plot title";
+    end PlotNode;
+  end LunCoAnnotations;
+
   partial connector FluidPort "Acausal fluid port (pressure + mass-flow)"
     Real p(unit = "Pa") "Line pressure";
     flow Real m_flow(unit = "kg/s") "Mass flow into the connector from this component";
@@ -93,16 +101,74 @@ package AnnotatedRocketStage
             textString="AnnotatedRocketStage — pressurised fluid line with throttle valve",
             fontSize=8,
             textColor={0,0,0}),
-          __LunCo_PlotNode(extent={{-100,-50},{-60,-90}},
-            signal="tank.m", title="Tank mass"),
-          __LunCo_PlotNode(extent={{-58,-50},{-18,-90}},
-            signal="airframe.altitude", title="Altitude"),
-          __LunCo_PlotNode(extent={{-16,-50},{24,-90}},
-            signal="airframe.velocity", title="Velocity"),
-          __LunCo_PlotNode(extent={{26,-50},{66,-90}},
-            signal="airframe.thrust_in", title="Thrust"),
-          __LunCo_PlotNode(extent={{68,-50},{108,-90}},
-            signal="airframe.acceleration", title="Acceleration")
+          Rectangle(extent={{-100,-50},{-60,-90}},
+            lineColor={120,120,120},
+            fillColor={245,245,250},
+            fillPattern=FillPattern.Solid,
+            radius=6),
+          Text(extent={{-100,-52},{-60,-60}},
+            textString="Tank mass",
+            fontSize=6,
+            textColor={60,60,60}),
+          Rectangle(extent={{-58,-50},{-18,-90}},
+            lineColor={120,120,120},
+            fillColor={245,245,250},
+            fillPattern=FillPattern.Solid,
+            radius=6),
+          Text(extent={{-58,-52},{-18,-60}},
+            textString="Altitude",
+            fontSize=6,
+            textColor={60,60,60}),
+          Rectangle(extent={{-16,-50},{24,-90}},
+            lineColor={120,120,120},
+            fillColor={245,245,250},
+            fillPattern=FillPattern.Solid,
+            radius=6),
+          Text(extent={{-16,-52},{24,-60}},
+            textString="Velocity",
+            fontSize=6,
+            textColor={60,60,60}),
+          Rectangle(extent={{26,-50},{66,-90}},
+            lineColor={120,120,120},
+            fillColor={245,245,250},
+            fillPattern=FillPattern.Solid,
+            radius=6),
+          Text(extent={{26,-52},{66,-60}},
+            textString="Thrust",
+            fontSize=6,
+            textColor={60,60,60}),
+          Rectangle(extent={{68,-50},{108,-90}},
+            lineColor={120,120,120},
+            fillColor={245,245,250},
+            fillPattern=FillPattern.Solid,
+            radius=6),
+          Text(extent={{68,-52},{108,-60}},
+            textString="Acceleration",
+            fontSize=6,
+            textColor={60,60,60})
+        }),
+      __LunCo(
+        plotNodes={
+          LunCoAnnotations.PlotNode(
+            extent={{-100,-50},{-60,-90}},
+            signal="tank.m",
+            title="Tank mass"),
+          LunCoAnnotations.PlotNode(
+            extent={{-58,-50},{-18,-90}},
+            signal="airframe.altitude",
+            title="Altitude"),
+          LunCoAnnotations.PlotNode(
+            extent={{-16,-50},{24,-90}},
+            signal="airframe.velocity",
+            title="Velocity"),
+          LunCoAnnotations.PlotNode(
+            extent={{26,-50},{66,-90}},
+            signal="airframe.thrust_in",
+            title="Thrust"),
+          LunCoAnnotations.PlotNode(
+            extent={{68,-50},{108,-90}},
+            signal="airframe.acceleration",
+            title="Acceleration")
         }),
       experiment(StartTime=0, StopTime=150, Tolerance=1e-4, Interval=0.1));
   end RocketStage;

@@ -1383,8 +1383,7 @@ fn connector_icon_color(
             GraphicItem::Ellipse(e) => (e.shape.line_color, e.shape.fill_color),
             GraphicItem::Line(l) => (l.color, None),
             GraphicItem::Text(_)
-            | GraphicItem::Bitmap(_)
-            | GraphicItem::LunCoPlotNode(_) => (None, None),
+            | GraphicItem::Bitmap(_) => (None, None),
         };
         if let Some(c) = line.or(fill) {
             return Some([c.r, c.g, c.b]);

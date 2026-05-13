@@ -31,7 +31,11 @@ impl lunco_canvas::Layer for DiagramDecorationLayer {
         _selection: &lunco_canvas::Selection,
     ) {
         let Ok(guard) = self.data.read() else { return };
-        let Some((coord_system, graphics)) = guard.as_ref() else {
+        // `_plot_nodes` is unused here: this decoration layer only
+        // paints `graphics` as background. Plot tiles emit as scene
+        // Nodes via `emit_diagram_decorations`, drawn separately by
+        // the canvas node-visual pipeline.
+        let Some((coord_system, graphics, _plot_nodes)) = guard.as_ref() else {
             return;
         };
         // Map the coordinate system's extent (Modelica +Y up) to the
@@ -54,21 +58,17 @@ impl lunco_canvas::Layer for DiagramDecorationLayer {
             bevy_egui::egui::pos2(screen_rect_canvas.max.x, screen_rect_canvas.max.y),
         );
         // Filter out items that have a corresponding scene Node
-        // (Text → editable label, LunCoPlotNode → live plot tile).
-        // Painting them here as well would double-render: the
-        // scene Node already paints itself via its `NodeVisual`
-        // and the decoration would just sit on top with stale
-        // text. Other graphics (Rectangle / Line / Polygon /
-        // Ellipse / Bitmap) stay as background decoration.
+        // (Text → editable label). Plot tiles live in a separate
+        // vendor annotation now and never appear in `graphics`, so
+        // they don't need filtering here. Painting Text as well
+        // would double-render: the scene Node already paints itself
+        // via its `NodeVisual` and the decoration would sit on top
+        // with stale text. Other graphics (Rectangle / Line /
+        // Polygon / Ellipse / Bitmap) stay as background decoration.
         use crate::annotations::GraphicItem;
         let decoration: Vec<GraphicItem> = graphics
             .iter()
-            .filter(|g| {
-                !matches!(
-                    g,
-                    GraphicItem::Text(_) | GraphicItem::LunCoPlotNode(_)
-                )
-            })
+            .filter(|g| !matches!(g, GraphicItem::Text(_)))
             .cloned()
             .collect();
         crate::icon_paint::paint_graphics(
@@ -86,23 +86,33 @@ impl lunco_canvas::Layer for DiagramDecorationLayer {
 /// decoration layer to paint MSL-style diagram callouts (labelled
 /// regions, accent text) behind the nodes.
 /// Emit canvas Nodes for every interactive item in the active
-/// class's `Diagram(graphics=…)`. Today that's:
-///   * `__LunCo_PlotNode` → `lunco.viz.plot` (live signal tile)
-///   * `Text` → `lunco.modelica.text` (editable label)
+/// class's diagram. Two sources, intentionally split:
+///
+///   * `Text` entries in `Diagram(graphics=…)` → `lunco.modelica.text`
+///     (editable label). Standard Modelica; OMEdit renders these too.
+///   * `LunCoAnnotations.PlotNode(...)` records in
+///     `annotation(__LunCo(plotNodes=…))` → `lunco.viz.plot`
+///     (live signal tile). Lunica-only feature: each tile binds a
+///     runtime `signal=` and paints a real-time graph on top of the
+///     placeholder `Rectangle` the source carries for OMEdit's
+///     benefit. OMEdit shows the rectangle; Lunica covers it with
+///     the live plot. Same source, two valid renderings.
 ///
 /// Each emitted Node carries a stable `origin` marker derived from
-/// the annotation's position in the source (`plot:<idx>:<signal>` or
-/// `text:<idx>`) so the canvas-edit pipeline recognises it as
-/// source-backed and the carry-over filter doesn't double-insert.
+/// the annotation's position in the source (`text:<idx>` or
+/// `plot:<idx>:<signal>`) so the canvas-edit pipeline recognises it
+/// as source-backed and the carry-over filter doesn't double-insert.
 /// Returns the set of emitted origin keys.
 pub(super) fn emit_diagram_decorations(
     scene: &mut lunco_canvas::scene::Scene,
     graphics: &[crate::annotations::GraphicItem],
+    plot_nodes: &[crate::annotations::LunCoPlotNode],
+    doc_id: Option<lunco_doc::DocumentId>,
 ) -> std::collections::HashSet<String> {
     use crate::annotations::GraphicItem;
     let mut origins: std::collections::HashSet<String> = Default::default();
     let mut text_idx: usize = 0;
-    for (idx, item) in graphics.iter().enumerate() {
+    for item in graphics.iter() {
         if let GraphicItem::Text(t) = item {
             // Editable label. Strip surrounding quotes the parser
             // left on `textString` so the visual sees the raw
@@ -146,18 +156,27 @@ pub(super) fn emit_diagram_decorations(
                 visual_rect: None,
             });
             text_idx += 1;
-            continue;
         }
-        let GraphicItem::LunCoPlotNode(plot) = item else { continue };
-        // `entity` is the runtime Bevy id of the simulator host that
-        // produces samples for this signal. We don't know it at
-        // projection time (the source can be loaded long before the
-        // sim spawns), so we leave it as `Entity::PLACEHOLDER` (0)
-        // — the live sample resolver in
-        // `lunco_viz::canvas_plot_node` keys by signal path and
-        // recovers the active producer at fetch time.
+    }
+    // Live plot tiles — emitted *after* texts so they sit on top in
+    // canvas draw order. The tile visual is opaque and covers the
+    // placeholder Rectangle/Text from `graphics`, giving Lunica
+    // users a real-time graph where OMEdit shows a labelled region.
+    for (idx, plot) in plot_nodes.iter().enumerate() {
+        // Source-backed tiles use the Doc binding: resolved to the
+        // document's current sim entity every frame via the
+        // snapshot's `doc_to_entity` table. Falls back to a Pinned
+        // unbound state (`entity = 0`) if there's no document
+        // context — defensive, doesn't happen in practice since
+        // projection is always doc-scoped.
+        let binding = match doc_id {
+            Some(d) => lunco_viz::kinds::canvas_plot_node::PlotBinding::Doc {
+                doc_id: d.raw(),
+            },
+            None => lunco_viz::kinds::canvas_plot_node::PlotBinding::Pinned { entity: 0 },
+        };
         let payload = lunco_viz::kinds::canvas_plot_node::PlotNodeData {
-            entity: 0,
+            binding,
             signal_path: plot.signal.clone(),
             title: plot.title.clone(),
         };
@@ -165,28 +184,21 @@ pub(super) fn emit_diagram_decorations(
         let origin = format!("plot:{idx}:{}", plot.signal);
         origins.insert(origin.clone());
         let id = scene.alloc_node_id();
+        // Modelica `extent={{x1,y1},{x2,y2}}` is +Y up and doesn't
+        // enforce corner ordering. Flip Y per corner, normalise so
+        // `from_min_max` sees `min < max`, otherwise the tile lands
+        // far above the icons or shrinks to a zero-area rect.
+        let x1 = plot.extent.p1.x as f32;
+        let x2 = plot.extent.p2.x as f32;
+        let y1 = -(plot.extent.p1.y as f32);
+        let y2 = -(plot.extent.p2.y as f32);
+        let rect = lunco_canvas::Rect::from_min_max(
+            lunco_canvas::Pos::new(x1.min(x2), y1.min(y2)),
+            lunco_canvas::Pos::new(x1.max(x2), y1.max(y2)),
+        );
         scene.insert_node(lunco_canvas::scene::Node {
             id,
-            rect: {
-                // Modelica diagrams are +Y up; canvas world is +Y
-                // down (`coords::modelica_to_canvas` negates Y).
-                // Apply the flip per corner, then normalise so
-                // `from_min_max` gets `min < max` on both axes —
-                // Modelica `extent={{x1,y1},{x2,y2}}` doesn't
-                // enforce corner ordering. Without this two
-                // failures stack: a flipped Y range that puts the
-                // tile far above the icons instead of below them,
-                // and a zero-area rect when the source's first
-                // corner has the larger y.
-                let x1 = plot.extent.p1.x as f32;
-                let x2 = plot.extent.p2.x as f32;
-                let y1 = -(plot.extent.p1.y as f32);
-                let y2 = -(plot.extent.p2.y as f32);
-                lunco_canvas::Rect::from_min_max(
-                    lunco_canvas::Pos::new(x1.min(x2), y1.min(y2)),
-                    lunco_canvas::Pos::new(x1.max(x2), y1.max(y2)),
-                )
-            },
+            rect,
             kind: lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND.into(),
             data,
             ports: Vec::new(),
@@ -203,12 +215,22 @@ pub(super) fn diagram_annotation_for_target(
     ast: &rumoca_session::parsing::ast::StoredDefinition,
     target: Option<&str>,
 ) -> Option<crate::annotations::Diagram> {
-    // Resolve the target class by qualified path walk (supports the
-    // MSL `Modelica.Blocks.Examples.PID_Controller` style). For `None`
-    // targets fall back to the first non-package class, matching the
-    // workbench's default active-class picker.
+    // Route through the canonical AST class lookup
+    // `crate::diagram::find_class_by_qualified_name`. It already
+    // handles within-clause stripping correctly — at segment
+    // boundaries, not raw string boundaries. The earlier local
+    // `walk_qualified` here used `.unwrap_or(rest)` after stripping
+    // a non-dot suffix, which corrupted targets when the within
+    // prefix happened to be a *string* prefix of the next segment
+    // (the bug that hid the diagram for `Duplicate to edit` of any
+    // class whose copy name was `<OriginalCopy>` — the within clause
+    // `AnnotatedRocketStage` is a string prefix of
+    // `AnnotatedRocketStageCopy`, so the strip mangled the target
+    // to `Copy.RocketStage` and the walk found nothing).
+    // For `None` targets fall back to the first non-package class,
+    // matching the workbench's default active-class picker.
     let class = if let Some(qualified) = target {
-        walk_qualified(ast, qualified)
+        crate::diagram::find_class_by_qualified_name(ast, qualified)
     } else {
         use rumoca_session::parsing::ClassType;
         ast.classes
@@ -219,44 +241,8 @@ pub(super) fn diagram_annotation_for_target(
     class.and_then(|c| crate::annotations::extract_diagram(&c.annotation))
 }
 
-/// Walk a dotted qualified class path through `ast.classes` into
-/// nested `class.classes`. Returns the deepest matching class, if any.
-///
-/// Honours the file's `within` clause: MSL files like
-/// `Modelica/Blocks/package.mo` start with `within Modelica;`, so their
-/// AST root contains `Blocks`, not `Modelica`. A drill-in target of
-/// `Modelica.Blocks.Examples.PID_Controller` must therefore have the
-/// `Modelica` prefix stripped before the walk; otherwise the first
-/// segment never matches and the diagram-decoration layer silently
-/// renders nothing.
-pub(super) fn walk_qualified<'a>(
-    ast: &'a rumoca_session::parsing::ast::StoredDefinition,
-    qualified: &str,
-) -> Option<&'a rumoca_session::parsing::ast::ClassDef> {
-    let stripped = if let Some(within) = ast.within.as_ref() {
-        let prefix = within
-            .name
-            .iter()
-            .map(|t| t.text.as_ref())
-            .collect::<Vec<_>>()
-            .join(".");
-        if !prefix.is_empty() {
-            if let Some(rest) = qualified.strip_prefix(&prefix) {
-                rest.strip_prefix('.').unwrap_or(rest)
-            } else {
-                qualified
-            }
-        } else {
-            qualified
-        }
-    } else {
-        qualified
-    };
-    let mut segments = stripped.split('.');
-    let first = segments.next()?;
-    let mut current = ast.classes.iter().find(|(n, _)| n.as_str() == first).map(|(_, c)| c)?;
-    for seg in segments {
-        current = current.classes.get(seg)?;
-    }
-    Some(current)
-}
+// `walk_qualified` deleted: was a near-duplicate of
+// `crate::diagram::find_class_by_qualified_name` and silently
+// disagreed with it on the within-clause strip. Two sources of
+// truth for the same lookup is how the duplicate-renders-nothing
+// bug shipped. Use the canonical helper.

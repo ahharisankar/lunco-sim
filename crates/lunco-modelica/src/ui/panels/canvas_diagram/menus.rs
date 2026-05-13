@@ -198,7 +198,7 @@ pub(super) fn render_plot_node_menu(
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 for (entity, path) in &sigs {
-                    let is_current = entity.to_bits() == current.entity
+                    let is_current = current.binding.pinned_entity() == Some(entity.to_bits())
                         && path == &current.signal_path;
                     if ui.selectable_label(is_current, path).clicked() {
                         rebind_plot_node(world, id, entity.to_bits(), path);
@@ -231,7 +231,9 @@ pub(super) fn rebind_plot_node(
 ) {
     use lunco_viz::kinds::canvas_plot_node::PlotNodeData;
     let payload = PlotNodeData {
-        entity: entity_bits,
+        binding: lunco_viz::kinds::canvas_plot_node::PlotBinding::Pinned {
+            entity: entity_bits,
+        },
         signal_path: signal_path.to_string(),
         title: String::new(),
     };
@@ -553,7 +555,9 @@ pub(super) fn insert_plot_node(
     signal_path: &str,
 ) {
     let payload = lunco_viz::kinds::canvas_plot_node::PlotNodeData {
-        entity: entity_bits,
+        binding: lunco_viz::kinds::canvas_plot_node::PlotBinding::Pinned {
+            entity: entity_bits,
+        },
         signal_path: signal_path.to_string(),
         title: String::new(),
     };

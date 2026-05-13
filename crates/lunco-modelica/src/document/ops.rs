@@ -197,17 +197,17 @@ pub enum ModelicaOp {
         /// Replacement value expression (emitted verbatim).
         value: String,
     },
-    /// Append a `__LunCo_PlotNode(...)` vendor entry to the class's
-    /// `annotation(Diagram(graphics={...}))` array.
+    /// Append a `LunCoAnnotations.PlotNode(...)` record to the
+    /// class's `annotation(__LunCo(plotNodes={...}))` array.
     AddPlotNode {
         /// Target class name.
         class: String,
         /// Plot annotation to add or update.
         plot: pretty::LunCoPlotNodeSpec,
     },
-    /// Remove the first `__LunCo_PlotNode(...)` vendor entry whose
+    /// Remove the first `LunCoAnnotations.PlotNode(...)` whose
     /// `signal=` matches `signal_path` from the class's
-    /// `Diagram(graphics)` array.
+    /// `annotation(__LunCo(plotNodes=...))` array.
     RemovePlotNode {
         /// Target class name.
         class: String,
@@ -215,7 +215,7 @@ pub enum ModelicaOp {
         signal_path: String,
     },
     /// Update the `extent={{...}}` argument of the first
-    /// `__LunCo_PlotNode(...)` entry whose `signal=` matches
+    /// `LunCoAnnotations.PlotNode(...)` whose `signal=` matches
     /// `signal_path`.
     SetPlotNodeExtent {
         /// Target class name.
@@ -229,7 +229,7 @@ pub enum ModelicaOp {
         y2: f32,
     },
     /// Update the `title=` argument (or insert one) on the first
-    /// `__LunCo_PlotNode(...)` entry whose `signal=` matches
+    /// `LunCoAnnotations.PlotNode(...)` whose `signal=` matches
     /// `signal_path`.
     SetPlotNodeTitle {
         /// Target class name.

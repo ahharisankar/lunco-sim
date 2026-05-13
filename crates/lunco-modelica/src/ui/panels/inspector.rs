@@ -323,7 +323,7 @@ fn render_plot_node_editor(
             apply_plot_binding(world, doc_id, node_id, 0, "");
         }
         // Title editor — writes back to source as the
-        // `__LunCo_PlotNode(title="…")` argument. Buffer per node
+        // `LunCoAnnotations.PlotNode(title="…")` field. Buffer per node
         // id keyed in egui memory so typing isn't preempted by the
         // re-projection that follows each commit. The op only
         // fires on Enter / focus loss to avoid a write per
@@ -379,7 +379,7 @@ fn render_plot_node_editor(
         .auto_shrink([false, true])
         .show(ui, |ui| {
             for (entity, path) in &sigs {
-                let is_current = entity.to_bits() == current.entity
+                let is_current = current.binding.pinned_entity() == Some(entity.to_bits())
                     && path == &current.signal_path;
                 let resp = ui.selectable_label(is_current, path);
                 if resp.clicked() && !is_current {
@@ -464,29 +464,40 @@ fn apply_plot_binding(
     use crate::document::ModelicaOp;
     use lunco_viz::kinds::canvas_plot_node::PlotNodeData;
 
-    // Snapshot the previous binding + the node's current rect so we
-    // can build the right op pair (remove old, add new) and so the
-    // optimistic in-memory swap stays consistent with what the
-    // source rewrite is about to do.
-    let (prev_signal, rect, kind_is_plot) = {
+    // Snapshot the previous binding, mode, and rect so we can build
+    // the right op pair (remove old, add new), preserve the tile's
+    // binding mode (Pinned vs Doc) across the rebind, and keep the
+    // optimistic in-memory swap consistent with the source rewrite.
+    let (prev_signal, prev_binding, rect, kind_is_plot) = {
         let state = world
             .resource::<crate::ui::panels::canvas_diagram::CanvasDiagramState>();
         let scene = &state.get(Some(doc_id)).canvas.scene;
         let Some(node) = scene.node(node_id) else { return };
-        let prev = node
-            .data
-            .downcast_ref::<PlotNodeData>()
-            .map(|d| d.signal_path.clone())
-            .unwrap_or_default();
+        let prev_data = node.data.downcast_ref::<PlotNodeData>();
+        let prev_sig = prev_data.map(|d| d.signal_path.clone()).unwrap_or_default();
+        let prev_bind = prev_data
+            .map(|d| d.binding.clone())
+            .unwrap_or_else(lunco_viz::kinds::canvas_plot_node::PlotBinding::default);
         let is_plot = node.kind == lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND;
-        (prev, node.rect, is_plot)
+        (prev_sig, prev_bind, node.rect, is_plot)
     };
     if !kind_is_plot {
         return;
     }
     // 1. Optimistic in-memory swap so the visual updates this frame.
+    //    Preserve binding mode: a source-backed (Doc) tile stays
+    //    Doc-bound after a signal rebind — only the signal path
+    //    changes. A Telemetry-pinned tile updates its `entity` to
+    //    the newly-chosen one. Without this, picking a new signal
+    //    in the inspector silently demoted source-backed tiles to
+    //    pinned mode, breaking the per-doc resolution policy.
+    use lunco_viz::kinds::canvas_plot_node::PlotBinding;
+    let binding = match prev_binding {
+        PlotBinding::Doc { .. } => prev_binding,
+        PlotBinding::Pinned { .. } => PlotBinding::Pinned { entity: entity_bits },
+    };
     let payload = PlotNodeData {
-        entity: entity_bits,
+        binding,
         signal_path: signal_path.to_string(),
         title: String::new(),
     };

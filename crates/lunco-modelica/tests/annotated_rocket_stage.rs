@@ -22,9 +22,11 @@ fn fixture_parses_and_extracts() {
         .map(|(_, c)| c)
         .expect("package class");
 
-    // The package should contain Engine, Tank, Gimbal, RocketStage.
+    // The package should contain the vendor-annotation record
+    // package plus the four physical classes and the top-level
+    // RocketStage assembly.
     let leaf_names: Vec<&str> = pkg.classes.keys().map(|k| k.as_str()).collect();
-    for expected in ["Engine", "Tank", "Gimbal", "RocketStage"] {
+    for expected in ["LunCoAnnotations", "Tank", "Valve", "Engine", "Airframe", "RocketStage"] {
         assert!(
             leaf_names.contains(&expected),
             "missing class {expected} (have {leaf_names:?})"
@@ -44,13 +46,14 @@ fn fixture_parses_and_extracts() {
             GraphicItem::Polygon(_) => polys += 1,
             GraphicItem::Line(_) => lines += 1,
             GraphicItem::Text(_) => texts += 1,
+            GraphicItem::Ellipse(_) | GraphicItem::Bitmap(_) => {}
         }
     }
     assert_eq!((rects, polys, lines, texts), (1, 1, 2, 1));
 
     // RocketStage: each component should resolve a Placement.
     let stage = &pkg.classes["RocketStage"];
-    for cname in ["tank", "engine", "gimbal"] {
+    for cname in ["tank", "valve", "engine", "airframe"] {
         let comp = &stage.components[cname];
         let p = extract_placement(&comp.annotation)
             .unwrap_or_else(|| panic!("{cname} missing Placement"));
@@ -58,23 +61,37 @@ fn fixture_parses_and_extracts() {
         assert!(p.transformation.extent.p1 != p.transformation.extent.p2);
     }
 
-    // Gimbal carries rotation=15.
-    let gimbal_p =
-        extract_placement(&stage.components["gimbal"].annotation).expect("gimbal placement");
-    assert_eq!(gimbal_p.transformation.rotation, 15.0);
-
-    // RocketStage Diagram should have 1 text + 2 lines.
+    // RocketStage Diagram: header text + 5 Rectangle/Text placeholder
+    // pairs for the plot regions (one per __LunCo plot node).
     let diag = extract_diagram(&stage.annotation).expect("stage Diagram");
     let text_count = diag
         .graphics
         .iter()
         .filter(|g| matches!(g, GraphicItem::Text(_)))
         .count();
-    let line_count = diag
+    let rect_count = diag
         .graphics
         .iter()
-        .filter(|g| matches!(g, GraphicItem::Line(_)))
+        .filter(|g| matches!(g, GraphicItem::Rectangle(_)))
         .count();
-    assert_eq!(text_count, 1);
-    assert_eq!(line_count, 2);
+    assert_eq!(text_count, 6, "1 header + 5 plot labels");
+    assert_eq!(rect_count, 5, "5 plot region rectangles");
+
+    // The vendor `__LunCo(plotNodes=…)` annotation should carry one
+    // typed `LunCoAnnotations.PlotNode` per plot region, with their
+    // `signal=` bindings preserved.
+    assert_eq!(diag.plot_nodes.len(), 5);
+    let signals: Vec<&str> = diag.plot_nodes.iter().map(|p| p.signal.as_str()).collect();
+    for expected in [
+        "tank.m",
+        "airframe.altitude",
+        "airframe.velocity",
+        "airframe.thrust_in",
+        "airframe.acceleration",
+    ] {
+        assert!(
+            signals.contains(&expected),
+            "missing plot signal `{expected}` (have {signals:?})"
+        );
+    }
 }

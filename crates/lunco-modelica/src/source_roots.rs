@@ -304,26 +304,18 @@ pub fn scan_source_root_deps(ast: &StoredDefinition) -> HashSet<String> {
         .collect()
 }
 
-/// Same walker shape as
-/// [`crate::icon_warmer::walk_class`], but emits only qualified
-/// (dotted) names; bare names are skipped because they always
-/// resolve within the current doc's own classes.
+/// Collect type-name references from `class`, keeping only qualified
+/// (dotted) names — bare names always resolve within the current
+/// doc's own classes, so they never imply an external source-root
+/// load. Traversal lives in `crate::ast_extract::walk_class_type_names`
+/// so this scanner and the icon warmer can't drift apart on what
+/// "every referenced type" means.
 fn walk_class_qualified_types(class: &ClassDef, out: &mut HashSet<String>) {
-    for ext in &class.extends {
-        let name = ext.base_name.to_string();
+    crate::ast_extract::walk_class_type_names(class, &mut |name| {
         if name.contains('.') {
-            out.insert(name);
+            out.insert(name.to_string());
         }
-    }
-    for (_, comp) in class.iter_components() {
-        let t = format!("{}", comp.type_name);
-        if t.contains('.') {
-            out.insert(t);
-        }
-    }
-    for nested in class.classes.values() {
-        walk_class_qualified_types(nested, out);
-    }
+    });
 }
 
 /// Modelica built-in root segments that never need a source root

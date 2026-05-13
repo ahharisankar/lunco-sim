@@ -395,23 +395,3 @@ pub fn op_to_patch(
     }
 }
 
-pub fn find_class_by_short_name_recursive<'a>(
-    ast: &'a StoredDefinition,
-    short: &str,
-) -> Option<&'a rumoca_session::parsing::ast::ClassDef> {
-    fn walk<'a>(
-        classes: &'a indexmap::IndexMap<String, rumoca_session::parsing::ast::ClassDef>,
-        short: &str,
-    ) -> Option<&'a rumoca_session::parsing::ast::ClassDef> {
-        if let Some(c) = classes.get(short) {
-            return Some(c);
-        }
-        for c in classes.values() {
-            if let Some(found) = walk(&c.classes, short) {
-                return Some(found);
-            }
-        }
-        None
-    }
-    walk(&ast.classes, short)
-}

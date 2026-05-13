@@ -563,7 +563,7 @@ pub fn apply_inputs_to_source(
     }
     let mut out = source.to_string();
     for (path, value) in inputs {
-        let leaf = path.0.rsplit('.').next().unwrap_or(&path.0);
+        let leaf = crate::ast_extract::short_name(&path.0);
         let escaped = regex::escape(leaf);
         let re = regex::Regex::new(&format!(
             r"(?m)\binput\b(\s+[A-Za-z_][A-Za-z0-9_.\[\]]*)\s+{}\b\s*;",
@@ -714,7 +714,7 @@ pub fn apply_overrides_to_source(
         // The path may be dotted (component.subcomponent.param); v1 only
         // supports the trailing identifier in the model's own source.
         // Inherited params raise an error per spec.
-        let leaf = path.0.rsplit('.').next().unwrap_or(&path.0);
+        let leaf = crate::ast_extract::short_name(&path.0);
         let new_literal = format_literal(value);
         let replaced = replace_param_literal(&out, leaf, &new_literal)?;
         out = replaced;

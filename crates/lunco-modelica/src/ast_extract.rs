@@ -69,6 +69,33 @@ pub fn extract_model_name_from_ast(ast: &StoredDefinition) -> Option<String> {
     find_first_non_package_qualified(&ast.classes, "")
 }
 
+/// Join a parent qualified name with a child segment to form a new
+/// qualified name. When `parent` is empty, returns `child` alone —
+/// **not** `".child"`, which in Modelica (MLS §5.3.2) is a *global*
+/// lookup prefix with distinct semantics. Centralised so every
+/// "walk-and-emit-qualified-names" callsite handles the empty-parent
+/// case the same way.
+pub fn qualify(parent: &str, child: &str) -> String {
+    if parent.is_empty() {
+        child.to_string()
+    } else {
+        format!("{parent}.{child}")
+    }
+}
+
+/// Return the last dotted segment of a qualified name — the short
+/// display form (`"Modelica.Blocks.PID"` → `"PID"`). For names
+/// without any `.`, returns the whole input. Empty input → empty.
+///
+/// Subscript-naïve: callers that may receive component paths with
+/// bracketed expressions containing dots (`a[b.c].x`) should
+/// pre-strip the brackets via `s.split('[').next()` — true subscript
+/// awareness would require rumoca-core's `top_level_last_segment`,
+/// which workbench callers can adopt once it's exposed publicly.
+pub fn short_name(qualified: &str) -> &str {
+    qualified.rsplit('.').next().unwrap_or(qualified)
+}
+
 /// Return ALL non-package classes (qualified) reachable from the
 /// top-level classes, depth-first. Used by the Compile handler to
 /// decide whether to auto-pick (length 0–1) or open a picker modal
@@ -87,11 +114,7 @@ fn collect_non_package_qualified(
     out: &mut Vec<String>,
 ) {
     for (name, class) in classes {
-        let qualified = if parent.is_empty() {
-            name.clone()
-        } else {
-            format!("{parent}.{name}")
-        };
+        let qualified = qualify(parent, name);
         match class.class_type {
             // Descend into packages to reach nested runnable classes.
             ClassType::Package => {
@@ -127,11 +150,7 @@ fn find_first_non_package_qualified(
     // First pass: prefer a runnable class AT THIS level.
     for (name, class) in classes {
         if is_runnable(&class.class_type) {
-            return Some(if parent.is_empty() {
-                name.clone()
-            } else {
-                format!("{parent}.{name}")
-            });
+            return Some(qualify(parent, name));
         }
     }
     // Second pass: descend into each package.
@@ -139,11 +158,7 @@ fn find_first_non_package_qualified(
         if class.class_type != ClassType::Package {
             continue;
         }
-        let next_parent = if parent.is_empty() {
-            name.clone()
-        } else {
-            format!("{parent}.{name}")
-        };
+        let next_parent = qualify(parent, name);
         if let Some(found) = find_first_non_package_qualified(&class.classes, &next_parent) {
             return Some(found);
         }
@@ -153,10 +168,7 @@ fn find_first_non_package_qualified(
     // old "return the package when nothing else exists" behaviour
     // still get something non-empty; compile will likely still fail
     // but at least the error message names the file's top entity.
-    classes
-        .keys()
-        .next()
-        .map(|n| if parent.is_empty() { n.to_string() } else { format!("{parent}.{n}") })
+    classes.keys().next().map(|n| qualify(parent, n))
 }
 
 /// Extract parameter values from Modelica source code.
@@ -441,6 +453,32 @@ fn find_in_classes<'a>(
     None
 }
 
+/// Visit every type-name reference reachable from `class`, recursing
+/// into nested classes. Emits each `extends` base name and each
+/// component `type_name` raw — **no filtering**. Callers apply their
+/// own predicate (built-in vs not, qualified-only, etc.).
+///
+/// Centralised here so the icon warmer's "what to prefetch" and the
+/// source-roots scanner's "which libraries to load" share one
+/// traversal. The previous local `walk_class` / `walk_class_qualified_types`
+/// pair was identical traversal + different filter, which is exactly
+/// how the canonical `find_class_by_qualified_name` and the buggy
+/// local `walk_qualified` diverged. Filter at the call site, not in
+/// the walker.
+pub fn walk_class_type_names<F: FnMut(&str)>(class: &ClassDef, visit: &mut F) {
+    for ext in &class.extends {
+        let name = ext.base_name.to_string();
+        visit(&name);
+    }
+    for (_, comp) in class.iter_components() {
+        let t = format!("{}", comp.type_name);
+        visit(&t);
+    }
+    for nested in class.classes.values() {
+        walk_class_type_names(nested, visit);
+    }
+}
+
 /// Lower-case Modelica class kind keyword: `model`, `block`, `connector`,
 /// `package`, `function`, `record`, `type`, `class`, `operator`. The same
 /// taxonomy the canvas's class-kind badge surfaces, kept consistent so
@@ -611,7 +649,7 @@ fn is_input_connector_type(type_name: &str) -> bool {
     // tail. `Modelica.Blocks.Interfaces.RealInput` and bare
     // `RealInput` both resolve to the short name `RealInput`.
     let bare = type_name.split('[').next().unwrap_or(type_name);
-    let short = bare.rsplit('.').next().unwrap_or(bare);
+    let short = short_name(bare);
     matches!(
         short,
         "RealInput" | "IntegerInput" | "BooleanInput" | "StringInput"
@@ -622,7 +660,7 @@ fn is_input_connector_type(type_name: &str) -> bool {
 /// connectors — see that doc for the rationale.
 fn is_output_connector_type(type_name: &str) -> bool {
     let bare = type_name.split('[').next().unwrap_or(type_name);
-    let short = bare.rsplit('.').next().unwrap_or(bare);
+    let short = short_name(bare);
     matches!(
         short,
         "RealOutput" | "IntegerOutput" | "BooleanOutput" | "StringOutput"

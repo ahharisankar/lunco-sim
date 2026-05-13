@@ -315,14 +315,13 @@ impl ModelicaEngine {
     ) -> Option<rumoca_session::parsing::ast::ClassDef> {
         let uri = self.session.class_lookup_query(qualified)?;
         let parsed = self.session.parsed_file_query(&uri)?;
-        let mut parts = qualified.split('.');
-        let first = parts.next()?;
-        let mut current = parsed.classes.get(first)?.clone();
-        for part in parts {
-            let next = current.classes.get(part)?.clone();
-            current = next;
-        }
-        Some(current)
+        // Route through the canonical within-aware lookup so this
+        // path can't silently disagree with the read path when the
+        // file carries a `within Foo;` clause and the caller asks
+        // for `Foo.Bar` (the segment walk would look for "Foo" in
+        // `parsed.classes`, which is keyed under "Bar"). Same bug
+        // class as `walk_qualified` and `lookup_class_mut` had.
+        crate::diagram::find_class_by_qualified_name(&parsed, qualified).cloned()
     }
 
     /// Whether `qualified` resolves to a class currently in the

@@ -1,5 +1,6 @@
 //! Graphics primitives for Modelica Icons and Diagrams.
 
+use rumoca_session::parsing::ast::Expression;
 use serde::{Deserialize, Serialize};
 use super::types::{Point, Extent, Color, LinePattern, FilledShape, Arrow, EllipseClosure};
 
@@ -12,8 +13,6 @@ pub enum GraphicItem {
     Text(Text),
     Ellipse(Ellipse),
     Bitmap(Bitmap),
-    /// Vendor extension: an embedded plot tile bound to a runtime signal.
-    LunCoPlotNode(LunCoPlotNode),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -80,11 +79,27 @@ pub struct Bitmap {
     pub rotation: f64,
 }
 
+/// LunCo vendor annotation: embedded plot tile bound to a runtime signal.
+/// Lives in `annotation(__LunCo(plotNodes={LunCoAnnotations.PlotNode(...)}))`,
+/// alongside (not inside) `Diagram(graphics=...)`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LunCoPlotNode {
     pub extent: Extent,
     pub signal: String,
     pub title: String,
+}
+
+/// True when `expr` is a `LunCoAnnotations.PlotNode(...)` (or bare
+/// `PlotNode(...)`, the `import LunCoAnnotations.*` form) record
+/// reference as found inside `__LunCo(plotNodes={...})`. Used by
+/// both the read-side parser and the write-side AST mutators.
+pub fn is_plot_node_record_call(expr: &Expression) -> bool {
+    let parts = match expr {
+        Expression::FunctionCall { comp, .. } => &comp.parts,
+        Expression::ClassModification { target, .. } => &target.parts,
+        _ => return false,
+    };
+    parts.last().map(|t| &*t.ident.text) == Some("PlotNode")
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -1756,12 +1756,11 @@ pub fn handle_modelica_responses(
                     // We deliberately do *not* auto-bind every detected
                     // observable any more — a freshly compiled model
                     // starts with an *empty* default plot. Users add
-                    // signals via the Telemetry panel checkboxes (or
-                    // place embedded `__LunCo_PlotNode` tiles on the
-                    // diagram). Avoids the noisy "12 lines on launch"
-                    // experience that prompted users to manually
-                    // un-tick everything before they could see what
-                    // they cared about.
+                    // signals via the Telemetry panel checkboxes.
+                    // Avoids the noisy "12 lines on launch" experience
+                    // that prompted users to manually un-tick
+                    // everything before they could see what they
+                    // cared about.
                     if let Some(cfg) = reg.get_mut(crate::ui::viz::DEFAULT_MODELICA_GRAPH) {
                         cfg.inputs.clear();
                     }
