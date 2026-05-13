@@ -37,7 +37,6 @@ impl ModelTabs {
                 drilled_class,
                 view_mode: ModelViewMode::default(),
                 pinned: true,
-                load_error: None,
             },
         );
         id
@@ -61,7 +60,6 @@ impl ModelTabs {
                 drilled_class,
                 view_mode: ModelViewMode::default(),
                 pinned: false,
-                load_error: None,
             },
         );
         let evict = self.preview_slot.replace(id);
@@ -81,7 +79,6 @@ impl ModelTabs {
                 drilled_class,
                 view_mode: ModelViewMode::default(),
                 pinned: true,
-                load_error: None,
             },
         );
         id

@@ -284,7 +284,7 @@ fn open_bundled_class(world: &mut World, class: &ClassRef) {
                 display_name,
                 started: web_time::Instant::now(),
                 task,
-                _busy: busy,
+                busy,
             },
         );
 }
@@ -338,7 +338,7 @@ fn open_user_file_class(world: &mut World, path: PathBuf, class: &ClassRef) {
                 display_name,
                 started: web_time::Instant::now(),
                 task,
-                _busy: busy,
+                busy,
             },
         );
 }

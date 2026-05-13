@@ -564,7 +564,11 @@ impl CanvasDiagramState {
     }
 
     /// Drop *every* per-tab entry whose doc is `doc` when the
-    /// document is removed from the registry.
+    /// document is removed from the registry. Also clears any
+    /// pending parse→project handoff handle for the doc — without
+    /// this, a doc closed mid-load (parse resolved, stash placed,
+    /// no canvas render fired before close) would leak its
+    /// `StatusBus` entry indefinitely.
     pub fn drop_doc(&mut self, doc: lunco_doc::DocumentId) {
         let to_drop: Vec<CanvasKey> = self
             .tab_doc
@@ -575,6 +579,7 @@ impl CanvasDiagramState {
             self.per_tab.remove(&t);
             self.tab_doc.remove(&t);
         }
+        self.pending_projection_handoff.remove(&doc);
     }
 
     /// Drop a single tab's canvas state. Called when a tab is

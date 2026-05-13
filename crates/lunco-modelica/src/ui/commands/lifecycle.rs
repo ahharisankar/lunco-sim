@@ -281,7 +281,7 @@ pub fn on_duplicate_model_from_read_only(
                 inner_drill: inner_drill,
                 started: web_time::Instant::now(),
                 task,
-                _busy: busy,
+                busy,
             },
         ),
     );
@@ -463,7 +463,7 @@ pub fn spawn_duplicate_class_task(world: &mut World, qualified: String, name_hin
                     inner_drill: None,
                     started: web_time::Instant::now(),
                     task,
-                    _busy: busy,
+                    busy,
                 },
             ),
         );

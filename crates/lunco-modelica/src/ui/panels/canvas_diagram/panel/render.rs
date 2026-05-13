@@ -52,47 +52,53 @@ pub(crate) fn render_diagram_canvas(
     }
 
     // ─── Overlays ───
+    //
+    // Single derivation: `StatusBus::lifecycle(scope, has_content)`
+    // collapses the prior `loading || parse_pending || projecting`
+    // OR and the separate empty/error branches into one match. Every
+    // async stage that contributes to the canvas (file-load, drill-in,
+    // duplicate, projection, AST reparse) holds a `BusyHandle`
+    // scoped to `Document(doc_id)` for its lifetime; the parse→project
+    // handoff overlaps handles via
+    // `CanvasDiagramState::pending_projection_handoff`, and AST
+    // reparse runs through `track_ast_reparse_busy`. The bus is
+    // never momentarily empty mid-flight, so the overlay needs no
+    // local fallback predicates.
     {
         let theme = world.get_resource::<lunco_theme::Theme>().cloned().unwrap_or_else(lunco_theme::Theme::dark);
-        let (load_error, show_indicator, show_empty) = {
-            let tabs = world.resource::<crate::ui::panels::model_view::ModelTabs>();
-            let err = render_tab_id.and_then(|tid| tabs.get(tid).and_then(|t| t.load_error.as_ref().map(|e| (t.drilled_class.clone().unwrap_or_default(), e.clone()))));
-
+        let drilled_class = render_tab_id
+            .and_then(|tid| {
+                let tabs = world.resource::<crate::ui::panels::model_view::ModelTabs>();
+                tabs.get(tid).and_then(|t| t.drilled_class.clone())
+            })
+            .unwrap_or_default();
+        let lifecycle = {
             let state = world.resource::<CanvasDiagramState>();
             let docstate = match render_tab_id { Some(t) => state.get_for_tab(t), None => state.get(active_doc) };
             let has_content = docstate.canvas.scene.node_count() > 0;
-
-            // Single source of truth: `StatusBus` busy for this doc.
-            // Every async stage (parse, project, future fetch/index/etc.)
-            // holds a `BusyHandle` scoped to `Document(doc_id)` for its
-            // entire lifetime, and the parse→project handoff overlaps
-            // handles via `CanvasDiagramState::pending_projection_handoff`,
-            // so the bus is never momentarily empty mid-flight. No
-            // OR-of-booleans across subsystem-private flags — the
-            // overlay just reads "is something happening for this doc?"
             let bus = world.resource::<lunco_workbench::status_bus::StatusBus>();
-            let busy = active_doc.map(|d| bus.is_busy(lunco_workbench::status_bus::BusyScope::Document(d.0))).unwrap_or(false);
-            // AST-stale by itself isn't tracked on the bus today —
-            // edits-in-progress are an internal mechanic that doesn't
-            // mint a handle. Keep it as a fallback so the overlay
-            // doesn't flash empty during an ops-driven rebuild.
-            let parse_pending = active_doc.and_then(|d| world.resource::<crate::ui::state::ModelicaDocumentRegistry>().host(d).map(|h| h.document().ast_is_stale())).unwrap_or(false);
-            let in_flight = busy || parse_pending;
-
-            (err, !has_content && in_flight, !has_content && !in_flight)
+            active_doc
+                .map(|d| bus.lifecycle(lunco_workbench::status_bus::BusyScope::Document(d.0), has_content))
+                .unwrap_or(lunco_workbench::status_bus::LifecycleState::Empty)
         };
 
-        if let Some((class, err)) = load_error {
-            overlays::render_drill_in_error_overlay(ui, response.rect, &class, &err, &theme);
-        } else if show_indicator {
-            let bus = world.resource::<lunco_workbench::status_bus::StatusBus>();
-            if let Some(doc_id) = active_doc {
-                lunco_ui::busy::LoadingIndicator::for_scope(lunco_workbench::status_bus::BusyScope::Document(doc_id.0))
-                    .overlay_on(ui, response.rect, bus, &theme);
+        use lunco_workbench::status_bus::LifecycleState;
+        match lifecycle {
+            LifecycleState::Loading => {
+                let bus = world.resource::<lunco_workbench::status_bus::StatusBus>();
+                if let Some(doc_id) = active_doc {
+                    lunco_ui::busy::LoadingIndicator::for_scope(lunco_workbench::status_bus::BusyScope::Document(doc_id.0))
+                        .overlay_on(ui, response.rect, bus, &theme);
+                }
+                ui.ctx().request_repaint();
             }
-            ui.ctx().request_repaint();
-        } else if show_empty {
-            overlays::render_empty_diagram_overlay(ui, response.rect, world);
+            LifecycleState::Failed(msg) => {
+                overlays::render_drill_in_error_overlay(ui, response.rect, &drilled_class, &msg, &theme);
+            }
+            LifecycleState::Empty => {
+                overlays::render_empty_diagram_overlay(ui, response.rect, world);
+            }
+            LifecycleState::Content => {}
         }
     }
 

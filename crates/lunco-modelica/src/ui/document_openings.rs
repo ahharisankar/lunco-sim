@@ -37,12 +37,12 @@ pub enum OpeningState {
         started: Instant,
         task: Task<FileLoadResult>,
         /// RAII guard registered with [`lunco_workbench::status_bus::StatusBus`]
-        /// at insert time. Same role as [`DrillInBinding::_busy`] and
-        /// [`DuplicateBinding::_busy`]: keeps a `(Document(doc_id),
+        /// at insert time. Same role as [`DrillInBinding::busy`] and
+        /// [`DuplicateBinding::busy`]: keeps a `(Document(doc_id),
         /// "opening")` entry on the bus from "user clicked open" until
         /// the file-load driver hands it off to the projection stage
         /// via [`crate::ui::panels::canvas_diagram::CanvasDiagramState::stash_projection_handoff`].
-        _busy: lunco_workbench::status_bus::BusyHandle,
+        busy: lunco_workbench::status_bus::BusyHandle,
     },
     /// MSL drill-in slim-slice load. Built by
     /// [`crate::ui::panels::canvas_diagram::drill_into_class`].
@@ -134,6 +134,59 @@ impl DocumentOpenings {
     }
 }
 
+/// In-flight per-document `StatusBus` handles for AST reparse —
+/// the debounced background parse that runs after a free-form source
+/// edit. Distinct from file-load / drill-in / duplicate openings
+/// because reparse doesn't have its own typed `Task<...>` we can
+/// hang a handle off (parse is dispatched through
+/// `ModelicaEngineHandle::upsert_document_async`, which takes a
+/// caller-provided spawn callback, plus a wasm worker fallback —
+/// too many paths to thread a handle through individually).
+///
+/// Instead, [`track_ast_reparse_busy`] derives "is reparse in
+/// flight?" from the document's own `ast_is_stale()` predicate each
+/// frame: rising edge mints a `Document(d) / "reparse"` entry on the
+/// bus; falling edge drops it. Renders see continuous busy across
+/// typing-debounce → parse → AST-install without a per-edit gap.
+#[derive(Resource, Default)]
+pub struct AstReparseBusyHandles {
+    handles: HashMap<DocumentId, lunco_workbench::status_bus::BusyHandle>,
+}
+
+/// Edge-triggered tracker for AST reparse state. Mints a `StatusBus`
+/// handle when `ast_is_stale()` flips from false → true and drops it
+/// when it flips back. Lets the canvas overlay rely on
+/// `bus.lifecycle(Document(d), ...)` alone without an ast-stale
+/// fallback predicate.
+pub fn track_ast_reparse_busy(
+    registry: Res<crate::ui::state::ModelicaDocumentRegistry>,
+    mut handles: ResMut<AstReparseBusyHandles>,
+    mut bus: ResMut<lunco_workbench::status_bus::StatusBus>,
+) {
+    use lunco_workbench::status_bus::{BusyScope, StatusBus};
+    let mut still_stale: std::collections::HashSet<DocumentId> = Default::default();
+    for (doc_id, host) in registry.iter() {
+        if !host.document().ast_is_stale() {
+            continue;
+        }
+        still_stale.insert(doc_id);
+        if handles.handles.contains_key(&doc_id) {
+            continue;
+        }
+        let h = StatusBus::begin(
+            &mut bus,
+            BusyScope::Document(doc_id.0),
+            "reparse",
+            "Reparsing…",
+        );
+        handles.handles.insert(doc_id, h);
+    }
+    // Drop handles for docs that are no longer stale (or have been
+    // closed). `Drop` clears the bus entry on the next
+    // `drainbusy_drops` tick.
+    handles.handles.retain(|d, _| still_stale.contains(d));
+}
+
 /// Drive [`OpeningState::FileLoad`] entries: poll each pending
 /// file-read task, install the resulting document into the registry,
 /// and clear the entry. Mirrors the previous `cache.file_tasks`
@@ -160,8 +213,8 @@ pub fn drive_file_load_openings(
         // `Document(doc_id)` entry continuously across the
         // file-load → projection boundary; the projection spawn
         // releases it via `complete_projection_handoff`.
-        if let Some(OpeningState::FileLoad { _busy, .. }) = openings.remove(doc_id) {
-            canvas_state.stash_projection_handoff(result.doc_id, _busy);
+        if let Some(OpeningState::FileLoad { busy, .. }) = openings.remove(doc_id) {
+            canvas_state.stash_projection_handoff(result.doc_id, busy);
         }
         registry.install_prebuilt(result.doc_id, result.doc);
         workbench.diagram_dirty = true;

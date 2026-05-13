@@ -38,10 +38,10 @@ pub struct DrillInBinding {
     /// RAII guard registered with [`lunco_workbench::status_bus::StatusBus`].
     /// Dropped together with the binding (on install or on document
     /// removal) — the bus then clears the
-    /// `(BusyScope::Document, "drill-in")` slot via `drain_busy_drops`.
+    /// `(BusyScope::Document, "drill-in")` slot via `drainbusy_drops`.
     /// Kept as a field so any future work that wants to query
     /// "is this document loading?" goes through the bus.
-    pub _busy: lunco_workbench::status_bus::BusyHandle,
+    pub busy: lunco_workbench::status_bus::BusyHandle,
 }
 
 /// Tab-to-task binding for duplicate-to-workspace operations whose
@@ -72,9 +72,9 @@ pub struct DuplicateBinding {
     pub started: web_time::Instant,
     pub task: bevy::tasks::Task<crate::document::ModelicaDocument>,
     /// RAII guard registered with [`lunco_workbench::status_bus::StatusBus`].
-    /// Same lifecycle as [`DrillInBinding::_busy`] — clears the
+    /// Same lifecycle as [`DrillInBinding::busy`] — clears the
     /// `(BusyScope::Document, "duplicate")` slot on Drop.
-    pub _busy: lunco_workbench::status_bus::BusyHandle,
+    pub busy: lunco_workbench::status_bus::BusyHandle,
 }
 
 /// Bevy system: poll pending duplicate bg tasks; `install_prebuilt`
@@ -127,7 +127,7 @@ pub fn drive_duplicate_loads(
         // once its own entry is in place. Without this stash the bus
         // briefly goes idle for the doc and the canvas overlay
         // flickers off then on.
-        canvas_state.stash_projection_handoff(doc_id, b._busy);
+        canvas_state.stash_projection_handoff(doc_id, b.busy);
         let dup_display_name = b.display_name;
         let origin_short = b.origin_short;
         let inner_drill = b.inner_drill;
@@ -254,7 +254,7 @@ pub fn drive_drill_in_loads(
             continue;
         };
         let qualified = b.qualified;
-        let mut busy = b._busy;
+        let mut busy = b.busy;
         let doc = match result {
             Ok(doc) => {
                 // Success path: hand the parse-phase busy handle to
@@ -270,24 +270,15 @@ pub fn drive_drill_in_loads(
                     "[CanvasDiagram] drill-in: class `{}` load failed: {}",
                     qualified, msg
                 );
-                // Failure path: drop the handle here with `Failed`
-                // outcome — no handoff, no projection. The bus
-                // records the outcome under
-                // `(Document(d), "drill-in")` so panels reading
-                // `bus.lifecycle(...)` see `LifecycleState::Failed`
-                // even after the entry is cleared. Tab-level
-                // `load_error` plumbing below is the existing UI
-                // path; we mirror the message into both.
-                busy.set_outcome(lunco_workbench::status_bus::BusyOutcome::Failed(msg.clone()));
+                // Drop the handle with `Failed` outcome — no handoff,
+                // no projection. The bus records the outcome under
+                // `(Document(d), "drill-in")`; the canvas overlay
+                // picks it up via `bus.lifecycle(...) →
+                // LifecycleState::Failed(msg)` and renders the
+                // drill-in error overlay. No per-tab `load_error`
+                // plumbing needed.
+                busy.set_outcome(lunco_workbench::status_bus::BusyOutcome::Failed(msg));
                 drop(busy);
-                // Surface the failure on every tab waiting on this
-                // (doc, drilled_class). Without this the canvas overlay
-                // would show "Loading resource…" forever.
-                for (_id, state) in tabs.iter_mut_for_doc(doc_id) {
-                    if state.drilled_class.as_deref() == Some(qualified.as_str()) {
-                        state.load_error = Some(msg.clone());
-                    }
-                }
                 continue;
             }
         };
@@ -491,7 +482,7 @@ fn open_drill_in_tab(
                 qualified: qualified.to_string(),
                 started: web_time::Instant::now(),
                 task,
-                _busy: busy,
+                busy,
             }),
         );
     }
