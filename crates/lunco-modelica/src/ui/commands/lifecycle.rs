@@ -140,7 +140,6 @@ pub fn on_create_new_scratch_model(
 
     let source_arc: Arc<str> = source.into();
     workbench.editor_buffer = source_arc.to_string();
-    workbench.diagram_dirty = true;
 
     workspace.active_document = Some(doc_id);
 

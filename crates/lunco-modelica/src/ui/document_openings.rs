@@ -172,7 +172,6 @@ pub fn track_ast_reparse_busy(
 /// drain that lived in `handle_package_loading_tasks`.
 pub fn drive_file_load_openings(
     mut openings: ResMut<DocumentOpenings>,
-    mut workbench: ResMut<crate::ui::state::WorkbenchState>,
     mut registry: ResMut<crate::ui::state::ModelicaDocumentRegistry>,
     mut workspace: ResMut<lunco_workbench::WorkspaceResource>,
     mut canvas_state: ResMut<crate::ui::panels::canvas_diagram::CanvasDiagramState>,
@@ -196,7 +195,6 @@ pub fn drive_file_load_openings(
             canvas_state.stash_projection_handoff(result.doc_id, busy);
         }
         registry.install_prebuilt(result.doc_id, result.doc);
-        workbench.diagram_dirty = true;
         workspace.active_document = Some(result.doc_id);
     }
 }
