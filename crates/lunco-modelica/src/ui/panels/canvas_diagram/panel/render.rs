@@ -98,6 +98,24 @@ pub(crate) fn render_diagram_canvas(
             super::super::ops::apply_ops_public(world, doc_id, all_ops);
         }
     }
+
+    // Apply in-canvas input-control widget writes. The control widget
+    // (sliders rendered next to component icons) queues writes during
+    // paint; we drain after the canvas finishes rendering so the
+    // simulator's `model.inputs` map (and worker `set_input`) update
+    // continuously while the user drags the slider.
+    if let Some(doc_id) = active_doc {
+        let writes = lunco_viz::kinds::canvas_plot_node::drain_input_writes(ui.ctx());
+        for (name, value) in writes {
+            if let Err(err) = crate::ui::commands::sim::apply_set_model_input(
+                world, doc_id, &name, value,
+            ) {
+                bevy::log::warn!(
+                    "[CanvasDiagram] in-canvas input write failed: name={name} value={value} err={err:?}"
+                );
+            }
+        }
+    }
     
     mark("tail (events/menu/fit)", &mut phase_t, &mut phase_log);
     log_frame_times(_frame_t0.elapsed().as_secs_f64() * 1000.0, 0.0);

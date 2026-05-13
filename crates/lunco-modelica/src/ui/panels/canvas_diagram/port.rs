@@ -41,6 +41,15 @@ pub(super) fn port_kind_str(kind: crate::visual_diagram::PortKind) -> &'static s
 ///   knob-style relative-drag widget for unbounded inputs and an
 ///   explicit `__LunCo_inputControl(target=...)` annotation for
 ///   model authors who want fine control over placement / kind.
+/// Heuristic `[min, max]` for unbounded inputs. Picks a symmetric
+/// range around the current value's magnitude so dragging covers a
+/// sensible swing. Zero values get `[-1, 1]` to avoid a zero-width
+/// strip. Non-negative values stay non-negative.
+fn fallback_range(value: f64) -> (f64, f64) {
+    let mag = value.abs().max(1.0) * 2.0;
+    if value < 0.0 { (-mag, mag) } else { (0.0, mag) }
+}
+
 pub(super) fn paint_input_control_widget(
     ui: &mut egui::Ui,
     icon_rect: egui::Rect,
@@ -54,16 +63,20 @@ pub(super) fn paint_input_control_widget(
     let snap = lunco_viz::kinds::canvas_plot_node::fetch_input_control_snapshot(ui.ctx());
     let prefix = format!("{instance_name}.");
 
+    // Show a slider for *every* input on this instance, not just
+    // bounded ones. Unbounded inputs get a heuristic range derived
+    // from the current value so users still get a draggable control;
+    // they can always edit the parameter literal for precise input.
     let mut bound: Vec<(String, f64, f64, f64)> = snap
         .inputs
         .iter()
         .filter(|(name, _)| name.starts_with(&prefix))
-        .filter_map(|(name, (value, min, max))| {
-            let (mn, mx) = (min.as_ref()?, max.as_ref()?);
-            if mx <= mn {
-                return None;
-            }
-            Some((name.clone(), *value, *mn, *mx))
+        .map(|(name, (value, min, max))| {
+            let (mn, mx) = match (min, max) {
+                (Some(a), Some(b)) if b > a => (*a, *b),
+                _ => fallback_range(*value),
+            };
+            (name.clone(), *value, mn, mx)
         })
         .collect();
     if bound.is_empty() {
@@ -86,10 +99,12 @@ pub(super) fn paint_input_control_widget(
     let strip_top_y = icon_rect.center().y - h * 0.5;
 
     for (idx, (name, value, mn, mx)) in bound.iter().enumerate() {
+        // Lay sliders OUTSIDE the icon to the right so they never
+        // occlude the component artwork (previously the strip was
+        // painted on top of the icon, hiding e.g. the valve body).
         let x = icon_rect.right()
-            - strip_pad
-            - strip_width
-            - (idx as f32) * (strip_width + strip_gap);
+            + strip_pad
+            + (idx as f32) * (strip_width + strip_gap);
         let strip_rect = egui::Rect::from_min_size(
             egui::pos2(x, strip_top_y),
             egui::vec2(strip_width, h),
@@ -141,13 +156,19 @@ pub(super) fn paint_input_control_widget(
             }
         }
         if response.hovered() {
-            let leaf = name.rsplit('.').next().unwrap_or(name);
-            let tooltip = if (mx - mn - 100.0).abs() < 1e-6 && mn.abs() < 1e-6 {
-                format!("{leaf}: {value:.1} %")
-            } else {
-                format!("{leaf}: {value:.3} (range {mn:.2} … {mx:.2})")
-            };
-            response.on_hover_text(tooltip);
+            // Strip the leading instance prefix so the tooltip shows
+            // the variable's name (e.g. `opening`, `availability`)
+            // rather than the generic RealInput `.value` leaf or the
+            // fully-qualified path. Falls back to the bare leaf when
+            // the qualified form has no recognisable inner segment.
+            let var_name = name
+                .strip_prefix(&prefix)
+                .map(|rest| {
+                    let trimmed = rest.trim_end_matches(".value");
+                    if trimmed.is_empty() { rest } else { trimmed }
+                })
+                .unwrap_or_else(|| name.rsplit('.').next().unwrap_or(name));
+            response.on_hover_text(var_name.to_string());
         }
     }
 }

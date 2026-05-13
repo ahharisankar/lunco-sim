@@ -95,6 +95,6 @@ pub fn apply_set_model_input(
         });
     }
     model.inputs.insert(name.to_string(), value);
-    bevy::log::info!("[SetModelInput] doc={} {}={}", doc.raw(), name, value);
+    bevy::log::debug!("[SetModelInput] doc={} {}={}", doc.raw(), name, value);
     Ok(doc)
 }

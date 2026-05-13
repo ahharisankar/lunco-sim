@@ -919,6 +919,47 @@ fn flatten_class_parameters(
     out
 }
 
+/// Convert a parameter's raw AST literal into a human-friendly
+/// decimal form. Modelica authors routinely write `3.0e6` /
+/// `1.0e-4`; that exponent form is fine for source but unreadable
+/// in a parameter editor. If the string parses cleanly as a number
+/// we reformat without scientific notation; anything that doesn't
+/// parse (expressions, strings, booleans, enum literals) is left
+/// untouched.
+fn format_param_value(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let Ok(v) = trimmed.parse::<f64>() else {
+        return raw.to_string();
+    };
+    if !v.is_finite() {
+        return raw.to_string();
+    }
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    // Pick a precision that preserves the value but trims trailing
+    // zeros. `{:.*}` with 12 decimals + trim handles both very large
+    // (3e6 → "3000000") and small (1e-4 → "0.0001") cleanly.
+    let mag = v.abs();
+    let decimals = if mag >= 1.0 {
+        // Show up to 6 fractional digits for "normal" sized values.
+        6
+    } else {
+        // Small values need more decimals to retain significance.
+        let zeros = (-mag.log10()).ceil() as usize;
+        (zeros + 6).min(20)
+    };
+    let s = format!("{:.*}", decimals, v);
+    let s = if s.contains('.') {
+        let t = s.trim_end_matches('0');
+        let t = t.trim_end_matches('.');
+        t.to_string()
+    } else {
+        s
+    };
+    s
+}
+
 fn render_active_class_parameters(
     ui: &mut egui::Ui,
     world: &mut World,
@@ -962,6 +1003,7 @@ fn render_active_class_parameters(
                 let editable = row.depth() <= 1;
                 let path = row.path();
                 ui.horizontal(|ui| {
+                    let display_value = format_param_value(&row.value);
                     if editable {
                         ui.label(format!("{:18}", path));
                         // Persist the edit buffer in egui memory keyed
@@ -976,7 +1018,7 @@ fn render_active_class_parameters(
                         let edit_id = egui::Id::new(("telem_flat_param", path.as_str()));
                         let mut buf = ui
                             .data_mut(|d| d.get_temp::<String>(edit_id))
-                            .unwrap_or_else(|| row.value.clone());
+                            .unwrap_or_else(|| display_value.clone());
                         let resp = ui.add(
                             egui::TextEdit::singleline(&mut buf)
                                 .id(edit_id)
@@ -987,11 +1029,11 @@ fn render_active_class_parameters(
                         }
                         let commit = resp.lost_focus()
                             && (ui.input(|i| i.key_pressed(egui::Key::Enter))
-                                || buf != row.value);
+                                || buf != display_value);
                         if resp.lost_focus() {
                             ui.data_mut(|d| d.remove::<String>(edit_id));
                         }
-                        if commit && buf != row.value {
+                        if commit && buf != display_value {
                             let (component, param) = if row.depth() == 0 {
                                 (row.leaf.clone(), String::new())
                             } else {
@@ -1013,7 +1055,7 @@ fn render_active_class_parameters(
                                 .size(11.0),
                         );
                         ui.label(
-                            egui::RichText::new(&row.value)
+                            egui::RichText::new(&display_value)
                                 .monospace()
                                 .size(11.0),
                         );
