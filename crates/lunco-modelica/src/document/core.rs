@@ -175,7 +175,7 @@ impl ModelicaDocument {
             ast
         };
 
-        let class_def = super::apply::find_class_by_short_name_recursive(&ast, short_name)
+        let class_def = crate::ast_extract::find_class_by_short_name(&ast, short_name)
             .ok_or_else(|| format!("class `{qualified}` not found in `{}`", path.display()))?;
         let (full_start, full_end) = class_def
             .full_span_with_leading_comments(&full_source)

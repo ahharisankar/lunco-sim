@@ -6,6 +6,12 @@ use super::errors::AstMutError;
 use crate::pretty;
 
 /// Resolve a dotted-qualified class path against a parsed `StoredDefinition`.
+///
+/// Strips the file's `within` clause prefix at segment boundary
+/// before walking — same rule as the read-path
+/// `crate::diagram::find_class_by_qualified_name`. Both paths share
+/// `crate::diagram::strip_within_prefix` so a future change to
+/// within-handling can't silently diverge between read and write.
 pub fn lookup_class_mut<'a>(
     sd: &'a mut StoredDefinition,
     qualified: &str,
@@ -13,7 +19,13 @@ pub fn lookup_class_mut<'a>(
     if qualified.is_empty() {
         return Err(AstMutError::ClassNotFound(qualified.into()));
     }
-    let mut parts = qualified.split('.');
+    // Resolve the within-stripped path *before* taking the mutable
+    // borrow on `sd.classes`. The strip only needs an immutable
+    // borrow of `sd.within`; if we did it inside the walk Rust would
+    // complain about overlapping borrows of `sd`.
+    let local_path: String =
+        crate::diagram::strip_within_prefix(qualified, sd.within.as_ref()).to_string();
+    let mut parts = local_path.split('.');
     let head = parts.next().expect("split always yields at least one piece");
     let mut current = sd
         .classes

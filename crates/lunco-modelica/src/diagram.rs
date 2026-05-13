@@ -24,7 +24,7 @@
 use lunco_core::diagram::{
     ComponentGraph, ComponentPort, EdgeKind, NodeId, NodeKind,
 };
-use rumoca_session::parsing::ast::{ClassDef, Component, Equation, Expression, StoredDefinition, Variability, Causality};
+use rumoca_session::parsing::ast::{ClassDef, Component, Equation, Expression, Name, StoredDefinition, Variability, Causality};
 use rumoca_session::parsing::ClassType;
 use std::collections::HashMap;
 
@@ -493,6 +493,27 @@ impl ModelicaComponentBuilder {
 ///    with the AST's `within` clause, strip it before walking.
 ///    Lets drill-in callers pass `"Modelica.Blocks.Continuous.CriticalDamping"`
 ///    without knowing the file's internal rooting.
+/// Strip the AST's `within` clause prefix from `qualified`, when it
+/// appears at a **segment boundary** (followed by `.`). Returns the
+/// path that's safe to split on `.` and walk against `ast.classes`.
+///
+/// Centralised here so the read path (`find_class_by_qualified_name`)
+/// and the write path (`ast_mut::lookup_class_mut`) can't silently
+/// disagree on within handling — the exact divergence that shipped
+/// the `walk_qualified` bug (string-prefix vs segment-prefix). The
+/// `and_then(strip_prefix('.'))` is the load-bearing part: it
+/// guarantees the prefix match ends at a Modelica name boundary, so
+/// `within = "AnnotatedRocketStage"` does *not* strip the leading
+/// `AnnotatedRocketStage` out of `AnnotatedRocketStageCopy.X`.
+pub fn strip_within_prefix<'a>(qualified: &'a str, within: Option<&Name>) -> &'a str {
+    let Some(within) = within else { return qualified };
+    let within_str = within.to_string();
+    qualified
+        .strip_prefix(&within_str)
+        .and_then(|s| s.strip_prefix('.'))
+        .unwrap_or(qualified)
+}
+
 pub fn find_class_by_qualified_name<'a>(
     ast: &'a StoredDefinition,
     name: &str,
@@ -509,16 +530,7 @@ pub fn find_class_by_qualified_name<'a>(
         return None;
     }
 
-    let mut path: &str = name;
-    if let Some(within) = ast.within.as_ref() {
-        let within_str = within.to_string();
-        if let Some(rest) = path
-            .strip_prefix(&within_str)
-            .and_then(|s| s.strip_prefix('.'))
-        {
-            path = rest;
-        }
-    }
+    let path = strip_within_prefix(name, ast.within.as_ref());
     let mut segments = path.split('.');
     let first = segments.next()?;
     let mut current = ast.classes.get(first)?;

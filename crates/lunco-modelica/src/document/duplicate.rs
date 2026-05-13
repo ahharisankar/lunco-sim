@@ -88,7 +88,7 @@ pub(crate) fn spans_from_ast(
     source: &str,
     class_name: &str,
 ) -> Option<DuplicateExtract> {
-    let class = find_top_or_nested_class_by_short_name(ast, class_name)?;
+    let class = crate::ast_extract::find_class_by_short_name(ast, class_name)?;
     let (full_start, full_end) = class.full_span_with_leading_comments(source)?;
     let end_tok = class.end_name_token.as_ref()?;
     Some(DuplicateExtract {
@@ -101,37 +101,11 @@ pub(crate) fn spans_from_ast(
     })
 }
 
-/// Find a class by simple name anywhere in the parsed AST — first at
-/// the top level, then walking nested-class trees.
-pub(crate) fn find_top_or_nested_class_by_short_name<'a>(
-    ast: &'a rumoca_session::parsing::ast::StoredDefinition,
-    short: &str,
-) -> Option<&'a rumoca_session::parsing::ast::ClassDef> {
-    if let Some(class) = ast.classes.get(short) {
-        return Some(class);
-    }
-    for class in ast.classes.values() {
-        if let Some(found) = find_nested_by_short_name(class, short) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-pub(crate) fn find_nested_by_short_name<'a>(
-    class: &'a rumoca_session::parsing::ast::ClassDef,
-    short: &str,
-) -> Option<&'a rumoca_session::parsing::ast::ClassDef> {
-    if let Some(child) = class.classes.get(short) {
-        return Some(child);
-    }
-    for nested in class.classes.values() {
-        if let Some(found) = find_nested_by_short_name(nested, short) {
-            return Some(found);
-        }
-    }
-    None
-}
+// Class-by-short-name lookup lives in `crate::ast_extract::find_class_by_short_name`.
+// Previously duplicated here as `find_top_or_nested_class_by_short_name` +
+// `find_nested_by_short_name`; collapsed to the canonical helper so the
+// three short-name lookups can't silently disagree (same shape as the
+// `walk_qualified` / `find_class_by_qualified_name` bug).
 
 /// Walk from a class file's directory up through the filesystem,
 /// collecting `import` statements from every `package.mo` on the
