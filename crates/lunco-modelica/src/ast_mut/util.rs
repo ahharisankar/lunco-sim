@@ -140,24 +140,13 @@ pub fn graphic_entry_arg<'a>(expr: &'a Expression, key: &str) -> Option<&'a Expr
 /// Predicate: is `expr` a `LunCoAnnotations.PlotNode(...)` (or bare
 /// `PlotNode(...)`) whose `signal=` matches?
 pub fn plot_node_signal_matches(expr: &Expression, target_signal: &str) -> bool {
-    if !is_plot_node_record_call(expr) {
+    if !crate::annotations::is_plot_node_record_call(expr) {
         return false;
     }
     matches!(
         graphic_entry_arg(expr, "signal"),
         Some(v) if string_literal_value(v) == Some(target_signal.to_string())
     )
-}
-
-/// True when `expr` is a `LunCoAnnotations.PlotNode(...)` or bare
-/// `PlotNode(...)` function-call / class-modification expression.
-pub fn is_plot_node_record_call(expr: &Expression) -> bool {
-    let parts = match expr {
-        Expression::FunctionCall { comp, .. } => &comp.parts,
-        Expression::ClassModification { target, .. } => &target.parts,
-        _ => return false,
-    };
-    parts.last().map(|t| &*t.ident.text) == Some("PlotNode")
 }
 
 pub fn point_pair(e: &Expression) -> Option<(f32, f32)> {

@@ -1208,10 +1208,9 @@ impl DefaultTool {
             State::ResizingNode { id, original_rect, .. } => {
                 // Live mutation already happened during the drag.
                 // Emit a single `NodeResized` on release so domain
-                // code can persist the new size (plot tiles round-
-                // trip the rect into the `__LunCo_PlotNode` extent;
-                // resizable component icons translate it to a
-                // `SetPlacement` with the new width/height). Skip
+                // code can persist the new size (resizable component
+                // icons translate it to a `SetPlacement` with the
+                // new width/height). Skip
                 // if the rect didn't actually change — same noise
                 // suppression `NodeMoved` does.
                 if let Some(n) = ops.scene.node(id) {

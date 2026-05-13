@@ -41,16 +41,12 @@ pub fn extract_icon_with_visibility(
 }
 
 /// Extract the `Diagram(...)` annotation from a class's annotation list.
-/// Also pulls LunCo vendor plot tiles from the sibling
-/// `__LunCo(plotNodes={LunCoAnnotations.PlotNode(...)})` annotation,
-/// so callers see a single combined view of the diagram.
 pub fn extract_diagram(annotations: &[Expression]) -> Option<Diagram> {
     let diagram_call = find_call(annotations, "Diagram")?;
     let diagram_args = call_args(diagram_call)?;
     Some(Diagram {
         coordinate_system: extract_coordinate_system(diagram_args).unwrap_or_default(),
         graphics: extract_graphics(diagram_args),
-        plot_nodes: extract_lunco_plot_nodes(annotations),
     })
 }
 
@@ -72,7 +68,7 @@ pub fn extract_lunco_plot_nodes(annotations: &[Expression]) -> Vec<LunCoPlotNode
 }
 
 fn extract_lunco_plot_node_record(expr: &Expression) -> Option<LunCoPlotNode> {
-    if !is_plot_node_call(expr) {
+    if !is_plot_node_record_call(expr) {
         return None;
     }
     let args = call_args(expr)?;
@@ -88,18 +84,6 @@ fn extract_lunco_plot_node_record(expr: &Expression) -> Option<LunCoPlotNode> {
         .map(|s| s.trim_matches('"').to_string())
         .unwrap_or_default();
     Some(LunCoPlotNode { extent, signal, title })
-}
-
-/// Match `LunCoAnnotations.PlotNode(...)` or bare `PlotNode(...)`
-/// (the latter for `import LunCoAnnotations.*;`-style usage).
-fn is_plot_node_call(expr: &Expression) -> bool {
-    let comp_parts = match expr {
-        Expression::FunctionCall { comp, .. } => &comp.parts,
-        Expression::ClassModification { target, .. } => &target.parts,
-        _ => return false,
-    };
-    let last = comp_parts.last().map(|t| t.ident.text.as_ref());
-    last == Some("PlotNode")
 }
 
 /// Extract the `experiment(...)` annotation from a class's annotation

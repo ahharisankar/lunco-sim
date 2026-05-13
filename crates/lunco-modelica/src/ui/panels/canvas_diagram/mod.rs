@@ -275,7 +275,6 @@ pub type BackgroundDiagramHandle = std::sync::Arc<
         Option<(
             crate::annotations::CoordinateSystem,
             Vec<crate::annotations::GraphicItem>,
-            Vec<crate::annotations::LunCoPlotNode>,
         )>,
     >,
 >;

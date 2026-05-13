@@ -323,7 +323,7 @@ fn render_plot_node_editor(
             apply_plot_binding(world, doc_id, node_id, 0, "");
         }
         // Title editor — writes back to source as the
-        // `__LunCo_PlotNode(title="…")` argument. Buffer per node
+        // `LunCoAnnotations.PlotNode(title="…")` field. Buffer per node
         // id keyed in egui memory so typing isn't preempted by the
         // re-projection that follows each commit. The op only
         // fires on Enter / focus loss to avoid a write per

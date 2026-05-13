@@ -31,7 +31,7 @@ impl lunco_canvas::Layer for DiagramDecorationLayer {
         _selection: &lunco_canvas::Selection,
     ) {
         let Ok(guard) = self.data.read() else { return };
-        let Some((coord_system, graphics, _plot_nodes)) = guard.as_ref() else {
+        let Some((coord_system, graphics)) = guard.as_ref() else {
             return;
         };
         // Map the coordinate system's extent (Modelica +Y up) to the
@@ -82,22 +82,22 @@ impl lunco_canvas::Layer for DiagramDecorationLayer {
 /// decoration layer to paint MSL-style diagram callouts (labelled
 /// regions, accent text) behind the nodes.
 /// Emit canvas Nodes for every interactive item in the active
-/// class's diagram. Two sources:
-///   * `Text` entries in `Diagram(graphics=…)` → `lunco.modelica.text`
-///     (editable label).
-///   * `LunCoAnnotations.PlotNode(...)` records in
-///     `annotation(__LunCo(plotNodes=…))` → `lunco.viz.plot` (live
-///     signal tile).
+/// class's `Diagram(graphics=…)`. Today that's only
+/// `Text` → `lunco.modelica.text` (editable label). LunCo plot
+/// metadata lives in `annotation(__LunCo(plotNodes=…))` and is
+/// preserved on round-trip, but does *not* render as an overlay —
+/// the standard `Rectangle` + `Text` placeholders in `graphics={…}`
+/// (which OMEdit also renders) are the single source of truth for
+/// what the user sees on either editor.
 ///
 /// Each emitted Node carries a stable `origin` marker derived from
-/// the annotation's position in the source (`plot:<idx>:<signal>` or
-/// `text:<idx>`) so the canvas-edit pipeline recognises it as
-/// source-backed and the carry-over filter doesn't double-insert.
-/// Returns the set of emitted origin keys.
+/// the annotation's position in the source (`text:<idx>`) so the
+/// canvas-edit pipeline recognises it as source-backed and the
+/// carry-over filter doesn't double-insert. Returns the set of
+/// emitted origin keys.
 pub(super) fn emit_diagram_decorations(
     scene: &mut lunco_canvas::scene::Scene,
     graphics: &[crate::annotations::GraphicItem],
-    plot_nodes: &[crate::annotations::LunCoPlotNode],
 ) -> std::collections::HashSet<String> {
     use crate::annotations::GraphicItem;
     let mut origins: std::collections::HashSet<String> = Default::default();
@@ -146,56 +146,7 @@ pub(super) fn emit_diagram_decorations(
                 visual_rect: None,
             });
             text_idx += 1;
-            continue;
         }
-    }
-    for (idx, plot) in plot_nodes.iter().enumerate() {
-        // `entity` is the runtime Bevy id of the simulator host that
-        // produces samples for this signal. We don't know it at
-        // projection time (the source can be loaded long before the
-        // sim spawns), so we leave it as `Entity::PLACEHOLDER` (0)
-        // — the live sample resolver in
-        // `lunco_viz::canvas_plot_node` keys by signal path and
-        // recovers the active producer at fetch time.
-        let payload = lunco_viz::kinds::canvas_plot_node::PlotNodeData {
-            entity: 0,
-            signal_path: plot.signal.clone(),
-            title: plot.title.clone(),
-        };
-        let data: lunco_canvas::NodeData = std::sync::Arc::new(payload);
-        let origin = format!("plot:{idx}:{}", plot.signal);
-        origins.insert(origin.clone());
-        let id = scene.alloc_node_id();
-        scene.insert_node(lunco_canvas::scene::Node {
-            id,
-            rect: {
-                // Modelica diagrams are +Y up; canvas world is +Y
-                // down (`coords::modelica_to_canvas` negates Y).
-                // Apply the flip per corner, then normalise so
-                // `from_min_max` gets `min < max` on both axes —
-                // Modelica `extent={{x1,y1},{x2,y2}}` doesn't
-                // enforce corner ordering. Without this two
-                // failures stack: a flipped Y range that puts the
-                // tile far above the icons instead of below them,
-                // and a zero-area rect when the source's first
-                // corner has the larger y.
-                let x1 = plot.extent.p1.x as f32;
-                let x2 = plot.extent.p2.x as f32;
-                let y1 = -(plot.extent.p1.y as f32);
-                let y2 = -(plot.extent.p2.y as f32);
-                lunco_canvas::Rect::from_min_max(
-                    lunco_canvas::Pos::new(x1.min(x2), y1.min(y2)),
-                    lunco_canvas::Pos::new(x1.max(x2), y1.max(y2)),
-                )
-            },
-            kind: lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND.into(),
-            data,
-            ports: Vec::new(),
-            label: String::new(),
-            origin: Some(origin),
-            resizable: true,
-            visual_rect: None,
-        });
     }
     origins
 }

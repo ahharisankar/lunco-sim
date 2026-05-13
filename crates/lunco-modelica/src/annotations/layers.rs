@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use super::types::{Extent, Point, CoordinateSystem};
-use super::graphics::{GraphicItem, LunCoPlotNode};
+use super::graphics::GraphicItem;
 
 /// Decoded `Icon(coordinateSystem=..., graphics={...})` annotation.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -116,16 +116,14 @@ impl Icon {
     }
 }
 
-/// Decoded `Diagram(coordinateSystem=..., graphics={...})` annotation,
-/// plus LunCo vendor plot tiles extracted from the sibling
-/// `__LunCo(plotNodes=...)` annotation. `plot_nodes` is empty for any
-/// class that doesn't carry the vendor annotation.
+/// Decoded `Diagram(coordinateSystem=..., graphics={...})` annotation.
+/// LunCo vendor plot metadata lives in a sibling
+/// `__LunCo(plotNodes=...)` annotation and is *not* included here —
+/// callers that want it use `extract_lunco_plot_nodes` directly.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Diagram {
     pub coordinate_system: CoordinateSystem,
     pub graphics: Vec<GraphicItem>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub plot_nodes: Vec<LunCoPlotNode>,
 }
 
 /// Decoded `experiment(StartTime=..., StopTime=..., Tolerance=..., Interval=...)`

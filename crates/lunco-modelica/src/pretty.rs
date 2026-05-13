@@ -276,21 +276,6 @@ pub fn lunco_plot_node_inner(p: &LunCoPlotNodeSpec) -> String {
     s
 }
 
-/// Render the full `__LunCo(plotNodes={...})` vendor annotation
-/// fragment (the top-level entry that sits alongside `Diagram(...)`
-/// in a class annotation list).
-pub fn lunco_annotation_inner(plots: &[LunCoPlotNodeSpec]) -> String {
-    let mut s = String::from("__LunCo(plotNodes={");
-    for (i, p) in plots.iter().enumerate() {
-        if i > 0 {
-            s.push_str(", ");
-        }
-        s.push_str(&lunco_plot_node_inner(p));
-    }
-    s.push_str("})");
-    s
-}
-
 /// Render a `Placement(transformation(extent={{x1,y1},{x2,y2}}))` fragment
 /// *without* the enclosing `annotation(...)` wrapper.
 pub fn placement_inner(p: &Placement) -> String {
