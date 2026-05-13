@@ -25,10 +25,6 @@ use crate::ui::state::ModelicaDocumentRegistry;
 /// parse) and installs it into the registry, clearing the entry.
 pub struct DrillInBinding {
     pub qualified: String,
-    /// When the tab was opened. Used to show elapsed-seconds in the
-    /// loading overlay so the user sees work is happening even when
-    /// rumoca takes tens of seconds on large package files.
-    pub started: web_time::Instant,
     /// Off-thread document load. Built via
     /// [`crate::document::ModelicaDocument::load_msl_file`] which
     /// hits rumoca's content-hash artifact cache, so a class whose
@@ -41,7 +37,7 @@ pub struct DrillInBinding {
     /// `(BusyScope::Document, "drill-in")` slot via `drain_busy_drops`.
     /// Kept as a field so any future work that wants to query
     /// "is this document loading?" goes through the bus.
-    pub _busy: lunco_workbench::status_bus::BusyHandle,
+    pub busy: lunco_workbench::status_bus::BusyHandle,
 }
 
 /// Tab-to-task binding for duplicate-to-workspace operations whose
@@ -69,12 +65,11 @@ pub struct DuplicateBinding {
     /// same inner class. `None` when the user was on the top
     /// class itself.
     pub inner_drill: Option<String>,
-    pub started: web_time::Instant,
     pub task: bevy::tasks::Task<crate::document::ModelicaDocument>,
     /// RAII guard registered with [`lunco_workbench::status_bus::StatusBus`].
-    /// Same lifecycle as [`DrillInBinding::_busy`] — clears the
+    /// Same lifecycle as [`DrillInBinding::busy`] — clears the
     /// `(BusyScope::Document, "duplicate")` slot on Drop.
-    pub _busy: lunco_workbench::status_bus::BusyHandle,
+    pub busy: lunco_workbench::status_bus::BusyHandle,
 }
 
 /// Bevy system: poll pending duplicate bg tasks; `install_prebuilt`
@@ -87,6 +82,7 @@ pub fn drive_duplicate_loads(
     mut probe: Option<bevy::prelude::ResMut<crate::FrameTimeProbe>>,
     mut egui_q: bevy::prelude::Query<&mut bevy_egui::EguiContext>,
     mut tabs: bevy::prelude::ResMut<crate::ui::panels::model_view::ModelTabs>,
+    mut canvas_state: bevy::prelude::ResMut<super::CanvasDiagramState>,
     mut commands: bevy::prelude::Commands,
 ) {
     use bevy::prelude::*;
@@ -119,6 +115,14 @@ pub fn drive_duplicate_loads(
         let Some(OpeningState::Duplicate(b)) = openings.remove(doc_id) else {
             continue;
         };
+        // Hand the parse-phase busy handle to the canvas state so the
+        // bus keeps a `Document(doc_id)` entry across the gap between
+        // here and the next `spawn_projection_task` for this doc. The
+        // projection spawn calls `complete_projection_handoff(doc_id)`
+        // once its own entry is in place. Without this stash the bus
+        // briefly goes idle for the doc and the canvas overlay
+        // flickers off then on.
+        canvas_state.stash_projection_handoff(doc_id, b.busy);
         let dup_display_name = b.display_name;
         let origin_short = b.origin_short;
         let inner_drill = b.inner_drill;
@@ -219,6 +223,7 @@ pub fn drive_drill_in_loads(
     mut registry: bevy::prelude::ResMut<ModelicaDocumentRegistry>,
     mut tabs: bevy::prelude::ResMut<crate::ui::panels::model_view::ModelTabs>,
     mut egui_q: bevy::prelude::Query<&mut bevy_egui::EguiContext>,
+    mut canvas_state: bevy::prelude::ResMut<super::CanvasDiagramState>,
 ) {
     use bevy::prelude::*;
     // Keep egui awake while loads are in flight so the "Loading…"
@@ -244,21 +249,31 @@ pub fn drive_drill_in_loads(
             continue;
         };
         let qualified = b.qualified;
+        let mut busy = b.busy;
         let doc = match result {
-            Ok(doc) => doc,
+            Ok(doc) => {
+                // Success path: hand the parse-phase busy handle to
+                // the canvas state so the bus keeps a `Document(d)`
+                // entry continuously through the parse→project
+                // transition. Released by `complete_projection_handoff`
+                // once the projection spawn mints its own.
+                canvas_state.stash_projection_handoff(doc_id, busy);
+                doc
+            }
             Err(msg) => {
                 warn!(
                     "[CanvasDiagram] drill-in: class `{}` load failed: {}",
                     qualified, msg
                 );
-                // Surface the failure on every tab waiting on this
-                // (doc, drilled_class). Without this the canvas overlay
-                // would show "Loading resource…" forever.
-                for (_id, state) in tabs.iter_mut_for_doc(doc_id) {
-                    if state.drilled_class.as_deref() == Some(qualified.as_str()) {
-                        state.load_error = Some(msg.clone());
-                    }
-                }
+                // Drop the handle with `Failed` outcome — no handoff,
+                // no projection. The bus records the outcome under
+                // `(Document(d), "drill-in")`; the canvas overlay
+                // picks it up via `bus.lifecycle(...) →
+                // LifecycleState::Failed(msg)` and renders the
+                // drill-in error overlay. No per-tab `load_error`
+                // plumbing needed.
+                busy.set_outcome(lunco_workbench::status_bus::BusyOutcome::Failed(msg));
+                drop(busy);
                 continue;
             }
         };
@@ -421,9 +436,10 @@ fn open_drill_in_tab(
         // Reserve a doc id only; the actual `ModelicaDocument`
         // (including the rumoca parse) is built on a background
         // thread and installed via `install_prebuilt` when ready.
-        // Queries against the id before install return `None` —
-        // panels render the "Loading resource…" overlay based on
-        // `DocumentOpenings::is_loading`.
+        // Queries against the id before install return `None`;
+        // panels render the "Loading resource…" overlay via
+        // `StatusBus::is_busy(BusyScope::Document(doc.0))` — the
+        // `DrillInBinding` minted at spawn keeps the bus entry alive.
         let mut registry = world.resource_mut::<ModelicaDocumentRegistry>();
         let id = registry.reserve_id();
         (id, true)
@@ -460,9 +476,8 @@ fn open_drill_in_tab(
             doc_id,
             OpeningState::DrillIn(DrillInBinding {
                 qualified: qualified.to_string(),
-                started: web_time::Instant::now(),
                 task,
-                _busy: busy,
+                busy,
             }),
         );
     }

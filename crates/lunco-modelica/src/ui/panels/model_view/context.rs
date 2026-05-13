@@ -183,7 +183,6 @@ pub fn sync_active_tab_to_doc(
         let source_arc: std::sync::Arc<str> = source.clone().into();
         let mut state = world.resource_mut::<WorkbenchState>();
         state.editor_buffer = source_arc.to_string();
-        state.diagram_dirty = true;
     }
 
     {

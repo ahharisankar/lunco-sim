@@ -641,19 +641,15 @@ pub struct ProjectionTask {
     pub spawned_at: web_time::Instant,
     pub deadline: std::time::Duration,
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    pub task: bevy::tasks::Task<Scene>,
+    /// The pool task. Spawned via
+    /// [`lunco_workbench::tracked_task::spawn_tracked_cancellable`], so a
+    /// `StatusBus` `BusyHandle` lives inside the future and clears the
+    /// bus entry on completion, panic, supersede, or drop.
+    pub task: lunco_workbench::tracked_task::TrackedTask<Scene>,
     /// Projection-relevant source hash captured at spawn time.
     /// Stashed onto `CanvasDocState::last_seen_source_hash` when the
     /// task completes — used by the next gen-bump check to skip
     /// reprojection on no-op edits (whitespace, comments).
     pub source_hash: u64,
-    /// RAII guard registered with [`lunco_workbench::status_bus::StatusBus`]
-    /// when the task is spawned. Drops together with the task — on
-    /// completion, on stale-supersede (`projection_task = None`) or on
-    /// timeout. Held in an `Option` so the spawning code can attach
-    /// the handle after the `CanvasDiagramState` borrow scope closes
-    /// (the bus and state are disjoint resources, but the spawn site
-    /// holds `&mut state` and can't grab the bus simultaneously).
-    pub _busy: Option<lunco_workbench::status_bus::BusyHandle>,
 }
 

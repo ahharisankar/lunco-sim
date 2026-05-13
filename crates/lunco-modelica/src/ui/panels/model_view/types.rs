@@ -28,7 +28,6 @@ pub struct ModelTabState {
     pub drilled_class: Option<String>,
     pub view_mode: ModelViewMode,
     pub pinned: bool,
-    pub load_error: Option<String>,
 }
 
 pub type TabId = u64;

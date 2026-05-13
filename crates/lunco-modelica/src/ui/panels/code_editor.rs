@@ -338,14 +338,16 @@ impl Panel for CodeEditorPanel {
         let (compilation_error, selected_entity, is_loading) = {
             let state = world.resource::<WorkbenchState>();
             let entity = state.selected_entity;
-            // Unified in-flight table covers drill-in, duplicate,
-            // and bundled/user-file reads.
+            // Any in-flight stage on the bus for this doc — covers
+            // file-load, drill-in, duplicate, reparse. Same predicate
+            // the canvas overlay uses; no per-panel loading-state
+            // bookkeeping.
             let loading = source_len == 0
                 && tab_target
                     .map(|d| {
                         world
-                            .get_resource::<crate::ui::document_openings::DocumentOpenings>()
-                            .map(|o| o.is_loading(d))
+                            .get_resource::<lunco_workbench::status_bus::StatusBus>()
+                            .map(|bus| bus.is_busy(lunco_workbench::status_bus::BusyScope::Document(d.0)))
                             .unwrap_or(false)
                     })
                     .unwrap_or(false);

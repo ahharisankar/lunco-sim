@@ -111,20 +111,11 @@ pub struct WorkbenchState {
     /// **Selection bridge**: which `ModelicaModel` entity panels are viewing.
     /// Set by any context (library, 3D viewport, colony tree).
     pub selected_entity: Option<Entity>,
-    // storage on `CompileStates.errors[doc]`; readers go through
-    // `compile_states.error_for(doc)`.
-    /// Render-side **derived projection** of the active document.
-    ///
-    /// Identity (which doc is active) lives on
-    /// [`lunco_workbench::WorkspaceResource`]. This
-    /// field is a pre-flattened view of the registry's
-    /// `host(active).document()` plus a few open-time-only fields
-    // All readers migrated to derive from
-    // `ModelicaDocumentRegistry::host(doc).document()` directly.
-    /// Flag to signal the diagram panel should rebuild from registry source.
-    pub diagram_dirty: bool,
-    // Per-doc loading state lives in
-    // `crate::ui::document_openings::DocumentOpenings::is_loading(doc)`.
+    // Per-doc compile errors live on `CompileStates.errors[doc]`;
+    // readers go through `compile_states.error_for(doc)`.
+    // Per-doc loading state lives on the `StatusBus` —
+    // `bus.is_busy(BusyScope::Document(doc.0))` /
+    // `bus.lifecycle(BusyScope::Document(doc.0), has_content)`.
 }
 
 // ---------------------------------------------------------------------------
@@ -659,7 +650,6 @@ impl Default for WorkbenchState {
         Self {
             editor_buffer: String::new(),
             selected_entity: None,
-            diagram_dirty: false,
         }
     }
 }

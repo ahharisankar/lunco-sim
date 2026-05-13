@@ -117,12 +117,6 @@ pub fn drain_browser_actions(world: &mut World) {
                 world
                     .resource_mut::<lunco_workbench::WorkspaceResource>()
                     .active_document = Some(doc);
-                // Force a fresh projection on the next canvas tick —
-                // the doc may have been already open at the package
-                // (target=None) level, with a cached zero-node scene.
-                world
-                    .resource_mut::<crate::ui::state::WorkbenchState>()
-                    .diagram_dirty = true;
             }
             // `BrowserAction` is `#[non_exhaustive]` upstream; future
             // variants land as warnings here, not silent drops.

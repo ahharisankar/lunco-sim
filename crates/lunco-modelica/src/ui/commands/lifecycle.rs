@@ -144,7 +144,6 @@ pub fn on_create_new_scratch_model(
 
     let source_arc: Arc<str> = source.into();
     workbench.editor_buffer = source_arc.to_string();
-    workbench.diagram_dirty = true;
 
     workspace.active_document = Some(doc_id);
 
@@ -283,9 +282,8 @@ pub fn on_duplicate_model_from_read_only(
                 display_name: name.clone(),
                 origin_short: origin_class_short.clone(),
                 inner_drill: inner_drill,
-                started: web_time::Instant::now(),
                 task,
-                _busy: busy,
+                busy,
             },
         ),
     );
@@ -465,9 +463,8 @@ pub fn spawn_duplicate_class_task(world: &mut World, qualified: String, name_hin
                     display_name: name.clone(),
                     origin_short: origin_short,
                     inner_drill: None,
-                    started: web_time::Instant::now(),
                     task,
-                    _busy: busy,
+                    busy,
                 },
             ),
         );

@@ -265,14 +265,25 @@ fn open_bundled_class(world: &mut World, class: &ClassRef) {
             doc,
         }
     });
+    // Mint a `StatusBus` handle BEFORE inserting into `DocumentOpenings`
+    // so the canvas overlay sees the doc as busy from the very first
+    // frame after the user clicked open. Handed off to the projection
+    // stage by `drive_file_load_openings` (see that fn).
+    let busy = world
+        .resource_mut::<lunco_workbench::status_bus::StatusBus>()
+        .begin(
+            lunco_workbench::status_bus::BusyScope::Document(reserved_doc_id.0),
+            "opening",
+            format!("Loading {display_name}…"),
+        );
     world
         .resource_mut::<crate::ui::document_openings::DocumentOpenings>()
         .insert(
             reserved_doc_id,
             crate::ui::document_openings::OpeningState::FileLoad {
                 display_name,
-                started: web_time::Instant::now(),
                 task,
+                busy,
             },
         );
 }
@@ -308,14 +319,24 @@ fn open_user_file_class(world: &mut World, path: PathBuf, class: &ClassRef) {
             doc,
         }
     });
+    // Mint a `StatusBus` handle BEFORE inserting; handed off to the
+    // projection stage in `drive_file_load_openings`. See the matching
+    // block in `open_bundled_file_class`.
+    let busy = world
+        .resource_mut::<lunco_workbench::status_bus::StatusBus>()
+        .begin(
+            lunco_workbench::status_bus::BusyScope::Document(reserved_doc_id.0),
+            "opening",
+            format!("Loading {display_name}…"),
+        );
     world
         .resource_mut::<crate::ui::document_openings::DocumentOpenings>()
         .insert(
             reserved_doc_id,
             crate::ui::document_openings::OpeningState::FileLoad {
                 display_name,
-                started: web_time::Instant::now(),
                 task,
+                busy,
             },
         );
 }
