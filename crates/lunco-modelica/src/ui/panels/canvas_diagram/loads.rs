@@ -25,10 +25,6 @@ use crate::ui::state::ModelicaDocumentRegistry;
 /// parse) and installs it into the registry, clearing the entry.
 pub struct DrillInBinding {
     pub qualified: String,
-    /// When the tab was opened. Used to show elapsed-seconds in the
-    /// loading overlay so the user sees work is happening even when
-    /// rumoca takes tens of seconds on large package files.
-    pub started: web_time::Instant,
     /// Off-thread document load. Built via
     /// [`crate::document::ModelicaDocument::load_msl_file`] which
     /// hits rumoca's content-hash artifact cache, so a class whose
@@ -38,7 +34,7 @@ pub struct DrillInBinding {
     /// RAII guard registered with [`lunco_workbench::status_bus::StatusBus`].
     /// Dropped together with the binding (on install or on document
     /// removal) — the bus then clears the
-    /// `(BusyScope::Document, "drill-in")` slot via `drainbusy_drops`.
+    /// `(BusyScope::Document, "drill-in")` slot via `drain_busy_drops`.
     /// Kept as a field so any future work that wants to query
     /// "is this document loading?" goes through the bus.
     pub busy: lunco_workbench::status_bus::BusyHandle,
@@ -69,7 +65,6 @@ pub struct DuplicateBinding {
     /// same inner class. `None` when the user was on the top
     /// class itself.
     pub inner_drill: Option<String>,
-    pub started: web_time::Instant,
     pub task: bevy::tasks::Task<crate::document::ModelicaDocument>,
     /// RAII guard registered with [`lunco_workbench::status_bus::StatusBus`].
     /// Same lifecycle as [`DrillInBinding::busy`] — clears the
@@ -441,9 +436,10 @@ fn open_drill_in_tab(
         // Reserve a doc id only; the actual `ModelicaDocument`
         // (including the rumoca parse) is built on a background
         // thread and installed via `install_prebuilt` when ready.
-        // Queries against the id before install return `None` —
-        // panels render the "Loading resource…" overlay based on
-        // `DocumentOpenings::is_loading`.
+        // Queries against the id before install return `None`;
+        // panels render the "Loading resource…" overlay via
+        // `StatusBus::is_busy(BusyScope::Document(doc.0))` — the
+        // `DrillInBinding` minted at spawn keeps the bus entry alive.
         let mut registry = world.resource_mut::<ModelicaDocumentRegistry>();
         let id = registry.reserve_id();
         (id, true)
@@ -480,7 +476,6 @@ fn open_drill_in_tab(
             doc_id,
             OpeningState::DrillIn(DrillInBinding {
                 qualified: qualified.to_string(),
-                started: web_time::Instant::now(),
                 task,
                 busy,
             }),

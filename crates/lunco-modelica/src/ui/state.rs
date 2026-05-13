@@ -123,8 +123,9 @@ pub struct WorkbenchState {
     // `ModelicaDocumentRegistry::host(doc).document()` directly.
     /// Flag to signal the diagram panel should rebuild from registry source.
     pub diagram_dirty: bool,
-    // Per-doc loading state lives in
-    // `crate::ui::document_openings::DocumentOpenings::is_loading(doc)`.
+    // Per-doc loading state is on the `StatusBus` —
+    // `bus.is_busy(BusyScope::Document(doc.0))` /
+    // `bus.lifecycle(BusyScope::Document(doc.0), has_content)`.
 }
 
 // ---------------------------------------------------------------------------

@@ -1,25 +1,28 @@
-//! Unified table of in-flight document opens.
+//! Per-document container for in-flight parse tasks.
 //!
-//! Replaces three parallel maps that previously each tracked one
-//! flavour of "doc N is loading":
-//!  - [`crate::ui::panels::package_browser::PackageTreeCache`]'s
-//!    `loading_ids` + `file_tasks` (bundled and user-file reads).
-//!  - `DrillInLoads` (MSL drill-in slim slices, now folded in here).
-//!  - `DuplicateLoads` (duplicate-to-workspace bg parses, now folded
-//!    in here).
+//! Holds one [`OpeningState`] per [`DocumentId`] until the parse
+//! resolves and the driver hands the document to
+//! [`crate::ui::state::ModelicaDocumentRegistry`]. Each variant
+//! owns its own typed `Task<...>` plus a [`lunco_workbench::status_bus::BusyHandle`]
+//! that keeps a `(BusyScope::Document, "opening"|"drill-in"|"duplicate")`
+//! entry on the bus for the parse lifetime.
 //!
-//! The three flavours have genuinely different task output types
-//! and post-install side effects, so each variant of [`OpeningState`]
-//! still owns its own typed `Task<...>`. What's unified is the
-//! identity (one [`DocumentId`] → one state) and the read surface
-//! (`is_loading`, `detail`, `progress`) that overlays and panel
-//! gates consult.
+//! **This is not the loading-state authority.** UI panels query the
+//! [`lunco_workbench::status_bus::StatusBus`] directly
+//! (`bus.is_busy(BusyScope::Document(d.0))` or
+//! `bus.lifecycle(...)`) so a single predicate covers every async
+//! stage that contributes to a doc's view (parse, projection,
+//! reparse, future fetch/index/etc.). The accessors here (`detail`,
+//! `progress`, `drill_in_qualified`, `duplicate_display`) return
+//! metadata *about* the in-flight task — display name, drill-in
+//! target, elapsed time — used by tab-title / placeholder-snapshot
+//! code that needs to know what the doc *will be* before it's
+//! installed.
 
 use bevy::prelude::*;
 use bevy::tasks::Task;
 use lunco_doc::DocumentId;
 use std::collections::HashMap;
-use web_time::Instant;
 
 use crate::ui::panels::canvas_diagram::loads::{DrillInBinding, DuplicateBinding};
 use crate::ui::panels::package_browser::cache::FileLoadResult;
@@ -34,7 +37,6 @@ pub enum OpeningState {
     /// installs `result.doc` against `result.doc_id`.
     FileLoad {
         display_name: String,
-        started: Instant,
         task: Task<FileLoadResult>,
         /// RAII guard registered with [`lunco_workbench::status_bus::StatusBus`]
         /// at insert time. Same role as [`DrillInBinding::busy`] and
@@ -52,30 +54,20 @@ pub enum OpeningState {
     Duplicate(DuplicateBinding),
 }
 
-/// Single-source-of-truth resource for "is doc N still preparing?".
-/// Panels read it via [`Self::is_loading`]; drivers iterate its
-/// entries filtered to their own variant.
+/// Per-document task container. Drivers iterate its entries
+/// filtered to their own variant; panels that need *metadata about*
+/// an in-flight open (tab title, placeholder snapshot) read via the
+/// accessors below. "Is this doc busy?" queries belong on the
+/// [`lunco_workbench::status_bus::StatusBus`], not here.
 #[derive(Resource, Default)]
 pub struct DocumentOpenings {
     pub in_flight: HashMap<DocumentId, OpeningState>,
 }
 
 impl DocumentOpenings {
-    pub fn is_loading(&self, doc: DocumentId) -> bool {
-        self.in_flight.contains_key(&doc)
-    }
-
-    /// Short description for the loading overlay — qualified class
-    /// name for drill-ins, display name for duplicates and file
-    /// reads.
-    pub fn detail(&self, doc: DocumentId) -> Option<&str> {
-        match self.in_flight.get(&doc)? {
-            OpeningState::FileLoad { display_name, .. } => Some(display_name.as_str()),
-            OpeningState::DrillIn(b) => Some(b.qualified.as_str()),
-            OpeningState::Duplicate(b) => Some(b.display_name.as_str()),
-        }
-    }
-
+    /// Qualified class name of an in-flight drill-in for `doc`, if
+    /// any. Used by placeholder snapshot code (`model_view/context.rs`)
+    /// to construct tab titles + URIs before the doc is installed.
     pub fn drill_in_qualified(&self, doc: DocumentId) -> Option<&str> {
         match self.in_flight.get(&doc)? {
             OpeningState::DrillIn(b) => Some(b.qualified.as_str()),
@@ -83,25 +75,12 @@ impl DocumentOpenings {
         }
     }
 
+    /// Display name of an in-flight duplicate for `doc`, if any.
+    /// Same placeholder-snapshot role as [`Self::drill_in_qualified`].
     pub fn duplicate_display(&self, doc: DocumentId) -> Option<&str> {
         match self.in_flight.get(&doc)? {
             OpeningState::Duplicate(b) => Some(b.display_name.as_str()),
             _ => None,
-        }
-    }
-
-    /// `(detail, seconds-since-opened)` for the overlay.
-    pub fn progress(&self, doc: DocumentId) -> Option<(&str, f32)> {
-        match self.in_flight.get(&doc)? {
-            OpeningState::FileLoad { display_name, started, .. } => {
-                Some((display_name.as_str(), started.elapsed().as_secs_f32()))
-            }
-            OpeningState::DrillIn(b) => {
-                Some((b.qualified.as_str(), b.started.elapsed().as_secs_f32()))
-            }
-            OpeningState::Duplicate(b) => {
-                Some((b.display_name.as_str(), b.started.elapsed().as_secs_f32()))
-            }
         }
     }
 
@@ -183,7 +162,7 @@ pub fn track_ast_reparse_busy(
     }
     // Drop handles for docs that are no longer stale (or have been
     // closed). `Drop` clears the bus entry on the next
-    // `drainbusy_drops` tick.
+    // `drain_busy_drops` tick.
     handles.handles.retain(|d, _| still_stale.contains(d));
 }
 
