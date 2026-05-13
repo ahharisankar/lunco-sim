@@ -9,6 +9,7 @@ members = [
     "crates/lunco-client",
     "crates/lunco-telemetry",
     "crates/lunco-celestial",
+    "crates/lunco-celestial-ephemeris",
     "crates/lunco-hardware",
     "crates/lunco-mobility",
     "crates/lunco-robotics",

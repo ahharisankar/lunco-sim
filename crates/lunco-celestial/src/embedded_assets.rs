@@ -91,14 +91,12 @@ impl Plugin for EmbeddedAssetsPlugin {
                 artemis_2_ephemeris_csv: ARTEMIS_2_EPHEMERIS_CSV.to_string(),
             });
 
-            // Initialize EphemerisResource with embedded CSV data
-            // Target ID -1024 = Artemis 2 spacecraft
-            let provider = crate::ephemeris::CelestialEphemerisProvider::new_with_embedded_ephemeris(&[
-                ("-1024", ARTEMIS_2_EPHEMERIS_CSV),
-            ]);
-            app.insert_resource(crate::ephemeris::EphemerisResource {
-                provider: std::sync::Arc::new(provider),
-            });
+            // Real ephemeris provider (VSOP2013 + embedded CSV) lives
+            // in `lunco-celestial-ephemeris`. Apps that want it on
+            // wasm32 add that crate's `EphemerisPlugin` after
+            // `EmbeddedAssetsPlugin` — the plugin reads
+            // `EmbeddedMissionData::artemis_2_ephemeris_csv` (set above)
+            // and overwrites the default no-op `EphemerisResource`.
         }
     }
 }

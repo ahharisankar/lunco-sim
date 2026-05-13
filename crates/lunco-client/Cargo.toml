@@ -53,6 +53,7 @@ bevy_egui = { workspace = true }
 # only.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 mimalloc = "0.1"
+lunco-celestial-ephemeris = { path = "../lunco-celestial-ephemeris" }
 
 [features]
 default = ["celestial"]

@@ -14,7 +14,7 @@ use bevy::asset::load_internal_asset;
 use bevy_shader::Shader;
 
 mod clock;
-mod ephemeris;
+pub mod ephemeris;
 pub mod registry;
 mod big_space_setup;
 mod systems;
@@ -93,11 +93,14 @@ impl Plugin for CelestialPlugin {
         app.register_type::<TrajectoryPath>();
         app.insert_resource(CelestialBodyRegistry::default_system());
 
-        // On wasm32, EphemerisResource is set by EmbeddedAssetsPlugin using embedded CSV data.
-        // On desktop, it's initialized here with filesystem access.
-        #[cfg(not(target_arch = "wasm32"))]
+        // Insert a no-op `EphemerisResource` so downstream systems
+        // (missions, trajectories, body positioning) can unconditionally
+        // depend on `Res<EphemerisResource>`. Apps that want real
+        // planetary positions add `lunco-celestial-ephemeris`'s
+        // `EphemerisPlugin`, which overwrites this with the
+        // VSOP2013/ELP-backed `CelestialEphemerisProvider`.
         app.insert_resource(ephemeris::EphemerisResource {
-            provider: std::sync::Arc::new(ephemeris::CelestialEphemerisProvider::new()),
+            provider: std::sync::Arc::new(ephemeris::NoOpEphemerisProvider),
         });
 
         // big_space::prelude::BigSpaceDefaultPlugins should be added by the application entry point

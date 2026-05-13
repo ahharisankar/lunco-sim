@@ -5914,9 +5914,6 @@ dependencies = [
  "bevy_egui",
  "bevy_shader",
  "big_space",
- "celestial-core",
- "celestial-ephemeris",
- "celestial-time",
  "chrono",
  "futures-lite",
  "lunco-assets",
@@ -5933,6 +5930,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lunco-celestial-ephemeris"
+version = "0.6.0-dev"
+dependencies = [
+ "bevy",
+ "celestial-core",
+ "celestial-ephemeris",
+ "celestial-time",
+ "lunco-assets",
+ "lunco-celestial",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "lunco-client"
 version = "0.6.0-dev"
 dependencies = [
@@ -5946,6 +5958,7 @@ dependencies = [
  "lunco-assets",
  "lunco-avatar",
  "lunco-celestial",
+ "lunco-celestial-ephemeris",
  "lunco-controller",
  "lunco-core",
  "lunco-cosim",

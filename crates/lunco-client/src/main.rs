@@ -79,6 +79,9 @@ fn main() {
         app.add_plugins(lunco_celestial::CelestialPlugin)
             .add_plugins(lunco_environment::EnvironmentPlugin)
             .insert_resource(ClearColor(Color::BLACK));
+
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_plugins(lunco_celestial_ephemeris::EphemerisPlugin);
     }
 
     app.add_plugins(MaterialPlugin::<BlueprintMaterial>::default())
