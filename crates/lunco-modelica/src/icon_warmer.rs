@@ -98,24 +98,11 @@ fn collect_referenced_types(ast: &StoredDefinition) -> Vec<String> {
 }
 
 fn walk_class(class: &ClassDef, out: &mut HashSet<String>) {
-    // `extends` bases (cross-package inheritance is the dominant cost).
-    for ext in &class.extends {
-        let name = ext.base_name.to_string();
-        if interesting_type(&name) {
-            out.insert(name);
+    crate::ast_extract::walk_class_type_names(class, &mut |name| {
+        if interesting_type(name) {
+            out.insert(name.to_string());
         }
-    }
-    // Components: type_name covers ports, parameters, sub-models.
-    for (_, comp) in class.iter_components() {
-        let t = format!("{}", comp.type_name);
-        if interesting_type(&t) {
-            out.insert(t);
-        }
-    }
-    // Recurse into nested classes.
-    for nested in class.classes.values() {
-        walk_class(nested, out);
-    }
+    });
 }
 
 /// True for type names worth warming. Filters out Modelica built-ins

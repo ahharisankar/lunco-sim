@@ -441,6 +441,32 @@ fn find_in_classes<'a>(
     None
 }
 
+/// Visit every type-name reference reachable from `class`, recursing
+/// into nested classes. Emits each `extends` base name and each
+/// component `type_name` raw — **no filtering**. Callers apply their
+/// own predicate (built-in vs not, qualified-only, etc.).
+///
+/// Centralised here so the icon warmer's "what to prefetch" and the
+/// source-roots scanner's "which libraries to load" share one
+/// traversal. The previous local `walk_class` / `walk_class_qualified_types`
+/// pair was identical traversal + different filter, which is exactly
+/// how the canonical `find_class_by_qualified_name` and the buggy
+/// local `walk_qualified` diverged. Filter at the call site, not in
+/// the walker.
+pub fn walk_class_type_names<F: FnMut(&str)>(class: &ClassDef, visit: &mut F) {
+    for ext in &class.extends {
+        let name = ext.base_name.to_string();
+        visit(&name);
+    }
+    for (_, comp) in class.iter_components() {
+        let t = format!("{}", comp.type_name);
+        visit(&t);
+    }
+    for nested in class.classes.values() {
+        walk_class_type_names(nested, visit);
+    }
+}
+
 /// Lower-case Modelica class kind keyword: `model`, `block`, `connector`,
 /// `package`, `function`, `record`, `type`, `class`, `operator`. The same
 /// taxonomy the canvas's class-kind badge surfaces, kept consistent so
