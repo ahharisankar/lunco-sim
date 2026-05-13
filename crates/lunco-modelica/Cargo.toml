@@ -11,6 +11,12 @@ description = "Native Modelica simulation integration for LunCoSim using Rumoca"
 # which matters for the wasm32 binary.
 default = ["lunco-api"]
 lunco-api = ["dep:lunco-api"]
+# Opt-in Tracy profiler hook. Off by default because tracy-client-sys needs a
+# C++ compile that breaks on wasm32 and on Windows MSVC 2019 (missing
+# `RelationProcessorDie` enumerant in pre-2004 Win10 SDKs). Enable with
+# `cargo run --features tracy --bin lunica` when you actually want a Tracy
+# session.
+tracy = ["bevy/trace_tracy"]
 
 [[bin]]
 name = "lunica"
@@ -152,11 +158,12 @@ uuid = { workspace = true }
 # via rfd's default feature set.
 rfd = { workspace = true }
 
-# Native-only: Tracy profiler client. tracy-client-sys requires a C++ compile
-# that doesn't work for wasm32-unknown-unknown (clang++ → TracyClient.cpp fails).
-# Connect with the `tracy-profiler` GUI on a debug/native build.
+# Tracy profiler is wired via the `tracy` feature above
+# (`tracy = ["bevy/trace_tracy"]`). Off by default because tracy-client-sys
+# needs a C++ compile that breaks on wasm32 and on Windows MSVC 2019
+# (missing `RelationProcessorDie` enumerant in pre-2004 Win10 SDKs).
+# Enable with `cargo run --features tracy --bin lunica` when profiling.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-bevy = { workspace = true, features = ["trace_tracy"] }
 # OS clipboard for the code editor's menu / toolbar / right-click Paste
 # buttons on native. Ctrl/Cmd+V already works through bevy_egui's own
 # arboard plumbing, but the buttons go through

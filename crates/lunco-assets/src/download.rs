@@ -74,6 +74,14 @@ pub struct AssetManifest {
 }
 
 impl AssetManifest {
+    /// Parse an `Assets.toml` blob from a string. Used by callers that
+    /// have the manifest text embedded via `include_str!` (packaged
+    /// binaries can't read the workspace source tree at runtime).
+    pub fn from_str(s: &str) -> Result<Self, std::io::Error> {
+        toml::from_str(s)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+    }
+
     /// Reads and parses `Assets.toml` from the given crate directory.
     pub fn from_crate_dir(crate_dir: &Path) -> Result<Self, std::io::Error> {
         let path = crate_dir.join("Assets.toml");

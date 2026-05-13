@@ -40,42 +40,71 @@ pub mod process;
 // ============================================================================
 
 /// Resolves the user-level config directory for LunCoSim — for
-/// recents, keybinds, palette history, layouts, and any other
-/// **per-user persistent state** that must survive `cargo clean` and
-/// is independent of any one Twin.
+/// settings, recents, keybinds, palette history, layouts, and any
+/// other **per-user persistent state** that must survive `cargo clean`
+/// and is independent of any one Twin.
 ///
 /// Resolution order:
 ///
 /// 1. `LUNCOSIM_CONFIG` environment variable if set (testing, custom
 ///    installs, sandboxed CI).
-/// 2. `~/.lunco/` — the project's canonical user-config home.
-///    Cross-platform via [`dirs::home_dir`]:
-///    - Linux: `~/.lunco`
-///    - macOS: `~/.lunco`
-///    - Windows: `C:\Users\<user>\.lunco`
+/// 2. Legacy `~/.lunco/` if it already exists (backwards compat for
+///    users who started before we adopted OS-conventional dirs).
+/// 3. OS-conventional config dir via [`dirs::config_dir`]:
+///    - Linux:   `~/.config/lunco/`
+///    - macOS:   `~/Library/Application Support/lunco/`
+///    - Windows: `%APPDATA%\lunco\` (i.e. `C:\Users\<user>\AppData\Roaming\lunco\`)
+/// 4. `~/.lunco/` if no OS-conventional dir is available.
+/// 5. `.lunco/` in the CWD as a pathological last resort.
 ///
 /// The directory is **not created** by this function — callers that
 /// write into a subdir use [`user_config_subdir`] which `create_dir_all`s.
 /// Read-only callers (existence probes for migrations, etc.) get a
 /// path back regardless of whether the dir exists.
 ///
-/// Falls back to `.lunco/` in the current working directory if
-/// [`dirs::home_dir`] returns `None` — vanishingly rare in practice
-/// (pathological env), but keeps the function infallible so callers
-/// don't have to reason about cross-platform home-dir failures.
-///
-/// Distinct from [`cache_dir`]: that returns the workspace-shared
-/// regenerable artifact cache (textures, MSL, ephemeris). Anything
-/// destroyed by `cargo clean` belongs there. User config does not.
+/// Distinct from [`cache_dir`]: that returns the regenerable artifact
+/// cache (MSL, textures, ephemeris). Anything safe to delete and
+/// re-download belongs there. User config does not.
 pub fn user_config_dir() -> PathBuf {
     if let Some(val) = std::env::var_os("LUNCOSIM_CONFIG") {
         return PathBuf::from(val);
     }
+    // Legacy: if the user already has `~/.lunco/` from an earlier
+    // build, keep using it so their settings/recents don't suddenly
+    // vanish from under them. New installs land in the OS dir below.
+    if let Some(home) = dirs::home_dir() {
+        let legacy = home.join(".lunco");
+        if legacy.exists() {
+            return legacy;
+        }
+    }
+    if let Some(cfg) = dirs::config_dir() {
+        return cfg.join("lunco");
+    }
     if let Some(home) = dirs::home_dir() {
         return home.join(".lunco");
     }
-    // Last resort — keeps the function infallible.
     PathBuf::from(".lunco")
+}
+
+/// User-level data directory for projects, exported simulations, FMUs,
+/// logs — anything the user produced and would be upset to lose.
+///
+/// Resolution: `LUNCOSIM_DATA` env → OS-conventional data dir
+/// ([`dirs::data_dir`]) under `lunco/` → fall back to [`user_config_dir`]
+/// so callers always get *some* writable location.
+///
+/// - Linux:   `~/.local/share/lunco/`
+/// - macOS:   `~/Library/Application Support/lunco/`
+/// - Windows: `%APPDATA%\lunco\`
+pub fn user_data_dir() -> PathBuf {
+    if let Some(val) = std::env::var_os("LUNCOSIM_DATA") {
+        return PathBuf::from(val);
+    }
+    if let Some(d) = dirs::data_dir() {
+        return d.join("lunco");
+    }
+    user_config_dir()
 }
 
 /// Returns a named subdirectory of [`user_config_dir`], creating it
@@ -134,28 +163,40 @@ pub fn cache_dir() -> PathBuf {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        // 1. Runtime env var overrides everything
+        // 1. Runtime env var overrides everything.
         if let Some(val) = std::env::var_os("LUNCOSIM_CACHE") {
             return PathBuf::from(val);
         }
-        // 2. Walk up from this crate's manifest to find .cache/msl
-        //    CARGO_MANIFEST_DIR = .../modelica/crates/lunco-assets
+        // 2. Dev mode: walk up from this crate's manifest looking for a
+        //    workspace `.cache/msl/Modelica` that's actually populated.
+        //    CARGO_MANIFEST_DIR = .../modelica/crates/lunco-assets.
+        //    Only succeeds inside a worktree; packaged installs skip
+        //    straight to (3).
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let mut current = Some(manifest);
         for _ in 0..10 {
             if let Some(dir) = &current {
                 let candidate = dir.join(".cache");
                 let msl_modelica = candidate.join("msl").join("Modelica");
-                // Check it has actual content
-                if msl_modelica.exists() {
-                    if msl_modelica.read_dir().map(|mut d| d.next().is_some()).unwrap_or(false) {
-                        return candidate;
-                    }
+                if msl_modelica.exists()
+                    && msl_modelica
+                        .read_dir()
+                        .map(|mut d| d.next().is_some())
+                        .unwrap_or(false)
+                {
+                    return candidate;
                 }
                 current = dir.parent().map(PathBuf::from);
             }
         }
-        // 3. Last resort: CWD-relative
+        // 3. OS-conventional cache dir for end users:
+        //      Linux:   ~/.cache/lunco/
+        //      macOS:   ~/Library/Caches/lunco/
+        //      Windows: %LOCALAPPDATA%\lunco\
+        if let Some(c) = dirs::cache_dir() {
+            return c.join("lunco");
+        }
+        // 4. Last resort: CWD-relative.
         PathBuf::from(".cache")
     }
 }

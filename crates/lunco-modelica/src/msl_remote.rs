@@ -29,9 +29,7 @@
 //! Console panel — that's our "status somewhere" until a dedicated status
 //! bar lands.
 
-use std::sync::{Arc, OnceLock};
-#[cfg(target_arch = "wasm32")]
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use bevy::prelude::*;
 
@@ -75,6 +73,12 @@ pub struct MslRemotePlugin;
 impl Plugin for MslRemotePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MslLoadState>();
+        // Persisted user settings (bundle URL, local-root override,
+        // last-fetched bookkeeping). Lives in settings.json so the
+        // Assets panel and the auto-download path see the same source
+        // of truth.
+        use lunco_settings::AppSettingsExt;
+        app.register_settings_section::<crate::msl_settings::MslSettings>();
 
         // Cross-platform: mirror MSL state changes into the workbench
         // status bus so renderers (status bar, console, diagnostics)
@@ -82,22 +86,40 @@ impl Plugin for MslRemotePlugin {
         // crate) because it knows about `MslLoadState` shape.
         app.add_systems(Update, mirror_state_to_status_bus);
 
-        // Native: synchronous decision based on whether the disk tree is
-        // there. We never need an async task on this target.
+        // Native: prefer an already-materialised tree (workspace dev
+        // cache, user-supplied override, or a previously-completed
+        // auto-download). If nothing is present, fall back to fetching
+        // the configured bundle URL into the cache dir. The fetch runs
+        // on `AsyncComputeTaskPool`; `drain_native_msl_fetch` promotes
+        // its result back into ECS state.
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if let Some(root) = lunco_assets::msl_source_root_path() {
+            let settings = app
+                .world()
+                .resource::<crate::msl_settings::MslSettings>()
+                .clone();
+
+            // 1. Settings-level override wins — user explicitly pointed
+            //    us at a tree on disk (e.g. a system install, a local
+            //    Modelica checkout).
+            let override_root = settings.local_root_override.as_ref().and_then(|p| {
+                if p.join("Modelica").exists() {
+                    Some(p.clone())
+                } else {
+                    warn!(
+                        "[MSL] settings.msl.local_root_override = {} has no Modelica/ subdir; ignoring",
+                        p.display()
+                    );
+                    None
+                }
+            });
+
+            let resolved_root = override_root.or_else(lunco_assets::msl_source_root_path);
+
+            if let Some(root) = resolved_root {
                 let count = count_mo_files(&root);
                 info!("[MSL] using on-disk root {} ({count} .mo files)", root.display());
                 let source = MslAssetSource::Filesystem(root);
-                // Publish to the process-wide handle so
-                // `ModelicaCompiler::new()` preloads MSL into every
-                // freshly-built session. Without this the native
-                // workbench used to fall through to the env-gated
-                // `LUNCO_MODELICA_PRELOAD_MSL` path and silently start
-                // sessions with zero MSL classes — every model that
-                // touched `Modelica.Blocks.Interfaces.RealOutput` etc.
-                // failed to resolve.
                 lunco_assets::msl::install_global_msl_source(source.clone());
                 app.insert_resource(source);
                 app.insert_resource(MslLoadState::Ready {
@@ -106,10 +128,22 @@ impl Plugin for MslRemotePlugin {
                     uncompressed_bytes: 0,
                 });
             } else {
-                warn!("[MSL] no on-disk root found — workbench will run without MSL");
-                app.insert_resource(MslLoadState::Failed(
-                    "MSL not present on disk; run `lunco-assets -- download` first".into(),
-                ));
+                // No tree on disk → kick off the existing
+                // downloader+indexer pipeline in the background. The
+                // `[msl]` entry in Assets.toml has the URL, version,
+                // and (once filled in) sha256. The indexer follows
+                // automatically after extract completes.
+                info!("[MSL] no on-disk root — starting background install");
+                let slot: NativeInstallSlot =
+                    Arc::new(Mutex::new(NativeInstallSlotInner::default()));
+                app.insert_resource(MslLoadState::Loading {
+                    phase: MslLoadPhase::FetchingBundle,
+                    bytes_done: 0,
+                    bytes_total: 0,
+                });
+                app.insert_resource(NativeMslInstallSlot(slot.clone()));
+                app.add_systems(Update, drain_native_msl_install);
+                spawn_native_install(slot);
             }
         }
 
@@ -160,6 +194,174 @@ const PARSE_CHUNK_SIZE: usize = 1;
 
 #[cfg(target_arch = "wasm32")]
 const PARSE_LOG_INTERVAL_SECS: u64 = 10;
+
+// ─── Native background install (downloader + indexer) ──────────────
+//
+// Reuses the existing infrastructure rather than reinventing it:
+//
+//   1. `lunco_assets::download::download_asset` handles HTTP fetch,
+//      sha256 verify, gzip/bzip2 untar, and version-file caching.
+//      The `[msl]` entry it reads lives in
+//      `crates/lunco-modelica/Assets.toml` (compiled in via
+//      `include_str!` so a packaged binary works without the source
+//      tree on disk).
+//
+//   2. The `msl_indexer` binary builds the rumoca bincode cache
+//      (`parsed-msl.bin`) used by `ModelicaCompiler::new` for the
+//      fast preload path. Spawned as a subprocess from the same
+//      background task so the user sees one continuous "MSL loading"
+//      indicator instead of two separate stages.
+//
+// Both steps run on `AsyncComputeTaskPool` so the Bevy main thread
+// stays responsive throughout. `drain_native_msl_install` promotes the
+// shared `NativeInstallSlot` into ECS state each frame.
+
+/// Bundled copy of `crates/lunco-modelica/Assets.toml`. Packaged
+/// binaries don't have the source tree, so we compile the manifest in.
+#[cfg(not(target_arch = "wasm32"))]
+const BUNDLED_ASSETS_TOML: &str = include_str!("../Assets.toml");
+
+#[cfg(not(target_arch = "wasm32"))]
+type NativeInstallSlot = Arc<Mutex<NativeInstallSlotInner>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct NativeInstallSlotInner {
+    /// Latest load-state the worker has reported; drained each frame.
+    pending_state: Option<MslLoadState>,
+    /// Final `MslAssetSource::Filesystem(root)` produced on success.
+    pending_source: Option<MslAssetSource>,
+    /// MSL release tag that just landed on disk (mirrors `Assets.toml`
+    /// `version`). Written into `MslSettings.last_fetched_version`.
+    pending_version: Option<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Resource)]
+struct NativeMslInstallSlot(NativeInstallSlot);
+
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_native_install(slot: NativeInstallSlot) {
+    use lunco_assets::download::AssetManifest;
+
+    let pool = bevy::tasks::AsyncComputeTaskPool::get();
+    pool.spawn(async move {
+        // Parse the bundled Assets.toml to recover the `[msl]` entry.
+        let manifest = match AssetManifest::from_str(BUNDLED_ASSETS_TOML) {
+            Ok(m) => m,
+            Err(e) => {
+                set_install_state(
+                    &slot,
+                    MslLoadState::Failed(format!("Assets.toml parse: {e}")),
+                );
+                return;
+            }
+        };
+        let Some(entry) = manifest.assets.get("msl") else {
+            set_install_state(
+                &slot,
+                MslLoadState::Failed("no [msl] entry in Assets.toml".into()),
+            );
+            return;
+        };
+        let version = entry.version.clone();
+
+        // ── Download + extract ────────────────────────────────────
+        // `download_asset` is synchronous (ureq) and prints to stdout.
+        // It already handles cache-hit (version file, sha256) so a
+        // repeat launch is effectively a no-op.
+        set_install_state(
+            &slot,
+            MslLoadState::Loading {
+                phase: MslLoadPhase::FetchingBundle,
+                bytes_done: 0,
+                bytes_total: 0,
+            },
+        );
+        if let Err(e) = lunco_assets::download::download_asset(entry, "msl") {
+            set_install_state(
+                &slot,
+                MslLoadState::Failed(format!("MSL download: {e}")),
+            );
+            return;
+        }
+
+        // ── Resolve resulting on-disk root ────────────────────────
+        let Some(root) = lunco_assets::msl_source_root_path() else {
+            set_install_state(
+                &slot,
+                MslLoadState::Failed(
+                    "downloader succeeded but no Modelica/ tree was found in cache"
+                        .into(),
+                ),
+            );
+            return;
+        };
+
+        // Make MSL usable for compilation *now* — the indexer below is
+        // a bincode cache acceleration, not a correctness gate. The
+        // first compile after a fresh download will pay the parse
+        // cost; the indexer makes subsequent launches fast.
+        let file_count = count_mo_files(&root);
+        let source = MslAssetSource::Filesystem(root.clone());
+        if let Ok(mut inner) = slot.lock() {
+            inner.pending_source = Some(source);
+            inner.pending_state = Some(MslLoadState::Ready {
+                file_count,
+                compressed_bytes: 0,
+                uncompressed_bytes: 0,
+            });
+            inner.pending_version = version;
+        }
+
+        // ── Indexer (best-effort, in-process) ─────────────────────
+        // Runs `lunco_modelica::indexer::run` on the same
+        // AsyncComputeTaskPool task — no subprocess, no PATH lookup,
+        // same workflow the `msl_indexer` binary uses. The runtime
+        // parse path still works without the cache, just slower, so
+        // any panic / error inside `run` is logged and swallowed
+        // rather than surfaced through `MslLoadState`.
+        bevy::log::info!("[MSL] running indexer to warm parsed-msl.bin cache…");
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::indexer::run(crate::indexer::Options::default());
+        }));
+    })
+    .detach();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn set_install_state(slot: &NativeInstallSlot, state: MslLoadState) {
+    if let Ok(mut inner) = slot.lock() {
+        inner.pending_state = Some(state);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn drain_native_msl_install(
+    slot: Res<NativeMslInstallSlot>,
+    mut state: ResMut<MslLoadState>,
+    mut settings: ResMut<crate::msl_settings::MslSettings>,
+    mut commands: Commands,
+) {
+    let Ok(mut inner) = slot.0.lock() else { return };
+    if let Some(new_state) = inner.pending_state.take() {
+        match (&*state, &new_state) {
+            (
+                MslLoadState::Loading { phase: a, .. },
+                MslLoadState::Loading { phase: b, .. },
+            ) if a == b => {}
+            _ => log_state_transition(&new_state),
+        }
+        *state = new_state;
+    }
+    if let Some(source) = inner.pending_source.take() {
+        lunco_assets::msl::install_global_msl_source(source.clone());
+        commands.insert_resource(source);
+    }
+    if let Some(v) = inner.pending_version.take() {
+        settings.last_fetched_version = Some(v);
+    }
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 fn count_mo_files(root: &std::path::Path) -> usize {
@@ -345,7 +547,6 @@ fn drive_msl_parse(
     }
 }
 
-#[cfg(target_arch = "wasm32")]
 fn log_state_transition(s: &MslLoadState) {
     match s {
         MslLoadState::NotStarted => {}

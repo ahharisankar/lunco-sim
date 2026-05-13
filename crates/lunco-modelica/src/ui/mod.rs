@@ -855,7 +855,171 @@ fn register_settings_menu(world: &mut World) {
             );
         });
         drop(snap);
+        ui.separator();
+        render_assets_settings(ui, world);
     });
+}
+
+/// Settings rows for the "Assets" section — MSL load state, bundle URL,
+/// local override, last-fetched bookkeeping, and quick actions
+/// (open cache folder, clear cache).
+fn render_assets_settings(ui: &mut bevy_egui::egui::Ui, world: &mut World) {
+    use bevy_egui::egui;
+    use lunco_assets::msl::{MslLoadPhase, MslLoadState};
+
+    ui.label(egui::RichText::new("Assets — MSL").weak().small());
+
+    // Current state line.
+    let state = world.get_resource::<MslLoadState>().cloned();
+    match state.as_ref() {
+        Some(MslLoadState::Ready {
+            file_count,
+            uncompressed_bytes,
+            ..
+        }) => {
+            ui.label(format!(
+                "Status: ready · {file_count} files · {:.1} MB",
+                *uncompressed_bytes as f64 / 1_048_576.0,
+            ));
+        }
+        Some(MslLoadState::Loading {
+            phase,
+            bytes_done,
+            bytes_total,
+        }) => {
+            let phase = match phase {
+                MslLoadPhase::FetchingManifest => "fetching manifest",
+                MslLoadPhase::FetchingBundle => "downloading",
+                MslLoadPhase::Decompressing => "extracting",
+                MslLoadPhase::Parsing => "loading",
+            };
+            if *bytes_total > 0 {
+                ui.label(format!(
+                    "Status: {phase} · {:.1} / {:.1} MB",
+                    *bytes_done as f64 / 1_048_576.0,
+                    *bytes_total as f64 / 1_048_576.0,
+                ));
+            } else {
+                ui.label(format!("Status: {phase}"));
+            }
+        }
+        Some(MslLoadState::Failed(msg)) => {
+            ui.colored_label(egui::Color32::LIGHT_RED, format!("Status: failed — {msg}"));
+        }
+        Some(MslLoadState::NotStarted) | None => {
+            ui.label("Status: not started");
+        }
+    }
+
+    // Resolved on-disk path. May be the auto-fetch destination, the
+    // workspace `.cache/msl/`, or a user-supplied override.
+    let root = lunco_assets::msl_source_root_path();
+    match root {
+        Some(p) => {
+            ui.horizontal(|ui| {
+                ui.label("Root:");
+                ui.monospace(p.display().to_string());
+            });
+        }
+        None => {
+            ui.label("Root: (not materialised yet)");
+        }
+    }
+
+    // Local-root override — wins over auto-download. Restart needed
+    // for changes to take effect (the resolution happens once at
+    // plugin build).
+    let mut settings = world.resource_mut::<crate::msl_settings::MslSettings>();
+    let mut local = settings
+        .local_root_override
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.label("Local root");
+        if ui
+            .add(
+                egui::TextEdit::singleline(&mut local)
+                    .desired_width(360.0)
+                    .hint_text("/path/to/msl (parent of Modelica/)"),
+            )
+            .on_hover_text(
+                "Absolute path to a Modelica Standard Library tree on \
+                 disk. The directory must contain a `Modelica/` \
+                 subdirectory. Takes precedence over the auto-download. \
+                 Restart required.",
+            )
+            .changed()
+        {
+            settings.local_root_override = if local.trim().is_empty() {
+                None
+            } else {
+                Some(std::path::PathBuf::from(local.trim()))
+            };
+        }
+    });
+    if let Some(v) = settings.last_fetched_version.clone() {
+        ui.label(
+            egui::RichText::new(format!("Installed version: {v}"))
+                .weak()
+                .small(),
+        );
+    }
+    drop(settings);
+
+    // Actions.
+    ui.horizontal(|ui| {
+        if ui
+            .button("Open cache folder")
+            .on_hover_text("Reveal the MSL cache directory in the system file manager.")
+            .clicked()
+        {
+            let path = lunco_assets::cache_subdir("msl");
+            if let Err(e) = open_in_file_manager(&path) {
+                bevy::log::warn!("[Assets] could not open {}: {e}", path.display());
+            }
+        }
+        if ui
+            .button("Clear cache")
+            .on_hover_text(
+                "Delete the MSL cache directory. Use when a previous \
+                 fetch left a partial tree. Restart to re-download.",
+            )
+            .clicked()
+        {
+            let path = lunco_assets::cache_subdir("msl");
+            match std::fs::remove_dir_all(&path) {
+                Ok(()) => bevy::log::info!("[Assets] cleared {}", path.display()),
+                Err(e) => {
+                    bevy::log::warn!("[Assets] could not clear {}: {e}", path.display())
+                }
+            }
+        }
+    });
+}
+
+/// Best-effort "reveal in file manager" — spawns the platform's
+/// default file browser at `path`. Returns an io error if the spawn
+/// fails outright (the file manager itself may still pop up an error
+/// dialog; we don't try to capture that).
+fn open_in_file_manager(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open").arg(path).spawn()?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(path).spawn()?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer").arg(path).spawn()?;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let _ = path;
+    }
+    Ok(())
 }
 
 /// Contribute Cut/Copy/Paste/Select-All entries to the workbench's

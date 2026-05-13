@@ -172,8 +172,24 @@ impl Settings {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            if let Err(e) = std::fs::write(&path, json) {
-                warn!("[Settings] write to {} failed: {e}", path.display());
+            // Write to a sibling tmp file and rename. `std::fs::write`
+            // truncates the destination, which on Windows leaves a
+            // zero-byte file if the process is killed mid-write (real
+            // hazard during a power cut or hard close). `rename` over
+            // an existing file is atomic on POSIX and on Windows ≥ 1607
+            // — good enough for user settings.
+            let tmp = path.with_extension("json.tmp");
+            if let Err(e) = std::fs::write(&tmp, json.as_bytes()) {
+                warn!("[Settings] write tmp {} failed: {e}", tmp.display());
+                return;
+            }
+            if let Err(e) = std::fs::rename(&tmp, &path) {
+                warn!(
+                    "[Settings] atomic rename {} → {} failed: {e}",
+                    tmp.display(),
+                    path.display()
+                );
+                let _ = std::fs::remove_file(&tmp);
                 return;
             }
             self.dirty = false;

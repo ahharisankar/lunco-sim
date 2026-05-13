@@ -99,9 +99,10 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "wayland",                     # Linux Wayland backend (avoids XWayland stalls on Wayland sessions)
     "bevy_picking",                # picking core (sub-backends are opt-in)
     # NOTE: `trace_tracy` is intentionally NOT in the workspace default features
-    # because tracy-client-sys requires a C++ compile that doesn't work targeting
-    # wasm32-unknown-unknown. It is re-enabled for native builds via a
-    # target-specific dependency on bevy in lunco-modelica/Cargo.toml.
+    # because tracy-client-sys requires a C++ compile that doesn't work
+    # targeting wasm32-unknown-unknown *or* Windows MSVC 2019. It is re-enabled
+    # on native via the opt-in `tracy` feature on `lunco-modelica`
+    # (see that crate's [features] section and target-cfg dependency).
     "serialize",                   # serde Serialize/Deserialize for Entity, Vec3, Quat, Handle, etc.
                                    # Enables `#[Command]` to always derive serde without per-field worry.
 ] }

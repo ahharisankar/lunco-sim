@@ -627,6 +627,8 @@ pub mod ui;
 /// Available on all targets, but primarily used for wasm builds.
 pub mod models;
 pub mod msl_remote;
+pub mod msl_settings;
+pub mod indexer;
 pub mod sim_stream;
 pub mod worker;
 pub mod experiments_runner;
