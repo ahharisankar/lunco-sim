@@ -487,6 +487,7 @@ fn apply_plot_binding(
     // 1. Optimistic in-memory swap so the visual updates this frame.
     let payload = PlotNodeData {
         entity: entity_bits,
+        doc_id: None,
         signal_path: signal_path.to_string(),
         title: String::new(),
     };

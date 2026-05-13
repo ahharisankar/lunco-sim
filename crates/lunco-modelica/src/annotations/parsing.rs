@@ -40,13 +40,17 @@ pub fn extract_icon_with_visibility(
     })
 }
 
-/// Extract the `Diagram(...)` annotation from a class's annotation list.
+/// Extract the `Diagram(...)` annotation from a class's annotation
+/// list. Also pulls the sibling `__LunCo(plotNodes={...})` vendor
+/// annotation so callers receive `graphics` (OMEdit-compatible) and
+/// `plot_nodes` (Lunica live-plot tiles) in one combined view.
 pub fn extract_diagram(annotations: &[Expression]) -> Option<Diagram> {
     let diagram_call = find_call(annotations, "Diagram")?;
     let diagram_args = call_args(diagram_call)?;
     Some(Diagram {
         coordinate_system: extract_coordinate_system(diagram_args).unwrap_or_default(),
         graphics: extract_graphics(diagram_args),
+        plot_nodes: extract_lunco_plot_nodes(annotations),
     })
 }
 

@@ -232,6 +232,7 @@ pub(super) fn rebind_plot_node(
     use lunco_viz::kinds::canvas_plot_node::PlotNodeData;
     let payload = PlotNodeData {
         entity: entity_bits,
+        doc_id: None,
         signal_path: signal_path.to_string(),
         title: String::new(),
     };
@@ -554,6 +555,7 @@ pub(super) fn insert_plot_node(
 ) {
     let payload = lunco_viz::kinds::canvas_plot_node::PlotNodeData {
         entity: entity_bits,
+        doc_id: None,
         signal_path: signal_path.to_string(),
         title: String::new(),
     };

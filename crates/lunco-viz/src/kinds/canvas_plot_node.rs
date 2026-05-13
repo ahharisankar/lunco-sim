@@ -40,14 +40,33 @@ pub const PLOT_NODE_KIND: &str = "lunco.viz.plot";
 
 /// Per-node persisted payload. Stored in `Node::data` as JSON so the
 /// scene serialiser handles round-trips without knowing about plots.
+///
+/// Two binding modes:
+///
+/// * **Pinned** (`doc_id = None`): use the literal `entity` field as
+///   the sim entity. Telemetry-bound tiles take this path — the user
+///   explicitly chose a specific sim and we want samples from that
+///   one even if other sims also publish the same signal.
+/// * **Per-doc** (`doc_id = Some(d)`): resolve the active sim entity
+///   for document `d` via the snapshot's `doc_to_entity` map at fetch
+///   time. Source-backed tiles (parsed from `__LunCo(plotNodes=…)`
+///   in a `.mo` file) take this path — they belong to a document,
+///   not to a specific sim instance, and follow whichever sim is
+///   bound to that document right now. Survives sim restart without
+///   a re-projection.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PlotNodeData {
-    /// Bevy entity that produced the signal samples. Encoded
-    /// alongside the path because `SignalRef` is `(entity, path)`-
-    /// keyed; the host fills this in when constructing the node.
-    /// Stored as `u64` so the JSON shape doesn't depend on Bevy
-    /// internals.
+    /// Bevy entity that produced the signal samples. Used directly
+    /// when `doc_id` is `None`. Stored as `u64` so the JSON shape
+    /// doesn't depend on Bevy internals.
     pub entity: u64,
+    /// Document this tile belongs to, when source-backed. Resolved
+    /// to a sim entity per frame via the snapshot's `doc_to_entity`
+    /// table — required for source-backed tiles since the runtime
+    /// sim entity isn't known at projection time and changes on
+    /// every play/stop cycle. `None` for Telemetry-pinned tiles.
+    #[serde(default)]
+    pub doc_id: Option<u64>,
     /// Signal path (e.g. `"P.y"`).
     pub signal_path: String,
     /// Display label. Defaults to `signal_path` when empty.
@@ -66,6 +85,14 @@ pub type SamplePoint = [f64; 2];
 #[derive(Debug, Default, Clone)]
 pub struct SignalSnapshot {
     pub samples: HashMap<(Entity, String), Vec<SamplePoint>>,
+    /// Document → currently-bound sim entity. Populated by the host
+    /// from `ModelicaDocumentRegistry`. Per-doc plot tiles
+    /// (`PlotNodeData.doc_id = Some(_)`) use this to recover the
+    /// runtime sim entity at fetch time instead of baking it in at
+    /// projection. Survives sim restart and tab switches without a
+    /// re-projection — the same scene Node tracks whatever sim is
+    /// active for its document right now.
+    pub doc_to_entity: HashMap<u64, Entity>,
 }
 
 /// Stash a snapshot in the egui context so any plot node visual
@@ -272,11 +299,23 @@ impl NodeVisual for PlotNodeVisual {
         } else {
             "(unbound plot)"
         };
-        // Unbound plots store `entity = 0` (invalid bit pattern in
-        // bevy 0.18). `try_from_bits` returns `None` instead of
-        // panicking, and an unbound plot naturally has no samples.
+        // Sample lookup. Two binding modes, see `PlotNodeData` doc:
+        //
+        // * `doc_id = Some(d)` (source-backed): resolve `d → entity`
+        //   via the snapshot's `doc_to_entity` table, then look up
+        //   `(entity, path)`. Re-resolved every frame so the tile
+        //   tracks whichever sim is currently bound to that document
+        //   — no rebinding op needed after a sim restart.
+        // * `doc_id = None` (pinned, e.g. Telemetry tiles): use
+        //   `self.data.entity` directly. `Entity::try_from_bits`
+        //   returns `None` for the all-zeros placeholder, naturally
+        //   degrading to "no samples" rather than panicking.
         let snapshot = fetch_signal_snapshot(ctx.ui.ctx());
-        let points: Vec<SamplePoint> = Entity::try_from_bits(self.data.entity)
+        let resolved_entity: Option<Entity> = match self.data.doc_id {
+            Some(d) => snapshot.doc_to_entity.get(&d).copied(),
+            None => Entity::try_from_bits(self.data.entity),
+        };
+        let points: Vec<SamplePoint> = resolved_entity
             .and_then(|e| {
                 snapshot
                     .samples

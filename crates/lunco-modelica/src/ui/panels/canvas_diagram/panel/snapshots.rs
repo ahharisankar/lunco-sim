@@ -13,6 +13,16 @@ pub(crate) fn stash_snapshots(ui: &egui::Context, world: &mut World, doc_id: Opt
             let pts: Vec<[f64; 2]> = hist.samples.iter().map(|s| [s.time, s.value]).collect();
             snapshot.samples.insert((sig_ref.entity, sig_ref.path.clone()), pts);
         }
+        // Source-backed plot tiles store a `doc_id` instead of a
+        // pinned sim entity (the runtime entity isn't known at
+        // parse / projection time). Populate the per-frame
+        // `doc → entity` table from the document registry so those
+        // tiles can resolve at fetch time.
+        if let Some(reg) = world.get_resource::<ModelicaDocumentRegistry>() {
+            for (e, d) in reg.iter_doc_for_entity() {
+                snapshot.doc_to_entity.insert(d.raw(), e);
+            }
+        }
         lunco_viz::kinds::canvas_plot_node::stash_signal_snapshot(ui, snapshot);
     }
 

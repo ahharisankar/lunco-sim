@@ -456,6 +456,14 @@ impl ModelicaDocumentRegistry {
         })
     }
 
+    /// Iterate every `(entity, doc)` link currently registered.
+    /// Used by per-frame snapshot builders that need to project the
+    /// full `doc → entity` table for source-backed plot tiles to
+    /// resolve their sim at fetch time.
+    pub fn iter_doc_for_entity(&self) -> impl Iterator<Item = (Entity, DocumentId)> + '_ {
+        self.by_entity.iter().map(|(e, d)| (*e, *d))
+    }
+
     /// Entities currently linked to this document. Typically 0 (editing
     /// without a running sim) or 1; >1 in cosim scenarios.
     pub fn entities_linked_to(&self, doc: DocumentId) -> Vec<Entity> {
