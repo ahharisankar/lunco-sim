@@ -118,7 +118,13 @@ impl BrowserSection for FilesSection {
             });
         }
 
-        let Some(twin) = ctx.twin else {
+        // Collect twins out of ctx so we can re-borrow ctx.actions
+        // inside each per-twin render without fighting the borrow
+        // checker. Twin refs are cheap (just &Twin); the Vec is the
+        // outer ctx.twins clone-of-refs.
+        let twins: Vec<&lunco_twin::Twin> = ctx.twins.clone();
+
+        if twins.is_empty() {
             if docs.is_empty() {
                 ui.label(
                     egui::RichText::new("Open a Twin or folder to browse files.")
@@ -127,47 +133,65 @@ impl BrowserSection for FilesSection {
                 );
             }
             return;
-        };
-
-        let files = twin.files();
-        if files.is_empty() {
-            if docs.is_empty() {
-                ui.label(
-                    egui::RichText::new("(no files found in this Twin)")
-                        .weak()
-                        .italics(),
-                );
-            }
-            return;
         }
 
         // Divider only appears between the workspace docs and the
-        // folder file list — if either is empty, no line to draw.
+        // folder list — if either is empty, no line to draw.
         if !docs.is_empty() {
             ui.separator();
         }
 
-        // Virtualised: only the visible rows are materialised. Critical
-        // for folders with thousands of entries (e.g. `~/.cargo`) —
-        // a non-virtual loop would allocate a row per file every
-        // frame and blow the frame budget regardless of off-thread
-        // scanning. Recursive directory grouping is Slice 2 work;
-        // flat keeps Slice 1 small.
         let row_h = ui.text_style_height(&egui::TextStyle::Body);
-        egui::ScrollArea::vertical()
-            .id_salt("twin_browser_files_scroll")
-            .auto_shrink([false; 2])
-            .show_rows(ui, row_h, files.len(), |ui, range| {
-                for i in range {
-                    let entry = &files[i];
-                    let label = entry.relative_path.display().to_string();
-                    let resp = ui.selectable_label(false, label);
-                    if resp.clicked() {
-                        ctx.actions.push(BrowserAction::OpenFile {
-                            relative_path: entry.relative_path.clone(),
-                        });
+        // Collect clicks across all per-folder renders, then push them
+        // to `ctx.actions` after the egui closures return. The nested
+        // `CollapsingHeader::show` + `ScrollArea::show_rows` closures
+        // would otherwise both want to borrow `ctx.actions` mutably.
+        let mut clicks: Vec<std::path::PathBuf> = Vec::new();
+
+        for twin in &twins {
+            let folder_name = twin
+                .root
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| twin.root.to_string_lossy().to_string());
+            let header_label = format!("📁  {}", folder_name);
+            let hover_path = twin.root.to_string_lossy().into_owned();
+            let salt = twin.root.to_string_lossy().into_owned();
+            let resp = egui::CollapsingHeader::new(header_label)
+                .id_salt(("twin_browser_folder", salt.clone()))
+                .default_open(true)
+                .show(ui, |ui| {
+                    let files = twin.files();
+                    if files.is_empty() {
+                        ui.label(
+                            egui::RichText::new("(empty)")
+                                .weak()
+                                .italics()
+                                .small(),
+                        );
+                        return;
                     }
-                }
-            });
+                    egui::ScrollArea::vertical()
+                        .id_salt(("twin_browser_files_scroll", salt.clone()))
+                        .auto_shrink([false; 2])
+                        .show_rows(ui, row_h, files.len(), |ui, range| {
+                            for i in range {
+                                let entry = &files[i];
+                                let label =
+                                    entry.relative_path.display().to_string();
+                                if ui.selectable_label(false, label).clicked() {
+                                    clicks.push(entry.relative_path.clone());
+                                }
+                            }
+                        });
+                });
+            resp.header_response
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(hover_path);
+        }
+
+        for relative_path in clicks {
+            ctx.actions.push(BrowserAction::OpenFile { relative_path });
+        }
     }
 }

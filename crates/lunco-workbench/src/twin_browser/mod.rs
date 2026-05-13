@@ -269,11 +269,17 @@ impl BrowserActions {
 /// the panel for the duration of the render and inserting them here
 /// would break the take-and-restore protocol.
 pub struct BrowserCtx<'a> {
-    /// The currently-active Twin, or `None` if no Twin is open. Today
-    /// the browser is single-twin oriented; multi-twin rendering
-    /// (per-Twin collapsing groups) is a follow-up once the Workspace
-    /// habit of holding several is actually exercised by the UI.
+    /// The currently-active Twin, or `None` if no Twin is open. Use
+    /// this when a section only needs to act on the focused folder
+    /// (commands, drill-in, etc.). Sections that want to render the
+    /// whole workspace (Files multi-root tree) read [`twins`] instead.
     pub twin: Option<&'a lunco_twin::Twin>,
+    /// Every folder/twin-mode Twin currently registered in the
+    /// Workspace, in registration order. Sections that visualise the
+    /// workspace as a whole (Files section's multi-root tree) iterate
+    /// this; sections that act on a single focused folder use
+    /// [`twin`] instead.
+    pub twins: Vec<&'a lunco_twin::Twin>,
     /// Outbox the section pushes user actions into.
     pub actions: &'a mut BrowserActions,
     /// Full ECS world for sections that need domain resources.
@@ -397,8 +403,13 @@ impl Panel for TwinBrowserPanel {
                             let twin_ref = workspace
                                 .as_ref()
                                 .and_then(|ws| ws.active_twin.and_then(|id| ws.twin(id)));
+                            let all_twins: Vec<&lunco_twin::Twin> = workspace
+                                .as_ref()
+                                .map(|ws| ws.twins().map(|(_, t)| t).collect())
+                                .unwrap_or_default();
                             let mut ctx = BrowserCtx {
                                 twin: twin_ref,
+                                twins: all_twins,
                                 actions: &mut actions,
                                 world,
                             };

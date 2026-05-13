@@ -89,8 +89,13 @@ impl Panel for FilesPanel {
                     let twin_ref = workspace
                         .as_ref()
                         .and_then(|ws| ws.active_twin.and_then(|id| ws.twin(id)));
+                    let all_twins: Vec<&lunco_twin::Twin> = workspace
+                        .as_ref()
+                        .map(|ws| ws.twins().map(|(_, t)| t).collect())
+                        .unwrap_or_default();
                     let mut ctx = BrowserCtx {
                         twin: twin_ref,
+                        twins: all_twins,
                         actions: &mut actions,
                         world,
                     };
