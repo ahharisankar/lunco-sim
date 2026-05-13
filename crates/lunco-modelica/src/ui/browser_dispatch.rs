@@ -49,8 +49,34 @@ pub fn drain_browser_actions(world: &mut World) {
                     continue;
                 };
                 let abs = root.join(&relative_path);
-                let class = crate::class_ref::ClassRef::user_file(abs, Vec::<String>::new());
-                crate::ui::panels::package_browser::open_class(world, class, false);
+                // Only Modelica `.mo` files go through the diagram /
+                // ModelView path — clicking a `.json`, `.txt`, etc.
+                // previously routed through `open_class` which assumes
+                // a Modelica class and produced bogus tabs. Non-`.mo`
+                // files fall through to the workbench-level `OpenFile`
+                // command, which is the generic file-opener (Modelica
+                // observer ignores it, text/USD/etc. observers handle
+                // their own extensions as they're added).
+                let is_modelica = abs
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("mo"))
+                    .unwrap_or(false);
+                if is_modelica {
+                    let class = crate::class_ref::ClassRef::user_file(
+                        abs,
+                        Vec::<String>::new(),
+                    );
+                    crate::ui::panels::package_browser::open_class(
+                        world, class, false,
+                    );
+                } else {
+                    world.commands().trigger(
+                        lunco_workbench::file_ops::OpenFile {
+                            path: abs.to_string_lossy().into_owned(),
+                        },
+                    );
+                }
             }
             BrowserAction::OpenModelicaClass {
                 relative_path,

@@ -188,7 +188,19 @@ impl BrowserSection for FilesSection {
             110,
         );
 
+        // Workspace-doc rename intents (parallel to the Twin-tree
+        // queues below). Drained once the loop finishes so the closures
+        // don't fight the borrow checker.
+        let mut doc_begin_rename: Option<DocRenameInProgress> = None;
+        let mut doc_submit: Option<(lunco_doc::DocumentId, String)> = None;
+        let mut doc_cancel = false;
+
         for entry in &docs {
+            let in_rename = self
+                .rename_doc
+                .as_ref()
+                .map(|r| r.doc == entry.id)
+                .unwrap_or(false);
             ui.horizontal(|ui| {
                 if entry.is_unsaved {
                     ui.label(
@@ -196,13 +208,61 @@ impl BrowserSection for FilesSection {
                             .color(dirty_dot_color)
                             .size(8.0),
                     );
-                    ui.label(
-                        egui::RichText::new(display_name_with_ext(entry))
-                            .italics(),
-                    );
                 } else {
                     ui.label(egui::RichText::new("  "));
-                    ui.label(egui::RichText::new(display_name_with_ext(entry)));
+                }
+                if in_rename {
+                    let state = self
+                        .rename_doc
+                        .as_mut()
+                        .expect("in_rename ⇒ rename_doc Some");
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut state.buffer)
+                            .desired_width(f32::INFINITY),
+                    );
+                    if state.needs_focus {
+                        resp.request_focus();
+                        state.needs_focus = false;
+                    }
+                    let enter = resp.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let esc =
+                        ui.input(|i| i.key_pressed(egui::Key::Escape));
+                    if enter {
+                        doc_submit =
+                            Some((state.doc, state.buffer.clone()));
+                    } else if esc || (resp.lost_focus() && !enter) {
+                        doc_cancel = true;
+                    }
+                } else {
+                    let display = display_name_with_ext(entry);
+                    let text = if entry.is_unsaved {
+                        egui::RichText::new(&display).italics()
+                    } else {
+                        egui::RichText::new(&display)
+                    };
+                    let r = ui.add(
+                        egui::Label::new(text)
+                            .selectable(false)
+                            .sense(egui::Sense::click()),
+                    );
+                    if r.double_clicked() {
+                        // Pre-fill with the stem (no extension) so the
+                        // user edits just the name. The kind-to-ext
+                        // mapping is the same `extension_for_kind`
+                        // used in display.
+                        let leaf = entry
+                            .display_name
+                            .split('.')
+                            .next()
+                            .unwrap_or(&entry.display_name)
+                            .to_string();
+                        doc_begin_rename = Some(DocRenameInProgress {
+                            doc: entry.id,
+                            buffer: leaf,
+                            needs_focus: true,
+                        });
+                    }
                 }
             });
         }
@@ -339,6 +399,27 @@ impl BrowserSection for FilesSection {
         }
         if cancel_rename {
             self.rename = None;
+        }
+
+        // Workspace-doc rename: drain after the egui pass for the
+        // same borrow-checker reason as the Twin-tree path.
+        if let Some(intent) = doc_begin_rename {
+            self.rename_doc = Some(intent);
+        }
+        if let Some((doc, new_name)) = doc_submit {
+            self.rename_doc = None;
+            let new_name = new_name.trim().to_string();
+            if !new_name.is_empty() {
+                ctx.world
+                    .commands()
+                    .trigger(super::super::file_ops::RenameOpenDocument {
+                        doc,
+                        new_name,
+                    });
+            }
+        }
+        if doc_cancel {
+            self.rename_doc = None;
         }
     }
 }
