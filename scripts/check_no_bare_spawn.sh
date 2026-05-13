@@ -22,8 +22,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# Allowlist format: one path:line per entry, '#' comments allowed.
-# Paths are relative to repo root. Update when a new legitimate
+# Allowlist format: one `path[:line]` per entry, '#' comments allowed.
+# Paths are relative to repo root. Prefer whole-file entries (stable
+# across line shifts) and group the justifications for every spawn
+# in that file under a single comment. Update when a new legitimate
 # spawn site is added — and add a comment explaining why it doesn't
 # need spawn_tracked.
 ALLOWLIST=$(cat <<'EOF'
@@ -41,12 +43,9 @@ crates/lunco-workbench/src/picker.rs
 # the binding-insert site (DrillInBinding._busy / DuplicateBinding._busy
 # / OpeningState::FileLoad._busy) so the bus is busy for the full
 # parse stage — the spawn itself does not own the handle.
-crates/lunco-modelica/src/ui/commands/lifecycle.rs:236
-crates/lunco-modelica/src/ui/commands/lifecycle.rs:386
-crates/lunco-modelica/src/ui/commands/lifecycle.rs:539
-crates/lunco-modelica/src/ui/panels/canvas_diagram/loads.rs:471
-crates/lunco-modelica/src/ui/panels/package_browser/mod.rs:258
-crates/lunco-modelica/src/ui/panels/package_browser/mod.rs:315
+crates/lunco-modelica/src/ui/commands/lifecycle.rs
+crates/lunco-modelica/src/ui/panels/canvas_diagram/loads.rs
+crates/lunco-modelica/src/ui/panels/package_browser/mod.rs
 
 # Background image (port icon) decode. Result lands in an asset cache;
 # no overlay state depends on the spawn completing within a frame.

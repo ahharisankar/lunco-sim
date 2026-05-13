@@ -166,6 +166,109 @@ pub fn track_ast_reparse_busy(
     handles.handles.retain(|d, _| still_stale.contains(d));
 }
 
+/// In-flight per-document `StatusBus` handles for compile work.
+/// Same edge-triggered pattern as [`AstReparseBusyHandles`]: minted
+/// when [`crate::ui::CompileStates::is_compiling`] rises, dropped
+/// when it falls — with the terminal outcome (`Succeeded` /
+/// `Failed(msg)`) recorded for [`lunco_workbench::status_bus::StatusBus::lifecycle`]
+/// consumers.
+///
+/// Compile runs in the off-thread Modelica worker; the dispatch path
+/// (`commands/compile.rs::on_compile_model`) is far enough from the
+/// completion path (`worker.rs` result handler) that threading a
+/// handle through both would be invasive. Derive-from-state covers
+/// both paths with a single system.
+#[derive(Resource, Default)]
+pub struct CompileBusyHandles {
+    handles: HashMap<DocumentId, lunco_workbench::status_bus::BusyHandle>,
+}
+
+/// Edge-triggered tracker for per-doc compile lifecycle. Mints a
+/// `(Document(d), "compile")` bus entry when `CompileState`
+/// transitions into `Compiling`, drops it (with `Failed(msg)` if
+/// the terminal state is `Error`) when it transitions out.
+pub fn track_compile_busy(
+    compile_states: Res<crate::ui::CompileStates>,
+    registry: Res<crate::ui::state::ModelicaDocumentRegistry>,
+    mut handles: ResMut<CompileBusyHandles>,
+    mut bus: ResMut<lunco_workbench::status_bus::StatusBus>,
+) {
+    use lunco_workbench::status_bus::{BusyOutcome, BusyScope, StatusBus};
+    let mut still_compiling: std::collections::HashSet<DocumentId> = Default::default();
+    for (doc_id, _host) in registry.iter() {
+        if !compile_states.is_compiling(doc_id) {
+            continue;
+        }
+        still_compiling.insert(doc_id);
+        if handles.handles.contains_key(&doc_id) {
+            continue;
+        }
+        let h = StatusBus::begin(
+            &mut bus,
+            BusyScope::Document(doc_id.0),
+            "compile",
+            "Compiling…",
+        );
+        handles.handles.insert(doc_id, h);
+    }
+    // Compile finished (or doc closed) — drop the handle with the
+    // appropriate terminal outcome. The bus's `last_outcome` then
+    // surfaces compile errors via `lifecycle()` for any panel that
+    // wants them.
+    let to_drop: Vec<DocumentId> = handles
+        .handles
+        .keys()
+        .filter(|d| !still_compiling.contains(d))
+        .copied()
+        .collect();
+    for doc_id in to_drop {
+        if let Some(mut handle) = handles.handles.remove(&doc_id) {
+            if let Some(msg) = compile_states.error_for(doc_id) {
+                handle.set_outcome(BusyOutcome::Failed(msg.to_string()));
+            }
+            // Drop on scope exit clears the bus entry.
+            let _ = handle;
+        }
+    }
+}
+
+/// `StatusBus` handle for an in-flight Fast Run.
+/// [`crate::experiments_runner::ModelicaRunner`] is a process-global
+/// singleton — only one run at a time — so a single `Option` is
+/// sufficient. Scope is `Global` because the runner doesn't track
+/// which document owns the active experiment.
+#[derive(Resource, Default)]
+pub struct SimulateBusyHandle {
+    handle: Option<lunco_workbench::status_bus::BusyHandle>,
+}
+
+/// Edge-triggered tracker for Fast Run lifecycle. Mints when
+/// [`crate::experiments_runner::ModelicaRunner::is_busy`] rises,
+/// drops when it falls.
+pub fn track_simulate_busy(
+    runner: Option<Res<crate::ModelicaRunnerResource>>,
+    mut state: ResMut<SimulateBusyHandle>,
+    mut bus: ResMut<lunco_workbench::status_bus::StatusBus>,
+) {
+    use lunco_workbench::status_bus::{BusyScope, StatusBus};
+    let Some(runner) = runner else { return };
+    let busy = runner.0.is_busy();
+    match (busy, state.handle.is_some()) {
+        (true, false) => {
+            state.handle = Some(StatusBus::begin(
+                &mut bus,
+                BusyScope::Global,
+                "simulate",
+                "Running…",
+            ));
+        }
+        (false, true) => {
+            state.handle = None;
+        }
+        _ => {}
+    }
+}
+
 /// Drive [`OpeningState::FileLoad`] entries: poll each pending
 /// file-read task, install the resulting document into the registry,
 /// and clear the entry. Mirrors the previous `cache.file_tasks`
@@ -175,6 +278,9 @@ pub fn drive_file_load_openings(
     mut registry: ResMut<crate::ui::state::ModelicaDocumentRegistry>,
     mut workspace: ResMut<lunco_workbench::WorkspaceResource>,
     mut canvas_state: ResMut<crate::ui::panels::canvas_diagram::CanvasDiagramState>,
+    mut tabs: ResMut<crate::ui::panels::model_view::ModelTabs>,
+    mut bus: ResMut<lunco_workbench::status_bus::StatusBus>,
+    mut commands: Commands,
 ) {
     use futures_lite::future;
     let doc_ids = openings.doc_ids();
@@ -185,16 +291,56 @@ pub fn drive_file_load_openings(
             }
             _ => None,
         };
-        let Some(result) = ready else { continue };
-        // Take the busy handle out of the variant before dropping the
-        // rest, and hand it to the canvas state. Bus keeps a
-        // `Document(doc_id)` entry continuously across the
-        // file-load → projection boundary; the projection spawn
-        // releases it via `complete_projection_handoff`.
-        if let Some(OpeningState::FileLoad { busy, .. }) = openings.remove(doc_id) {
-            canvas_state.stash_projection_handoff(result.doc_id, busy);
+        let Some(ready) = ready else { continue };
+        let Some(OpeningState::FileLoad { busy, .. }) = openings.remove(doc_id) else {
+            continue;
+        };
+        match ready.result {
+            Ok(doc) => {
+                // Success: hand the parse-phase handle to the canvas
+                // state so the bus stays busy across the file-load →
+                // projection boundary; the projection spawn releases
+                // it via `complete_projection_handoff`.
+                canvas_state.stash_projection_handoff(ready.doc_id, busy);
+                registry.install_prebuilt(ready.doc_id, doc);
+                workspace.active_document = Some(ready.doc_id);
+            }
+            Err(msg) => {
+                // Failure: surface the error to the user via the
+                // status bar's history popover (`bus.push`) and
+                // record `Failed` on the bus entry's outcome.
+                // Close every tab pre-emptively opened against
+                // the reserved doc id — without this, the user
+                // is left with orphan tabs pointing at a doc
+                // that was never installed (registry lookups
+                // return `None` and the canvas would show the
+                // load-failed overlay indefinitely). The reserved
+                // id itself is just a `u64` counter bump; no
+                // memory leak beyond that.
+                bevy::log::warn!(
+                    "[DocumentOpenings] file-load failed doc={} err={msg}",
+                    ready.doc_id.raw(),
+                );
+                bus.push(
+                    "open",
+                    lunco_workbench::status_bus::StatusLevel::Error,
+                    msg.clone(),
+                );
+                let mut busy = busy;
+                busy.set_outcome(lunco_workbench::status_bus::BusyOutcome::Failed(msg));
+                drop(busy);
+                let orphan_tab_ids: Vec<crate::ui::panels::model_view::TabId> = tabs
+                    .iter_mut_for_doc(ready.doc_id)
+                    .map(|(id, _)| id)
+                    .collect();
+                for tab_id in orphan_tab_ids {
+                    commands.trigger(lunco_workbench::CloseTab {
+                        kind: crate::ui::panels::model_view::MODEL_VIEW_KIND,
+                        instance: tab_id,
+                    });
+                    tabs.close_tab(tab_id);
+                }
+            }
         }
-        registry.install_prebuilt(result.doc_id, result.doc);
-        workspace.active_document = Some(result.doc_id);
     }
 }

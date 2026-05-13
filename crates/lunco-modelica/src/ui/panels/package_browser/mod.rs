@@ -256,13 +256,19 @@ fn open_bundled_class(world: &mut World, class: &ClassRef) {
     let origin = lunco_doc::DocumentOrigin::Bundled { filename: filename.clone() };
     let filename_for_task = filename.clone();
     let task = AsyncComputeTaskPool::get().spawn(async move {
-        let source_text = crate::models::get_model(&filename_for_task)
-            .unwrap_or("")
-            .to_string();
-        let doc = crate::document::ModelicaDocument::with_origin(reserved_doc_id, source_text, origin);
+        let result = match crate::models::get_model(&filename_for_task) {
+            Some(source_text) => Ok(crate::document::ModelicaDocument::with_origin(
+                reserved_doc_id,
+                source_text.to_string(),
+                origin,
+            )),
+            None => Err(format!(
+                "Bundled model not found: {filename_for_task}"
+            )),
+        };
         crate::ui::panels::package_browser::cache::FileLoadResult {
             doc_id: reserved_doc_id,
-            doc,
+            result,
         }
     });
     // Mint a `StatusBus` handle BEFORE inserting into `DocumentOpenings`
@@ -312,11 +318,18 @@ fn open_user_file_class(world: &mut World, path: PathBuf, class: &ClassRef) {
     let origin = lunco_doc::DocumentOrigin::File { path: path.clone(), writable: true };
     let path_for_task = path.clone();
     let task = AsyncComputeTaskPool::get().spawn(async move {
-        let source_text = std::fs::read_to_string(&path_for_task).unwrap_or_default();
-        let doc = crate::document::ModelicaDocument::with_origin(reserved_doc_id, source_text, origin);
+        let result = std::fs::read_to_string(&path_for_task)
+            .map(|source_text| {
+                crate::document::ModelicaDocument::with_origin(
+                    reserved_doc_id,
+                    source_text,
+                    origin,
+                )
+            })
+            .map_err(|e| format!("Failed to read {}: {e}", path_for_task.display()));
         crate::ui::panels::package_browser::cache::FileLoadResult {
             doc_id: reserved_doc_id,
-            doc,
+            result,
         }
     });
     // Mint a `StatusBus` handle BEFORE inserting; handed off to the

@@ -82,12 +82,14 @@ pub struct BusyId(u64);
 /// Terminal state of a unit of work, recorded on the bus when the
 /// owning [`BusyHandle`] drops. Lets panels distinguish "no content
 /// because the task succeeded with an empty result" from "no content
-/// because the task failed" without each panel keeping its own
-/// per-error state.
+/// because the task failed" — or was cancelled — without each panel
+/// keeping its own per-error state.
 ///
-/// Default on plain `Drop` is [`BusyOutcome::Succeeded`]; callers
-/// that detect failure should call [`BusyHandle::set_outcome`] with
-/// [`BusyOutcome::Failed`] before dropping.
+/// Default on plain `Drop` is [`BusyOutcome::Succeeded`]; failure
+/// paths call [`BusyHandle::set_outcome`] with [`BusyOutcome::Failed`].
+/// [`spawn_tracked_cancellable`](crate::tracked_task::spawn_tracked_cancellable)
+/// records [`BusyOutcome::Cancelled`] automatically when the
+/// cooperative cancel flag was set at the time the future finished.
 #[derive(Debug, Clone)]
 pub enum BusyOutcome {
     /// Work ran to completion. Empty results are still `Succeeded` —
@@ -95,6 +97,11 @@ pub enum BusyOutcome {
     Succeeded,
     /// Work terminated with a user-visible error.
     Failed(String),
+    /// Work short-circuited because the caller (or the user via the
+    /// cancel button) flipped the cancel token. Distinct from
+    /// `Succeeded` so panels can choose a neutral affordance
+    /// instead of an "empty result" overlay.
+    Cancelled,
 }
 
 /// RAII guard for an in-flight busy entry. Move into the task / per-tab
@@ -447,6 +454,21 @@ impl StatusBus {
         }
     }
 
+    /// Drop every recorded outcome whose `(scope, _)` matches
+    /// `target` exactly. Use on resource teardown (document close,
+    /// tab close, panel close) so `last_outcome` doesn't grow
+    /// unboundedly across a long-running session. Scope hierarchy
+    /// is NOT walked here — `Global` only clears `Global` entries,
+    /// not all descendants — because callers know the precise scope
+    /// they're tearing down.
+    pub fn clear_outcomes_for(&mut self, target: BusyScope) {
+        let before = self.last_outcome.len();
+        self.last_outcome.retain(|(s, _), _| *s != target);
+        if self.last_outcome.len() != before {
+            self.seq = self.seq.wrapping_add(1);
+        }
+    }
+
     /// Most recent terminal outcome within `scope`, if any. Picks the
     /// latest by wall-clock timestamp. Returns the source key so
     /// callers can filter (e.g. "only show the projection error,
@@ -463,12 +485,27 @@ impl StatusBus {
     /// given the panel's own "has content" predicate. Single
     /// derivation path — replaces hand-coded ORs of `loading`,
     /// `parse_pending`, `projecting`, etc.
+    ///
+    /// **Content priority.** When the panel already has content,
+    /// the state is always [`LifecycleState::Content`] — even if
+    /// work is in flight for `scope`. This means:
+    /// - The loading card is never painted over already-loaded
+    ///   content (no 1-frame "indicator covers scene" flash on
+    ///   projection completion).
+    /// - Background refresh (e.g. AST reparse while a model is
+    ///   visible) doesn't cover the canvas.
+    /// - Initial loads — where no content exists yet — still show
+    ///   `Loading` until the first paint.
+    ///
+    /// Panels that want a discreet "refreshing" affordance can
+    /// read `is_busy(scope) && has_content` separately; it isn't
+    /// baked into the lifecycle state machine.
     pub fn lifecycle(&self, scope: BusyScope, has_content: bool) -> LifecycleState {
-        if self.is_busy(scope) {
-            return LifecycleState::Loading;
-        }
         if has_content {
             return LifecycleState::Content;
+        }
+        if self.is_busy(scope) {
+            return LifecycleState::Loading;
         }
         match self.last_outcome(scope) {
             Some((BusyOutcome::Failed(msg), _)) => LifecycleState::Failed(msg.clone()),
@@ -598,8 +635,14 @@ pub struct StatusBusPlugin;
 
 impl Plugin for StatusBusPlugin {
     fn build(&self, app: &mut App) {
+        // `PreUpdate` runs before any panel render in `Update`, so
+        // handles dropped in the previous frame's render (e.g. the
+        // `BusyHandle` inside a `spawn_tracked` future that just
+        // completed) clear from `active_progress` before any panel
+        // reads `is_busy` / `lifecycle`. Keeps the rendered bus
+        // state in lock-step with the underlying work.
         app.init_resource::<StatusBus>()
-            .add_systems(Update, drain_busy_drops);
+            .add_systems(PreUpdate, drain_busy_drops);
     }
 }
 

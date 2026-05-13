@@ -10,14 +10,16 @@ pub struct ScanResult {
     pub children: Vec<PackageNode>,
 }
 
-/// Output of a bundled or user-file load task. Carries just enough
-/// to install the prebuilt document into the registry — display
-/// name / library / dedup key live in [`crate::ui::document_openings::OpeningState::FileLoad`]
-/// for the duration of the load, so this result is `doc_id + doc`
-/// only.
+/// Output of a bundled or user-file load task. `result` is the
+/// outcome — `Ok(doc)` for a successful read, `Err(msg)` for any IO
+/// or decode failure that should be surfaced as a load-failed
+/// overlay (`StatusBus` → `BusyOutcome::Failed`). Display name /
+/// library / dedup key live on the matching
+/// [`crate::ui::document_openings::OpeningState::FileLoad`] for
+/// the duration of the load.
 pub struct FileLoadResult {
     pub doc_id: lunco_doc::DocumentId,
-    pub doc: crate::document::ModelicaDocument,
+    pub result: Result<crate::document::ModelicaDocument, String>,
 }
 
 #[derive(Clone)]
