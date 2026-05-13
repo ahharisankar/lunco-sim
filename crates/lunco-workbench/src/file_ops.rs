@@ -42,7 +42,7 @@ use lunco_doc_bevy::SaveAsDocument;
 use lunco_twin::{DocumentKindId, DocumentKindRegistry, TwinError, TwinMode};
 
 use crate::picker::{PickFollowUp, PickResolved};
-use crate::session::{TwinAdded, TwinClosed, WorkspaceResource};
+use crate::session::{FileRenamed, TwinAdded, TwinClosed, WorkspaceResource};
 
 /// Create a new untitled document of the given kind.
 ///
@@ -130,6 +130,37 @@ pub struct AddTwin {
     /// Filesystem path of the Twin root (must contain `twin.toml`).
     /// Empty triggers the picker.
     pub path: String,
+}
+
+/// Rename a file or folder *inside* an open Twin.
+///
+/// Identifies the entry by `(twin_root, relative_path)` so the
+/// command body is self-contained (no Bevy resource handles) — HTTP
+/// callers, scripts, and the inline browser editor all dispatch the
+/// same shape. The observer:
+///
+/// 1. Validates inputs (new_name non-empty, no path separators, source
+///    exists, target doesn't already exist).
+/// 2. Performs `std::fs::rename` on the absolute paths.
+/// 3. Re-scans the affected Twin via [`Twin::reload`] so the file
+///    index reflects disk.
+/// 4. Patches every open Document whose `DocumentOrigin::File { path }`
+///    lay under the old path — paths are rewritten so live edits don't
+///    detach from disk.
+/// 5. Fires [`FileRenamed`] for domain plugins to chain follow-ups
+///    (Modelica class-declaration rename, USD reference rewrites, …).
+#[Command(default)]
+pub struct RenameTwinEntry {
+    /// Absolute path of the Twin root the entry belongs to. The
+    /// observer resolves this back to a `TwinId` via
+    /// [`WorkspaceResource::twins`].
+    pub twin_root: String,
+    /// Path of the entry relative to `twin_root` (e.g. `Rover.mo` or
+    /// `subdir/Other.mo`).
+    pub relative_path: String,
+    /// New filename — no path separators allowed (rename only; move
+    /// across directories is a separate concern).
+    pub new_name: String,
 }
 
 /// Save every dirty document in the current session.
@@ -412,6 +443,122 @@ pub(crate) fn drain_pending_twin_opens(
     pending.tasks = still_running;
 }
 
+#[on_command(RenameTwinEntry)]
+fn on_rename_twin_entry(
+    trigger: On<RenameTwinEntry>,
+    mut workspace: ResMut<WorkspaceResource>,
+    mut commands: Commands,
+) {
+    use lunco_doc::DocumentOrigin;
+    let ev = trigger.event();
+    let twin_root = std::path::PathBuf::from(&ev.twin_root);
+    let new_name = ev.new_name.trim();
+    if new_name.is_empty() {
+        warn!("[RenameTwinEntry] new_name is empty");
+        return;
+    }
+    if new_name.contains(std::path::MAIN_SEPARATOR)
+        || new_name.contains('/')
+        || new_name == "."
+        || new_name == ".."
+    {
+        warn!(
+            "[RenameTwinEntry] new_name `{new_name}` contains a path separator or \
+             special segment — rename only, no move across directories"
+        );
+        return;
+    }
+    // Resolve TwinId by matching root path.
+    let twin_id = workspace
+        .twins()
+        .find(|(_, t)| t.root == twin_root)
+        .map(|(id, _)| id);
+    let Some(twin_id) = twin_id else {
+        warn!(
+            "[RenameTwinEntry] no open Twin matches root {}",
+            twin_root.display()
+        );
+        return;
+    };
+    let old_rel = std::path::PathBuf::from(&ev.relative_path);
+    let old_abs = twin_root.join(&old_rel);
+    if !old_abs.exists() {
+        warn!(
+            "[RenameTwinEntry] source missing: {}",
+            old_abs.display()
+        );
+        return;
+    }
+    let new_abs = old_abs
+        .parent()
+        .map(|p| p.join(new_name))
+        .unwrap_or_else(|| twin_root.join(new_name));
+    if new_abs == old_abs {
+        // No-op (user submitted the existing name) — silent.
+        return;
+    }
+    if new_abs.exists() {
+        warn!(
+            "[RenameTwinEntry] target already exists: {}",
+            new_abs.display()
+        );
+        return;
+    }
+    let is_dir = old_abs.is_dir();
+    if let Err(e) = std::fs::rename(&old_abs, &new_abs) {
+        warn!(
+            "[RenameTwinEntry] fs::rename {} -> {} failed: {e}",
+            old_abs.display(),
+            new_abs.display()
+        );
+        return;
+    }
+
+    // Re-scan the Twin so its `files()` reflects disk.
+    if let Some(twin) = workspace.twin_mut(twin_id) {
+        if let Err(e) = twin.reload() {
+            warn!(
+                "[RenameTwinEntry] Twin::reload after rename failed: {e} \
+                 (twin index may be stale until next OpenFolder)"
+            );
+        }
+    }
+
+    // Patch open documents whose canonical path lay under the old path
+    // so live edits stay attached to disk.
+    for doc in workspace.documents_mut() {
+        if let DocumentOrigin::File { path, writable } = &doc.origin {
+            if path.starts_with(&old_abs) {
+                let suffix = path
+                    .strip_prefix(&old_abs)
+                    .expect("starts_with implies strip_prefix succeeds");
+                let new_path = if suffix.as_os_str().is_empty() {
+                    new_abs.clone()
+                } else {
+                    new_abs.join(suffix)
+                };
+                let writable = *writable;
+                doc.origin = DocumentOrigin::File {
+                    path: new_path,
+                    writable,
+                };
+            }
+        }
+    }
+
+    info!(
+        "[RenameTwinEntry] {} -> {}",
+        old_abs.display(),
+        new_abs.display()
+    );
+    commands.trigger(FileRenamed {
+        twin: twin_id,
+        old_abs,
+        new_abs,
+        is_dir,
+    });
+}
+
 #[on_command(SaveAll)]
 fn on_save_all(_trigger: On<SaveAll>) {
     info!("[SaveAll] handler stubbed — iterating dirty docs lands in follow-up");
@@ -486,6 +633,7 @@ register_commands!(
     on_new_document,
     on_open_folder,
     on_open_twin,
+    on_rename_twin_entry,
     on_save_all,
     on_save_as_twin
 );

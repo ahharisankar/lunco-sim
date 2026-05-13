@@ -91,6 +91,31 @@ pub struct DocumentClosed {
     pub doc: DocumentId,
 }
 
+/// A filesystem entry inside a Twin was renamed. Fired by the
+/// `RenameTwinEntry` observer after the on-disk move + Twin re-scan
+/// succeed. Domain plugins observe this to chain follow-up work that
+/// the workbench layer can't sensibly do itself:
+///
+/// - Modelica: if both ends are `.mo`, rename the file's top-level
+///   class declaration so the file-stem invariant holds (and, in a
+///   future slice, rewrite cross-file references).
+/// - USD: rewrite `references = @./old@` payloads in sibling stages.
+///
+/// Paths are absolute and post-rename for `new_abs`; `old_abs` is the
+/// pre-rename absolute path. Both refer to the same entry kind (file
+/// or directory).
+#[derive(Event, Clone, Debug)]
+pub struct FileRenamed {
+    /// The Twin the entry belongs to.
+    pub twin: TwinId,
+    /// Absolute path before the rename (no longer on disk).
+    pub old_abs: std::path::PathBuf,
+    /// Absolute path after the rename.
+    pub new_abs: std::path::PathBuf,
+    /// `true` if the entry is a directory, `false` if a regular file.
+    pub is_dir: bool,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Convenience command-side helpers
 // ─────────────────────────────────────────────────────────────────────────────

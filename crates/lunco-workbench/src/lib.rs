@@ -170,8 +170,8 @@ fn on_focus_panel(
 register_commands!(on_focus_panel,);
 pub use perspective::{Perspective, PerspectiveId};
 pub use session::{
-    DocumentClosed, DocumentOpened, RegisterDocument, TwinAdded, TwinClosed,
-    UnregisterDocument, WorkspacePlugin, WorkspaceResource,
+    DocumentClosed, DocumentOpened, FileRenamed, RegisterDocument, TwinAdded,
+    TwinClosed, UnregisterDocument, WorkspacePlugin, WorkspaceResource,
 };
 pub use viewport::{ViewportPanel, WorkbenchViewportCamera, VIEWPORT_PANEL_ID};
 
@@ -272,7 +272,7 @@ impl Plugin for WorkbenchPlugin {
         // from their own plugin's build, which runs after ours.
         app.world_mut()
             .resource_mut::<BrowserSectionRegistry>()
-            .register(FilesSection);
+            .register(FilesSection::default());
     }
 }
 

@@ -223,6 +223,18 @@ impl Workspace {
             .map(|(_, t)| t)
     }
 
+    /// Mutable look up. Required by callers that need to call
+    /// [`Twin::reload`] after on-disk changes (rename, save-as-new-file)
+    /// without forcing a `close_twin` + `add_twin` round-trip (which
+    /// would change the `TwinId` and break any state keyed off it —
+    /// experiments, cosim entities, document context bindings).
+    pub fn twin_mut(&mut self, id: TwinId) -> Option<&mut Twin> {
+        self.twins
+            .iter_mut()
+            .find(|(tid, _)| *tid == id)
+            .map(|(_, t)| t)
+    }
+
     // ── Documents ───────────────────────────────────────────────────
 
     /// Register an open Document. Does not attempt deduplication —

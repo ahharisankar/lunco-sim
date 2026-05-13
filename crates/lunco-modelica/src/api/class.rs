@@ -128,3 +128,78 @@ fn rewrite_class_name(source: &str, old: &str, new: &str) -> Option<String> {
 fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
+
+/// Chain observer: when the workbench fires [`FileRenamed`] after a
+/// successful on-disk rename, and the renamed entry is a `.mo` file
+/// whose stem also changed, rename the file's top-level class
+/// declaration so the Modelica convention `Foo.mo` ⇔ `class Foo` stays
+/// intact.
+///
+/// Skips silently when:
+/// - the entry is a directory (no class inside),
+/// - either path lacks the `.mo` extension (kind mismatch),
+/// - the stem didn't actually change (only extension/case),
+/// - no open document corresponds to the renamed file (nothing for
+///   [`RenameModelicaClass`] to act on — the on-disk file still has
+///   the old class name; a follow-up open + manual rename can fix it).
+///
+/// Cross-file reference rewrites (`import`, `extends`, qualified type
+/// refs in other docs) are deliberately not addressed here — that's a
+/// separate slice with its own AST-resolver design.
+pub fn on_file_renamed_chain_to_modelica(
+    trigger: On<lunco_workbench::FileRenamed>,
+    workspace: Res<lunco_workbench::WorkspaceResource>,
+    mut commands: Commands,
+) {
+    use lunco_doc::DocumentOrigin;
+    let ev = trigger.event();
+    if ev.is_dir {
+        return;
+    }
+    let old_ext = ev
+        .old_abs
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    let new_ext = ev
+        .new_abs
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    if old_ext.as_deref() != Some("mo") || new_ext.as_deref() != Some("mo") {
+        return;
+    }
+    let old_stem = match ev.old_abs.file_stem().and_then(|s| s.to_str()) {
+        Some(s) => s.to_string(),
+        None => return,
+    };
+    let new_stem = match ev.new_abs.file_stem().and_then(|s| s.to_str()) {
+        Some(s) => s.to_string(),
+        None => return,
+    };
+    if old_stem == new_stem {
+        return;
+    }
+    // Look up the open Document by its (already post-rename) origin
+    // path. The workbench observer rewrote `DocumentEntry.origin`
+    // before firing this event, so we match against `new_abs`.
+    let doc_id = workspace.documents().iter().find_map(|d| {
+        if let DocumentOrigin::File { path, .. } = &d.origin {
+            if path == &ev.new_abs {
+                return Some(d.id);
+            }
+        }
+        None
+    });
+    let Some(doc_id) = doc_id else {
+        // File renamed on disk but no live document — nothing to
+        // rewrite. The class declaration stays out of sync until the
+        // user opens the file and renames inside the editor.
+        return;
+    };
+    commands.trigger(RenameModelicaClass {
+        doc: doc_id,
+        old_name: old_stem,
+        new_name: new_stem,
+    });
+}
