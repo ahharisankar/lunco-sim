@@ -374,15 +374,15 @@ fn draw_diagram_into_vello_scene(
             // signals are thicker than mechanical/acausal.
             let wire_w = if is_causal { 0.5 } else { 0.3 };
 
-            // Build the wire path. Use authored waypoints when present
-            // (the MSL `connect(...) annotation(Line(points=...))` form);
-            // fall back to a straight segment otherwise.
+            // Build the wire path from the *live* edge waypoints
+            // (mutated during a waypoint drag by the canvas tool, so
+            // the wire follows the cursor without waiting for a re-
+            // projection). Falls back to a straight segment when the
+            // edge has no waypoints.
             let mut path = BezPath::new();
             path.move_to(a);
-            if let Some(d) = edge_data {
-                for w in &d.waypoints_world {
-                    path.line_to((w.x as f64, w.y as f64));
-                }
+            for w in &edge.waypoints {
+                path.line_to((w.x as f64, w.y as f64));
             }
             path.line_to(b);
             scene.stroke(
@@ -397,11 +397,11 @@ fn draw_diagram_into_vello_scene(
             // from the last segment of the path; size scales with
             // wire stroke so it doesn't dominate at large zoom.
             if is_causal {
-                let tail_pt = if let Some(d) = edge_data {
-                    d.waypoints_world.last().map(|w| (w.x as f64, w.y as f64)).unwrap_or(a)
-                } else {
-                    a
-                };
+                let tail_pt = edge
+                    .waypoints
+                    .last()
+                    .map(|w| (w.x as f64, w.y as f64))
+                    .unwrap_or(a);
                 draw_arrowhead(&mut scene, xform, tail_pt, b, pen);
             }
         }

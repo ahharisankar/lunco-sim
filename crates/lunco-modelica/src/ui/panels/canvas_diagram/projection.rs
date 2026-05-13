@@ -458,20 +458,18 @@ pub(super) fn project_scene(diagram: &VisualDiagram) -> (Scene, HashMap<DiagramN
             // Mirror the interior polyline (authored or auto-routed)
             // into the scene's first-class waypoints field so the
             // canvas tool can hit-test + mutate it during drag without
-            // reaching into per-domain edge data. Renderer keeps a
-            // separate copy in `ConnectionEdgeData` for its own draw
-            // path until the visual is refactored to read from
-            // `Edge::waypoints` directly. `waypoints_authored`
+            // reaching into per-domain edge data. Renderers (both egui
+            // and Vello) now read this field directly, so there's no
+            // frozen copy to drift out of sync. `waypoints_authored`
             // distinguishes user-authored bends (from source
             // annotation) from auto-router output so rubber-band on
             // node move only persists what the user actually authored.
-            waypoints: waypoints_world.clone(),
+            waypoints: waypoints_world,
             waypoints_authored,
             data: std::sync::Arc::new(ConnectionEdgeData {
                 connector_type: connector_type.clone(),
                 from_dir,
                 to_dir,
-                waypoints_world,
                 icon_color: icon_color
                     .map(|[r, g, b]| egui::Color32::from_rgb(r, g, b)),
                 source_path: src_node

@@ -701,71 +701,91 @@ impl DefaultTool {
             }
             Some((id, NodeHitKind::Body)) => PressTarget::NodeBody(id),
             None => {
-                // Could still hit an edge — edges need a larger
-                // click tolerance than ports. When the press lands on
-                // a handle (corner/segment midpoint) of an ALREADY-
-                // selected edge, promote to an edge-waypoint drag;
-                // otherwise this is a plain click-to-select.
-                const EDGE_BODY_TOL: f32 = 4.0;
-                const EDGE_HANDLE_RADIUS: f32 = 5.0;
-                // Two-phase test: first, try handles only on selected
-                // edges; then, fall back to body hits across all edges.
-                let mut press_target = PressTarget::Empty;
-                let mut handle_hit: Option<(EdgeId, EdgeHit)> = None;
-                for eid in ops.selection.edges() {
-                    let Some(edge) = ops.scene.edge(eid) else { continue };
-                    let Some((from, to)) = ops.scene.edge_endpoint_positions(edge) else { continue };
-                    // Corner handles.
-                    let mut found = None;
+                // Could still hit an edge. Tolerances are quoted in
+                // *screen points* and scaled to world units by the
+                // current zoom — otherwise 5-world-unit handles shrink
+                // off-grabbable at high zoom and balloon at low zoom.
+                const EDGE_BODY_TOL_PX: f32 = 4.0;
+                const EDGE_HANDLE_RADIUS_PX: f32 = 5.0;
+                let zoom = ops.viewport.zoom.max(0.001);
+                let body_tol = EDGE_BODY_TOL_PX / zoom;
+                let handle_r = EDGE_HANDLE_RADIUS_PX / zoom;
+                let handle_r_sq = handle_r * handle_r;
+                // Hit-test handles on a single edge. Returns the first
+                // matching corner or segment-midpoint, if any.
+                let test_handles = |edge: &crate::scene::Edge,
+                                    from: Pos,
+                                    to: Pos|
+                 -> Option<EdgeHit> {
                     for (i, w) in edge.waypoints.iter().enumerate() {
                         let dx = world.x - w.x;
                         let dy = world.y - w.y;
-                        if dx * dx + dy * dy
-                            <= EDGE_HANDLE_RADIUS * EDGE_HANDLE_RADIUS
-                        {
-                            found = Some(EdgeHit::Corner(i));
-                            break;
+                        if dx * dx + dy * dy <= handle_r_sq {
+                            return Some(EdgeHit::Corner(i));
                         }
                     }
-                    // Segment-midpoint handles (skip very short
-                    // segments to avoid overlap with the corner
-                    // handles).
-                    if found.is_none() {
-                        let mut pts: Vec<Pos> =
-                            Vec::with_capacity(2 + edge.waypoints.len());
-                        pts.push(from);
-                        pts.extend(edge.waypoints.iter().copied());
-                        pts.push(to);
-                        for i in 0..pts.len() - 1 {
-                            let sx = pts[i + 1].x - pts[i].x;
-                            let sy = pts[i + 1].y - pts[i].y;
-                            if sx * sx + sy * sy
-                                <= 4.0 * EDGE_HANDLE_RADIUS * EDGE_HANDLE_RADIUS
-                            {
-                                continue;
-                            }
-                            let mx = (pts[i].x + pts[i + 1].x) * 0.5;
-                            let my = (pts[i].y + pts[i + 1].y) * 0.5;
-                            let dx = world.x - mx;
-                            let dy = world.y - my;
-                            if dx * dx + dy * dy
-                                <= EDGE_HANDLE_RADIUS * EDGE_HANDLE_RADIUS
-                            {
-                                found = Some(EdgeHit::Segment(i));
-                                break;
-                            }
+                    let mut pts: Vec<Pos> =
+                        Vec::with_capacity(2 + edge.waypoints.len());
+                    pts.push(from);
+                    pts.extend(edge.waypoints.iter().copied());
+                    pts.push(to);
+                    for i in 0..pts.len() - 1 {
+                        let sx = pts[i + 1].x - pts[i].x;
+                        let sy = pts[i + 1].y - pts[i].y;
+                        // Skip segments shorter than the handle diameter
+                        // to avoid overlap with corner handles.
+                        if sx * sx + sy * sy <= 4.0 * handle_r_sq {
+                            continue;
+                        }
+                        let mx = (pts[i].x + pts[i + 1].x) * 0.5;
+                        let my = (pts[i].y + pts[i + 1].y) * 0.5;
+                        let dx = world.x - mx;
+                        let dy = world.y - my;
+                        if dx * dx + dy * dy <= handle_r_sq {
+                            return Some(EdgeHit::Segment(i));
                         }
                     }
-                    if let Some(hit) = found {
+                    None
+                };
+                let mut press_target = PressTarget::Empty;
+                let mut handle_hit: Option<(EdgeId, EdgeHit)> = None;
+                // Prefer handles on already-selected edges (their
+                // handles render on top), then fall through to the
+                // edge currently under the cursor — so a single press
+                // on a corner/midpoint of an unselected wire starts
+                // the drag without a prior select step.
+                for eid in ops.selection.edges() {
+                    let Some(edge) = ops.scene.edge(eid) else { continue };
+                    let Some((from, to)) = ops.scene.edge_endpoint_positions(edge) else { continue };
+                    if let Some(hit) = test_handles(edge, from, to) {
                         handle_hit = Some((eid, hit));
                         break;
+                    }
+                }
+                if handle_hit.is_none() {
+                    if let Some(eid) = ops.scene.hit_edge(world, body_tol) {
+                        if !ops.selection.contains(SelectItem::Edge(eid)) {
+                            if let Some(edge) = ops.scene.edge(eid) {
+                                if let Some((from, to)) =
+                                    ops.scene.edge_endpoint_positions(edge)
+                                {
+                                    if let Some(hit) =
+                                        test_handles(edge, from, to)
+                                    {
+                                        handle_hit = Some((eid, hit));
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 if let Some((eid, hit)) = handle_hit {
                     if !ops.read_only {
                         press_target = PressTarget::EdgeHandle(eid, hit);
+                    } else {
+                        press_target = PressTarget::EdgeBody(eid);
                     }
-                } else if let Some(eid) = ops.scene.hit_edge(world, EDGE_BODY_TOL) {
+                } else if let Some(eid) = ops.scene.hit_edge(world, body_tol) {
                     press_target = PressTarget::EdgeBody(eid);
                 }
                 press_target

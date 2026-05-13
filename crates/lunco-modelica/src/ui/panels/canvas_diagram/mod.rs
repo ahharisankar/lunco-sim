@@ -166,7 +166,6 @@ fn build_registry() -> VisualRegistry {
                 .unwrap_or_else(|| wire_color_for(&d.connector_type)),
             from_dir: d.from_dir,
             to_dir: d.to_dir,
-            waypoints_world: d.waypoints_world.clone(),
             is_causal,
             source_path: d.source_path.clone(),
             target_path: d.target_path.clone(),

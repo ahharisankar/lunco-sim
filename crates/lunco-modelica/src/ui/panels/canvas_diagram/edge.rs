@@ -25,7 +25,6 @@ pub struct ConnectionEdgeData {
     pub connector_type: String,
     pub from_dir: PortDir,
     pub to_dir: PortDir,
-    pub waypoints_world: Vec<lunco_canvas::Pos>,
     pub icon_color: Option<egui::Color32>,
     pub source_path: String,
     pub target_path: String,
@@ -105,7 +104,6 @@ pub(super) struct OrthogonalEdgeVisual {
     pub(super) color: egui::Color32,
     pub(super) from_dir: PortDir,
     pub(super) to_dir: PortDir,
-    pub(super) waypoints_world: Vec<CanvasPos>,
     pub(super) is_causal: bool,
     pub(super) source_path: String,
     pub(super) target_path: String,
@@ -130,7 +128,6 @@ impl Default for OrthogonalEdgeVisual {
             color: wire_color_for(""),
             from_dir: PortDir::None,
             to_dir: PortDir::None,
-            waypoints_world: Vec::new(),
             is_causal: false,
             source_path: String::new(),
             target_path: String::new(),
@@ -185,54 +182,28 @@ impl EdgeVisual for OrthogonalEdgeVisual {
         // of inventing a straight from→to line that ignores stubs
         // and waypoints.
         let polyline: Vec<egui::Pos2> = 'route: {
-            // Prefer the live waypoints provided by the caller — these
-            // come straight from `Edge::waypoints` (mutated live by the
-            // canvas tool during a waypoint drag), so the wire follows
-            // the cursor without waiting for a re-projection. Fall back
-            // to the visual's frozen `waypoints_world` only if the live
-            // list is empty (defends against any caller that doesn't
-            // pass them).
+            // The caller passes the live waypoints from `Edge::waypoints`
+            // (mutated by the canvas tool during a drag), so the wire
+            // follows the cursor without waiting for a re-projection.
             let from_screen = egui::pos2(from.x, from.y);
             let to_screen = egui::pos2(to.x, to.y);
-            let way_screen: Vec<egui::Pos2> = if !waypoints_screen.is_empty() {
-                waypoints_screen
-                    .iter()
-                    .map(|p| egui::pos2(p.x, p.y))
-                    .collect()
-            } else {
-                self.waypoints_world
-                    .iter()
-                    .map(|p| {
-                        let s = ctx
-                            .viewport
-                            .world_to_screen(*p, ctx.screen_rect);
-                        egui::pos2(s.x, s.y)
-                    })
-                    .collect()
-            };
+            let way_screen: Vec<egui::Pos2> = waypoints_screen
+                .iter()
+                .map(|p| egui::pos2(p.x, p.y))
+                .collect();
             if !way_screen.is_empty() {
-                const ALIGN_TOL: f32 = 1.0;
-                let first_far = way_screen
-                    .first()
-                    .map(|p| {
-                        (p.x - from_screen.x).abs() > ALIGN_TOL
-                            && (p.y - from_screen.y).abs() > ALIGN_TOL
-                    })
-                    .unwrap_or(false);
-                let last_far = way_screen
-                    .last()
-                    .map(|p| {
-                        (p.x - to_screen.x).abs() > ALIGN_TOL
-                            && (p.y - to_screen.y).abs() > ALIGN_TOL
-                    })
-                    .unwrap_or(false);
-                if !(first_far || last_far) {
-                    let mut pts = Vec::with_capacity(way_screen.len() + 2);
-                    pts.push(from_screen);
-                    pts.extend(way_screen.iter().copied());
-                    pts.push(to_screen);
-                    break 'route pts;
-                }
+                // Trust authored waypoints. The polyline is always
+                // from-port → waypoints → to-port; the first/last
+                // segment is drawn straight even if it's diagonal
+                // (Dymola convention — users may bend a wire off the
+                // port axis on purpose). Earlier code rejected non-
+                // axis-aligned endpoints and fell back to the auto-
+                // router, which silently discarded user edits.
+                let mut pts = Vec::with_capacity(way_screen.len() + 2);
+                pts.push(from_screen);
+                pts.extend(way_screen.iter().copied());
+                pts.push(to_screen);
+                break 'route pts;
             }
             route_orthogonal(
                 egui::pos2(from.x, from.y),
