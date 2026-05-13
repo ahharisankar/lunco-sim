@@ -706,9 +706,14 @@ pub(super) fn paint_flow_dots(
     // motion cue is always visible. Alpha stays moderate (180)
     // so the dots read as a moving stream rather than a solid
     // dotted line.
+    // Spacing/speed scale strictly with canvas zoom so the dots are
+    // anchored to *world* distance: at 2× zoom they move twice as
+    // fast on screen but cover the same wire length per second.
     const SPACING_PX: f32 = 16.0;
     const SPEED_PX_S: f32 = 36.0;
-    let phase = ((time as f32) * SPEED_PX_S).rem_euclid(SPACING_PX);
+    let spacing = SPACING_PX * scale;
+    let speed = SPEED_PX_S * scale;
+    let phase = ((time as f32) * speed).rem_euclid(spacing);
     let dot_color = egui::Color32::from_rgba_unmultiplied(
         base_color.r(),
         base_color.g(),
@@ -731,7 +736,7 @@ pub(super) fn paint_flow_dots(
             }
             acc += seg_len;
         }
-        s += SPACING_PX;
+        s += spacing;
     }
 }
 
