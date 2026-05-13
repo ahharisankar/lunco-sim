@@ -6,8 +6,19 @@ use rumoca_phase_parse::parse_to_ast;
 use super::errors::AstMutError;
 use crate::pretty;
 
-/// Parse a `__LunCoFragment` stub class and return the resulting
-/// `StoredDefinition`, **memoised by stub text**.
+/// Wrapper class name used when fragments of Modelica (a binding
+/// expression, a `connect(...)` equation, a single graphics record,
+/// etc.) need to be handed to the standard parser, which only
+/// accepts a complete class definition. The fragment is interpolated
+/// inside `model {FRAGMENT_CLASS_NAME} ... end {FRAGMENT_CLASS_NAME};`,
+/// parsed, and the wrapper is discarded by looking up the contained
+/// child. Centralised so all sites that construct the wrapper and
+/// all sites that retrieve the inner class agree on the literal —
+/// previously hand-typed in ~14 places.
+pub const FRAGMENT_CLASS_NAME: &str = "__LunCoFragment";
+
+/// Parse a [`FRAGMENT_CLASS_NAME`] stub class and return the
+/// resulting `StoredDefinition`, **memoised by stub text**.
 pub(crate) fn parse_stub_cached(stub: &str) -> Option<Arc<StoredDefinition>> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -35,12 +46,12 @@ pub(crate) fn parse_stub_cached(stub: &str) -> Option<Arc<StoredDefinition>> {
 /// or modification: `"1.5"`, `"true"`, `"{1, 2}"`, etc.) into an
 /// [`rumoca_session::parsing::ast::Expression`].
 pub(crate) fn parse_value_fragment(value_text: &str) -> Result<rumoca_session::parsing::ast::Expression, AstMutError> {
-    let stub = format!("model __LunCoFragment\n  Real __v = {value_text};\nend __LunCoFragment;\n");
+    let stub = format!("model {FRAGMENT_CLASS_NAME}\n  Real __v = {value_text};\nend {FRAGMENT_CLASS_NAME};\n");
     let parsed = parse_stub_cached(&stub)
         .ok_or_else(|| AstMutError::ValueParseFailed { value: value_text.to_string() })?;
     let class = parsed
         .classes
-        .get("__LunCoFragment")
+        .get(FRAGMENT_CLASS_NAME)
         .ok_or_else(|| AstMutError::ValueParseFailed { value: value_text.to_string() })?;
     let comp = class
         .components
@@ -58,11 +69,11 @@ pub(crate) fn parse_component_fragment(
     decl: &pretty::ComponentDecl,
 ) -> Result<rumoca_session::parsing::ast::Component, AstMutError> {
     let body = pretty::component_decl(decl);
-    let stub = format!("model __LunCoFragment\n{body}end __LunCoFragment;\n");
+    let stub = format!("model {FRAGMENT_CLASS_NAME}\n{body}end {FRAGMENT_CLASS_NAME};\n");
     let parsed = parse_stub_cached(&stub).ok_or_else(|| {
         AstMutError::ValueParseFailed { value: body.clone() }
     })?;
-    let class = parsed.classes.get("__LunCoFragment").ok_or_else(|| {
+    let class = parsed.classes.get(FRAGMENT_CLASS_NAME).ok_or_else(|| {
         AstMutError::ValueParseFailed { value: body.clone() }
     })?;
     class
@@ -77,11 +88,11 @@ pub(crate) fn parse_connect_equation_fragment(
     eq: &pretty::ConnectEquation,
 ) -> Result<rumoca_session::parsing::ast::Equation, AstMutError> {
     let body = pretty::connect_equation(eq);
-    let stub = format!("model __LunCoFragment\nequation\n{body}end __LunCoFragment;\n");
+    let stub = format!("model {FRAGMENT_CLASS_NAME}\nequation\n{body}end {FRAGMENT_CLASS_NAME};\n");
     let parsed = parse_stub_cached(&stub).ok_or_else(|| {
         AstMutError::ValueParseFailed { value: body.clone() }
     })?;
-    let class = parsed.classes.get("__LunCoFragment").ok_or_else(|| {
+    let class = parsed.classes.get(FRAGMENT_CLASS_NAME).ok_or_else(|| {
         AstMutError::ValueParseFailed { value: body.clone() }
     })?;
     class
@@ -94,13 +105,13 @@ pub(crate) fn parse_connect_equation_fragment(
 /// Parse a fragment destined for a graphics array (`{Foo(...), Bar(...)}`).
 pub(crate) fn parse_graphics_entry(text: &str) -> Result<rumoca_session::parsing::ast::Expression, AstMutError> {
     let stub = format!(
-        "model __LunCoFragment\nannotation(Diagram(graphics={{{text}}}));\nend __LunCoFragment;\n"
+        "model {FRAGMENT_CLASS_NAME}\nannotation(Diagram(graphics={{{text}}}));\nend {FRAGMENT_CLASS_NAME};\n"
     );
     let parsed = parse_stub_cached(&stub)
         .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })?;
     let class = parsed
         .classes
-        .get("__LunCoFragment")
+        .get(FRAGMENT_CLASS_NAME)
         .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })?;
     let diagram = class
         .annotation
@@ -135,13 +146,13 @@ pub(crate) fn parse_graphics_entry(text: &str) -> Result<rumoca_session::parsing
 /// class so the standard Modelica parser sees a well-formed input.
 pub(crate) fn parse_plot_node_record(text: &str) -> Result<rumoca_session::parsing::ast::Expression, AstMutError> {
     let stub = format!(
-        "model __LunCoFragment\nannotation(__LunCo(plotNodes={{{text}}}));\nend __LunCoFragment;\n"
+        "model {FRAGMENT_CLASS_NAME}\nannotation(__LunCo(plotNodes={{{text}}}));\nend {FRAGMENT_CLASS_NAME};\n"
     );
     let parsed = parse_stub_cached(&stub)
         .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })?;
     let class = parsed
         .classes
-        .get("__LunCoFragment")
+        .get(FRAGMENT_CLASS_NAME)
         .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })?;
     let lunco_call = class
         .annotation
@@ -178,11 +189,11 @@ pub(crate) fn parse_experiment_expression(
     interval: f64,
 ) -> Result<rumoca_session::parsing::ast::Expression, AstMutError> {
     let inner = pretty::experiment_inner(start_time, stop_time, tolerance, interval);
-    let stub = format!("model __LunCoFragment\nannotation({inner});\nend __LunCoFragment;\n");
+    let stub = format!("model {FRAGMENT_CLASS_NAME}\nannotation({inner});\nend {FRAGMENT_CLASS_NAME};\n");
     let parsed = parse_stub_cached(&stub).ok_or_else(|| {
         AstMutError::ValueParseFailed { value: inner.clone() }
     })?;
-    let class = parsed.classes.get("__LunCoFragment").ok_or_else(|| {
+    let class = parsed.classes.get(FRAGMENT_CLASS_NAME).ok_or_else(|| {
         AstMutError::ValueParseFailed { value: inner.clone() }
     })?;
     class
@@ -195,12 +206,12 @@ pub(crate) fn parse_experiment_expression(
 pub(crate) fn parse_placement_expression(placement: &pretty::Placement) -> Result<rumoca_session::parsing::ast::Expression, AstMutError> {
     let placement_text = pretty::placement_inner(placement);
     let stub = format!(
-        "model __LunCoFragment\n  Real __v annotation({placement_text});\nend __LunCoFragment;\n"
+        "model {FRAGMENT_CLASS_NAME}\n  Real __v annotation({placement_text});\nend {FRAGMENT_CLASS_NAME};\n"
     );
     let parsed = parse_stub_cached(&stub).ok_or_else(|| {
         AstMutError::ValueParseFailed { value: placement_text.clone() }
     })?;
-    let class = parsed.classes.get("__LunCoFragment").ok_or_else(|| {
+    let class = parsed.classes.get(FRAGMENT_CLASS_NAME).ok_or_else(|| {
         AstMutError::ValueParseFailed { value: placement_text.clone() }
     })?;
     let comp = class.components.get("__v").ok_or_else(|| {

@@ -284,11 +284,7 @@ pub fn resolve_library_head_prefix(qualified: &str) -> Option<String> {
         return None;
     }
     for full_head in candidates {
-        let candidate = if rest.is_empty() {
-            full_head.clone()
-        } else {
-            format!("{full_head}.{rest}")
-        };
+        let candidate = crate::ast_extract::qualify(&full_head, rest);
         if locate_library_file(&candidate).is_some() {
             return Some(candidate);
         }

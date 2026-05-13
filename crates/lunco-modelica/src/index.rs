@@ -202,7 +202,7 @@ pub struct ClassEntry {
 impl ClassEntry {
     /// Short name (leaf segment of the qualified name).
     pub fn short_name(&self) -> &str {
-        self.name.rsplit('.').next().unwrap_or(&self.name)
+        crate::ast_extract::short_name(&self.name)
     }
 
     /// Second-level segment of the qualified name — e.g.
@@ -662,7 +662,7 @@ impl ModelicaIndex {
         if let Some(c) = self.components.iter().find(|c| c.name == name) {
             return Some(c);
         }
-        let leaf = name.rsplit('.').next().unwrap_or(name);
+        let leaf = crate::ast_extract::short_name(name);
         if leaf == name {
             return None;
         }

@@ -338,7 +338,7 @@ impl ModelicaComponentBuilder {
 
         // Create nodes
         for (qualified_name, class_type) in &all_classes {
-            let short_name = qualified_name.split('.').last().unwrap_or(qualified_name);
+            let short_name = crate::ast_extract::short_name(qualified_name);
             let _parent = qualified_name.rsplit_once('.').map(|(p, _)| p.to_string());
 
             let kind = match class_type {
@@ -418,11 +418,7 @@ impl ModelicaComponentBuilder {
             .map(|w| w.to_string())
             .unwrap_or_default();
         let qualify = |short: &str| -> String {
-            if within_prefix.is_empty() {
-                short.to_string()
-            } else {
-                format!("{within_prefix}.{short}")
-            }
+            crate::ast_extract::qualify(&within_prefix, short)
         };
         // Models are the canonical "open this in the canvas" choice;
         // connectors and types alone have no diagram. Walk in order:
@@ -447,7 +443,7 @@ impl ModelicaComponentBuilder {
             }
             for (inner_name, inner) in &pkg.classes {
                 if is_diagrammable(inner.class_type.clone()) {
-                    return qualify(&format!("{pkg_name}.{inner_name}"));
+                    return qualify(&crate::ast_extract::qualify(pkg_name, inner_name));
                 }
             }
         }

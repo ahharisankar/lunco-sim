@@ -231,7 +231,7 @@ fn class_def_to_node(
         let mut children: Vec<PackageNode> = def
             .classes
             .iter()
-            .map(|(n, c)| class_def_to_node(path, &format!("{qualified}.{n}"), n, c))
+            .map(|(n, c)| class_def_to_node(path, &crate::ast_extract::qualify(qualified, n), n, c))
             .collect();
         children.sort_by_key(omedit_sort_key);
         PackageNode::Category {

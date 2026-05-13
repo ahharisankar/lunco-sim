@@ -119,7 +119,7 @@ pub fn resolve_metadata_for_doc(
             }
         }
         if found.is_none() {
-            let leaf = q.rsplit('.').next().unwrap_or(q);
+            let leaf = crate::ast_extract::short_name(q);
             found = index
                 .classes
                 .iter()

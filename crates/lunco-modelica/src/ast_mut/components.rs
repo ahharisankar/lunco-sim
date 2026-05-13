@@ -2,7 +2,7 @@
 
 use rumoca_session::parsing::ast::ClassDef;
 use super::errors::AstMutError;
-use super::parsing::{parse_value_fragment, parse_component_fragment};
+use super::parsing::{parse_value_fragment, parse_component_fragment, FRAGMENT_CLASS_NAME};
 use crate::pretty;
 
 /// Set or replace a single parameter modification on a component.
@@ -79,12 +79,12 @@ pub fn add_variable(
         });
     }
     let body = pretty::variable_decl(decl);
-    let stub = format!("model __LunCoFragment\n{body}end __LunCoFragment;\n");
+    let stub = format!("model {FRAGMENT_CLASS_NAME}\n{body}end {FRAGMENT_CLASS_NAME};\n");
     let parsed = super::parsing::parse_stub_cached(&stub)
         .ok_or_else(|| AstMutError::ValueParseFailed { value: body.clone() })?;
     let parsed_class = parsed
         .classes
-        .get("__LunCoFragment")
+        .get(FRAGMENT_CLASS_NAME)
         .ok_or_else(|| AstMutError::ValueParseFailed { value: body.clone() })?;
     let new_component = parsed_class
         .components
