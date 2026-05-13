@@ -129,6 +129,54 @@ fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+/// Chain observer: workbench [`lunco_workbench::file_ops::RenameOpenDocument`]
+/// → [`RenameModelicaClass`] for Untitled Modelica drafts.
+///
+/// The workbench's own observer routes saved files via
+/// [`lunco_workbench::file_ops::RenameTwinEntry`] (which then chains
+/// here via [`on_file_renamed_chain_to_modelica`]). Untitled docs have
+/// no on-disk presence, so the rename is purely a class-declaration
+/// rewrite — that's what this observer handles.
+pub fn on_rename_open_document_chain_to_modelica(
+    trigger: On<lunco_workbench::file_ops::RenameOpenDocument>,
+    workspace: Res<lunco_workbench::WorkspaceResource>,
+    registry: Res<crate::ui::state::ModelicaDocumentRegistry>,
+    mut commands: Commands,
+) {
+    use lunco_doc::DocumentOrigin;
+    let ev = trigger.event();
+    let Some(entry) = workspace.document(ev.doc) else {
+        return;
+    };
+    // Only handle Untitled drafts; saved files go through the
+    // RenameTwinEntry → FileRenamed → on_file_renamed_chain_to_modelica
+    // path.
+    let DocumentOrigin::Untitled { name } = &entry.origin else {
+        return;
+    };
+    // Confirm the doc is actually Modelica before firing
+    // RenameModelicaClass.
+    if registry.host(ev.doc).is_none() {
+        return;
+    }
+    let old_name = name.clone();
+    let new_name = ev.new_name.trim().to_string();
+    if new_name.is_empty() || new_name == old_name {
+        return;
+    }
+    bevy::log::info!(
+        "[RenameOpenDocument→Modelica] Untitled doc={} {} → {}",
+        ev.doc,
+        old_name,
+        new_name
+    );
+    commands.trigger(RenameModelicaClass {
+        doc: ev.doc,
+        old_name,
+        new_name,
+    });
+}
+
 /// Chain observer: when the workbench fires [`FileRenamed`] after a
 /// successful on-disk rename, and the renamed entry is a `.mo` file
 /// whose stem also changed, rename the file's top-level class
@@ -153,6 +201,12 @@ pub fn on_file_renamed_chain_to_modelica(
 ) {
     use lunco_doc::DocumentOrigin;
     let ev = trigger.event();
+    bevy::log::info!(
+        "[FileRenamed→Modelica] fired old={} new={} is_dir={}",
+        ev.old_abs.display(),
+        ev.new_abs.display(),
+        ev.is_dir
+    );
     if ev.is_dir {
         return;
     }
@@ -192,14 +246,40 @@ pub fn on_file_renamed_chain_to_modelica(
         None
     });
     let Some(doc_id) = doc_id else {
-        // File renamed on disk but no live document — nothing to
-        // rewrite. The class declaration stays out of sync until the
-        // user opens the file and renames inside the editor.
+        bevy::log::info!(
+            "[FileRenamed→Modelica] no live document for new path {} \
+             (open docs: {})",
+            ev.new_abs.display(),
+            workspace
+                .documents()
+                .iter()
+                .filter_map(|d| match &d.origin {
+                    DocumentOrigin::File { path, .. } => {
+                        Some(path.display().to_string())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         return;
     };
+    bevy::log::info!(
+        "[FileRenamed→Modelica] chaining RenameModelicaClass + SaveDocument \
+         doc={} {} → {}",
+        doc_id.raw(),
+        old_stem,
+        new_stem
+    );
     commands.trigger(RenameModelicaClass {
         doc: doc_id,
         old_name: old_stem,
         new_name: new_stem,
     });
+    // Persist immediately so the on-disk file's class declaration
+    // matches the new filename atomically with the rename — VS Code
+    // style "rename = single user-visible operation". Without this,
+    // the doc would carry the renamed class only in-memory; closing
+    // without save would drop the rename.
+    commands.trigger(lunco_doc_bevy::SaveDocument { doc: doc_id });
 }

@@ -17,9 +17,10 @@ pub fn publish_unsaved_modelica_docs(
             let o = host.document().origin();
             o.is_writable() || o.is_untitled()
         })
-        .map(|(_, host)| {
+        .map(|(id, host)| {
             let origin = host.document().origin();
             lunco_workbench::UnsavedDocEntry {
+                id,
                 display_name: origin.display_name(),
                 kind: "Modelica".into(),
                 is_unsaved: origin.is_untitled(),

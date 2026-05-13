@@ -122,6 +122,10 @@ impl BrowserScope {
 /// (e.g. lunco-modelica scans its document registry).
 #[derive(Debug, Clone)]
 pub struct UnsavedDocEntry {
+    /// Document identity. Used by the Files section to dispatch
+    /// per-doc actions (inline rename, close, save) keyed on the
+    /// row the user interacted with.
+    pub id: lunco_doc::DocumentId,
     /// Display name (file stem for saved docs, "Untitled-3.mo"
     /// for unsaved drafts).
     pub display_name: String,
