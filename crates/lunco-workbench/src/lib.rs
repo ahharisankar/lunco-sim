@@ -1717,7 +1717,20 @@ fn render_layout(ctx: &egui::Context, layout: &mut WorkbenchLayout, world: &mut 
         style.tab.active_with_kb_focus.text_color = palette.mauve;
         style.tab.focused_with_kb_focus.bg_fill = palette.surface0;
         style.tab.focused_with_kb_focus.text_color = palette.mauve;
-        DockArea::new(dock).style(style).show(ctx, &mut viewer);
+        // Guard against degenerate viewport rects. On Windows + Intel
+        // Vulkan the swapchain can present a zero/non-finite size for
+        // the first frames after the window is mapped; egui_dock 0.18
+        // then computes `min + dim_size * fraction` with
+        // `Rect::NOTHING`, yielding NaN, and egui asserts in
+        // `advance_cursor_after_rect`. Skip the dock for that frame.
+        let screen = ctx.screen_rect();
+        if screen.width().is_finite()
+            && screen.height().is_finite()
+            && screen.width() > 1.0
+            && screen.height() > 1.0
+        {
+            DockArea::new(dock).style(style).show(ctx, &mut viewer);
+        }
     } else {
         // 3D-app mode — explicit side panels, transparent centre.
         // Defaults are percentages of the current window so the layout
