@@ -201,6 +201,14 @@ pub struct ModelicaResult {
     /// per-`ModelRef` cache without a second AST pass.
     #[serde(default)]
     pub compiled_model_name: Option<String>,
+    /// Set when this result acknowledges a
+    /// [`ModelicaCommand::LoadSourceRoot`]. The main-thread drain
+    /// system uses this to transition the matching
+    /// [`crate::source_roots::SourceRootRegistry`] entry from
+    /// `Loading` to `Ready` (or `Failed` when `error.is_some()`).
+    /// Regular Compile / Step results leave it `None`.
+    #[serde(default)]
+    pub loaded_source_root_id: Option<String>,
 }
 
 impl Default for ModelicaResult {
@@ -223,6 +231,7 @@ impl Default for ModelicaResult {
             experiment_interval: None,
             experiment_solver: None,
             compiled_model_name: None,
+            loaded_source_root_id: None,
         }
     }
 }
@@ -564,6 +573,7 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                                             experiment_interval: exp_interval,
                                             experiment_solver: exp_solver,
                                             compiled_model_name: Some(model_name.clone()),
+                                            loaded_source_root_id: None,
                                         });
                                     }
                                     Err(e) => {
@@ -739,6 +749,19 @@ pub fn modelica_worker(rx: Receiver<ModelicaCommand>, tx: Sender<ModelicaResult>
                             report.inserted_file_count,
                             t0.elapsed().as_secs_f64(),
                         );
+                        // Ack back to the main thread so the registry can
+                        // flip Loading → Ready (or Failed when diagnostics
+                        // are non-empty).
+                        let err = if report.diagnostics.is_empty() {
+                            None
+                        } else {
+                            Some(report.diagnostics.join("; "))
+                        };
+                        let _ = tx_inner.send(ModelicaResult {
+                            loaded_source_root_id: Some(id),
+                            error: err,
+                            ..Default::default()
+                        });
                     }
                 }
             }));
@@ -1249,6 +1272,16 @@ pub fn process_inline_command<F: FnMut(ModelicaResult)>(
                 report.inserted_file_count,
                 t0.elapsed().as_secs_f64(),
             );
+            let err = if report.diagnostics.is_empty() {
+                None
+            } else {
+                Some(report.diagnostics.join("; "))
+            };
+            send(ModelicaResult {
+                loaded_source_root_id: Some(id),
+                error: err,
+                ..Default::default()
+            });
         }
     }
 }
@@ -1394,10 +1427,62 @@ pub fn handle_modelica_responses(
     // doc index, keeping AST as the single source of truth.
     doc_registry: Option<Res<crate::ui::ModelicaDocumentRegistry>>,
     runner_res: Option<Res<crate::ModelicaRunnerResource>>,
+    source_roots: Option<ResMut<crate::source_roots::SourceRootRegistry>>,
+    status_bus: Option<ResMut<lunco_workbench::status_bus::StatusBus>>,
 ) {
     let mut compile_states = compile_states;
     let mut console = console;
+    let mut source_roots = source_roots;
+    let mut status_bus = status_bus;
     while let Ok(result) = channels.rx.try_recv() {
+        // Source-root load ack: route to the registry and short-
+        // circuit before any of the sim-result handling below
+        // (which keys on `result.entity` — LoadSourceRoot uses
+        // `Entity::PLACEHOLDER`).
+        if let Some(root_id) = result.loaded_source_root_id.as_ref() {
+            let is_failure = result.error.is_some();
+            if let Some(roots) = source_roots.as_deref_mut() {
+                if let Some(entry) = roots.roots.get_mut(root_id) {
+                    if let Some(err) = result.error.as_ref() {
+                        bevy::log::warn!(
+                            "[source-roots] `{}` load failed: {}",
+                            root_id, err,
+                        );
+                        entry.state = crate::source_roots::LoadState::Failed(
+                            err.clone(),
+                        );
+                    } else {
+                        bevy::log::info!(
+                            "[source-roots] `{}` is now Ready",
+                            root_id,
+                        );
+                        entry.state = crate::source_roots::LoadState::Ready;
+                    }
+                }
+            }
+            if let Some(bus) = status_bus.as_deref_mut() {
+                bus.clear_progress(crate::source_roots::STATUS_BUS_SOURCE);
+                if is_failure {
+                    bus.push(
+                        crate::source_roots::STATUS_BUS_SOURCE,
+                        lunco_workbench::status_bus::StatusLevel::Warn,
+                        format!(
+                            "Library `{}` load failed: {}",
+                            root_id,
+                            result.error.as_deref().unwrap_or(""),
+                        ),
+                    );
+                } else {
+                    bus.push(
+                        crate::source_roots::STATUS_BUS_SOURCE,
+                        lunco_workbench::status_bus::StatusLevel::Info,
+                        format!("Library `{}` ready", root_id),
+                    );
+                }
+            }
+            continue;
+        }
+
         // Pipe Modelica `experiment(...)` annotation values into the
         // experiments runner's per-ModelRef cache so the Fast Run
         // toolbar's bounds readout reflects the model rather than

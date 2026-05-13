@@ -227,6 +227,47 @@ impl SourceRootRegistry {
         self.roots.contains_key(id)
     }
 
+    /// Insert / refresh an entry for a workspace-or-document-backed
+    /// source root and mark it `Ready`. Used by the doc-opened
+    /// observer to register every open doc's top-level package
+    /// names as already-loaded — they're synced into the rumoca
+    /// session by `engine_resource::drive_engine_sync` immediately
+    /// on install, so the dep gate should treat them as Ready
+    /// without a worker round-trip.
+    ///
+    /// Idempotent: re-registering an existing entry keeps the
+    /// existing `kind` if it's a SystemLibrary (a workspace doc
+    /// must not shadow MSL), otherwise overwrites with the new
+    /// metadata. Always flips state to `Ready`.
+    pub fn register_open_doc_root(&mut self, id: String, path: Option<PathBuf>) {
+        // Don't let an opened doc shadow a system library entry —
+        // MSL contents are loaded via its own kind, not as workspace
+        // files.
+        if let Some(existing) = self.roots.get(&id) {
+            if matches!(existing.kind, SourceRootKind::SystemLibrary { .. }) {
+                return;
+            }
+        }
+        let kind = match path {
+            Some(p) => SourceRootKind::WorkspaceFile { path: p },
+            None => SourceRootKind::Bundled {
+                // Untitled docs don't have a filename; rumoca only
+                // sees them via engine_resource sync. The `Bundled`
+                // variant is a stand-in marker: never actually
+                // loaded by the gate (state is already Ready).
+                filename: format!("untitled:{id}"),
+            },
+        };
+        self.roots.insert(
+            id.clone(),
+            SourceRoot {
+                id,
+                kind,
+                state: LoadState::Ready,
+            },
+        );
+    }
+
     /// Borrow an entry's load state.
     pub fn state(&self, id: &str) -> Option<&LoadState> {
         self.roots.get(id).map(|r| &r.state)
@@ -319,10 +360,15 @@ fn is_builtin_root(root: &str) -> bool {
 ///   compile path will surface the missing-type error from rumoca
 ///   the same way it did before PR-C. Adding support for these is
 ///   the work of a follow-up PR.
+/// Source tag used for [`lunco_workbench::status_bus::StatusBus`]
+/// progress entries during source-root loads.
+pub const STATUS_BUS_SOURCE: &str = "source-roots";
+
 pub fn ensure_loaded(
     registry: &mut SourceRootRegistry,
     id: &str,
     channels: &crate::ModelicaChannels,
+    status_bus: Option<&mut lunco_workbench::status_bus::StatusBus>,
 ) -> bool {
     let Some(entry) = registry.roots.get_mut(id) else {
         return false;
@@ -424,6 +470,19 @@ pub fn ensure_loaded(
         progress: 0.0,
         started: Instant::now(),
     };
+    if let Some(bus) = status_bus {
+        bus.push_progress(
+            STATUS_BUS_SOURCE,
+            format!("Loading library `{id}`…"),
+            0,
+            0,
+        );
+        bus.push(
+            STATUS_BUS_SOURCE,
+            lunco_workbench::status_bus::StatusLevel::Info,
+            format!("Loading library `{id}` ({summary})"),
+        );
+    }
     true
 }
 

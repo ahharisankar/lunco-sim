@@ -462,6 +462,7 @@ pub fn on_compile_model(
     mut q_models: Query<&mut ModelicaModel>,
     model_tabs: Res<crate::ui::panels::model_view::ModelTabs>,
     mut world_source_roots: Option<ResMut<crate::source_roots::SourceRootRegistry>>,
+    mut status_bus: Option<ResMut<lunco_workbench::status_bus::StatusBus>>,
 ) {
     let doc = trigger.event().doc;
     let explicit_class = trigger.event().class.clone();
@@ -784,7 +785,12 @@ pub fn on_compile_model(
                 crate::source_roots::log_compile_deps(roots, &model_name, &ast);
                 let deps = crate::source_roots::scan_source_root_deps(&ast);
                 for root in &deps {
-                    crate::source_roots::ensure_loaded(roots, root, &channels);
+                    crate::source_roots::ensure_loaded(
+                        roots,
+                        root,
+                        &channels,
+                        status_bus.as_deref_mut(),
+                    );
                 }
             }
         }

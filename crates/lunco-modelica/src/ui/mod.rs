@@ -216,20 +216,37 @@ fn sync_workspace_on_doc_opened(
     trigger: On<lunco_doc_bevy::DocumentOpened>,
     registry: Res<ModelicaDocumentRegistry>,
     mut ws: ResMut<lunco_workbench::WorkspaceResource>,
+    mut source_roots: Option<ResMut<crate::source_roots::SourceRootRegistry>>,
 ) {
     let id = trigger.event().doc;
     // Dedupe — `DocumentOpened` can fire multiple times per id during
     // the race between allocate/install_prebuilt and later reconcile
     // passes. Treat a second Opened as a no-op so the Workspace
     // document list stays a set, not a multiset.
-    if ws.document(id).is_some() {
-        return;
-    }
     let Some(host) = registry.host(id) else {
         return;
     };
     let doc = host.document();
     let origin = doc.origin().clone();
+    // Register every top-level class the opened doc declares so the
+    // pre-Compile gate treats them as Ready (engine_resource syncs
+    // doc ASTs into the rumoca session on install, so the types
+    // resolve without a worker round-trip).
+    if let Some(roots) = source_roots.as_deref_mut() {
+        let path = match &origin {
+            lunco_doc::DocumentOrigin::File { path, .. } => Some(path.clone()),
+            _ => None,
+        };
+        for class in doc.index().classes.values() {
+            // Top-level classes only: qualified name with no `.`.
+            if !class.name.contains('.') {
+                roots.register_open_doc_root(class.name.clone(), path.clone());
+            }
+        }
+    }
+    if ws.document(id).is_some() {
+        return;
+    }
     let title = origin.display_name();
     ws.add_document(lunco_workspace::DocumentEntry {
         id,

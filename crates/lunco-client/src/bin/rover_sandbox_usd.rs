@@ -172,14 +172,6 @@ fn main() {
         .add_plugins(CoSimPlugin)
         .add_plugins(lunco_workbench::WorkbenchPlugin)
         .add_plugins(ModelicaPlugin)
-        // MSL must be installed into the global source handle BEFORE the
-        // worker's first `ModelicaCompiler::new()` runs, otherwise the
-        // rumoca session starts empty and every model that references
-        // `Modelica.*` types fails Typecheck. `lunica.rs` already does
-        // this; rover_sandbox_usd was missing it, so duplicate /
-        // user-built models with MSL deps couldn't compile. See
-        // `msl_remote.rs::MslRemotePlugin::build` for the install path.
-        .add_plugins(lunco_modelica::msl_remote::MslRemotePlugin)
         .add_plugins(lunco_core::LunCoCorePlugin)
         .add_plugins(GravityPlugin)
         .add_plugins(EnvironmentPlugin)
