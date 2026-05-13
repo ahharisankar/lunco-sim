@@ -628,6 +628,14 @@ pub(super) fn projection_relevant_source_hash(source: &str) -> u64 {
 ///   live via `spawned_at.elapsed() > deadline`.
 pub struct ProjectionTask {
     pub gen_at_spawn: u64,
+    /// Document the projection was spawned for. Captured at spawn
+    /// because the world's "active document" can drift while the
+    /// task runs off-thread (user switches tabs, duplicates a doc,
+    /// closes one). On completion the canvas swap layer uses *this*
+    /// doc id — not the live active doc — to tag source-backed plot
+    /// tiles' `PlotBinding::Doc` with the right document, otherwise
+    /// they'd resolve to whichever sim is active in another tab.
+    pub doc_at_spawn: lunco_doc::DocumentId,
     /// Drill-in target the projection was spawned for. Compared
     /// against `CanvasDocState::last_seen_target` on completion so
     /// the UI knows which target produced the rendered scene.

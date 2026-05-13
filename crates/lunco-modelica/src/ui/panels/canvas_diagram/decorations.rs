@@ -215,12 +215,22 @@ pub(super) fn diagram_annotation_for_target(
     ast: &rumoca_session::parsing::ast::StoredDefinition,
     target: Option<&str>,
 ) -> Option<crate::annotations::Diagram> {
-    // Resolve the target class by qualified path walk (supports the
-    // MSL `Modelica.Blocks.Examples.PID_Controller` style). For `None`
-    // targets fall back to the first non-package class, matching the
-    // workbench's default active-class picker.
+    // Route through the canonical AST class lookup
+    // `crate::diagram::find_class_by_qualified_name`. It already
+    // handles within-clause stripping correctly — at segment
+    // boundaries, not raw string boundaries. The earlier local
+    // `walk_qualified` here used `.unwrap_or(rest)` after stripping
+    // a non-dot suffix, which corrupted targets when the within
+    // prefix happened to be a *string* prefix of the next segment
+    // (the bug that hid the diagram for `Duplicate to edit` of any
+    // class whose copy name was `<OriginalCopy>` — the within clause
+    // `AnnotatedRocketStage` is a string prefix of
+    // `AnnotatedRocketStageCopy`, so the strip mangled the target
+    // to `Copy.RocketStage` and the walk found nothing).
+    // For `None` targets fall back to the first non-package class,
+    // matching the workbench's default active-class picker.
     let class = if let Some(qualified) = target {
-        walk_qualified(ast, qualified)
+        crate::diagram::find_class_by_qualified_name(ast, qualified)
     } else {
         use rumoca_session::parsing::ClassType;
         ast.classes
@@ -231,44 +241,8 @@ pub(super) fn diagram_annotation_for_target(
     class.and_then(|c| crate::annotations::extract_diagram(&c.annotation))
 }
 
-/// Walk a dotted qualified class path through `ast.classes` into
-/// nested `class.classes`. Returns the deepest matching class, if any.
-///
-/// Honours the file's `within` clause: MSL files like
-/// `Modelica/Blocks/package.mo` start with `within Modelica;`, so their
-/// AST root contains `Blocks`, not `Modelica`. A drill-in target of
-/// `Modelica.Blocks.Examples.PID_Controller` must therefore have the
-/// `Modelica` prefix stripped before the walk; otherwise the first
-/// segment never matches and the diagram-decoration layer silently
-/// renders nothing.
-pub(super) fn walk_qualified<'a>(
-    ast: &'a rumoca_session::parsing::ast::StoredDefinition,
-    qualified: &str,
-) -> Option<&'a rumoca_session::parsing::ast::ClassDef> {
-    let stripped = if let Some(within) = ast.within.as_ref() {
-        let prefix = within
-            .name
-            .iter()
-            .map(|t| t.text.as_ref())
-            .collect::<Vec<_>>()
-            .join(".");
-        if !prefix.is_empty() {
-            if let Some(rest) = qualified.strip_prefix(&prefix) {
-                rest.strip_prefix('.').unwrap_or(rest)
-            } else {
-                qualified
-            }
-        } else {
-            qualified
-        }
-    } else {
-        qualified
-    };
-    let mut segments = stripped.split('.');
-    let first = segments.next()?;
-    let mut current = ast.classes.iter().find(|(n, _)| n.as_str() == first).map(|(_, c)| c)?;
-    for seg in segments {
-        current = current.classes.get(seg)?;
-    }
-    Some(current)
-}
+// `walk_qualified` deleted: was a near-duplicate of
+// `crate::diagram::find_class_by_qualified_name` and silently
+// disagreed with it on the within-clause strip. Two sources of
+// truth for the same lookup is how the duplicate-renders-nothing
+// bug shipped. Use the canonical helper.

@@ -38,19 +38,19 @@ pub(crate) fn poll_and_swap_projection(
 
     let done_task = docstate.projection_task.as_mut().and_then(|t| {
         futures_lite::future::block_on(futures_lite::future::poll_once(&mut t.task))
-            .map(|scene| (t.gen_at_spawn, t.target_at_spawn.clone(), t.source_hash, scene))
+            .map(|scene| (t.gen_at_spawn, t.doc_at_spawn, t.target_at_spawn.clone(), t.source_hash, scene))
     });
 
-    let done_task = done_task.and_then(|(gen, target, source_hash, scene)| {
+    let done_task = done_task.and_then(|(gen, doc, target, source_hash, scene)| {
         if gen < docstate.canvas_acked_gen {
             docstate.projection_task = None;
             None
         } else {
-            Some((gen, target, source_hash, scene))
+            Some((gen, doc, target, source_hash, scene))
         }
     });
 
-    if let Some((gen, target, source_hash, scene)) = done_task {
+    if let Some((gen, task_doc, target, source_hash, scene)) = done_task {
         bevy::log::info!(
             "[CanvasDiagram] poll_done gen={} target={:?} new_scene_nodes={} old_scene_nodes={}",
             gen, target, scene.node_count(), docstate.canvas.scene.node_count(),
@@ -75,7 +75,12 @@ pub(crate) fn poll_and_swap_projection(
 
         let mut scene = scene;
         let (bg_graphics, bg_plot_nodes): (Vec<_>, Vec<_>) = docstate.background_diagram.read().ok().and_then(|g| g.as_ref().map(|(_, gfx, plots)| (gfx.clone(), plots.clone()))).unwrap_or_default();
-        let source_backed_origins = decorations::emit_diagram_decorations(&mut scene, &bg_graphics, &bg_plot_nodes, active_doc);
+        // Tag source-backed plot tiles with the doc this task was
+        // spawned for — *not* the world's current active doc. The
+        // task may have started in tab A and completed after the
+        // user duplicated / switched to tab B; using the live
+        // active doc would bind tile resolution to the wrong sim.
+        let source_backed_origins = decorations::emit_diagram_decorations(&mut scene, &bg_graphics, &bg_plot_nodes, Some(task_doc));
         
         let scene_only_nodes: Vec<lunco_canvas::scene::Node> = docstate.canvas.scene.nodes().filter(|(_, n)| {
             n.kind == lunco_viz::kinds::canvas_plot_node::PLOT_NODE_KIND && n.origin.as_deref().map(|o| !source_backed_origins.contains(o)).unwrap_or(true)
@@ -197,6 +202,7 @@ fn spawn_projection_task(world: &mut World, doc_id: lunco_doc::DocumentId, gen: 
 
     docstate.projection_task = Some(ProjectionTask {
         gen_at_spawn: gen,
+        doc_at_spawn: doc_id,
         target_at_spawn: target_class.clone(),
         spawned_at,
         deadline: max_duration,
