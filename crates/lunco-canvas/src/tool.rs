@@ -296,9 +296,12 @@ enum PressTarget {
     NodeBody(NodeId),
     Port(PortRef, Pos), // port world-space position for ghost edge origin
     /// On an edge's waypoint or segment handle. Drag promotes to
-    /// `DraggingEdgeWaypoint`. `Body` hits do *not* land here — those
-    /// are handled inline at press time as a select-and-stay.
+    /// `DraggingEdgeWaypoint`.
     EdgeHandle(EdgeId, EdgeHit),
+    /// On an edge's body (not a handle). Click selects the edge on
+    /// release; drag falls back to rubber-band (the body itself isn't
+    /// draggable — Dymola convention).
+    EdgeBody(EdgeId),
     Empty,
 }
 
@@ -359,6 +362,9 @@ impl Tool for DefaultTool {
                         } else {
                             *landed_on = PressTarget::Empty;
                         }
+                    }
+                    PressTarget::EdgeBody(_) => {
+                        // EdgeIds aren't remapped by this helper.
                     }
                     PressTarget::EdgeHandle(_, _) => {
                         // EdgeIds aren't remapped by this helper —
@@ -760,8 +766,7 @@ impl DefaultTool {
                         press_target = PressTarget::EdgeHandle(eid, hit);
                     }
                 } else if let Some(eid) = ops.scene.hit_edge(world, EDGE_BODY_TOL) {
-                    let item = SelectItem::Edge(eid);
-                    self.apply_click_selection(item, extend, toggle, ops);
+                    press_target = PressTarget::EdgeBody(eid);
                 }
                 press_target
             }
@@ -851,7 +856,7 @@ impl DefaultTool {
                         mode: ConnectMode::Drag,
                     };
                 }
-                PressTarget::Empty => {
+                PressTarget::Empty | PressTarget::EdgeBody(_) => {
                     self.state = State::RubberBand {
                         origin_world,
                         pointer_world: world,
@@ -1191,6 +1196,14 @@ impl DefaultTool {
                         // confirmation they hit it.
                         self.apply_click_selection(
                             SelectItem::Node(id),
+                            extend,
+                            toggle,
+                            ops,
+                        );
+                    }
+                    PressTarget::EdgeBody(eid) => {
+                        self.apply_click_selection(
+                            SelectItem::Edge(eid),
                             extend,
                             toggle,
                             ops,
