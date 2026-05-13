@@ -113,9 +113,13 @@ pub fn on_create_new_scratch_model(
         .iter()
         .map(|e| e.display_name.clone())
         .collect();
-    let mut n: u32 = 1;
+    let mut n: u32 = 0;
     let name = loop {
-        let candidate = format!("Untitled{n}");
+        let candidate = if n == 0 {
+            "Untitled".to_string()
+        } else {
+            format!("Untitled{}", n + 1)
+        };
         if !taken.contains(&candidate) {
             break candidate;
         }

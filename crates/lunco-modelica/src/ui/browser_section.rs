@@ -106,13 +106,13 @@ impl BrowserSection for ModelicaSection {
         };
 
         for (root_id, root_name) in &library_rows {
-            // MSL is huge — start collapsed. Bundled / third-party
-            // start open so the user can see their contents right away.
-            let default_open = root_id != "msl_root";
+            // All libraries start collapsed; user expands the ones
+            // they care about. Keeps the browser scannable on startup.
+            let _ = root_id;
             let label = format!("🔒  {}", root_name);
             let resp = egui::CollapsingHeader::new(label)
                 .id_salt(("twin.modelica.library", root_id))
-                .default_open(default_open)
+                .default_open(false)
                 .show(ui, |ui| {
                     crate::ui::panels::package_browser::render_root_subtree(
                         ctx.world, ui, root_id,
