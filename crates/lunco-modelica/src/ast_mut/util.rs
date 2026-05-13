@@ -1,7 +1,7 @@
 //! AST and text utility helpers.
 
 use std::sync::Arc;
-use rumoca_session::parsing::ast::{ClassDef, ComponentReference, Expression, StoredDefinition, Token, TerminalType};
+use rumoca_session::parsing::ast::{ClassDef, ComponentReference, Expression, StoredDefinition, Token};
 use super::errors::AstMutError;
 use crate::pretty;
 
@@ -184,18 +184,11 @@ pub fn number_literal_value(e: &Expression) -> Option<f64> {
     }
 }
 
+/// Delegates to [`crate::ast_extract::string_literal_value`] — the
+/// canonical decoder. Kept here as a re-export so existing
+/// `super::util::string_literal_value` imports keep working.
 pub fn string_literal_value(e: &Expression) -> Option<String> {
-    let Expression::Terminal { terminal_type, token } = e else { return None };
-    if !matches!(terminal_type, TerminalType::String) {
-        return None;
-    }
-    let raw: &str = &token.text;
-    let trimmed = raw.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(raw);
-    Some(
-        trimmed
-            .replace("\\\"", "\"")
-            .replace("\\\\", "\\"),
-    )
+    crate::ast_extract::string_literal_value(e)
 }
 
 /// A trimmed `Text(...)` graphic.

@@ -96,6 +96,72 @@ pub fn short_name(qualified: &str) -> &str {
     qualified.rsplit('.').next().unwrap_or(qualified)
 }
 
+/// Decode Modelica string-literal escape sequences. Replaces `\"`,
+/// `\\`, `\n`, `\t`, `\r`, and `\'` with the corresponding character;
+/// leaves any other `\X` pair as-is.
+///
+/// Operates on the **already-quote-stripped** content of a Modelica
+/// `STRING` terminal — the surrounding `"…"` should be removed by
+/// the caller. Use [`string_literal_value`] when starting from an
+/// `Expression` to do both steps in one call.
+pub fn unescape_modelica_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(n) = chars.next() {
+                match n {
+                    '"' => out.push('"'),
+                    '\\' => out.push('\\'),
+                    'n' => out.push('\n'),
+                    't' => out.push('\t'),
+                    'r' => out.push('\r'),
+                    '\'' => out.push('\''),
+                    other => {
+                        out.push('\\');
+                        out.push(other);
+                    }
+                }
+            } else {
+                out.push('\\');
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Decode an `Expression::Terminal { terminal_type: String, .. }`
+/// into the raw `String` value. Strips surrounding quotes and
+/// applies the full Modelica escape table via
+/// [`unescape_modelica_string`]. Returns `None` for non-string
+/// terminals or non-terminal expressions.
+///
+/// Canonical entry point — three earlier implementations
+/// (`ast_mut::util::string_literal_value`, the deleted
+/// `canvas_projection::string_literal_of`, and an inline pattern in
+/// `model_view::parsing`) disagreed on what to strip and which
+/// escapes to decode. Use this from now on.
+pub fn string_literal_value(
+    e: &rumoca_session::parsing::ast::Expression,
+) -> Option<String> {
+    use rumoca_session::parsing::ast::Expression;
+    use rumoca_session::parsing::TerminalType;
+    let Expression::Terminal { terminal_type, token } = e else {
+        return None;
+    };
+    if !matches!(terminal_type, TerminalType::String) {
+        return None;
+    }
+    let raw: &str = &token.text;
+    let trimmed = raw
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(raw);
+    Some(unescape_modelica_string(trimmed))
+}
+
 /// Return the qualified-name prefix *before* the last dotted segment
 /// — the parent scope. `"Modelica.Blocks.PID"` → `"Modelica.Blocks"`.
 /// Names without any `.` (single-segment, e.g. `"PID"`) return `""`

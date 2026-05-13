@@ -3,7 +3,7 @@
 pub fn extract_documentation(
     annotations: &[rumoca_session::parsing::ast::Expression],
 ) -> (Option<String>, Option<String>) {
-    use rumoca_session::parsing::ast::{Expression, TerminalType};
+    use rumoca_session::parsing::ast::Expression;
     let call = annotations.iter().find(|e| match e {
         Expression::FunctionCall { comp, .. } | Expression::ClassModification { target: comp, .. } => {
             comp.parts
@@ -34,41 +34,11 @@ pub fn extract_documentation(
             if arg_name != name {
                 continue;
             }
-            if let Expression::Terminal { terminal_type: TerminalType::String, token } = value {
-                let raw = token.text.as_ref();
-                let inner = raw.trim_start_matches('"').trim_end_matches('"');
-                return Some(unescape_modelica_string(inner));
+            if let Some(s) = crate::ast_extract::string_literal_value(value) {
+                return Some(s);
             }
         }
         None
     };
     (str_arg("info"), str_arg("revisions"))
-}
-
-pub fn unescape_modelica_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            if let Some(n) = chars.next() {
-                match n {
-                    '"' => out.push('"'),
-                    '\\' => out.push('\\'),
-                    'n' => out.push('\n'),
-                    't' => out.push('\t'),
-                    'r' => out.push('\r'),
-                    '\'' => out.push('\''),
-                    other => {
-                        out.push('\\');
-                        out.push(other);
-                    }
-                }
-            } else {
-                out.push('\\');
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }

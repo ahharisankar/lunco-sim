@@ -1291,7 +1291,7 @@ fn classify_connector(
                 let unit = c
                     .modifications
                     .get("unit")
-                    .and_then(string_literal_of)
+                    .and_then(crate::ast_extract::string_literal_value)
                     .unwrap_or_default();
                 Some(FlowVarMeta { name: name.clone(), unit })
             } else {
@@ -1345,26 +1345,12 @@ fn classify_connector(
 }
 
 /// Extract a `"literal"` from an `Expression::Terminal` that holds
-/// a string token. Used to read `unit="kg/s"` out of a component's
-/// modification list without dragging in rumoca's full expression
-/// evaluator. Returns `None` for non-literal expressions.
-fn string_literal_of(expr: &rumoca_session::parsing::ast::Expression) -> Option<String> {
-    use rumoca_session::parsing::ast::Expression;
-    if let Expression::Terminal { token, .. } = expr {
-        let s = token.text.as_ref();
-        // Parser strips the quotes for string literals; most unit
-        // strings arrive already unquoted. Strip quotes defensively
-        // in case a caller hands us the raw source slice.
-        let trimmed = s.trim_matches('"');
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    } else {
-        None
-    }
-}
+// Local `string_literal_of` deleted. Replaced by the canonical
+// `crate::ast_extract::string_literal_value`, which checks
+// `TerminalType::String` properly and decodes the full Modelica
+// escape table. The old local was a third divergent implementation
+// of the same op (strict-type check missing, no escape decoding,
+// `trim_matches('"')` instead of exact-one-pair strip).
 
 /// Lookup the first colored graphic's line / fill color on a
 /// connector class. Split out from the old `resolve_connector_icon_color`
