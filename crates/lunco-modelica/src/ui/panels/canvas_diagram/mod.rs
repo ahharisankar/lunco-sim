@@ -422,9 +422,41 @@ pub struct CanvasDiagramState {
     /// Updated on every `get_mut_for_tab` insert.
     tab_doc: std::collections::HashMap<CanvasKey, lunco_doc::DocumentId>,
     fallback: CanvasDocState,
+    /// Parse→project handoff slot. When a driver (duplicate, drill-in,
+    /// file-load) resolves its parse task, it moves its `StatusBus`
+    /// `BusyHandle` here so the bus stays busy for `Document(doc_id)`
+    /// across the frame boundary where the parse handle would otherwise
+    /// drop before the projection task spawns. The next
+    /// `spawn_projection_task` for the doc minted its own handle and
+    /// then calls [`complete_projection_handoff`], releasing this one.
+    /// Without this slot the bus blinks empty between parse-complete
+    /// and project-spawn, and the canvas overlay flickers off then on.
+    pending_projection_handoff:
+        std::collections::HashMap<lunco_doc::DocumentId, lunco_workbench::status_bus::BusyHandle>,
 }
 
 impl CanvasDiagramState {
+    /// Stash the parse-phase `BusyHandle` so the `StatusBus` keeps an
+    /// entry under `Document(doc_id)` until the next projection spawn
+    /// for the doc registers its own. Replaces any previous stashed
+    /// handle for the same doc (its `Drop` then clears the older bus
+    /// entry safely — see `re_begin_evicts_prior_handle_silently`).
+    pub fn stash_projection_handoff(
+        &mut self,
+        doc: lunco_doc::DocumentId,
+        handle: lunco_workbench::status_bus::BusyHandle,
+    ) {
+        self.pending_projection_handoff.insert(doc, handle);
+    }
+
+    /// Drop the handoff handle for `doc`, if any. Called from
+    /// `spawn_projection_task` after the new projection entry is on
+    /// the bus, so total bus busy-count for the doc never reaches
+    /// zero during the parse→project transition.
+    pub fn complete_projection_handoff(&mut self, doc: lunco_doc::DocumentId) {
+        self.pending_projection_handoff.remove(&doc);
+    }
+
     /// Legacy single-doc lookup. Resolves to the first tab viewing
     /// `doc`, or the shared fallback when `doc` is `None` /
     /// no tab has been opened yet. Non-render callers (event

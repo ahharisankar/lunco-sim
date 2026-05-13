@@ -87,6 +87,7 @@ pub fn drive_duplicate_loads(
     mut probe: Option<bevy::prelude::ResMut<crate::FrameTimeProbe>>,
     mut egui_q: bevy::prelude::Query<&mut bevy_egui::EguiContext>,
     mut tabs: bevy::prelude::ResMut<crate::ui::panels::model_view::ModelTabs>,
+    mut canvas_state: bevy::prelude::ResMut<super::CanvasDiagramState>,
     mut commands: bevy::prelude::Commands,
 ) {
     use bevy::prelude::*;
@@ -119,6 +120,14 @@ pub fn drive_duplicate_loads(
         let Some(OpeningState::Duplicate(b)) = openings.remove(doc_id) else {
             continue;
         };
+        // Hand the parse-phase busy handle to the canvas state so the
+        // bus keeps a `Document(doc_id)` entry across the gap between
+        // here and the next `spawn_projection_task` for this doc. The
+        // projection spawn calls `complete_projection_handoff(doc_id)`
+        // once its own entry is in place. Without this stash the bus
+        // briefly goes idle for the doc and the canvas overlay
+        // flickers off then on.
+        canvas_state.stash_projection_handoff(doc_id, b._busy);
         let dup_display_name = b.display_name;
         let origin_short = b.origin_short;
         let inner_drill = b.inner_drill;
@@ -219,6 +228,7 @@ pub fn drive_drill_in_loads(
     mut registry: bevy::prelude::ResMut<ModelicaDocumentRegistry>,
     mut tabs: bevy::prelude::ResMut<crate::ui::panels::model_view::ModelTabs>,
     mut egui_q: bevy::prelude::Query<&mut bevy_egui::EguiContext>,
+    mut canvas_state: bevy::prelude::ResMut<super::CanvasDiagramState>,
 ) {
     use bevy::prelude::*;
     // Keep egui awake while loads are in flight so the "Loading…"
@@ -243,6 +253,11 @@ pub fn drive_drill_in_loads(
         let Some(OpeningState::DrillIn(b)) = openings.remove(doc_id) else {
             continue;
         };
+        // Hand the parse-phase busy handle to the canvas state so the
+        // bus keeps a `Document(doc_id)` entry continuously through
+        // the parse→project transition. See the matching block in
+        // `drive_duplicate_loads`.
+        canvas_state.stash_projection_handoff(doc_id, b._busy);
         let qualified = b.qualified;
         let doc = match result {
             Ok(doc) => doc,

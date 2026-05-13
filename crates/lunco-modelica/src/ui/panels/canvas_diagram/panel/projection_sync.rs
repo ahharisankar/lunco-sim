@@ -37,7 +37,7 @@ pub(crate) fn poll_and_swap_projection(
     }
 
     let done_task = docstate.projection_task.as_mut().and_then(|t| {
-        futures_lite::future::block_on(futures_lite::future::poll_once(&mut t.task))
+        t.task.poll_once()
             .map(|scene| (t.gen_at_spawn, t.doc_at_spawn, t.target_at_spawn.clone(), t.source_hash, scene))
     });
 
@@ -180,25 +180,49 @@ fn spawn_projection_task(world: &mut World, doc_id: lunco_doc::DocumentId, gen: 
     if let Some(t) = docstate.projection_task.as_ref() { if t.gen_at_spawn != gen { t.cancel.store(true, std::sync::atomic::Ordering::Relaxed); } }
     docstate.projection_task = None;
 
-    let pool = bevy::tasks::AsyncComputeTaskPool::get();
     let spawned_at = web_time::Instant::now();
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let cancel_for_task = std::sync::Arc::clone(&cancel);
     let target_for_log = target_class.clone();
     let source_hash = projection_relevant_source_hash(&*source);
-    
-    let task = pool.spawn(async move {
-        use std::sync::atomic::Ordering;
-        if cancel_for_task.load(Ordering::Relaxed) { return Scene::new(); }
-        futures_lite::future::yield_now().await;
-        let ast_for_recover = std::sync::Arc::clone(&ast_arc);
-        let mut diagram = crate::ui::panels::canvas_projection::import_model_to_diagram_from_ast(ast_arc, &*source, max_nodes, target_for_log.as_deref(), &layout).unwrap_or_default();
-        futures_lite::future::yield_now().await;
-        recover_edges_from_ast(&ast_for_recover, &mut diagram);
-        futures_lite::future::yield_now().await;
-        let (scene, _) = project_scene(&diagram);
-        scene
-    });
+    let label = match &target_class { Some(t) => format!("Projecting {t}"), None => "Projecting…".to_string() };
+
+    // Release the `CanvasDiagramState` borrow before grabbing the bus —
+    // they are disjoint resources, but Bevy won't let us hold both
+    // simultaneously through `World`.
+    drop(state);
+
+    let task = {
+        let mut bus = world.resource_mut::<lunco_workbench::status_bus::StatusBus>();
+        lunco_workbench::tracked_task::spawn_tracked_cancellable(
+            &mut bus,
+            lunco_workbench::status_bus::BusyScope::Document(doc_id.0),
+            "projection",
+            label,
+            std::sync::Arc::clone(&cancel),
+            async move {
+                use std::sync::atomic::Ordering;
+                if cancel_for_task.load(Ordering::Relaxed) { return Scene::new(); }
+                futures_lite::future::yield_now().await;
+                let ast_for_recover = std::sync::Arc::clone(&ast_arc);
+                let mut diagram = crate::ui::panels::canvas_projection::import_model_to_diagram_from_ast(ast_arc, &*source, max_nodes, target_for_log.as_deref(), &layout).unwrap_or_default();
+                futures_lite::future::yield_now().await;
+                recover_edges_from_ast(&ast_for_recover, &mut diagram);
+                futures_lite::future::yield_now().await;
+                let (scene, _) = project_scene(&diagram);
+                scene
+            },
+        )
+    };
+
+    // Now that the "projection" entry is on the bus, complete any
+    // parse→project handoff: drop the pending handle the driver
+    // stashed when it resolved the parse. Bus stays continuously
+    // busy for `Document(doc_id)` across the boundary because the
+    // new entry was inserted before this drop fires.
+    let mut state = world.resource_mut::<CanvasDiagramState>();
+    state.complete_projection_handoff(doc_id);
+    let docstate = match render_tab_id { Some(t) => state.get_mut_for_tab(t, doc_id), None => state.get_mut(Some(doc_id)) };
 
     docstate.projection_task = Some(ProjectionTask {
         gen_at_spawn: gen,
@@ -206,16 +230,8 @@ fn spawn_projection_task(world: &mut World, doc_id: lunco_doc::DocumentId, gen: 
         target_at_spawn: target_class.clone(),
         spawned_at,
         deadline: max_duration,
-        cancel: cancel.clone(),
+        cancel,
         task,
         source_hash,
-        _busy: None,
     });
-
-    let label = match &target_class { Some(t) => format!("Projecting {t}"), None => "Projecting…".to_string() };
-    let handle = world.resource_mut::<lunco_workbench::status_bus::StatusBus>().begin_cancellable(lunco_workbench::status_bus::BusyScope::Document(doc_id.0), "projection", label, cancel);
-    
-    let mut state = world.resource_mut::<CanvasDiagramState>();
-    let docstate = match render_tab_id { Some(t) => state.get_mut_for_tab(t, doc_id), None => state.get_mut(Some(doc_id)) };
-    if let Some(t) = docstate.projection_task.as_mut() { t._busy = Some(handle); }
 }

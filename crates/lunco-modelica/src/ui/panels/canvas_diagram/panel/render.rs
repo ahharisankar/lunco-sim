@@ -57,17 +57,29 @@ pub(crate) fn render_diagram_canvas(
         let (load_error, show_indicator, show_empty) = {
             let tabs = world.resource::<crate::ui::panels::model_view::ModelTabs>();
             let err = render_tab_id.and_then(|tid| tabs.get(tid).and_then(|t| t.load_error.as_ref().map(|e| (t.drilled_class.clone().unwrap_or_default(), e.clone()))));
-            
+
             let state = world.resource::<CanvasDiagramState>();
             let docstate = match render_tab_id { Some(t) => state.get_for_tab(t), None => state.get(active_doc) };
             let has_content = docstate.canvas.scene.node_count() > 0;
-            let projecting = docstate.projection_task.is_some();
-            let parse_pending = active_doc.and_then(|d| world.resource::<crate::ui::state::ModelicaDocumentRegistry>().host(d).map(|h| h.document().ast_is_stale())).unwrap_or(false);
-            
-            let openings = world.resource::<crate::ui::document_openings::DocumentOpenings>();
-            let loading = active_doc.map(|d| openings.is_loading(d)).unwrap_or(false);
 
-            (err, !has_content && (loading || parse_pending || projecting), !has_content && !loading && !parse_pending && !projecting)
+            // Single source of truth: `StatusBus` busy for this doc.
+            // Every async stage (parse, project, future fetch/index/etc.)
+            // holds a `BusyHandle` scoped to `Document(doc_id)` for its
+            // entire lifetime, and the parse→project handoff overlaps
+            // handles via `CanvasDiagramState::pending_projection_handoff`,
+            // so the bus is never momentarily empty mid-flight. No
+            // OR-of-booleans across subsystem-private flags — the
+            // overlay just reads "is something happening for this doc?"
+            let bus = world.resource::<lunco_workbench::status_bus::StatusBus>();
+            let busy = active_doc.map(|d| bus.is_busy(lunco_workbench::status_bus::BusyScope::Document(d.0))).unwrap_or(false);
+            // AST-stale by itself isn't tracked on the bus today —
+            // edits-in-progress are an internal mechanic that doesn't
+            // mint a handle. Keep it as a fallback so the overlay
+            // doesn't flash empty during an ops-driven rebuild.
+            let parse_pending = active_doc.and_then(|d| world.resource::<crate::ui::state::ModelicaDocumentRegistry>().host(d).map(|h| h.document().ast_is_stale())).unwrap_or(false);
+            let in_flight = busy || parse_pending;
+
+            (err, !has_content && in_flight, !has_content && !in_flight)
         };
 
         if let Some((class, err)) = load_error {

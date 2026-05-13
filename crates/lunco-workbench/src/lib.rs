@@ -60,6 +60,7 @@ pub mod perf_hud;
 pub mod picker;
 pub mod status_bus;
 pub mod theme_command;
+pub mod tracked_task;
 pub mod twin_browser;
 pub mod uri;
 pub mod window_command;
