@@ -34,8 +34,8 @@ pub enum AstMutError {
         /// Component name that already exists.
         component: String,
     },
-    /// No `__LunCo_PlotNode(signal=…)` matched in the class's
-    /// `Diagram(graphics)` array.
+    /// No `LunCoAnnotations.PlotNode(signal=…)` matched in the class's
+    /// `annotation(__LunCo(plotNodes=...))` array.
     PlotNodeNotFound {
         /// Class whose Diagram annotation was searched.
         class: String,
@@ -94,7 +94,7 @@ impl std::fmt::Display for AstMutError {
             ),
             AstMutError::PlotNodeNotFound { class, signal } => write!(
                 f,
-                "no __LunCo_PlotNode with signal `{signal}` in class `{class}`"
+                "no LunCoAnnotations.PlotNode with signal `{signal}` in class `{class}`"
             ),
             AstMutError::DiagramTextIndexOutOfRange { class, index } => write!(
                 f,

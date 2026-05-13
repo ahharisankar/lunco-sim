@@ -4,7 +4,7 @@ use std::sync::Arc;
 use rumoca_session::parsing::ast::{ClassDef, Expression};
 use super::errors::AstMutError;
 use super::util::{is_annotation_entry_named, synth_token, is_graphic_entry_named, graphic_entry_arg, string_literal_value, point_pair, render_text_spec, read_text_spec, plot_node_signal_matches};
-use super::parsing::{parse_graphics_entry, parse_experiment_expression, parse_placement_expression};
+use super::parsing::{parse_graphics_entry, parse_experiment_expression, parse_placement_expression, parse_plot_node_record};
 use crate::pretty;
 
 /// Append a graphic to `class.annotation.<section>(graphics)`.
@@ -98,13 +98,117 @@ fn graphics_array_mut<'a>(
     }
 }
 
-/// Add a `__LunCo_PlotNode(...)` entry to the class's `Diagram(graphics)` array.
+/// Get a mutable reference to the `plotNodes={...}` array inside the
+/// class's `__LunCo(...)` vendor annotation. Inserts the annotation
+/// and/or the `plotNodes` modification if they don't yet exist.
+fn lunco_plot_nodes_array_mut(class: &mut ClassDef) -> &mut Vec<Expression> {
+    let section_idx = class
+        .annotation
+        .iter()
+        .position(|e| is_annotation_entry_named(e, "__LunCo"));
+    let section_idx = match section_idx {
+        Some(i) => i,
+        None => {
+            class.annotation.push(Expression::ClassModification {
+                target: rumoca_session::parsing::ast::ComponentReference {
+                    local: false,
+                    parts: vec![rumoca_session::parsing::ast::ComponentRefPart {
+                        ident: synth_token("__LunCo".to_string()),
+                        subs: None,
+                    }],
+                    def_id: None,
+                },
+                modifications: Vec::new(),
+            });
+            class.annotation.len() - 1
+        }
+    };
+    let mods = match &mut class.annotation[section_idx] {
+        Expression::ClassModification { modifications, .. } => modifications,
+        _ => unreachable!("__LunCo entry was a ClassModification on insert/find"),
+    };
+
+    let plot_nodes_idx = mods.iter().position(|m| matches!(
+        m,
+        Expression::Modification { target, .. }
+            if target.parts.len() == 1
+                && &*target.parts[0].ident.text == "plotNodes"
+    ));
+    let plot_nodes_idx = match plot_nodes_idx {
+        Some(i) => i,
+        None => {
+            mods.push(Expression::Modification {
+                target: rumoca_session::parsing::ast::ComponentReference {
+                    local: false,
+                    parts: vec![rumoca_session::parsing::ast::ComponentRefPart {
+                        ident: synth_token("plotNodes".to_string()),
+                        subs: None,
+                    }],
+                    def_id: None,
+                },
+                value: Arc::new(Expression::Array {
+                    elements: Vec::new(),
+                    is_matrix: false,
+                }),
+            });
+            mods.len() - 1
+        }
+    };
+    let value = match &mut mods[plot_nodes_idx] {
+        Expression::Modification { value, .. } => Arc::make_mut(value),
+        _ => unreachable!("plotNodes modification just inserted/found above"),
+    };
+    match value {
+        Expression::Array { elements, .. } => elements,
+        other => {
+            *other = Expression::Array {
+                elements: Vec::new(),
+                is_matrix: false,
+            };
+            match other {
+                Expression::Array { elements, .. } => elements,
+                _ => unreachable!("just assigned an Array variant"),
+            }
+        }
+    }
+}
+
+/// Drop the class's `__LunCo` annotation entirely if its `plotNodes`
+/// array is now empty. Keeps source clean after removing the last
+/// plot node — no `annotation(__LunCo(plotNodes={}))` clutter.
+fn prune_empty_lunco_annotation(class: &mut ClassDef) {
+    let Some(idx) = class
+        .annotation
+        .iter()
+        .position(|e| is_annotation_entry_named(e, "__LunCo"))
+    else {
+        return;
+    };
+    let is_empty = match &class.annotation[idx] {
+        Expression::ClassModification { modifications, .. } => modifications.iter().all(|m| {
+            matches!(
+                m,
+                Expression::Modification { target, value }
+                    if target.parts.len() == 1
+                        && &*target.parts[0].ident.text == "plotNodes"
+                        && matches!(value.as_ref(), Expression::Array { elements, .. } if elements.is_empty())
+            )
+        }),
+        _ => false,
+    };
+    if is_empty {
+        class.annotation.remove(idx);
+    }
+}
+
+/// Add or replace a plot tile in the class's
+/// `annotation(__LunCo(plotNodes={LunCoAnnotations.PlotNode(...)}))`.
 pub fn add_plot_node(
     class: &mut ClassDef,
     plot: &pretty::LunCoPlotNodeSpec,
 ) -> Result<(), AstMutError> {
-    let new_entry = parse_graphics_entry(&pretty::lunco_plot_node_inner(plot))?;
-    let arr = graphics_array_mut(class, "Diagram");
+    let new_entry = parse_plot_node_record(&pretty::lunco_plot_node_inner(plot))?;
+    let arr = lunco_plot_nodes_array_mut(class);
     let signal = plot.signal.clone();
     if let Some(slot) = arr
         .iter_mut()
@@ -117,10 +221,12 @@ pub fn add_plot_node(
     Ok(())
 }
 
-/// Remove the `__LunCo_PlotNode(...)` entry whose `signal=` matches.
+/// Remove the `LunCoAnnotations.PlotNode(...)` entry whose `signal=`
+/// matches. Drops the enclosing `__LunCo` annotation if it becomes
+/// empty as a result.
 pub fn remove_plot_node(class: &mut ClassDef, signal_path: &str) -> Result<(), AstMutError> {
     let class_name = class.name.text.to_string();
-    let arr = graphics_array_mut(class, "Diagram");
+    let arr = lunco_plot_nodes_array_mut(class);
     let before = arr.len();
     arr.retain(|e| !plot_node_signal_matches(e, signal_path));
     if arr.len() == before {
@@ -129,6 +235,7 @@ pub fn remove_plot_node(class: &mut ClassDef, signal_path: &str) -> Result<(), A
             signal: signal_path.to_string(),
         });
     }
+    prune_empty_lunco_annotation(class);
     Ok(())
 }
 
@@ -169,7 +276,7 @@ where
     F: FnOnce(&mut pretty::LunCoPlotNodeSpec),
 {
     let class_name = class.name.text.to_string();
-    let arr = graphics_array_mut(class, "Diagram");
+    let arr = lunco_plot_nodes_array_mut(class);
     let entry = arr
         .iter_mut()
         .find(|e| plot_node_signal_matches(e, signal_path))
@@ -179,7 +286,7 @@ where
         })?;
     let mut spec = read_plot_node_spec(entry);
     update(&mut spec);
-    *entry = parse_graphics_entry(&pretty::lunco_plot_node_inner(&spec))?;
+    *entry = parse_plot_node_record(&pretty::lunco_plot_node_inner(&spec))?;
     Ok(())
 }
 

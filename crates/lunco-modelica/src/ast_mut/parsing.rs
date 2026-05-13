@@ -130,6 +130,47 @@ pub(crate) fn parse_graphics_entry(text: &str) -> Result<rumoca_session::parsing
         .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })
 }
 
+/// Parse a single `LunCoAnnotations.PlotNode(...)` record fragment as
+/// it appears inside `__LunCo(plotNodes={...})`. Wraps it in a stub
+/// class so the standard Modelica parser sees a well-formed input.
+pub(crate) fn parse_plot_node_record(text: &str) -> Result<rumoca_session::parsing::ast::Expression, AstMutError> {
+    let stub = format!(
+        "model __LunCoFragment\nannotation(__LunCo(plotNodes={{{text}}}));\nend __LunCoFragment;\n"
+    );
+    let parsed = parse_stub_cached(&stub)
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })?;
+    let class = parsed
+        .classes
+        .get("__LunCoFragment")
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })?;
+    let lunco_call = class
+        .annotation
+        .first()
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })?;
+    let rumoca_session::parsing::ast::Expression::ClassModification { modifications, .. } = lunco_call else {
+        return Err(AstMutError::ValueParseFailed { value: text.to_string() });
+    };
+    let plot_nodes_mod = modifications
+        .iter()
+        .find_map(|m| match m {
+            rumoca_session::parsing::ast::Expression::Modification { target, value }
+                if target.parts.len() == 1
+                    && &*target.parts[0].ident.text == "plotNodes" =>
+            {
+                Some(value)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })?;
+    let rumoca_session::parsing::ast::Expression::Array { elements, .. } = plot_nodes_mod.as_ref() else {
+        return Err(AstMutError::ValueParseFailed { value: text.to_string() });
+    };
+    elements
+        .first()
+        .cloned()
+        .ok_or_else(|| AstMutError::ValueParseFailed { value: text.to_string() })
+}
+
 pub(crate) fn parse_experiment_expression(
     start_time: f64,
     stop_time: f64,

@@ -12,8 +12,6 @@ pub enum GraphicItem {
     Text(Text),
     Ellipse(Ellipse),
     Bitmap(Bitmap),
-    /// Vendor extension: an embedded plot tile bound to a runtime signal.
-    LunCoPlotNode(LunCoPlotNode),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -80,6 +78,9 @@ pub struct Bitmap {
     pub rotation: f64,
 }
 
+/// LunCo vendor annotation: embedded plot tile bound to a runtime signal.
+/// Lives in `annotation(__LunCo(plotNodes={LunCoAnnotations.PlotNode(...)}))`,
+/// alongside (not inside) `Diagram(graphics=...)`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LunCoPlotNode {
     pub extent: Extent,

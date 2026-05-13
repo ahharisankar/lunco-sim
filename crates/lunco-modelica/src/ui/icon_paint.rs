@@ -200,14 +200,6 @@ pub fn paint_graphics_themed(
                 GraphicItem::Text(t) => paint_text(painter, &xform, t, substitution, resolver),
                 GraphicItem::Ellipse(e) => paint_ellipse(painter, &xform, e),
                 GraphicItem::Bitmap(b) => paint_bitmap(painter, &xform, b),
-                // Plot tiles render as canvas-level scene Nodes
-                // (kind `lunco.viz.plot`), not as part of an icon's
-                // graphic stack — the canvas projector emits a
-                // separate Node for each one. Skipping here means
-                // a plot annotation accidentally placed inside an
-                // Icon (vs the Diagram layer it belongs on) renders
-                // nothing rather than crashing the painter.
-                GraphicItem::LunCoPlotNode(_) => {}
             }
         }
     });

@@ -41,13 +41,65 @@ pub fn extract_icon_with_visibility(
 }
 
 /// Extract the `Diagram(...)` annotation from a class's annotation list.
+/// Also pulls LunCo vendor plot tiles from the sibling
+/// `__LunCo(plotNodes={LunCoAnnotations.PlotNode(...)})` annotation,
+/// so callers see a single combined view of the diagram.
 pub fn extract_diagram(annotations: &[Expression]) -> Option<Diagram> {
     let diagram_call = find_call(annotations, "Diagram")?;
     let diagram_args = call_args(diagram_call)?;
     Some(Diagram {
         coordinate_system: extract_coordinate_system(diagram_args).unwrap_or_default(),
         graphics: extract_graphics(diagram_args),
+        plot_nodes: extract_lunco_plot_nodes(annotations),
     })
+}
+
+/// Extract `__LunCo(plotNodes={LunCoAnnotations.PlotNode(...), ...})`
+/// from a class annotation list. Returns an empty Vec if the vendor
+/// annotation or its `plotNodes` array is missing.
+pub fn extract_lunco_plot_nodes(annotations: &[Expression]) -> Vec<LunCoPlotNode> {
+    let Some(call) = find_call(annotations, "__LunCo") else {
+        return Vec::new();
+    };
+    let Some(args) = call_args(call) else { return Vec::new() };
+    let Some(plot_nodes_arr) = named_arg(args, "plotNodes") else {
+        return Vec::new();
+    };
+    let Some(elements) = array_elements(plot_nodes_arr) else {
+        return Vec::new();
+    };
+    elements.iter().filter_map(extract_lunco_plot_node_record).collect()
+}
+
+fn extract_lunco_plot_node_record(expr: &Expression) -> Option<LunCoPlotNode> {
+    if !is_plot_node_call(expr) {
+        return None;
+    }
+    let args = call_args(expr)?;
+    let extent = named_arg(args, "extent").and_then(extract_extent)?;
+    let signal = named_arg(args, "signal")
+        .and_then(extract_string)
+        .map(|s| s.trim_matches('"').to_string())?;
+    if signal.is_empty() {
+        return None;
+    }
+    let title = named_arg(args, "title")
+        .and_then(extract_string)
+        .map(|s| s.trim_matches('"').to_string())
+        .unwrap_or_default();
+    Some(LunCoPlotNode { extent, signal, title })
+}
+
+/// Match `LunCoAnnotations.PlotNode(...)` or bare `PlotNode(...)`
+/// (the latter for `import LunCoAnnotations.*;`-style usage).
+fn is_plot_node_call(expr: &Expression) -> bool {
+    let comp_parts = match expr {
+        Expression::FunctionCall { comp, .. } => &comp.parts,
+        Expression::ClassModification { target, .. } => &target.parts,
+        _ => return false,
+    };
+    let last = comp_parts.last().map(|t| t.ident.text.as_ref());
+    last == Some("PlotNode")
 }
 
 /// Extract the `experiment(...)` annotation from a class's annotation
@@ -387,26 +439,8 @@ fn extract_graphic_item_filtered(
         "Text" => Some(GraphicItem::Text(extract_text(args)?)),
         "Ellipse" => Some(GraphicItem::Ellipse(extract_ellipse(args)?)),
         "Bitmap" => Some(GraphicItem::Bitmap(extract_bitmap(args)?)),
-        "__LunCo_PlotNode" => {
-            Some(GraphicItem::LunCoPlotNode(extract_lunco_plot_node(args)?))
-        }
         _ => None,
     }
-}
-
-fn extract_lunco_plot_node(args: &[Expression]) -> Option<LunCoPlotNode> {
-    let extent = named_arg(args, "extent").and_then(extract_extent)?;
-    let signal = named_arg(args, "signal")
-        .and_then(extract_string)
-        .map(|s| s.trim_matches('"').to_string())?;
-    if signal.is_empty() {
-        return None;
-    }
-    let title = named_arg(args, "title")
-        .and_then(extract_string)
-        .map(|s| s.trim_matches('"').to_string())
-        .unwrap_or_default();
-    Some(LunCoPlotNode { extent, signal, title })
 }
 
 fn is_visibility_falsy(

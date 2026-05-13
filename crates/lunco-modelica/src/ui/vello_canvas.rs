@@ -944,10 +944,6 @@ fn draw_icon_primitive(
             let _ = (scene, doc);
         }
         GraphicItem::Bitmap(_) => {}
-        // Vendor plot tiles are emitted as separate canvas Nodes
-        // (`lunco.viz.plot`), not painted into the Vello scene as
-        // part of an icon's primitive stack. No-op here.
-        GraphicItem::LunCoPlotNode(_) => {}
     }
 }
 

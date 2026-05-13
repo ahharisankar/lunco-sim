@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use super::types::{Extent, Point, CoordinateSystem};
-use super::graphics::GraphicItem;
+use super::graphics::{GraphicItem, LunCoPlotNode};
 
 /// Decoded `Icon(coordinateSystem=..., graphics={...})` annotation.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -50,7 +50,6 @@ impl Icon {
                     merge(b.extent.p2.x + b.origin.x, b.extent.p2.y + b.origin.y);
                 }
                 GraphicItem::Text(_) => continue,
-                GraphicItem::LunCoPlotNode(_) => continue,
             }
         }
         if found {
@@ -104,7 +103,6 @@ impl Icon {
                     merge(t.extent.p1.x + t.origin.x, t.extent.p1.y + t.origin.y);
                     merge(t.extent.p2.x + t.origin.x, t.extent.p2.y + t.origin.y);
                 }
-                GraphicItem::LunCoPlotNode(_) => continue,
             }
         }
         if found {
@@ -118,11 +116,16 @@ impl Icon {
     }
 }
 
-/// Decoded `Diagram(coordinateSystem=..., graphics={...})` annotation.
+/// Decoded `Diagram(coordinateSystem=..., graphics={...})` annotation,
+/// plus LunCo vendor plot tiles extracted from the sibling
+/// `__LunCo(plotNodes=...)` annotation. `plot_nodes` is empty for any
+/// class that doesn't carry the vendor annotation.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Diagram {
     pub coordinate_system: CoordinateSystem,
     pub graphics: Vec<GraphicItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plot_nodes: Vec<LunCoPlotNode>,
 }
 
 /// Decoded `experiment(StartTime=..., StopTime=..., Tolerance=..., Interval=...)`

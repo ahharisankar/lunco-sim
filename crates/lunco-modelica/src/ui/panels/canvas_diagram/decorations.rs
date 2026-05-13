@@ -31,7 +31,7 @@ impl lunco_canvas::Layer for DiagramDecorationLayer {
         _selection: &lunco_canvas::Selection,
     ) {
         let Ok(guard) = self.data.read() else { return };
-        let Some((coord_system, graphics)) = guard.as_ref() else {
+        let Some((coord_system, graphics, _plot_nodes)) = guard.as_ref() else {
             return;
         };
         // Map the coordinate system's extent (Modelica +Y up) to the
@@ -54,21 +54,17 @@ impl lunco_canvas::Layer for DiagramDecorationLayer {
             bevy_egui::egui::pos2(screen_rect_canvas.max.x, screen_rect_canvas.max.y),
         );
         // Filter out items that have a corresponding scene Node
-        // (Text → editable label, LunCoPlotNode → live plot tile).
-        // Painting them here as well would double-render: the
-        // scene Node already paints itself via its `NodeVisual`
-        // and the decoration would just sit on top with stale
-        // text. Other graphics (Rectangle / Line / Polygon /
-        // Ellipse / Bitmap) stay as background decoration.
+        // (Text → editable label). Plot tiles live in a separate
+        // vendor annotation now and never appear in `graphics`, so
+        // they don't need filtering here. Painting Text as well
+        // would double-render: the scene Node already paints itself
+        // via its `NodeVisual` and the decoration would sit on top
+        // with stale text. Other graphics (Rectangle / Line /
+        // Polygon / Ellipse / Bitmap) stay as background decoration.
         use crate::annotations::GraphicItem;
         let decoration: Vec<GraphicItem> = graphics
             .iter()
-            .filter(|g| {
-                !matches!(
-                    g,
-                    GraphicItem::Text(_) | GraphicItem::LunCoPlotNode(_)
-                )
-            })
+            .filter(|g| !matches!(g, GraphicItem::Text(_)))
             .cloned()
             .collect();
         crate::icon_paint::paint_graphics(
@@ -86,9 +82,12 @@ impl lunco_canvas::Layer for DiagramDecorationLayer {
 /// decoration layer to paint MSL-style diagram callouts (labelled
 /// regions, accent text) behind the nodes.
 /// Emit canvas Nodes for every interactive item in the active
-/// class's `Diagram(graphics=…)`. Today that's:
-///   * `__LunCo_PlotNode` → `lunco.viz.plot` (live signal tile)
-///   * `Text` → `lunco.modelica.text` (editable label)
+/// class's diagram. Two sources:
+///   * `Text` entries in `Diagram(graphics=…)` → `lunco.modelica.text`
+///     (editable label).
+///   * `LunCoAnnotations.PlotNode(...)` records in
+///     `annotation(__LunCo(plotNodes=…))` → `lunco.viz.plot` (live
+///     signal tile).
 ///
 /// Each emitted Node carries a stable `origin` marker derived from
 /// the annotation's position in the source (`plot:<idx>:<signal>` or
@@ -98,11 +97,12 @@ impl lunco_canvas::Layer for DiagramDecorationLayer {
 pub(super) fn emit_diagram_decorations(
     scene: &mut lunco_canvas::scene::Scene,
     graphics: &[crate::annotations::GraphicItem],
+    plot_nodes: &[crate::annotations::LunCoPlotNode],
 ) -> std::collections::HashSet<String> {
     use crate::annotations::GraphicItem;
     let mut origins: std::collections::HashSet<String> = Default::default();
     let mut text_idx: usize = 0;
-    for (idx, item) in graphics.iter().enumerate() {
+    for item in graphics.iter() {
         if let GraphicItem::Text(t) = item {
             // Editable label. Strip surrounding quotes the parser
             // left on `textString` so the visual sees the raw
@@ -148,7 +148,8 @@ pub(super) fn emit_diagram_decorations(
             text_idx += 1;
             continue;
         }
-        let GraphicItem::LunCoPlotNode(plot) = item else { continue };
+    }
+    for (idx, plot) in plot_nodes.iter().enumerate() {
         // `entity` is the runtime Bevy id of the simulator host that
         // produces samples for this signal. We don't know it at
         // projection time (the source can be loaded long before the

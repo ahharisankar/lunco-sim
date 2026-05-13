@@ -62,38 +62,34 @@ fn line() -> GraphicSpec {
     }
 }
 
-/// Count graphics-array entries whose head identifier matches `name`.
-/// Handles both `FunctionCall` and `ClassModification` parser shapes
-/// — an array entry can be either depending on context.
-fn count_named_in_diagram_graphics(class_src: &str, class: &str, name: &str) -> usize {
+/// Count `LunCoAnnotations.PlotNode(...)` records (or bare
+/// `PlotNode(...)`) inside the class's
+/// `annotation(__LunCo(plotNodes={...}))` array.
+fn count_plot_nodes(class_src: &str, class: &str) -> usize {
     let sd = parse_to_ast(class_src, "test.mo").unwrap();
     let class_def = sd.classes.get(class).expect("class present");
     for entry in &class_def.annotation {
-        if let Expression::ClassModification { target, modifications } = entry {
-            if target.parts.len() == 1 && &*target.parts[0].ident.text == "Diagram" {
-                for m in modifications {
-                    if let Expression::Modification { target: t, value } = m {
-                        if t.parts.len() == 1 && &*t.parts[0].ident.text == "graphics" {
-                            if let Expression::Array { elements, .. } = value.as_ref() {
-                                return elements
-                                    .iter()
-                                    .filter(|e| match e {
-                                        Expression::FunctionCall { comp, .. } => {
-                                            comp.parts.len() == 1
-                                                && &*comp.parts[0].ident.text == name
-                                        }
-                                        Expression::ClassModification { target, .. } => {
-                                            target.parts.len() == 1
-                                                && &*target.parts[0].ident.text == name
-                                        }
-                                        _ => false,
-                                    })
-                                    .count();
-                            }
-                        }
-                    }
-                }
+        let Expression::ClassModification { target, modifications } = entry else { continue };
+        if !(target.parts.len() == 1 && &*target.parts[0].ident.text == "__LunCo") {
+            continue;
+        }
+        for m in modifications {
+            let Expression::Modification { target: t, value } = m else { continue };
+            if !(t.parts.len() == 1 && &*t.parts[0].ident.text == "plotNodes") {
+                continue;
             }
+            let Expression::Array { elements, .. } = value.as_ref() else { continue };
+            return elements
+                .iter()
+                .filter(|e| {
+                    let parts = match e {
+                        Expression::FunctionCall { comp, .. } => &comp.parts,
+                        Expression::ClassModification { target, .. } => &target.parts,
+                        _ => return false,
+                    };
+                    parts.last().map(|p| &*p.ident.text) == Some("PlotNode")
+                })
+                .count();
         }
     }
     0
@@ -110,7 +106,7 @@ fn add_plot_node_creates_diagram_section() {
     ast_mut::add_plot_node(class, &plot("x", "X")).expect("add_plot_node");
     let regen = sd.to_modelica();
     assert_eq!(
-        count_named_in_diagram_graphics(&regen, "M", "__LunCo_PlotNode"),
+        count_plot_nodes(&regen, "M"),
         1,
         "regen:\n{regen}"
     );
@@ -125,7 +121,7 @@ fn add_plot_node_replaces_same_signal() {
     ast_mut::add_plot_node(class, &plot("x", "old")).unwrap();
     ast_mut::add_plot_node(class, &plot("x", "new")).unwrap();
     let regen = sd.to_modelica();
-    assert_eq!(count_named_in_diagram_graphics(&regen, "M", "__LunCo_PlotNode"), 1);
+    assert_eq!(count_plot_nodes(&regen, "M"), 1);
     assert!(regen.contains("\"new\""), "new title not present:\n{regen}");
 }
 
@@ -141,7 +137,7 @@ fn remove_plot_node_drops_matching_entry() {
     ast_mut::add_plot_node(class, &plot("y", "")).unwrap();
     ast_mut::remove_plot_node(class, "x").expect("remove");
     let regen = sd.to_modelica();
-    assert_eq!(count_named_in_diagram_graphics(&regen, "M", "__LunCo_PlotNode"), 1);
+    assert_eq!(count_plot_nodes(&regen, "M"), 1);
     assert!(regen.contains("\"y\""), "y dropped");
     assert!(!regen.contains("\"x\""), "x still present");
 }
@@ -173,7 +169,7 @@ fn set_plot_node_extent_updates_in_place() {
         regen.contains("100") && regen.contains("400"),
         "extent not updated:\n{regen}"
     );
-    assert_eq!(count_named_in_diagram_graphics(&regen, "M", "__LunCo_PlotNode"), 1);
+    assert_eq!(count_plot_nodes(&regen, "M"), 1);
 }
 
 #[test]
@@ -276,9 +272,11 @@ fn add_plot_node_through_apply() {
         plot: plot("x", "X"),
     })
     .expect("apply AddPlotNode");
-    let src = h.document().source();
-    assert!(src.contains("__LunCo_PlotNode"));
+    let src = h.document().source().to_string();
+    assert!(src.contains("LunCoAnnotations.PlotNode"), "record missing:\n{src}");
+    assert!(src.contains("__LunCo(plotNodes"), "vendor annotation missing:\n{src}");
     assert!(src.contains("\"x\""));
+    assert_eq!(count_plot_nodes(&src, "M"), 1);
 }
 
 #[test]
@@ -289,22 +287,23 @@ fn remove_plot_node_through_apply() {
     // applies (no debounced reparse driver). Production paths re-run
     // the parser between ops via `ui/ast_refresh.rs`.
     let mut h = host(
-        "model M\nannotation(Diagram(graphics={__LunCo_PlotNode(extent={{0,0},{1,1}}, signal=\"x\")}));\nend M;\n",
+        "model M\nannotation(__LunCo(plotNodes={LunCoAnnotations.PlotNode(extent={{0,0},{1,1}}, signal=\"x\")}));\nend M;\n",
     );
     h.apply(ModelicaOp::RemovePlotNode {
         class: "M".into(),
         signal_path: "x".into(),
     })
     .expect("apply RemovePlotNode");
-    let src = h.document().source();
-    assert!(!src.contains("__LunCo_PlotNode"), "node not removed:\n{src}");
+    let src = h.document().source().to_string();
+    assert!(!src.contains("LunCoAnnotations.PlotNode"), "node not removed:\n{src}");
+    assert_eq!(count_plot_nodes(&src, "M"), 0);
 }
 
 #[test]
 fn set_plot_node_extent_through_apply() {
     // Same single-apply pattern as remove_plot_node_through_apply.
     let mut h = host(
-        "model M\nannotation(Diagram(graphics={__LunCo_PlotNode(extent={{0,0},{1,1}}, signal=\"x\")}));\nend M;\n",
+        "model M\nannotation(__LunCo(plotNodes={LunCoAnnotations.PlotNode(extent={{0,0},{1,1}}, signal=\"x\")}));\nend M;\n",
     );
     h.apply(ModelicaOp::SetPlotNodeExtent {
         class: "M".into(),
