@@ -253,19 +253,33 @@ pub fn drive_drill_in_loads(
         let Some(OpeningState::DrillIn(b)) = openings.remove(doc_id) else {
             continue;
         };
-        // Hand the parse-phase busy handle to the canvas state so the
-        // bus keeps a `Document(doc_id)` entry continuously through
-        // the parse→project transition. See the matching block in
-        // `drive_duplicate_loads`.
-        canvas_state.stash_projection_handoff(doc_id, b._busy);
         let qualified = b.qualified;
+        let mut busy = b._busy;
         let doc = match result {
-            Ok(doc) => doc,
+            Ok(doc) => {
+                // Success path: hand the parse-phase busy handle to
+                // the canvas state so the bus keeps a `Document(d)`
+                // entry continuously through the parse→project
+                // transition. Released by `complete_projection_handoff`
+                // once the projection spawn mints its own.
+                canvas_state.stash_projection_handoff(doc_id, busy);
+                doc
+            }
             Err(msg) => {
                 warn!(
                     "[CanvasDiagram] drill-in: class `{}` load failed: {}",
                     qualified, msg
                 );
+                // Failure path: drop the handle here with `Failed`
+                // outcome — no handoff, no projection. The bus
+                // records the outcome under
+                // `(Document(d), "drill-in")` so panels reading
+                // `bus.lifecycle(...)` see `LifecycleState::Failed`
+                // even after the entry is cleared. Tab-level
+                // `load_error` plumbing below is the existing UI
+                // path; we mirror the message into both.
+                busy.set_outcome(lunco_workbench::status_bus::BusyOutcome::Failed(msg.clone()));
+                drop(busy);
                 // Surface the failure on every tab waiting on this
                 // (doc, drilled_class). Without this the canvas overlay
                 // would show "Loading resource…" forever.

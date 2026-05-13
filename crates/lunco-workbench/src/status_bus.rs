@@ -79,6 +79,24 @@ impl BusyScope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BusyId(u64);
 
+/// Terminal state of a unit of work, recorded on the bus when the
+/// owning [`BusyHandle`] drops. Lets panels distinguish "no content
+/// because the task succeeded with an empty result" from "no content
+/// because the task failed" without each panel keeping its own
+/// per-error state.
+///
+/// Default on plain `Drop` is [`BusyOutcome::Succeeded`]; callers
+/// that detect failure should call [`BusyHandle::set_outcome`] with
+/// [`BusyOutcome::Failed`] before dropping.
+#[derive(Debug, Clone)]
+pub enum BusyOutcome {
+    /// Work ran to completion. Empty results are still `Succeeded` —
+    /// "no nodes to draw" is a successful empty diagram.
+    Succeeded,
+    /// Work terminated with a user-visible error.
+    Failed(String),
+}
+
 /// RAII guard for an in-flight busy entry. Move into the task / per-tab
 /// state whose lifetime defines the work; on `Drop` the bus removes the
 /// entry on the next frame (via a drained mpsc channel) so callers
@@ -87,7 +105,8 @@ pub struct BusyId(u64);
 /// Send-safe: may be moved into `AsyncComputeTaskPool` futures.
 pub struct BusyHandle {
     id: BusyId,
-    drop_tx: Sender<BusyId>,
+    drop_tx: Sender<(BusyId, BusyOutcome)>,
+    outcome: Option<BusyOutcome>,
 }
 
 impl BusyHandle {
@@ -95,14 +114,44 @@ impl BusyHandle {
     pub fn id(&self) -> BusyId {
         self.id
     }
+
+    /// Record a terminal outcome for this handle. Replaces any prior
+    /// outcome; the value set last before `Drop` is what the bus
+    /// stores in `last_outcome`. Use [`BusyOutcome::Failed`] to mark
+    /// a user-visible failure so panels can render an error overlay
+    /// without per-panel error plumbing.
+    pub fn set_outcome(&mut self, outcome: BusyOutcome) {
+        self.outcome = Some(outcome);
+    }
 }
 
 impl Drop for BusyHandle {
     fn drop(&mut self) {
+        // Default to `Succeeded` — most tasks complete normally and
+        // never call `set_outcome`. Failure paths must opt in.
+        let outcome = self.outcome.take().unwrap_or(BusyOutcome::Succeeded);
         // Best-effort: receiver is held by the bus; if the bus has been
         // dropped (e.g. app shutdown) the send simply fails.
-        let _ = self.drop_tx.send(self.id);
+        let _ = self.drop_tx.send((self.id, outcome));
     }
+}
+
+/// Single state machine derived from the bus + a panel's content
+/// predicate. Replaces per-panel OR-of-booleans like
+/// `loading || parse_pending || projecting`.
+#[derive(Debug, Clone)]
+pub enum LifecycleState {
+    /// Work is in flight for this scope. Render a loading indicator.
+    Loading,
+    /// No work in flight and the panel has content. Render content,
+    /// no overlay.
+    Content,
+    /// No work in flight, no content, last outcome (if any) was
+    /// success. Render an "empty" affordance.
+    Empty,
+    /// No work in flight, no content, last outcome was failure.
+    /// Carries the error message for the overlay.
+    Failed(String),
 }
 
 /// Maximum number of *discrete* events kept in `history`. Progress
@@ -195,10 +244,15 @@ pub struct StatusBus {
     next_id: u64,
     /// Sender cloned into every [`BusyHandle`]. The matching receiver
     /// lives in `drop_rx`; `drain_busy_drops` walks it each frame.
-    drop_tx: Sender<BusyId>,
+    drop_tx: Sender<(BusyId, BusyOutcome)>,
     /// Receiver for handle-drop notifications. `Mutex` because Bevy
     /// requires `Resource: Send + Sync` and `Receiver` is `!Sync`.
-    drop_rx: Mutex<Receiver<BusyId>>,
+    drop_rx: Mutex<Receiver<(BusyId, BusyOutcome)>>,
+    /// Latest terminal outcome per `(scope, source)`. Written by
+    /// `drain_busy_drops` when a [`BusyHandle`] drops; consulted by
+    /// [`Self::lifecycle`] so panels can distinguish "successfully
+    /// empty" from "failed" without per-panel error state.
+    last_outcome: HashMap<(BusyScope, &'static str), (BusyOutcome, Instant)>,
 }
 
 impl Default for StatusBus {
@@ -212,6 +266,7 @@ impl Default for StatusBus {
             next_id: 0,
             drop_tx,
             drop_rx: Mutex::new(drop_rx),
+            last_outcome: HashMap::new(),
         }
     }
 }
@@ -319,6 +374,7 @@ impl StatusBus {
         BusyHandle {
             id,
             drop_tx: self.drop_tx.clone(),
+            outcome: None,
         }
     }
 
@@ -369,19 +425,54 @@ impl StatusBus {
         self.seq = self.seq.wrapping_add(1);
     }
 
-    /// Internal: clear the entry owned by `id`. Called by
-    /// `drain_busy_drops` when a [`BusyHandle`] is dropped.
-    fn clear_by_id(&mut self, id: BusyId) {
+    /// Internal: clear the entry owned by `id` and record its
+    /// terminal `outcome` in `last_outcome` for the corresponding
+    /// `(scope, source)`. Called by `drain_busy_drops` when a
+    /// [`BusyHandle`] is dropped.
+    fn clear_by_id(&mut self, id: BusyId, outcome: BusyOutcome) {
         let Some(key) = self.by_id.remove(&id) else {
             return;
         };
         // Only clear if this id still owns the slot — a re-`begin` at
         // the same key would have already evicted us via `by_id`.
+        // The outcome is recorded regardless: even when the handle's
+        // entry was superseded, the terminal state for that source
+        // is still useful as the "most recent outcome".
+        self.last_outcome.insert(key, (outcome, Instant::now()));
         if let Some(ev) = self.active_progress.get(&key) {
             if ev.busy_id == Some(id) {
                 self.active_progress.remove(&key);
                 self.seq = self.seq.wrapping_add(1);
             }
+        }
+    }
+
+    /// Most recent terminal outcome within `scope`, if any. Picks the
+    /// latest by wall-clock timestamp. Returns the source key so
+    /// callers can filter (e.g. "only show the projection error,
+    /// not the parse outcome").
+    pub fn last_outcome(&self, scope: BusyScope) -> Option<(&BusyOutcome, &'static str)> {
+        self.last_outcome
+            .iter()
+            .filter(|((s, _), _)| s.is_within(scope))
+            .max_by_key(|(_, (_, at))| *at)
+            .map(|((_, src), (out, _))| (out, *src))
+    }
+
+    /// Derive a [`LifecycleState`] for a panel scoped to `scope`,
+    /// given the panel's own "has content" predicate. Single
+    /// derivation path — replaces hand-coded ORs of `loading`,
+    /// `parse_pending`, `projecting`, etc.
+    pub fn lifecycle(&self, scope: BusyScope, has_content: bool) -> LifecycleState {
+        if self.is_busy(scope) {
+            return LifecycleState::Loading;
+        }
+        if has_content {
+            return LifecycleState::Content;
+        }
+        match self.last_outcome(scope) {
+            Some((BusyOutcome::Failed(msg), _)) => LifecycleState::Failed(msg.clone()),
+            _ => LifecycleState::Empty,
         }
     }
 
@@ -466,17 +557,17 @@ pub fn drain_busy_drops(
     debug: Option<Res<BusyDebug>>,
 ) {
     let min = debug.map(|d| d.min_duration).unwrap_or_default();
-    // Pull all pending ids out under the mutex first so we can release
+    // Pull all pending drops out under the mutex first so we can release
     // it before mutating self via `clear_by_id`.
-    let mut drops: Vec<BusyId> = Vec::new();
+    let mut drops: Vec<(BusyId, BusyOutcome)> = Vec::new();
     if let Ok(rx) = bus.drop_rx.lock() {
-        while let Ok(id) = rx.try_recv() {
-            drops.push(id);
+        while let Ok(d) = rx.try_recv() {
+            drops.push(d);
         }
     }
     if min.is_zero() {
-        for id in drops {
-            bus.clear_by_id(id);
+        for (id, outcome) in drops {
+            bus.clear_by_id(id, outcome);
         }
         return;
     }
@@ -485,7 +576,7 @@ pub fn drain_busy_drops(
     // back into the channel so a future frame retries.
     let now = Instant::now();
     let tx = bus.drop_tx.clone();
-    for id in drops {
+    for (id, outcome) in drops {
         let still_young = bus
             .by_id
             .get(&id)
@@ -493,9 +584,9 @@ pub fn drain_busy_drops(
             .map(|ev| now.saturating_duration_since(ev.at) < min)
             .unwrap_or(false);
         if still_young {
-            let _ = tx.send(id);
+            let _ = tx.send((id, outcome));
         } else {
-            bus.clear_by_id(id);
+            bus.clear_by_id(id, outcome);
         }
     }
 }
@@ -534,9 +625,9 @@ mod tests {
         assert!(bus.is_busy(BusyScope::Global));
         drop(handle);
         // Simulate a frame.
-        let drops: Vec<BusyId> = bus.drop_rx.lock().unwrap().try_iter().collect();
-        for id in drops {
-            bus.clear_by_id(id);
+        let drops: Vec<(BusyId, BusyOutcome)> = bus.drop_rx.lock().unwrap().try_iter().collect();
+        for (id, outcome) in drops {
+            bus.clear_by_id(id, outcome);
         }
         assert!(!bus.is_busy(BusyScope::Tab(7)));
         assert!(!bus.is_busy(BusyScope::Global));
@@ -551,7 +642,7 @@ mod tests {
         // h1's id no longer owns the slot; dropping it must not clear
         // the entry now belonging to h2.
         drop(h1);
-        bus.clear_by_id(id1);
+        bus.clear_by_id(id1, BusyOutcome::Succeeded);
         assert!(bus.is_busy(BusyScope::Tab(1)));
     }
 

@@ -36,6 +36,13 @@ pub enum OpeningState {
         display_name: String,
         started: Instant,
         task: Task<FileLoadResult>,
+        /// RAII guard registered with [`lunco_workbench::status_bus::StatusBus`]
+        /// at insert time. Same role as [`DrillInBinding::_busy`] and
+        /// [`DuplicateBinding::_busy`]: keeps a `(Document(doc_id),
+        /// "opening")` entry on the bus from "user clicked open" until
+        /// the file-load driver hands it off to the projection stage
+        /// via [`crate::ui::panels::canvas_diagram::CanvasDiagramState::stash_projection_handoff`].
+        _busy: lunco_workbench::status_bus::BusyHandle,
     },
     /// MSL drill-in slim-slice load. Built by
     /// [`crate::ui::panels::canvas_diagram::drill_into_class`].
@@ -136,6 +143,7 @@ pub fn drive_file_load_openings(
     mut workbench: ResMut<crate::ui::state::WorkbenchState>,
     mut registry: ResMut<crate::ui::state::ModelicaDocumentRegistry>,
     mut workspace: ResMut<lunco_workbench::WorkspaceResource>,
+    mut canvas_state: ResMut<crate::ui::panels::canvas_diagram::CanvasDiagramState>,
 ) {
     use futures_lite::future;
     let doc_ids = openings.doc_ids();
@@ -147,7 +155,14 @@ pub fn drive_file_load_openings(
             _ => None,
         };
         let Some(result) = ready else { continue };
-        openings.remove(doc_id);
+        // Take the busy handle out of the variant before dropping the
+        // rest, and hand it to the canvas state. Bus keeps a
+        // `Document(doc_id)` entry continuously across the
+        // file-load → projection boundary; the projection spawn
+        // releases it via `complete_projection_handoff`.
+        if let Some(OpeningState::FileLoad { _busy, .. }) = openings.remove(doc_id) {
+            canvas_state.stash_projection_handoff(result.doc_id, _busy);
+        }
         registry.install_prebuilt(result.doc_id, result.doc);
         workbench.diagram_dirty = true;
         workspace.active_document = Some(result.doc_id);
