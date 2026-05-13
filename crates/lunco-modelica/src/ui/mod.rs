@@ -717,9 +717,13 @@ impl Plugin for ModelicaUiPlugin {
             .init_resource::<panels::canvas_diagram::DiagramProjectionLimits>()
             .init_resource::<document_openings::DocumentOpenings>()
             .init_resource::<document_openings::AstReparseBusyHandles>()
+            .init_resource::<document_openings::CompileBusyHandles>()
+            .init_resource::<document_openings::SimulateBusyHandle>()
             .init_resource::<panels::canvas_diagram::CanvasSnapSettings>()
             .add_systems(Update, document_openings::drive_file_load_openings)
             .add_systems(Update, document_openings::track_ast_reparse_busy)
+            .add_systems(Update, document_openings::track_compile_busy)
+            .add_systems(Update, document_openings::track_simulate_busy)
             .add_systems(Update, panels::canvas_diagram::drive_drill_in_loads)
             .add_systems(Update, panels::canvas_diagram::drive_duplicate_loads)
             // Flip `cancel` on every non-active tab's in-flight

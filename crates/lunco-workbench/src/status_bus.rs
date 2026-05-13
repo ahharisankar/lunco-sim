@@ -463,12 +463,27 @@ impl StatusBus {
     /// given the panel's own "has content" predicate. Single
     /// derivation path — replaces hand-coded ORs of `loading`,
     /// `parse_pending`, `projecting`, etc.
+    ///
+    /// **Content priority.** When the panel already has content,
+    /// the state is always [`LifecycleState::Content`] — even if
+    /// work is in flight for `scope`. This means:
+    /// - The loading card is never painted over already-loaded
+    ///   content (no 1-frame "indicator covers scene" flash on
+    ///   projection completion).
+    /// - Background refresh (e.g. AST reparse while a model is
+    ///   visible) doesn't cover the canvas.
+    /// - Initial loads — where no content exists yet — still show
+    ///   `Loading` until the first paint.
+    ///
+    /// Panels that want a discreet "refreshing" affordance can
+    /// read `is_busy(scope) && has_content` separately; it isn't
+    /// baked into the lifecycle state machine.
     pub fn lifecycle(&self, scope: BusyScope, has_content: bool) -> LifecycleState {
-        if self.is_busy(scope) {
-            return LifecycleState::Loading;
-        }
         if has_content {
             return LifecycleState::Content;
+        }
+        if self.is_busy(scope) {
+            return LifecycleState::Loading;
         }
         match self.last_outcome(scope) {
             Some((BusyOutcome::Failed(msg), _)) => LifecycleState::Failed(msg.clone()),
@@ -598,8 +613,14 @@ pub struct StatusBusPlugin;
 
 impl Plugin for StatusBusPlugin {
     fn build(&self, app: &mut App) {
+        // `PreUpdate` runs before any panel render in `Update`, so
+        // handles dropped in the previous frame's render (e.g. the
+        // `BusyHandle` inside a `spawn_tracked` future that just
+        // completed) clear from `active_progress` before any panel
+        // reads `is_busy` / `lifecycle`. Keeps the rendered bus
+        // state in lock-step with the underlying work.
         app.init_resource::<StatusBus>()
-            .add_systems(Update, drain_busy_drops);
+            .add_systems(PreUpdate, drain_busy_drops);
     }
 }
 
