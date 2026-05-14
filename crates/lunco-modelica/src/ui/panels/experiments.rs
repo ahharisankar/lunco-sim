@@ -1386,7 +1386,7 @@ pub fn render_experiments_plot(
     world: &mut World,
     viz_id: VizId,
 ) -> ExpPlotSummary {
-    render_experiments_plot_inner(ui, world, viz_id, &[])
+    render_experiments_plot_inner(ui, world, viz_id, &[], false)
 }
 
 pub fn render_experiments_plot_with_extras(
@@ -1394,8 +1394,9 @@ pub fn render_experiments_plot_with_extras(
     world: &mut World,
     viz_id: VizId,
     extras: &[PlotExtraLine],
+    has_live: bool,
 ) -> ExpPlotSummary {
-    render_experiments_plot_inner(ui, world, viz_id, extras)
+    render_experiments_plot_inner(ui, world, viz_id, extras, has_live)
 }
 
 fn render_experiments_plot_inner(
@@ -1403,6 +1404,7 @@ fn render_experiments_plot_inner(
     world: &mut World,
     viz_id: VizId,
     extras: &[PlotExtraLine],
+    has_live: bool,
 ) -> ExpPlotSummary {
     // Scope to the experiments-pinned (or active) doc — same
     // semantics as the Experiments table above. When no doc is
@@ -1440,18 +1442,6 @@ fn render_experiments_plot_inner(
         .get_resource::<PlotPanelStates>()
         .map(|s| (s.visible(viz_id), s.picked(viz_id)))
         .unwrap_or_default();
-
-    let var_count = picked_vars.len();
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(format!(
-                "📈 {doc_label}  ·  {var_count} var{}",
-                if var_count == 1 { "" } else { "s" }
-            ))
-            .color(col_muted)
-            .small(),
-        );
-    });
 
     // Build var -> unit map from the active doc index.
     let units: std::collections::HashMap<String, String> = active_doc_units(world, viz_id);
@@ -1567,85 +1557,142 @@ fn render_experiments_plot_inner(
     let mut reset_clicked = false;
     let mut fit_clicked = false;
     let mut new_plot_clicked = false;
-    if !all_vars.is_empty() {
-        let mut groups: std::collections::BTreeMap<String, Vec<String>> =
-            std::collections::BTreeMap::new();
-        for v in &all_vars {
-            let (head, tail) = match v.split_once('.') {
-                Some((h, t)) => (h.to_string(), t.to_string()),
-                None => (String::new(), v.clone()),
-            };
-            groups.entry(head).or_default().push(tail);
-        }
-        let group_count = groups.len();
-        ui.horizontal(|ui| {
-            // Left: picker groups (horizontal scroll if many).
-            egui::ScrollArea::horizontal()
-                .id_salt("exp_picker_scroll")
-                .max_height(20.0)
-                .max_width(ui.available_width() - 200.0)
-                .show(ui, |ui| {
-                    for (head, tails) in &groups {
-                        let picked_in_group = tails.iter().filter(|t| {
-                            let full = if head.is_empty() { (*t).clone() } else { format!("{head}.{t}") };
-                            picked_vars.contains(&full)
-                        }).count();
-                        let label = if head.is_empty() {
-                            format!("(top) {}/{}", picked_in_group, tails.len())
-                        } else {
-                            format!("{head} {}/{}", picked_in_group, tails.len())
-                        };
-                        egui::CollapsingHeader::new(label)
-                            .id_salt(format!("exp_picker_group_{head}"))
-                            .default_open(group_count <= 1)
-                            .show(ui, |ui| {
-                                for t in tails {
-                                    let full = if head.is_empty() {
-                                        t.clone()
-                                    } else {
-                                        format!("{head}.{t}")
-                                    };
-                                    let mut on = picked_vars.contains(&full);
-                                    if ui.checkbox(&mut on, t).on_hover_text(&full).changed() {
-                                        toggle_var = Some(full);
-                                    }
-                                }
-                            });
-                    }
-                });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("➕")
-                    .on_hover_text("New plot panel — opens a fresh tab.")
+    let mut dup_clicked = false;
+    let mut csv_clicked = false;
+    // Unified header — doc badge + var picker chips + plot actions
+    // on a single line. Renders in every state (no runs, runs only,
+    // runs + live) so the no-run and run views align visually and
+    // there's only one place for the user to find Fit/Dup/CSV.
+    let var_count = picked_vars.len();
+    let mut groups: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for v in &all_vars {
+        let (head, tail) = match v.split_once('.') {
+            Some((h, t)) => (h.to_string(), t.to_string()),
+            None => (String::new(), v.clone()),
+        };
+        groups.entry(head).or_default().push(tail);
+    }
+    let group_count = groups.len();
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!(
+                "📈 {doc_label}  ·  {var_count} var{}",
+                if var_count == 1 { "" } else { "s" }
+            ))
+            .color(col_muted)
+            .small(),
+        );
+        // Right-aligned action cluster first so the picker scroll
+        // area gets the remaining middle space.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .small_button("➕")
+                .on_hover_text("New plot panel — opens a fresh tab.")
+                .clicked()
+            {
+                new_plot_clicked = true;
+            }
+            if ui
+                .small_button("📄")
+                .on_hover_text(
+                    "Duplicate this plot — new tab with the same \
+                     signal bindings and picked variables.",
+                )
+                .clicked()
+            {
+                dup_clicked = true;
+            }
+            if ui
+                .small_button("📐 Fit")
+                .on_hover_text("Auto-fit axes to data")
+                .clicked()
+            {
+                fit_clicked = true;
+            }
+            if has_live
+                && ui
+                    .small_button("💾 CSV")
+                    .on_hover_text("Export live signal histories to CSV.")
+                    .clicked()
+            {
+                csv_clicked = true;
+            }
+            if scrub_time.is_some() {
+                if ui
+                    .small_button("↻")
+                    .on_hover_text("Drop scrub cursor")
                     .clicked()
                 {
-                    new_plot_clicked = true;
+                    reset_clicked = true;
                 }
-                if ui.small_button("📐 Fit").on_hover_text("Auto-fit axes to data").clicked() {
-                    fit_clicked = true;
-                }
-                if scrub_time.is_some() {
-                    if ui.small_button("↻").on_hover_text("Drop scrub cursor").clicked() {
-                        reset_clicked = true;
-                    }
-                    if let Some(t) = scrub_time {
-                        ui.label(
-                            egui::RichText::new(format!("⏱ {t:.3}s"))
-                                .size(11.0)
-                                .monospace(),
-                        );
-                    }
-                }
-                if shared_unit.is_none() && !series.is_empty() && picked_vars.len() > 1 {
+                if let Some(t) = scrub_time {
                     ui.label(
-                        egui::RichText::new("⚠ mixed units")
+                        egui::RichText::new(format!("⏱ {t:.3}s"))
                             .size(11.0)
-                            .color(col_warning),
-                    )
-                    .on_hover_text("Picked variables have different units; y-axis label suppressed.");
+                            .monospace(),
+                    );
                 }
-            });
+            }
+            if shared_unit.is_none() && !series.is_empty() && picked_vars.len() > 1 {
+                ui.label(
+                    egui::RichText::new("⚠ mixed units")
+                        .size(11.0)
+                        .color(col_warning),
+                )
+                .on_hover_text("Picked variables have different units; y-axis label suppressed.");
+            }
+            // Middle/left: picker chips. Inside the right-to-left
+            // layout but rendered as a horizontal-scroll area
+            // consuming the remaining width.
+            if !groups.is_empty() {
+                egui::ScrollArea::horizontal()
+                    .id_salt("exp_picker_scroll")
+                    .max_height(20.0)
+                    .show(ui, |ui| {
+                        ui.with_layout(
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                for (head, tails) in &groups {
+                                    let picked_in_group = tails.iter().filter(|t| {
+                                        let full = if head.is_empty() {
+                                            (*t).clone()
+                                        } else {
+                                            format!("{head}.{t}")
+                                        };
+                                        picked_vars.contains(&full)
+                                    }).count();
+                                    let label = if head.is_empty() {
+                                        format!("(top) {}/{}", picked_in_group, tails.len())
+                                    } else {
+                                        format!("{head} {}/{}", picked_in_group, tails.len())
+                                    };
+                                    egui::CollapsingHeader::new(label)
+                                        .id_salt(format!("exp_picker_group_{head}"))
+                                        .default_open(group_count <= 1)
+                                        .show(ui, |ui| {
+                                            for t in tails {
+                                                let full = if head.is_empty() {
+                                                    t.clone()
+                                                } else {
+                                                    format!("{head}.{t}")
+                                                };
+                                                let mut on = picked_vars.contains(&full);
+                                                if ui.checkbox(&mut on, t)
+                                                    .on_hover_text(&full)
+                                                    .changed()
+                                                {
+                                                    toggle_var = Some(full);
+                                                }
+                                            }
+                                        });
+                                }
+                            },
+                        );
+                    });
+            }
         });
-    }
+    });
     if let Some(v) = toggle_var {
         if let Some(mut states) = world.get_resource_mut::<PlotPanelStates>() {
             states.toggle_var(viz_id, v);
@@ -1655,6 +1702,12 @@ fn render_experiments_plot_inner(
         world
             .commands()
             .trigger(crate::ui::commands::NewPlotPanel::default());
+    }
+    if dup_clicked {
+        world.commands().trigger(crate::ui::commands::NewPlotPanel {
+            source: viz_id.0,
+            ..Default::default()
+        });
     }
 
     // Empty-state auto-promote — when this plot tab has no visible
@@ -1796,6 +1849,7 @@ fn render_experiments_plot_inner(
         visible_runs,
         series_drawn: series.len(),
         picked_vars: picked_vars.len(),
+        csv_export_clicked: csv_clicked,
     }
 }
 
@@ -2012,6 +2066,11 @@ pub struct ExpPlotSummary {
     pub visible_runs: usize,
     pub series_drawn: usize,
     pub picked_vars: usize,
+    /// User clicked the `💾 CSV` button in the plot's header. Only
+    /// fires when `has_live` was passed to the renderer; callers
+    /// (Graphs panel) handle the export so the experiments module
+    /// doesn't depend on the SignalRegistry-CSV writer.
+    pub csv_export_clicked: bool,
 }
 
 /// Compute an [`ExpPlotSummary`] without rendering. Lets the Graphs
@@ -2049,6 +2108,7 @@ pub fn experiments_plot_summary(world: &World, viz_id: VizId) -> ExpPlotSummary 
         visible_runs,
         series_drawn,
         picked_vars: picked_vars.len(),
+        csv_export_clicked: false,
     }
 }
 
