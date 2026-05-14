@@ -143,22 +143,12 @@ impl BrowserSection for ModelicaSection {
                     if !(origin.is_writable() || origin.is_untitled()) {
                         return None;
                     }
-                    let label = if origin.is_untitled() {
-                        document
-                            .index()
-                            .classes
-                            .values()
-                            .find(|c| {
-                                !matches!(
-                                    c.kind,
-                                    crate::index::ClassKind::Package
-                                )
-                            })
-                            .map(|c| c.name.clone())
-                            .unwrap_or_else(|| origin.display_name())
-                    } else {
-                        origin.display_name()
-                    };
+                    // Doc-row label reflects the *container* (origin
+                    // slug for Untitled drafts, filename for on-disk
+                    // docs). The inner class name is rendered as the
+                    // M-badge child row, so the two stay decoupled —
+                    // renaming the doc row doesn't rewrite source.
+                    let label = origin.display_name();
                     Some((doc_id, label))
                 })
                 .collect()
@@ -178,34 +168,246 @@ impl BrowserSection for ModelicaSection {
     }
 }
 
-/// Renders one writable / Untitled workspace doc row as a read-only
-/// `CollapsingHeader` carrying the doc's name + a file/draft icon.
-/// Mutation actions (rename, delete, etc.) are intentionally absent:
-/// the Twin browser is a navigation surface; modify operations live
-/// in a dedicated workflow elsewhere.
+/// Inline-rename state for Twin Browser doc rows. `Some((doc, draft))`
+/// → the row for `doc` renders a `TextEdit` instead of a header label;
+/// `None` → all rows show their normal collapsing-header. Committed
+/// on Enter or focus-loss, cancelled on Escape.
+#[derive(bevy::prelude::Resource, Default, Debug)]
+pub struct DocRenameState {
+    pub editing: Option<(DocumentId, String)>,
+    /// Set to `true` for one frame after a rename starts so the
+    /// `TextEdit` can grab focus on the first paint; cleared once
+    /// focus is delivered. Without this latch, calling
+    /// `request_focus()` every frame would re-steal focus the moment
+    /// the user clicks elsewhere, making it impossible to cancel or
+    /// commit by clicking away.
+    pub needs_focus: bool,
+}
+
+/// Renders one writable / Untitled workspace doc row. The header is a
+/// `CollapsingHeader` by default; double-click the header label
+/// switches to an inline `TextEdit` whose commit dispatches
+/// `RenameModelicaClass` on the doc's default class (and that
+/// command also updates Untitled origins, so the row label flips
+/// alongside the class rename).
 fn render_workspace_doc_row(
     ui: &mut egui::Ui,
     ctx: &mut BrowserCtx<'_>,
     doc_id: DocumentId,
     doc_name: &str,
 ) {
-    let icon: &'static str = ctx
+    let editing = ctx
         .world
-        .get_resource::<ModelicaDocumentRegistry>()
-        .and_then(|r| r.host(doc_id))
-        .map(|h| {
-            if h.document().origin().is_untitled() {
-                "📝"
-            } else {
-                "📄"
+        .get_resource::<DocRenameState>()
+        .and_then(|s| s.editing.clone())
+        .filter(|(d, _)| *d == doc_id);
+
+    let mut start_rename: Option<String> = None;
+    let mut commit_rename: Option<String> = None;
+    let mut cancel_rename = false;
+    let mut update_draft: Option<String> = None;
+
+    if let Some((_, draft)) = editing {
+        // Inline edit mode — replaces the CollapsingHeader header
+        // with a TextEdit so the doc's child class tree disappears
+        // for the moment (consistent with VS Code rename UX in the
+        // file explorer).
+        let mut buf = draft;
+        ui.horizontal(|ui| {
+            ui.label("📝");
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut buf).desired_width(180.0),
+            );
+            // One-shot focus grab: only on the first frame after the
+            // rename began. Calling `request_focus()` every frame
+            // re-steals focus and prevents click-away from working.
+            if ctx
+                .world
+                .get_resource::<DocRenameState>()
+                .map(|s| s.needs_focus)
+                .unwrap_or(false)
+            {
+                resp.request_focus();
+                if let Some(mut s) = ctx.world.get_resource_mut::<DocRenameState>() {
+                    s.needs_focus = false;
+                }
             }
-        })
-        .unwrap_or("📄");
-    let header = egui::CollapsingHeader::new(format!("{icon}  {doc_name}"))
-        .id_salt(("twin.modelica.workspace_doc", doc_id.raw()))
-        .default_open(true);
-    header.show(ui, |ui| render_workspace_doc(ui, ctx, doc_id));
-    let _ = doc_name;
+            let enter = resp.lost_focus()
+                && resp.ctx.input(|i| i.key_pressed(egui::Key::Enter));
+            let escape = resp.ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            if enter || (resp.lost_focus() && !escape) {
+                let trimmed = buf.trim().to_string();
+                if trimmed.is_empty() {
+                    cancel_rename = true;
+                } else {
+                    commit_rename = Some(trimmed);
+                }
+            } else if escape {
+                cancel_rename = true;
+            }
+        });
+    } else {
+        // Manual CollapsingState so the header *label* gets its own
+        // Response — `CollapsingHeader::show` returns a header
+        // response whose click is consumed by the toggle, so
+        // double-click on the bare API never fires reliably.
+        let id = ui.make_persistent_id((
+            "twin.modelica.workspace_doc",
+            doc_id.raw(),
+        ));
+        let state =
+            egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(),
+                id,
+                true,
+            );
+        // Icon prefix: 📝 untitled draft, 📄 saved on disk. Read
+        // the origin once before show_header so we don't re-borrow
+        // the registry inside the closure.
+        let icon: &'static str = ctx
+            .world
+            .get_resource::<ModelicaDocumentRegistry>()
+            .and_then(|r| r.host(doc_id))
+            .map(|h| {
+                if h.document().origin().is_untitled() {
+                    "📝"
+                } else {
+                    "📄"
+                }
+            })
+            .unwrap_or("📄");
+        let header = state.show_header(ui, |ui| {
+            let resp = ui
+                .add(
+                    egui::Label::new(format!("{icon}  {doc_name}"))
+                        .sense(egui::Sense::click()),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(
+                    "Double-click (or F2 while focused) to rename. \
+                     Untitled drafts → renames the top-level class. \
+                     Saved files → renames the file on disk.",
+                );
+            if resp.double_clicked() {
+                start_rename = Some(doc_name.to_string());
+            }
+            // F2 while the label has keyboard focus also starts a
+            // rename — mirrors the VS Code / OMEdit shortcut.
+            if resp.has_focus()
+                && resp.ctx.input(|i| i.key_pressed(egui::Key::F2))
+            {
+                start_rename = Some(doc_name.to_string());
+            }
+            resp.context_menu(|ui| {
+                if ui.button("✏ Rename").clicked() {
+                    start_rename = Some(doc_name.to_string());
+                    ui.close();
+                }
+            });
+        });
+        header.body(|ui| render_workspace_doc(ui, ctx, doc_id));
+    }
+
+    // State transitions, priority: commit > cancel > start > update.
+    if let Some(new_name) = commit_rename {
+        // The doc-row rename is a *container* rename, not a class
+        // rename. Untitled draft → update `DocumentOrigin::Untitled`
+        // only; File-backed → rename the file on disk via
+        // `RenameTwinEntry`. Source is not rewritten and no reparse
+        // is triggered — the Modelica class inside keeps its name.
+        // Users who want to rename the class itself click the inner
+        // M-badge row, which still goes through `RenameModelicaClass`.
+        enum RenameTarget {
+            File { twin_root: String, relative_path: String },
+            UntitledOrigin,
+            None,
+        }
+        let target = {
+            let registry = ctx.world.resource::<ModelicaDocumentRegistry>();
+            let host = registry.host(doc_id);
+            let origin = host.map(|h| h.document().origin().clone());
+            match origin {
+                Some(lunco_doc::DocumentOrigin::File { path, writable: true }) => {
+                    let ws = ctx.world.resource::<lunco_workbench::WorkspaceResource>();
+                    let twin_root = ws
+                        .active_twin
+                        .and_then(|id| ws.twin(id))
+                        .map(|t| t.root.clone());
+                    if let Some(root) = twin_root {
+                        if let Ok(rel) = path.strip_prefix(&root) {
+                            RenameTarget::File {
+                                twin_root: root.to_string_lossy().into_owned(),
+                                relative_path: rel.to_string_lossy().into_owned(),
+                            }
+                        } else {
+                            RenameTarget::None
+                        }
+                    } else {
+                        RenameTarget::None
+                    }
+                }
+                Some(lunco_doc::DocumentOrigin::Untitled { .. }) => {
+                    RenameTarget::UntitledOrigin
+                }
+                _ => RenameTarget::None,
+            }
+        };
+        match target {
+            RenameTarget::File { twin_root, relative_path } => {
+                let new_file_name = {
+                    use std::path::Path;
+                    let typed = Path::new(&new_name);
+                    if typed.extension().is_some() {
+                        new_name.clone()
+                    } else if let Some(ext) = Path::new(&relative_path)
+                        .extension()
+                        .and_then(|s| s.to_str())
+                    {
+                        format!("{new_name}.{ext}")
+                    } else {
+                        new_name.clone()
+                    }
+                };
+                ctx.world
+                    .commands()
+                    .trigger(lunco_workbench::file_ops::RenameTwinEntry {
+                        twin_root,
+                        relative_path,
+                        new_name: new_file_name,
+                    });
+            }
+            RenameTarget::UntitledOrigin => {
+                if !new_name.is_empty() {
+                    if let Some(mut registry) =
+                        ctx.world.get_resource_mut::<ModelicaDocumentRegistry>()
+                    {
+                        if let Some(host) = registry.host_mut(doc_id) {
+                            host.document_mut().set_origin(
+                                lunco_doc::DocumentOrigin::untitled(new_name.clone()),
+                            );
+                        }
+                    }
+                }
+            }
+            RenameTarget::None => {}
+        }
+        if let Some(mut s) = ctx.world.get_resource_mut::<DocRenameState>() {
+            s.editing = None;
+        }
+    } else if cancel_rename {
+        if let Some(mut s) = ctx.world.get_resource_mut::<DocRenameState>() {
+            s.editing = None;
+        }
+    } else if let Some(initial) = start_rename {
+        if let Some(mut s) = ctx.world.get_resource_mut::<DocRenameState>() {
+            s.editing = Some((doc_id, initial));
+            s.needs_focus = true;
+        }
+    } else if let Some(draft) = update_draft {
+        if let Some(mut s) = ctx.world.get_resource_mut::<DocRenameState>() {
+            s.editing = Some((doc_id, draft));
+        }
+    }
 }
 
 /// Render the class tree of one writable / Untitled workspace

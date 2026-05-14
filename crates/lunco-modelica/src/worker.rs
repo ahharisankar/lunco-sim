@@ -1692,9 +1692,14 @@ pub fn handle_modelica_responses(
             // from here — there is no longer a Modelica-specific
             // shadow history.
             if let Some(sigs) = signals.as_deref_mut() {
-                // Compile-type results reset the signal's horizon so
-                // the old run's tail doesn't bleed into the new one.
-                if result.is_new_model || result.is_reset || result.is_parameter_update {
+                // Only a fresh compile (new DAE shape, possibly new
+                // signal set) clears the registry's history. Reset and
+                // parameter-update both restart sim-time at 0 but the
+                // signal *shape* is unchanged, and users want to keep
+                // seeing the prior run's curves while they iterate —
+                // wiping on every param tweak made the Graphs tab look
+                // permanently empty after any Telemetry edit.
+                if result.is_new_model {
                     for (name, _) in result.detected_symbols.iter().chain(result.outputs.iter()) {
                         sigs.clear_history(&lunco_viz::SignalRef::new(
                             result.entity,

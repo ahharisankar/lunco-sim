@@ -119,12 +119,15 @@ impl Panel for TelemetryPanel {
         let (entity, has_data) = {
             // Resolution order, strongest signal first:
             //   1. Explicit doc-pin (user clicked 📌 on this panel)
-            //   2. Entity-level pin (`WorkbenchState.selected_entity`,
-            //      set implicitly by compile / click flows)
-            //   3. Follow the active document tab
-            // Without (1) above (2), pinning Telemetry to Model B
-            // is silently ignored when `selected_entity` still
-            // references Model A's stepper from an earlier compile.
+            //   2. Follow the active document tab — switching tabs
+            //      moves the telemetry view with the user.
+            //   3. Entity-level pin (`WorkbenchState.selected_entity`,
+            //      set implicitly by compile / click flows) as a last
+            //      fallback when no active doc has a stepper yet.
+            // (2) sits above (3) because the user-visible rule is
+            // "Telemetry follows the focused tab"; Compile setting
+            // `selected_entity` shouldn't strand the panel on the
+            // last-compiled stepper after the user switches tabs.
             let explicit_doc_pin = world
                 .get_resource::<crate::ui::doc_pin::DocPinState>()
                 .and_then(|p| p.telemetry);
@@ -133,8 +136,8 @@ impl Panel for TelemetryPanel {
                 .and_then(|s| s.selected_entity);
             let resolved = explicit_doc_pin
                 .and_then(|doc| crate::ui::state::simulator_for(world, doc))
-                .or(pinned_entity)
-                .or_else(|| crate::ui::state::active_simulator(world));
+                .or_else(|| crate::ui::state::active_simulator(world))
+                .or(pinned_entity);
             let has = resolved
                 .map(|e| world.get::<ModelicaModel>(e).is_some())
                 .unwrap_or(false);
@@ -1037,8 +1040,18 @@ fn render_active_class_parameters(
                         // loss we drop the draft so the next frame
                         // syncs to whatever the AST now says.
                         let edit_id = egui::Id::new(("telem_flat_param", path.as_str()));
-                        let mut buf = ui
-                            .data_mut(|d| d.get_temp::<String>(edit_id))
+                        // Latched buffer: persists the committed value
+                        // until `display_value` (rumoca-session cache,
+                        // ~1.5s lag) catches up. Without this, the field
+                        // visually reverts to the stale pre-edit value
+                        // on focus loss, and a subsequent click+blur
+                        // re-fires the commit against a now-stale
+                        // ast_mut text range, producing
+                        // "text range out of bounds" failures.
+                        let latched: Option<String> =
+                            ui.data_mut(|d| d.get_temp::<String>(edit_id));
+                        let mut buf = latched
+                            .clone()
                             .unwrap_or_else(|| display_value.clone());
                         let resp = ui.add(
                             egui::TextEdit::singleline(&mut buf)
@@ -1048,13 +1061,17 @@ fn render_active_class_parameters(
                         if resp.has_focus() {
                             ui.data_mut(|d| d.insert_temp(edit_id, buf.clone()));
                         }
+                        // Change detection compares against the latched
+                        // committed value (or display_value if nothing
+                        // is latched yet) — never against the lagging
+                        // display_value alone.
+                        let baseline = latched
+                            .clone()
+                            .unwrap_or_else(|| display_value.clone());
                         let commit = resp.lost_focus()
                             && (ui.input(|i| i.key_pressed(egui::Key::Enter))
-                                || buf != display_value);
-                        if resp.lost_focus() {
-                            ui.data_mut(|d| d.remove::<String>(edit_id));
-                        }
-                        if commit && buf != display_value {
+                                || buf != baseline);
+                        if commit && buf != baseline {
                             let (component, param) = if row.depth() == 0 {
                                 (row.leaf.clone(), String::new())
                             } else {
@@ -1065,6 +1082,18 @@ fn render_active_class_parameters(
                                 active, component, param, buf, row.value
                             );
                             edits.push((component, param, buf.clone()));
+                            // Latch the committed value so the field
+                            // keeps showing it until the AST/cache
+                            // reflects the change.
+                            ui.data_mut(|d| d.insert_temp(edit_id, buf.clone()));
+                        } else if !resp.has_focus() {
+                            // Drop the latch once display_value reflects
+                            // it; otherwise leave it in place.
+                            if let Some(l) = &latched {
+                                if l == &display_value {
+                                    ui.data_mut(|d| d.remove::<String>(edit_id));
+                                }
+                            }
                         }
                     } else {
                         // Deeper than one level — read-only label. Edit

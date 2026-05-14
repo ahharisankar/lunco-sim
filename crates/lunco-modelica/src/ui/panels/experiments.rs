@@ -66,11 +66,27 @@ pub struct PlotPanelState {
     pub scrub_time: Option<f64>,
     pub visible_experiments: std::collections::HashSet<ExperimentId>,
     pub last_twin: Option<lunco_experiments::TwinId>,
+    /// True once the plot has auto-promoted the latest run for this
+    /// twin (mark-visible + pick top dynamic vars). Prevents the
+    /// auto-show from fighting the user after they explicitly empty
+    /// the plot. Reset on twin switch by `sync_twin`'s restore path
+    /// (a fresh state for a new twin starts at `false`).
+    pub auto_show_attempted: bool,
 }
 
 #[derive(Resource, Default, Debug)]
 pub struct PlotPanelStates {
     pub by_viz: std::collections::HashMap<VizId, PlotPanelState>,
+    /// Archived per-(viz, twin) state. When a plot's resolved twin
+    /// changes (user switches to a tab backed by a different model),
+    /// the live entry's prior state is stashed here keyed by the
+    /// previous twin; returning to that twin restores the picks /
+    /// run-visibility / scrub. Without this archive, switching tabs
+    /// would discard the prior plot's curve selections entirely.
+    archived: std::collections::HashMap<
+        (VizId, lunco_experiments::TwinId),
+        PlotPanelState,
+    >,
 }
 
 impl PlotPanelStates {
@@ -138,6 +154,40 @@ impl PlotPanelStates {
         for s in self.by_viz.values_mut() {
             s.visible_experiments.remove(&id);
         }
+        for s in self.archived.values_mut() {
+            s.visible_experiments.remove(&id);
+        }
+    }
+
+    /// Swap the live entry for `viz` to match `twin`, archiving any
+    /// non-empty state from the previous twin and restoring a prior
+    /// stash for `twin` if one exists. Idempotent when the twin is
+    /// already current. Called at the top of `render_experiments_plot`
+    /// each frame.
+    pub fn sync_twin(&mut self, viz: VizId, twin: &lunco_experiments::TwinId) {
+        let needs_swap = match self.by_viz.get(&viz) {
+            Some(s) => s.last_twin.as_ref() != Some(twin),
+            None => true,
+        };
+        if !needs_swap {
+            return;
+        }
+        if let Some(prev) = self.by_viz.remove(&viz) {
+            if let Some(prev_twin) = prev.last_twin.clone() {
+                let worth_keeping = !prev.picked_vars.is_empty()
+                    || !prev.visible_experiments.is_empty()
+                    || prev.scrub_time.is_some();
+                if worth_keeping {
+                    self.archived.insert((viz, prev_twin), prev);
+                }
+            }
+        }
+        let mut restored = self
+            .archived
+            .remove(&(viz, twin.clone()))
+            .unwrap_or_default();
+        restored.last_twin = Some(twin.clone());
+        self.by_viz.insert(viz, restored);
     }
 }
 
@@ -1178,6 +1228,14 @@ impl ExperimentsPanel {
                                         .unwrap_or_else(|| "unsupported".into()),
                                 );
                             } else {
+                                // No-override state shows an *empty*
+                                // editable cell with the default as
+                                // hint text. Previously the field was
+                                // pre-filled with the default literal,
+                                // which made it indistinguishable from
+                                // a disabled/read-only cell and users
+                                // didn't realize they could click and
+                                // type to override.
                                 let existing = current_overrides.get(&path).cloned();
                                 let mut text = match &existing {
                                     Some(ParamValue::Real(x)) => format!("{x}"),
@@ -1188,10 +1246,14 @@ impl ExperimentsPanel {
                                     Some(ParamValue::String(s)) => s.clone(),
                                     Some(ParamValue::Enum(s)) => s.clone(),
                                     Some(ParamValue::RealArray(_)) => "(array)".into(),
-                                    None => p.default_literal.clone().unwrap_or_default(),
+                                    None => String::new(),
                                 };
+                                let hint =
+                                    p.default_literal.clone().unwrap_or_default();
                                 let resp = ui.add(
-                                    egui::TextEdit::singleline(&mut text).desired_width(80.0),
+                                    egui::TextEdit::singleline(&mut text)
+                                        .desired_width(80.0)
+                                        .hint_text(hint),
                                 );
                                 if resp.lost_focus()
                                     || resp.ctx.input(|i| i.key_pressed(egui::Key::Enter))
@@ -1291,15 +1353,67 @@ struct PlotSeries {
 /// - Y-axis label: shows the unit when every visible variable shares
 ///   one; otherwise blank (mixed-unit plots happen often when users
 ///   tick variables across components).
+/// Extra line injected into the experiments plot — used by
+/// [`crate::ui::panels::graphs`] to overlay live `SignalRegistry`
+/// histories on top of the completed-run curves so users see a
+/// single merged plot instead of two stacked widgets.
+pub struct PlotExtraLine {
+    pub label: String,
+    pub color: (u8, u8, u8),
+    pub points: Vec<[f64; 2]>,
+}
+
+/// Render a bare plot frame plus any live overlays. Used when no
+/// active doc is resolved so the Graphs tab still shows a plot
+/// widget instead of disappearing.
+fn render_empty_plot_frame(ui: &mut egui::Ui, extras: &[PlotExtraLine]) {
+    Plot::new("graphs_experiments_plot_empty")
+        .legend(Legend::default())
+        .allow_drag(false)
+        .show(ui, |plot_ui| {
+            for ex in extras {
+                let (r, g, b) = ex.color;
+                let line =
+                    Line::new(ex.label.clone(), PlotPoints::from(ex.points.clone()))
+                        .color(egui::Color32::from_rgb(r, g, b));
+                plot_ui.line(line);
+            }
+        });
+}
+
 pub fn render_experiments_plot(
     ui: &mut egui::Ui,
     world: &mut World,
     viz_id: VizId,
 ) -> ExpPlotSummary {
+    render_experiments_plot_inner(ui, world, viz_id, &[], false)
+}
+
+pub fn render_experiments_plot_with_extras(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    viz_id: VizId,
+    extras: &[PlotExtraLine],
+    has_live: bool,
+) -> ExpPlotSummary {
+    render_experiments_plot_inner(ui, world, viz_id, extras, has_live)
+}
+
+fn render_experiments_plot_inner(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    viz_id: VizId,
+    extras: &[PlotExtraLine],
+    has_live: bool,
+) -> ExpPlotSummary {
     // Scope to the experiments-pinned (or active) doc — same
-    // semantics as the Experiments table above.
+    // semantics as the Experiments table above. When no doc is
+    // resolved yet (boot, welcome screen, no model open) we still
+    // render an empty plot widget plus any live overlays so the
+    // Graphs tab never collapses to a blank panel.
     let Some(doc_id) = crate::ui::doc_pin::resolved_experiments_doc(world)
     else {
+        render_empty_plot_frame(ui, extras);
         return ExpPlotSummary::default();
     };
     let twin = crate::ui::doc_pin::twin_id_for_doc(doc_id);
@@ -1308,16 +1422,11 @@ pub fn render_experiments_plot(
         (t.tokens.warning, t.tokens.accent, t.tokens.text_subdued)
     };
 
-    // Doc switch → drop stale picks / visibility ids that belonged
-    // to the previous doc's namespace.
+    // Doc switch → archive the previous twin's picks / visibility
+    // and restore any prior stash for the new twin, so returning to
+    // a tab brings back its plot selections instead of dropping them.
     if let Some(mut states) = world.get_resource_mut::<PlotPanelStates>() {
-        let entry = states.entry(viz_id);
-        if entry.last_twin.as_ref() != Some(&twin) {
-            entry.picked_vars.clear();
-            entry.visible_experiments.clear();
-            entry.scrub_time = None;
-            entry.last_twin = Some(twin.clone());
-        }
+        states.sync_twin(viz_id, &twin);
     }
 
     // Doc badge so the user can tell which model's runs are
@@ -1328,13 +1437,6 @@ pub fn render_experiments_plot(
         .get_resource::<ExperimentRegistry>()
         .map(|r| r.list_for_twin(&twin).len())
         .unwrap_or(0);
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(format!("📈 {doc_label}  ·  {run_count} run{}", if run_count == 1 { "" } else { "s" }))
-                .color(col_muted)
-                .small(),
-        );
-    });
 
     let (visible, picked_vars) = world
         .get_resource::<PlotPanelStates>()
@@ -1455,85 +1557,142 @@ pub fn render_experiments_plot(
     let mut reset_clicked = false;
     let mut fit_clicked = false;
     let mut new_plot_clicked = false;
-    if !all_vars.is_empty() {
-        let mut groups: std::collections::BTreeMap<String, Vec<String>> =
-            std::collections::BTreeMap::new();
-        for v in &all_vars {
-            let (head, tail) = match v.split_once('.') {
-                Some((h, t)) => (h.to_string(), t.to_string()),
-                None => (String::new(), v.clone()),
-            };
-            groups.entry(head).or_default().push(tail);
-        }
-        let group_count = groups.len();
-        ui.horizontal(|ui| {
-            // Left: picker groups (horizontal scroll if many).
-            egui::ScrollArea::horizontal()
-                .id_salt("exp_picker_scroll")
-                .max_height(20.0)
-                .max_width(ui.available_width() - 200.0)
-                .show(ui, |ui| {
-                    for (head, tails) in &groups {
-                        let picked_in_group = tails.iter().filter(|t| {
-                            let full = if head.is_empty() { (*t).clone() } else { format!("{head}.{t}") };
-                            picked_vars.contains(&full)
-                        }).count();
-                        let label = if head.is_empty() {
-                            format!("(top) {}/{}", picked_in_group, tails.len())
-                        } else {
-                            format!("{head} {}/{}", picked_in_group, tails.len())
-                        };
-                        egui::CollapsingHeader::new(label)
-                            .id_salt(format!("exp_picker_group_{head}"))
-                            .default_open(group_count <= 1)
-                            .show(ui, |ui| {
-                                for t in tails {
-                                    let full = if head.is_empty() {
-                                        t.clone()
-                                    } else {
-                                        format!("{head}.{t}")
-                                    };
-                                    let mut on = picked_vars.contains(&full);
-                                    if ui.checkbox(&mut on, t).on_hover_text(&full).changed() {
-                                        toggle_var = Some(full);
-                                    }
-                                }
-                            });
-                    }
-                });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("➕")
-                    .on_hover_text("New plot panel — opens a fresh tab.")
+    let mut dup_clicked = false;
+    let mut csv_clicked = false;
+    // Unified header — doc badge + var picker chips + plot actions
+    // on a single line. Renders in every state (no runs, runs only,
+    // runs + live) so the no-run and run views align visually and
+    // there's only one place for the user to find Fit/Dup/CSV.
+    let var_count = picked_vars.len();
+    let mut groups: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for v in &all_vars {
+        let (head, tail) = match v.split_once('.') {
+            Some((h, t)) => (h.to_string(), t.to_string()),
+            None => (String::new(), v.clone()),
+        };
+        groups.entry(head).or_default().push(tail);
+    }
+    let group_count = groups.len();
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!(
+                "📈 {doc_label}  ·  {var_count} var{}",
+                if var_count == 1 { "" } else { "s" }
+            ))
+            .color(col_muted)
+            .small(),
+        );
+        // Right-aligned action cluster first so the picker scroll
+        // area gets the remaining middle space.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .small_button("➕")
+                .on_hover_text("New plot panel — opens a fresh tab.")
+                .clicked()
+            {
+                new_plot_clicked = true;
+            }
+            if ui
+                .small_button("📄")
+                .on_hover_text(
+                    "Duplicate this plot — new tab with the same \
+                     signal bindings and picked variables.",
+                )
+                .clicked()
+            {
+                dup_clicked = true;
+            }
+            if ui
+                .small_button("📐 Fit")
+                .on_hover_text("Auto-fit axes to data")
+                .clicked()
+            {
+                fit_clicked = true;
+            }
+            if has_live
+                && ui
+                    .small_button("💾 CSV")
+                    .on_hover_text("Export live signal histories to CSV.")
+                    .clicked()
+            {
+                csv_clicked = true;
+            }
+            if scrub_time.is_some() {
+                if ui
+                    .small_button("↻")
+                    .on_hover_text("Drop scrub cursor")
                     .clicked()
                 {
-                    new_plot_clicked = true;
+                    reset_clicked = true;
                 }
-                if ui.small_button("📐 Fit").on_hover_text("Auto-fit axes to data").clicked() {
-                    fit_clicked = true;
-                }
-                if scrub_time.is_some() {
-                    if ui.small_button("↻").on_hover_text("Drop scrub cursor").clicked() {
-                        reset_clicked = true;
-                    }
-                    if let Some(t) = scrub_time {
-                        ui.label(
-                            egui::RichText::new(format!("⏱ {t:.3}s"))
-                                .size(11.0)
-                                .monospace(),
-                        );
-                    }
-                }
-                if shared_unit.is_none() && !series.is_empty() && picked_vars.len() > 1 {
+                if let Some(t) = scrub_time {
                     ui.label(
-                        egui::RichText::new("⚠ mixed units")
+                        egui::RichText::new(format!("⏱ {t:.3}s"))
                             .size(11.0)
-                            .color(col_warning),
-                    )
-                    .on_hover_text("Picked variables have different units; y-axis label suppressed.");
+                            .monospace(),
+                    );
                 }
-            });
+            }
+            if shared_unit.is_none() && !series.is_empty() && picked_vars.len() > 1 {
+                ui.label(
+                    egui::RichText::new("⚠ mixed units")
+                        .size(11.0)
+                        .color(col_warning),
+                )
+                .on_hover_text("Picked variables have different units; y-axis label suppressed.");
+            }
+            // Middle/left: picker chips. Inside the right-to-left
+            // layout but rendered as a horizontal-scroll area
+            // consuming the remaining width.
+            if !groups.is_empty() {
+                egui::ScrollArea::horizontal()
+                    .id_salt("exp_picker_scroll")
+                    .max_height(20.0)
+                    .show(ui, |ui| {
+                        ui.with_layout(
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                for (head, tails) in &groups {
+                                    let picked_in_group = tails.iter().filter(|t| {
+                                        let full = if head.is_empty() {
+                                            (*t).clone()
+                                        } else {
+                                            format!("{head}.{t}")
+                                        };
+                                        picked_vars.contains(&full)
+                                    }).count();
+                                    let label = if head.is_empty() {
+                                        format!("(top) {}/{}", picked_in_group, tails.len())
+                                    } else {
+                                        format!("{head} {}/{}", picked_in_group, tails.len())
+                                    };
+                                    egui::CollapsingHeader::new(label)
+                                        .id_salt(format!("exp_picker_group_{head}"))
+                                        .default_open(group_count <= 1)
+                                        .show(ui, |ui| {
+                                            for t in tails {
+                                                let full = if head.is_empty() {
+                                                    t.clone()
+                                                } else {
+                                                    format!("{head}.{t}")
+                                                };
+                                                let mut on = picked_vars.contains(&full);
+                                                if ui.checkbox(&mut on, t)
+                                                    .on_hover_text(&full)
+                                                    .changed()
+                                                {
+                                                    toggle_var = Some(full);
+                                                }
+                                            }
+                                        });
+                                }
+                            },
+                        );
+                    });
+            }
         });
-    }
+    });
     if let Some(v) = toggle_var {
         if let Some(mut states) = world.get_resource_mut::<PlotPanelStates>() {
             states.toggle_var(viz_id, v);
@@ -1544,31 +1703,32 @@ pub fn render_experiments_plot(
             .commands()
             .trigger(crate::ui::commands::NewPlotPanel::default());
     }
-
-    // Empty-state CTA — if this plot tab has no visible runs but
-    // the doc *has* completed runs, offer a one-click "Show latest
-    // run" so the user doesn't need to scroll the Experiments
-    // table and tick the row.
-    let mut show_latest_clicked = false;
-    if series.is_empty() && run_count > 0 {
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("This plot is empty.")
-                    .color(col_muted)
-                    .small(),
-            );
-            if ui
-                .small_button("👁 Show latest run")
-                .on_hover_text(
-                    "Mark the most recent completed run visible in this plot \
-                     and auto-pick the top dynamic variables.",
-                )
-                .clicked()
-            {
-                show_latest_clicked = true;
-            }
+    if dup_clicked {
+        world.commands().trigger(crate::ui::commands::NewPlotPanel {
+            source: viz_id.0,
+            ..Default::default()
         });
     }
+
+    // Empty-state auto-promote — when this plot tab has no visible
+    // runs but the doc *has* completed runs, automatically mark the
+    // latest run visible and auto-pick top dynamic vars. Gated by
+    // `auto_show_attempted` so clearing curves later doesn't re-fire
+    // the promote on the next frame. The flag is reset on twin
+    // switch (sync_twin restores a fresh state for new twins).
+    let auto_show_pending = {
+        let needs_auto = series.is_empty() && run_count > 0;
+        if needs_auto {
+            world
+                .get_resource::<PlotPanelStates>()
+                .and_then(|s| s.by_viz.get(&viz_id))
+                .map(|st| !st.auto_show_attempted)
+                .unwrap_or(true)
+        } else {
+            false
+        }
+    };
+    let show_latest_clicked = auto_show_pending;
 
     // Plot frame always renders. x-axis label dropped: time is
     // implicit in this panel and the label was burning a row of
@@ -1599,6 +1759,16 @@ pub fn render_experiments_plot(
                 let line = Line::new(s.label.clone(), PlotPoints::from(s.points.clone()))
                     .color(egui::Color32::from_rgb(r, g, b))
                     .style(style);
+                plot_ui.line(line);
+            }
+            // Live `SignalRegistry` curves overlaid on top of the
+            // run curves so users get a single merged plot instead
+            // of separate "experiment" and "live" widgets.
+            for ex in extras {
+                let (r, g, b) = ex.color;
+                let line =
+                    Line::new(ex.label.clone(), PlotPoints::from(ex.points.clone()))
+                        .color(egui::Color32::from_rgb(r, g, b));
                 plot_ui.line(line);
             }
             if let Some(t) = scrub_time {
@@ -1645,6 +1815,7 @@ pub fn render_experiments_plot(
             if let Some(mut states) = world.get_resource_mut::<PlotPanelStates>() {
                 let entry = states.entry(viz_id);
                 entry.visible_experiments.insert(exp.id);
+                entry.auto_show_attempted = true;
                 if entry.picked_vars.is_empty() {
                     if let Some(result) = &exp.result {
                         let mut by_var: Vec<(&String, f64)> = result
@@ -1678,6 +1849,7 @@ pub fn render_experiments_plot(
         visible_runs,
         series_drawn: series.len(),
         picked_vars: picked_vars.len(),
+        csv_export_clicked: csv_clicked,
     }
 }
 
@@ -1894,6 +2066,11 @@ pub struct ExpPlotSummary {
     pub visible_runs: usize,
     pub series_drawn: usize,
     pub picked_vars: usize,
+    /// User clicked the `💾 CSV` button in the plot's header. Only
+    /// fires when `has_live` was passed to the renderer; callers
+    /// (Graphs panel) handle the export so the experiments module
+    /// doesn't depend on the SignalRegistry-CSV writer.
+    pub csv_export_clicked: bool,
 }
 
 /// Compute an [`ExpPlotSummary`] without rendering. Lets the Graphs
@@ -1931,6 +2108,7 @@ pub fn experiments_plot_summary(world: &World, viz_id: VizId) -> ExpPlotSummary 
         visible_runs,
         series_drawn,
         picked_vars: picked_vars.len(),
+        csv_export_clicked: false,
     }
 }
 

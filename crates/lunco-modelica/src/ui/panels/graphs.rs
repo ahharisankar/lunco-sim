@@ -30,7 +30,7 @@ use bevy_egui::egui;
 use lunco_workbench::{InstancePanel, PanelId, PanelSlot};
 use lunco_viz::{
     export_signals_to_csv, kinds::line_plot::LinePlot, view::Panel2DCtx, viz::Visualization,
-    viz::VizId, SignalRegistry, VisualizationRegistry, VizFitRequests,
+    viz::VizId, SignalRegistry, VisualizationRegistry,
 };
 
 use crate::ui::viz::{ensure_default_modelica_graph, DEFAULT_MODELICA_GRAPH};
@@ -87,16 +87,11 @@ fn render_modelica_plot(ui: &mut egui::Ui, world: &mut World, viz_id: VizId) {
             active.0 = Some(viz_id);
         }
     }
-    let muted = world
-        .get_resource::<lunco_theme::Theme>()
-        .map(|t| t.tokens.text_subdued)
-        .unwrap_or(egui::Color32::DARK_GRAY);
-
     // Bootstrap the registry entry for the default graph the first
     // time the panel renders. Other VizIds were created by
     // `NewPlotPanel` and already exist; this branch is a no-op for
     // them.
-    let (bound_count, time_min, time_max, sample_total) = {
+    let bound_count = {
         let Some(mut registry) = world.get_resource_mut::<VisualizationRegistry>() else {
             ui.label("lunco-viz not installed.");
             return;
@@ -111,29 +106,8 @@ fn render_modelica_plot(ui: &mut egui::Ui, world: &mut World, viz_id: VizId) {
             ui.label(format!("Plot #{} not found.", viz_id.0));
             return;
         };
-        let count = cfg.inputs.len();
-        let sources: Vec<_> = cfg.inputs.iter().map(|b| b.source.clone()).collect();
-        drop(registry);
-
-        let (mut t_min, mut t_max, mut total) = (f64::INFINITY, f64::NEG_INFINITY, 0usize);
-        if let Some(sigs) = world.get_resource::<SignalRegistry>() {
-            for src in &sources {
-                if let Some(hist) = sigs.scalar_history(src) {
-                    if let (Some(first), Some(last)) =
-                        (hist.samples.front(), hist.samples.back())
-                    {
-                        t_min = t_min.min(first.time);
-                        t_max = t_max.max(last.time);
-                    }
-                    total += hist.len();
-                }
-            }
-        }
-        (count, t_min, t_max, total)
+        cfg.inputs.len()
     };
-
-    let mut fit_clicked = false;
-    let mut export_csv_clicked = false;
     // Per-plot experiment overlay: each tab has its own picked-vars
     // and scrub cursor, so every plot can render the experiments
     // overlay independently.
@@ -142,107 +116,68 @@ fn render_modelica_plot(ui: &mut egui::Ui, world: &mut World, viz_id: VizId) {
     let has_live = bound_count > 0;
     let has_exp = exp_summary.total_runs > 0;
 
-    let show_top_header = has_live || (!has_live && !has_exp);
-    if show_top_header {
-        ui.horizontal(|ui| {
-            if has_live {
-                ui.label(
-                    egui::RichText::new(format!("Live: {bound_count} var"))
-                        .size(11.0)
-                        .color(muted),
-                );
-                if time_min.is_finite() && time_max.is_finite() {
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "t: {time_min:.2}→{time_max:.2}s  ({sample_total} samples)"
-                        ))
-                        .size(11.0)
-                        .color(muted),
-                    );
-                }
-            } else {
-                ui.label(
-                    egui::RichText::new("No data yet — pick variables in")
-                        .size(11.0)
-                        .color(muted),
-                );
-                if ui
-                    .small_button("Telemetry")
-                    .on_hover_text("Focus the Telemetry panel.")
-                    .clicked()
-                {
-                    world.commands().trigger(lunco_workbench::FocusPanel {
-                        id: "modelica_inspector".into(),
-                    });
-                }
-                ui.label(
-                    egui::RichText::new("and run a model.")
-                        .size(11.0)
-                        .color(muted),
-                );
-            }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let new_plot = ui
-                    .small_button("➕")
-                    .on_hover_text("New plot panel — opens a fresh tab.");
-                if new_plot.clicked() {
-                    world
-                        .commands()
-                        .trigger(crate::ui::commands::NewPlotPanel::default());
-                }
-                let dup = ui
-                    .small_button("📄")
-                    .on_hover_text(
-                        "Duplicate this plot — new tab with the same \
-                         signal bindings and picked variables.",
-                    );
-                if dup.clicked() {
-                    world.commands().trigger(crate::ui::commands::NewPlotPanel {
-                        source: viz_id.0,
-                        ..Default::default()
-                    });
-                }
-                if has_live {
-                    let fit = ui
-                        .small_button("📐")
-                        .on_hover_text("Auto-fit axes to current data.");
-                    if fit.clicked() {
-                        fit_clicked = true;
-                    }
-                    let csv = ui
-                        .small_button("💾 CSV")
-                        .on_hover_text("Export live signal histories to CSV.");
-                    if csv.clicked() {
-                        export_csv_clicked = true;
-                    }
-                }
-            });
-        });
-        ui.separator();
-    }
-    if fit_clicked {
-        if let Some(mut requests) = world.get_resource_mut::<VizFitRequests>() {
-            requests.request(viz_id);
+    // Top action row removed — the experiments plot's own header
+    // owns the doc badge, picker chips, and all action buttons
+    // (Fit, Dup, New, CSV) so the layout is a single line in every
+    // state.
+    if has_live && !has_exp {
+        // Pure live mode keeps the dedicated LinePlot rendering so
+        // the X/Y/+add binding picker stays accessible.
+        render_line_plot(ui, world, viz_id);
+    } else {
+        let extras = if has_live {
+            collect_live_extras(world, viz_id)
+        } else {
+            Vec::new()
+        };
+        let summary = crate::ui::panels::experiments::render_experiments_plot_with_extras(
+            ui, world, viz_id, &extras, has_live,
+        );
+        if summary.csv_export_clicked {
+            export_graph_to_csv(world, viz_id);
         }
     }
-    if export_csv_clicked {
-        export_graph_to_csv(world, viz_id);
-    }
+}
 
-    if has_exp && has_live {
-        let avail = ui.available_height();
-        ui.allocate_ui(egui::vec2(ui.available_width(), avail * 0.5), |ui| {
-            crate::ui::panels::experiments::render_experiments_plot(ui, world, viz_id);
-        });
-        ui.separator();
-        render_line_plot(ui, world, viz_id);
-    } else if has_exp {
-        crate::ui::panels::experiments::render_experiments_plot(ui, world, viz_id);
-    } else if has_live {
-        render_line_plot(ui, world, viz_id);
-    }
+/// Build the live-signal overlay used when the Graphs panel has
+/// both completed runs *and* live-signal bindings. Reads the same
+/// per-VizId `VisualizationConfig` that the LinePlot kind reads, so
+/// the curves match what the dedicated live plot would draw (color,
+/// label, visibility — minus the X/Y picker UI, which only the
+/// LinePlot toolbar exposes).
+fn collect_live_extras(
+    world: &World,
+    viz_id: VizId,
+) -> Vec<crate::ui::panels::experiments::PlotExtraLine> {
+    let Some(reg) = world.get_resource::<VisualizationRegistry>() else {
+        return Vec::new();
+    };
+    let Some(cfg) = reg.get(viz_id) else {
+        return Vec::new();
+    };
+    let Some(sigs) = world.get_resource::<SignalRegistry>() else {
+        return Vec::new();
+    };
+    cfg.inputs
+        .iter()
+        .filter(|b| b.role == "y" && b.visible)
+        .filter_map(|b| {
+            let hist = sigs.scalar_history(&b.source)?;
+            if hist.is_empty() {
+                return None;
+            }
+            let points: Vec<[f64; 2]> = hist.iter().map(|s| [s.time, s.value]).collect();
+            let color = b
+                .color
+                .unwrap_or_else(|| lunco_viz::signal::color_for_signal(&b.source.path));
+            let label = b.label.clone().unwrap_or_else(|| b.source.path.clone());
+            Some(crate::ui::panels::experiments::PlotExtraLine {
+                label,
+                color: (color.r(), color.g(), color.b()),
+                points,
+            })
+        })
+        .collect()
 }
 
 fn render_line_plot(ui: &mut egui::Ui, world: &mut World, viz_id: VizId) {
