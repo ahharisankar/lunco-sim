@@ -42,6 +42,26 @@ impl ModelTabs {
         id
     }
 
+    /// Rewrite every `drilled_class == Some(old)` tab on `doc` to
+    /// `Some(new)`. Called by the `ClassRenamed` change observer so
+    /// tabs follow class identity through a rename instead of going
+    /// stale and forcing a duplicate-tab.
+    pub fn rename_drilled_class(
+        &mut self,
+        doc: DocumentId,
+        old: &str,
+        new: &str,
+    ) -> usize {
+        let mut hit = 0;
+        for state in self.tabs.values_mut() {
+            if state.doc == doc && state.drilled_class.as_deref() == Some(old) {
+                state.drilled_class = Some(new.to_string());
+                hit += 1;
+            }
+        }
+        hit
+    }
+
     pub fn ensure_preview_for(
         &mut self,
         doc: DocumentId,

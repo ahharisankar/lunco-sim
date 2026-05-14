@@ -10,6 +10,26 @@ use crate::pretty;
 
 /// Map the op-layer's [`pretty::ClassKindSpec`] to the Index's
 /// [`crate::index::ClassKind`].
+/// Inverse of [`class_kind_spec_to_index_kind`]. Used when the
+/// rebuild-time class diff emits `ClassAdded` for a class first
+/// seen in the index — we need the op-layer kind keyword.
+pub fn index_kind_to_class_kind_spec(kind: crate::index::ClassKind) -> pretty::ClassKindSpec {
+    use crate::index::ClassKind;
+    match kind {
+        ClassKind::Model => pretty::ClassKindSpec::Model,
+        ClassKind::Block => pretty::ClassKindSpec::Block,
+        ClassKind::Connector => pretty::ClassKindSpec::Connector,
+        ClassKind::Package => pretty::ClassKindSpec::Package,
+        ClassKind::Record => pretty::ClassKindSpec::Record,
+        ClassKind::Function => pretty::ClassKindSpec::Function,
+        ClassKind::Type => pretty::ClassKindSpec::Type,
+        // Class kinds without a direct pretty mapping fall back to
+        // Model — the diff path only uses this for change-history
+        // metadata, not source generation.
+        _ => pretty::ClassKindSpec::Model,
+    }
+}
+
 pub fn class_kind_spec_to_index_kind(spec: pretty::ClassKindSpec) -> crate::index::ClassKind {
     use crate::index::ClassKind;
     match spec {

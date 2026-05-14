@@ -838,6 +838,24 @@ impl ExperimentDrafts {
     pub fn forget_doc(&mut self, doc: lunco_doc::DocumentId) {
         self.drafts.retain(|(d, _), _| *d != doc);
     }
+    /// Re-key the `(doc, old)` draft to `(doc, new)`. Called by
+    /// the class-rename observer so a class rename in the editor
+    /// preserves the user's parameter / bounds / inputs setup
+    /// instead of forcing a fresh draft on the new name.
+    pub fn rename_model_ref(
+        &mut self,
+        doc: lunco_doc::DocumentId,
+        old: &ModelRef,
+        new: &ModelRef,
+    ) -> bool {
+        match self.drafts.remove(&(doc, old.clone())) {
+            Some(d) => {
+                self.drafts.insert((doc, new.clone()), d);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// Bevy resource holding RunHandles for in-flight experiments.

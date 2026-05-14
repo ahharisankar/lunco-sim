@@ -100,6 +100,21 @@ pub enum ModelicaChange {
         /// Fully-qualified class name that no longer exists.
         qualified: String,
     },
+    /// A class was renamed in place (e.g. user retyped the class
+    /// header in the text editor). Identity-preserving — emitted
+    /// instead of a (`ClassRemoved`, `ClassAdded`) pair when the
+    /// rebuild can confidently match one removed class to one
+    /// added class on the same generation.
+    ///
+    /// Consumers keyed by class name (open tabs, experiment
+    /// records, parameter drafts, MSL caches…) re-key from `old`
+    /// to `new` instead of dropping state.
+    ClassRenamed {
+        /// Prior fully-qualified class name.
+        old: String,
+        /// New fully-qualified class name.
+        new: String,
+    },
 }
 
 /// The op type for [`crate::document::ModelicaDocument`].

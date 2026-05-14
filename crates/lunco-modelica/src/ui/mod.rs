@@ -172,6 +172,8 @@ fn close_drilled_tabs_on_class_removed(
     registry: Res<crate::ui::state::ModelicaDocumentRegistry>,
     mut tabs: ResMut<crate::ui::panels::model_view::ModelTabs>,
     mut watermark: ResMut<ClassRemovedWatermark>,
+    mut experiments: Option<ResMut<lunco_experiments::ExperimentRegistry>>,
+    mut drafts: Option<ResMut<crate::experiments_runner::ExperimentDrafts>>,
 ) {
     use lunco_doc::Document as _;
     let doc = trigger.event().doc;
@@ -188,10 +190,17 @@ fn close_drilled_tabs_on_class_removed(
     };
     let mut highest_gen = last_seen;
     let mut to_close: Vec<String> = Vec::new();
+    let mut to_rename: Vec<(String, String)> = Vec::new();
     for (gen, change) in changes {
         highest_gen = highest_gen.max(*gen);
-        if let crate::document::ModelicaChange::ClassRemoved { qualified } = change {
-            to_close.push(qualified.clone());
+        match change {
+            crate::document::ModelicaChange::ClassRemoved { qualified } => {
+                to_close.push(qualified.clone());
+            }
+            crate::document::ModelicaChange::ClassRenamed { old, new } => {
+                to_rename.push((old.clone(), new.clone()));
+            }
+            _ => {}
         }
     }
     for qualified in to_close {
@@ -202,6 +211,37 @@ fn close_drilled_tabs_on_class_removed(
                 closed.len()
             );
         }
+    }
+    // Identity-preserving rename: tabs / experiments / drafts that
+    // referenced the old class name re-bind to the new one. Keeps
+    // the user's open canvas / run history / setup intact when they
+    // retype a class header in the text editor.
+    for (old, new) in to_rename {
+        let touched_tabs = tabs.rename_drilled_class(doc, &old, &new);
+        let touched_experiments = experiments
+            .as_mut()
+            .map(|r| {
+                r.rename_model_ref(
+                    &crate::ui::doc_pin::twin_id_for_doc(doc),
+                    &lunco_experiments::ModelRef(old.clone()),
+                    &lunco_experiments::ModelRef(new.clone()),
+                )
+            })
+            .unwrap_or(0);
+        let touched_drafts = drafts
+            .as_mut()
+            .map(|d| {
+                d.rename_model_ref(
+                    doc,
+                    &lunco_experiments::ModelRef(old.clone()),
+                    &lunco_experiments::ModelRef(new.clone()),
+                )
+            })
+            .unwrap_or(false);
+        bevy::log::info!(
+            "[R4] ClassRenamed({old} → {new}): {touched_tabs} tab(s), \
+             {touched_experiments} experiment(s), drafts={touched_drafts}"
+        );
     }
     watermark.0.insert(doc, highest_gen);
 }

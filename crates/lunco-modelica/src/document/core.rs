@@ -350,11 +350,49 @@ impl ModelicaDocument {
     }
 
     fn rebuild_index(&mut self) {
+        // Snapshot the prior class-name set so we can diff after the
+        // rebuild and emit `ClassAdded` / `ClassRemoved` /
+        // `ClassRenamed` changes. Without this, structural edits
+        // made through the text editor (re-typing a class header,
+        // pasting a new class…) silently mutate the index — and
+        // every downstream consumer that keys by class name (open
+        // tabs, experiment records, parameter drafts) goes stale.
+        let prior: std::collections::HashSet<String> =
+            self.index.classes.keys().cloned().collect();
         self.index.rebuild_with_errors(
             &self.syntax.ast,
             &self.source,
             self.syntax.has_errors(),
         );
+        let now: std::collections::HashSet<String> =
+            self.index.classes.keys().cloned().collect();
+        let added: Vec<String> = now.difference(&prior).cloned().collect();
+        let removed: Vec<String> = prior.difference(&now).cloned().collect();
+        // Heuristic: exactly one added + one removed = rename. The
+        // alternative — emitting separate Removed+Added — would
+        // make every consumer drop state and force the user to
+        // rebuild it. A false-positive here (two unrelated edits
+        // collapsed into a "rename") is recoverable; a missed
+        // rename causes the duplicate-tab / lost-experiment bug.
+        if added.len() == 1 && removed.len() == 1 {
+            self.push_change(ModelicaChange::ClassRenamed {
+                old: removed.into_iter().next().unwrap(),
+                new: added.into_iter().next().unwrap(),
+            });
+        } else {
+            for qualified in removed {
+                self.push_change(ModelicaChange::ClassRemoved { qualified });
+            }
+            for qualified in added {
+                let kind = self
+                    .index
+                    .classes
+                    .get(&qualified)
+                    .map(|c| super::apply::index_kind_to_class_kind_spec(c.kind))
+                    .unwrap_or(crate::pretty::ClassKindSpec::Model);
+                self.push_change(ModelicaChange::ClassAdded { qualified, kind });
+            }
+        }
     }
 
     pub fn source_snapshot(&self) -> String { self.source.clone() }

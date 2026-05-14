@@ -274,6 +274,38 @@ impl ExperimentRegistry {
             .unwrap_or(&[])
     }
 
+    /// Rewrite every experiment under `twin` whose `model_ref`
+    /// equals `old` to instead reference `new`. Returns the count
+    /// of touched records. Called by the class-rename observer so a
+    /// `model Foo` → `model Bar` edit in the source doesn't strand
+    /// the user's run history under a class name that no longer
+    /// exists.
+    pub fn rename_model_ref(
+        &mut self,
+        twin: &TwinId,
+        old: &ModelRef,
+        new: &ModelRef,
+    ) -> usize {
+        let mut hit = 0;
+        if let Some(bucket) = self.by_twin.get_mut(twin) {
+            for exp in bucket.iter_mut() {
+                if exp.model_ref == *old {
+                    exp.model_ref = new.clone();
+                    hit += 1;
+                }
+            }
+        }
+        // Migrate the auto-name counter so the next "Run N" picks
+        // up where the old class left off instead of resetting to 1.
+        if let Some(count) = self.name_counter.remove(&(twin.clone(), old.clone())) {
+            self.name_counter
+                .entry((twin.clone(), new.clone()))
+                .and_modify(|c| *c = (*c).max(count))
+                .or_insert(count);
+        }
+        hit
+    }
+
     /// Evict every experiment under `twin`, regardless of status.
     /// Returns the number of records removed. Callers should ensure
     /// no in-flight handles still reference the cleared ids (the
