@@ -119,12 +119,15 @@ impl Panel for TelemetryPanel {
         let (entity, has_data) = {
             // Resolution order, strongest signal first:
             //   1. Explicit doc-pin (user clicked 📌 on this panel)
-            //   2. Entity-level pin (`WorkbenchState.selected_entity`,
-            //      set implicitly by compile / click flows)
-            //   3. Follow the active document tab
-            // Without (1) above (2), pinning Telemetry to Model B
-            // is silently ignored when `selected_entity` still
-            // references Model A's stepper from an earlier compile.
+            //   2. Follow the active document tab — switching tabs
+            //      moves the telemetry view with the user.
+            //   3. Entity-level pin (`WorkbenchState.selected_entity`,
+            //      set implicitly by compile / click flows) as a last
+            //      fallback when no active doc has a stepper yet.
+            // (2) sits above (3) because the user-visible rule is
+            // "Telemetry follows the focused tab"; Compile setting
+            // `selected_entity` shouldn't strand the panel on the
+            // last-compiled stepper after the user switches tabs.
             let explicit_doc_pin = world
                 .get_resource::<crate::ui::doc_pin::DocPinState>()
                 .and_then(|p| p.telemetry);
@@ -133,8 +136,8 @@ impl Panel for TelemetryPanel {
                 .and_then(|s| s.selected_entity);
             let resolved = explicit_doc_pin
                 .and_then(|doc| crate::ui::state::simulator_for(world, doc))
-                .or(pinned_entity)
-                .or_else(|| crate::ui::state::active_simulator(world));
+                .or_else(|| crate::ui::state::active_simulator(world))
+                .or(pinned_entity);
             let has = resolved
                 .map(|e| world.get::<ModelicaModel>(e).is_some())
                 .unwrap_or(false);
