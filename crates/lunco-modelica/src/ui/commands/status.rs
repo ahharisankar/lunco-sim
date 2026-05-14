@@ -17,12 +17,20 @@ pub fn publish_unsaved_modelica_docs(
             let o = host.document().origin();
             o.is_writable() || o.is_untitled()
         })
-        .map(|(_, host)| {
-            let origin = host.document().origin();
+        .map(|(id, host)| {
+            let document = host.document();
+            let origin = document.origin();
+            // `is_unsaved` covers both flavours of "Save before close
+            // would lose data": Untitled drafts (never saved) AND
+            // dirty saved files (edited since last save). The
+            // app-close prompt and the Files-section dirty dot both
+            // read this flag — keeping the semantics one place.
+            let is_unsaved = origin.is_untitled() || document.is_dirty();
             lunco_workbench::UnsavedDocEntry {
+                id,
                 display_name: origin.display_name(),
                 kind: "Modelica".into(),
-                is_unsaved: origin.is_untitled(),
+                is_unsaved,
             }
         })
         .collect();

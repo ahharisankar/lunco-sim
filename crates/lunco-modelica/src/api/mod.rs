@@ -51,9 +51,13 @@ impl Plugin for ModelicaApiEditPlugin {
             .register_type::<ApiLinePattern>();
         register_all_commands(app);
         // Chain: workbench `FileRenamed` → `RenameModelicaClass` for
-        // `.mo` files. Observer is not a `#[Command]`, so it's not in
-        // `register_commands!()` — added directly.
+        // saved `.mo` files. Observer is not a `#[Command]`, so it's
+        // not in `register_commands!()` — added directly.
         app.add_observer(class::on_file_renamed_chain_to_modelica);
+        // Chain: workbench `RenameOpenDocument` → `RenameModelicaClass`
+        // for Untitled Modelica drafts (no on-disk path; the rename is
+        // purely a class-declaration rewrite).
+        app.add_observer(class::on_rename_open_document_chain_to_modelica);
     }
 }
 

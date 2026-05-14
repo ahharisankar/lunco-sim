@@ -132,6 +132,30 @@ pub struct AddTwin {
     pub path: String,
 }
 
+/// Rename an open document (a tab in the workspace).
+///
+/// Differs from [`RenameTwinEntry`]: identifies the target by
+/// [`DocumentId`] rather than `(twin_root, relative_path)`, so it works
+/// for Untitled drafts that have no on-disk path, as well as for saved
+/// files that belong to no open Twin.
+///
+/// The observer routes by [`DocumentOrigin`]:
+///
+/// - `File { writable: true }` *under an open Twin*: forwards to
+///   [`RenameTwinEntry`] — same on-disk path, same `FileRenamed` chain,
+///   same Modelica class-name rewrite.
+/// - `Untitled { name }`: domain crates observe this command directly
+///   (Modelica chains to [`RenameModelicaClass`]) — workbench has no
+///   semantic handle on what an Untitled draft means.
+/// - `File { writable: false }` or `Bundled`: read-only, rejected.
+#[Command(default)]
+pub struct RenameOpenDocument {
+    /// The document to rename.
+    pub doc: lunco_doc::DocumentId,
+    /// New filename / class identifier — no path separators allowed.
+    pub new_name: String,
+}
+
 /// Rename a file or folder *inside* an open Twin.
 ///
 /// Identifies the entry by `(twin_root, relative_path)` so the
@@ -443,12 +467,84 @@ pub(crate) fn drain_pending_twin_opens(
     pending.tasks = still_running;
 }
 
+#[on_command(RenameOpenDocument)]
+fn on_rename_open_document(
+    trigger: On<RenameOpenDocument>,
+    workspace: Res<WorkspaceResource>,
+    mut commands: Commands,
+) {
+    use lunco_doc::DocumentOrigin;
+    let ev = trigger.event();
+    let new_name = ev.new_name.trim().to_string();
+    if new_name.is_empty() {
+        warn!("[RenameOpenDocument] empty new_name");
+        return;
+    }
+    let Some(entry) = workspace.document(ev.doc) else {
+        warn!("[RenameOpenDocument] no Workspace doc with id {}", ev.doc);
+        return;
+    };
+    match &entry.origin {
+        DocumentOrigin::File { path, writable: true } => {
+            // Saved file: route through RenameTwinEntry if the path
+            // lies under an open Twin. Standalone-file renames (no
+            // owning Twin) aren't supported yet — would need a
+            // path-only rename path that bypasses Twin::reload.
+            let twin_root = workspace.twins().find_map(|(_, t)| {
+                if path.starts_with(&t.root) {
+                    Some(t.root.clone())
+                } else {
+                    None
+                }
+            });
+            let Some(root) = twin_root else {
+                warn!(
+                    "[RenameOpenDocument] doc {} path {} not under any open \
+                     Twin — standalone file rename not yet supported",
+                    ev.doc,
+                    path.display()
+                );
+                return;
+            };
+            let rel = match path.strip_prefix(&root) {
+                Ok(r) => r.to_path_buf(),
+                Err(_) => return,
+            };
+            commands.trigger(RenameTwinEntry {
+                twin_root: root.to_string_lossy().into_owned(),
+                relative_path: rel.to_string_lossy().into_owned(),
+                new_name,
+            });
+        }
+        DocumentOrigin::Untitled { .. } => {
+            // Domain plugins observe RenameOpenDocument directly for
+            // Untitled docs (Modelica → RenameModelicaClass). The
+            // workbench observer doesn't touch them.
+        }
+        DocumentOrigin::File { writable: false, .. }
+        | DocumentOrigin::Bundled { .. } => {
+            warn!("[RenameOpenDocument] doc {} is read-only", ev.doc);
+        }
+    }
+}
+
 #[on_command(RenameTwinEntry)]
 fn on_rename_twin_entry(
     trigger: On<RenameTwinEntry>,
-    mut workspace: ResMut<WorkspaceResource>,
-    mut commands: Commands,
+    #[cfg(not(target_arch = "wasm32"))] mut workspace: ResMut<WorkspaceResource>,
+    #[cfg(not(target_arch = "wasm32"))] mut commands: Commands,
 ) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = trigger;
+        warn!(
+            "[RenameTwinEntry] rename not yet supported on wasm — needs \
+             lunco_storage::Storage::rename + IndexedDB backend (W1/W2)"
+        );
+        return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
     use lunco_doc::DocumentOrigin;
     let ev = trigger.event();
     let twin_root = std::path::PathBuf::from(&ev.twin_root);
@@ -557,6 +653,7 @@ fn on_rename_twin_entry(
         new_abs,
         is_dir,
     });
+    } // end #[cfg(not(target_arch = "wasm32"))]
 }
 
 #[on_command(SaveAll)]
@@ -633,6 +730,7 @@ register_commands!(
     on_new_document,
     on_open_folder,
     on_open_twin,
+    on_rename_open_document,
     on_rename_twin_entry,
     on_save_all,
     on_save_as_twin

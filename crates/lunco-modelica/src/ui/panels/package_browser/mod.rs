@@ -295,15 +295,33 @@ fn open_bundled_class(world: &mut World, class: &ClassRef) {
 }
 
 fn open_user_file_class(world: &mut World, path: PathBuf, class: &ClassRef) {
-    use crate::ui::panels::model_view::MODEL_VIEW_KIND;
+    use crate::ui::panels::model_view::{MODEL_VIEW_KIND, ModelViewMode};
     use bevy::tasks::AsyncComputeTaskPool;
 
     let drilled = if class.path.is_empty() { None } else { Some(class.qualified()) };
+    // Non-`.mo` files have no Modelica classes to render in Canvas
+    // mode — default the tab to Text mode so the user sees the raw
+    // file contents instead of an empty diagram.
+    let initial_mode = if path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|e| e.eq_ignore_ascii_case("mo"))
+        .unwrap_or(false)
+    {
+        None
+    } else {
+        Some(ModelViewMode::Text)
+    };
     let already_open = world.resource::<ModelicaDocumentRegistry>().find_by_path(&path);
     if let Some(doc) = already_open {
         let tab_id = world
             .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
             .ensure_for(doc, drilled.clone());
+        if let Some(mode) = initial_mode {
+            world
+                .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
+                .set_view_mode(tab_id, mode);
+        }
         world.commands().trigger(lunco_workbench::OpenTab { kind: MODEL_VIEW_KIND, instance: tab_id });
         return;
     }
@@ -312,6 +330,11 @@ fn open_user_file_class(world: &mut World, path: PathBuf, class: &ClassRef) {
     let tab_id = world
         .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
         .ensure_for(reserved_doc_id, drilled.clone());
+    if let Some(mode) = initial_mode {
+        world
+            .resource_mut::<crate::ui::panels::model_view::ModelTabs>()
+            .set_view_mode(tab_id, mode);
+    }
     world.commands().trigger(lunco_workbench::OpenTab { kind: MODEL_VIEW_KIND, instance: tab_id });
 
     let display_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Opened").to_string();

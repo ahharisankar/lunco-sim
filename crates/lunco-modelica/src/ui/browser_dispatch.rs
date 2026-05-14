@@ -61,8 +61,19 @@ pub fn drain_browser_actions(world: &mut World) {
                     continue;
                 };
                 let abs = root.join(&relative_path);
-                let class = crate::class_ref::ClassRef::user_file(abs, Vec::<String>::new());
-                crate::ui::panels::package_browser::open_class(world, class, false);
+                // Open in a ModelView tab — same path as Modelica
+                // classes. For non-`.mo` content the parser produces
+                // no classes, so Canvas mode shows empty; the user
+                // toggles the 📝 Text mode in the tab toolbar to see
+                // raw source. (A future kind-aware default would
+                // pre-select Text for non-`.mo`; tracked separately.)
+                let class = crate::class_ref::ClassRef::user_file(
+                    abs,
+                    Vec::<String>::new(),
+                );
+                crate::ui::panels::package_browser::open_class(
+                    world, class, false,
+                );
             }
             BrowserAction::OpenModelicaClass {
                 relative_path,
