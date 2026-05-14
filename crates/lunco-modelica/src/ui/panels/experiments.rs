@@ -16,7 +16,7 @@ use bevy::prelude::*;
 use bevy_egui::egui;
 use egui_plot::{Legend, Line, LineStyle, Plot, PlotPoints, VLine};
 use lunco_experiments::{
-    ExperimentId, ExperimentRegistry, RunStatus, TwinId,
+    ExperimentId, ExperimentRegistry, RunStatus,
 };
 use lunco_viz::viz::VizId;
 use lunco_workbench::{Panel, PanelId, PanelSlot};
@@ -162,9 +162,22 @@ impl Panel for ExperimentsPanel {
     }
 
     fn render(&mut self, ui: &mut egui::Ui, world: &mut World) {
-        // v1 single-twin scope. Multi-twin filter lands when the twin
-        // browser plumbs an active TwinId through the workspace.
-        let twin = TwinId("default".into());
+        // Pin header — follow active tab, or 📌 to lock the
+        // experiments view to a specific model.
+        crate::ui::doc_pin::render_pin_header(
+            ui,
+            world,
+            crate::ui::doc_pin::PinKind::Experiments,
+        );
+        // Scope this panel to the doc-pin-resolved document. Each
+        // open doc has its own run history (`twin_id_for_doc`), so
+        // switching tabs flips the list automatically.
+        let Some(doc_id) = crate::ui::doc_pin::resolved_experiments_doc(world)
+        else {
+            ui.label("No active document.");
+            return;
+        };
+        let twin = crate::ui::doc_pin::twin_id_for_doc(doc_id);
         // Semantic colours from the theme. ThemePlugin is mandatory
         // (installed by WorkbenchPlugin), so this resource is always
         // present.
@@ -1273,7 +1286,13 @@ pub fn render_experiments_plot(
     world: &mut World,
     viz_id: VizId,
 ) -> ExpPlotSummary {
-    let twin = TwinId("default".into());
+    // Scope to the experiments-pinned (or active) doc — same
+    // semantics as the Experiments table above.
+    let Some(doc_id) = crate::ui::doc_pin::resolved_experiments_doc(world)
+    else {
+        return ExpPlotSummary::default();
+    };
+    let twin = crate::ui::doc_pin::twin_id_for_doc(doc_id);
     let (col_warning, col_accent) = {
         let t = world.resource::<lunco_theme::Theme>();
         (t.tokens.warning, t.tokens.accent)
@@ -1763,7 +1782,11 @@ pub struct ExpPlotSummary {
 /// Compute an [`ExpPlotSummary`] without rendering. Lets the Graphs
 /// panel show counts in its top header row before drawing the plot.
 pub fn experiments_plot_summary(world: &World, viz_id: VizId) -> ExpPlotSummary {
-    let twin = TwinId("default".into());
+    let Some(doc_id) = crate::ui::doc_pin::resolved_experiments_doc(world)
+    else {
+        return ExpPlotSummary::default();
+    };
+    let twin = crate::ui::doc_pin::twin_id_for_doc(doc_id);
     let (visible, picked_vars) = world
         .get_resource::<PlotPanelStates>()
         .map(|s| (s.visible(viz_id), s.picked(viz_id)))
@@ -1798,8 +1821,12 @@ pub fn experiments_plot_summary(world: &World, viz_id: VizId) -> ExpPlotSummary 
 /// the active twin. Used by the Telemetry panel to surface
 /// experiment-only variables alongside live cosim signals.
 pub fn all_experiment_variables(world: &World) -> std::collections::BTreeSet<String> {
-    let twin = TwinId("default".into());
     let mut out: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let Some(doc_id) = crate::ui::doc_pin::resolved_experiments_doc(world)
+    else {
+        return out;
+    };
+    let twin = crate::ui::doc_pin::twin_id_for_doc(doc_id);
     if let Some(reg) = world.get_resource::<ExperimentRegistry>() {
         for exp in reg.list_for_twin(&twin) {
             if let Some(result) = &exp.result {

@@ -1014,8 +1014,10 @@ pub fn on_fast_run_active_model(trigger: On<FastRunActiveModel>, mut commands: C
             }
         };
 
-        // Insert experiment + dispatch run.
-        let twin_id = lunco_experiments::TwinId("default".into());
+        // Insert experiment + dispatch run. Scope to the originating
+        // doc so multi-tab workflows keep run histories separate
+        // (Model A's runs ≠ Model B's runs).
+        let twin_id = crate::ui::doc_pin::twin_id_for_doc(doc);
         let exp_id = {
             let mut reg = world.resource_mut::<lunco_experiments::ExperimentRegistry>();
             reg.insert_new(twin_id, model_ref, overrides, inputs, bounds)

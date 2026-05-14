@@ -49,7 +49,9 @@ pub(crate) fn stash_snapshots(ui: &egui::Context, world: &mut World, doc_id: Opt
     // ─── Live Values ───
     {
         let mut state = lunco_viz::kinds::canvas_plot_node::NodeStateSnapshot::default();
-        seed_state_from_latest_experiment(world, &mut state);
+        if let Some(d) = doc_id {
+            seed_state_from_latest_experiment(world, &mut state, d);
+        }
         if let Some(entity) = canvas_sim {
             if let Some(model) = world.get::<ModelicaModel>(entity) {
                 for (k, v) in &model.parameters { state.values.insert(k.to_string(), *v); }
@@ -99,9 +101,10 @@ pub(crate) fn stash_snapshots(ui: &egui::Context, world: &mut World, doc_id: Opt
 fn seed_state_from_latest_experiment(
     world: &World,
     state: &mut lunco_viz::kinds::canvas_plot_node::NodeStateSnapshot,
+    doc_id: lunco_doc::DocumentId,
 ) {
-    use lunco_experiments::{ExperimentRegistry, TwinId};
-    let twin = TwinId("default".into());
+    use lunco_experiments::ExperimentRegistry;
+    let twin = crate::ui::doc_pin::twin_id_for_doc(doc_id);
     let active_plot = world.get_resource::<crate::ui::panels::experiments::ActivePlot>().copied().unwrap_or_default().or_default();
     let plot_states = world.get_resource::<crate::ui::panels::experiments::PlotPanelStates>();
     let visible_in_active = plot_states.map(|s| s.visible(active_plot));

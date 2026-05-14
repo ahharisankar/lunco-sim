@@ -13,6 +13,7 @@
 
 use bevy::prelude::*;
 use lunco_doc::DocumentId;
+use lunco_experiments::TwinId;
 
 #[derive(Resource, Default, Debug, Clone)]
 pub struct DocPinState {
@@ -22,6 +23,9 @@ pub struct DocPinState {
     /// Inspector panel pin — locks the per-selection editor to a
     /// specific doc's canvas selection.
     pub inspector: Option<DocumentId>,
+    /// Experiments panel pin — locks the experiment list + plot
+    /// readouts to a specific doc's run history.
+    pub experiments: Option<DocumentId>,
 }
 
 impl DocPinState {
@@ -32,7 +36,19 @@ impl DocPinState {
         if self.inspector == Some(doc) {
             self.inspector = None;
         }
+        if self.experiments == Some(doc) {
+            self.experiments = None;
+        }
     }
+}
+
+/// Stable per-document scoping key for [`lunco_experiments::ExperimentRegistry`].
+/// Each open document owns its own list of runs — opening Model A
+/// and Model B side-by-side gives two independent experiment streams
+/// instead of one mixed pile (different variable namespaces, no
+/// useful cross-comparison).
+pub fn twin_id_for_doc(doc: DocumentId) -> TwinId {
+    TwinId(format!("doc:{}", doc.raw()))
 }
 
 /// Active document from the workspace (most-recently-focused tab).
@@ -56,11 +72,21 @@ pub fn resolved_inspector_doc(world: &World) -> Option<DocumentId> {
     pin.or_else(|| active_doc(world))
 }
 
+/// `pin.experiments.or(active_doc)`. Experiments panel + plot
+/// readouts use this to choose which doc's run history to show.
+pub fn resolved_experiments_doc(world: &World) -> Option<DocumentId> {
+    let pin = world
+        .get_resource::<DocPinState>()
+        .and_then(|s| s.experiments);
+    pin.or_else(|| active_doc(world))
+}
+
 /// Which slot of [`DocPinState`] a header widget toggles.
 #[derive(Copy, Clone, Debug)]
 pub enum PinKind {
     Telemetry,
     Inspector,
+    Experiments,
 }
 
 /// Render a one-line "follow active tab | 📌 pinned to {name}" row
@@ -78,6 +104,7 @@ pub fn render_pin_header(
         .map(|s| match kind {
             PinKind::Telemetry => s.telemetry,
             PinKind::Inspector => s.inspector,
+            PinKind::Experiments => s.experiments,
         })
         .unwrap_or(None);
     let active = active_doc(world);
@@ -118,6 +145,7 @@ pub fn render_pin_header(
             let slot = match kind {
                 PinKind::Telemetry => &mut state.telemetry,
                 PinKind::Inspector => &mut state.inspector,
+                PinKind::Experiments => &mut state.experiments,
             };
             *slot = match *slot {
                 Some(_) => None,
