@@ -158,6 +158,16 @@ impl Default for UsdPrimPath {
 #[derive(Component)]
 pub struct UsdVisualSynced;
 
+/// Marker placed on a USD scene root that exists purely to render a
+/// preview thumbnail. Plugins that activate simulation side-effects on
+/// USD prims (avatar cameras, vehicle FSW, wheel physics) should walk
+/// each candidate prim's `ChildOf` ancestry and bail if any ancestor
+/// carries this marker — preview-only stages must show geometry but
+/// must not spawn cameras into the window or insert physics bodies
+/// into the live world.
+#[derive(Component, Default, Debug, Clone, Copy)]
+pub struct UsdPreviewOnly;
+
 /// System that synchronizes USD prims into Bevy entities with visual components.
 ///
 /// For each entity with `UsdPrimPath` (but not `UsdVisualSynced`):

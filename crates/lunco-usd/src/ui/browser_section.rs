@@ -11,7 +11,7 @@
 
 use bevy_egui::egui;
 use lunco_workbench::twin_browser::BrowserScope;
-use lunco_workbench::{BrowserCtx, BrowserSection, OpenTab};
+use lunco_workbench::{BrowserCtx, BrowserSection, FocusPanel};
 
 use crate::ui::loaded_stages::LoadedUsdStages;
 use crate::ui::viewport::{SetActiveUsdViewport, USD_VIEWPORT_PANEL_ID};
@@ -39,7 +39,10 @@ impl BrowserSection for UsdSceneSection {
     }
 
     fn default_open(&self) -> bool {
-        true
+        // Collapse by default so the USD section renders as a folder
+        // entry until the user opens it. Avoids drowning the browser
+        // with stage rows in folders containing many `.usda` files.
+        false
     }
 
     fn render(&mut self, ui: &mut egui::Ui, ctx: &mut BrowserCtx<'_>) {
@@ -82,23 +85,20 @@ impl BrowserSection for UsdSceneSection {
                 entry.default_open(),
             )
             .show_header(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(format!("{}{}", title, writable_badge));
-                    if viewport_doc.is_some() {
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if ui
-                                    .small_button("👁")
-                                    .on_hover_text("Show in 3D viewport")
-                                    .clicked()
-                                {
-                                    focus_doc = viewport_doc;
-                                }
-                            },
-                        );
+                let label = format!("{}{}", title, writable_badge);
+                if let Some(doc) = viewport_doc {
+                    let resp = ui
+                        .add(
+                            egui::Label::new(label)
+                                .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text("Click to show in 3D viewport");
+                    if resp.clicked() {
+                        focus_doc = Some(doc);
                     }
-                });
+                } else {
+                    ui.label(label);
+                }
             })
             .body(|ui| entry.render_children(ui, ctx));
         }
@@ -107,9 +107,8 @@ impl BrowserSection for UsdSceneSection {
 
         if let Some(doc) = focus_doc {
             ctx.world.commands().trigger(SetActiveUsdViewport { doc });
-            ctx.world.commands().trigger(OpenTab {
-                kind: USD_VIEWPORT_PANEL_ID,
-                instance: doc.raw(),
+            ctx.world.commands().trigger(FocusPanel {
+                id: USD_VIEWPORT_PANEL_ID.0.to_string(),
             });
         }
     }

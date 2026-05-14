@@ -785,7 +785,6 @@ impl Plugin for ModelicaUiPlugin {
             .init_resource::<panels::experiments::ExperimentVisibility>()
             .init_resource::<panels::experiments::PlotPanelStates>()
             .init_resource::<doc_pin::DocPinState>()
-            .init_resource::<browser_section::DocRenameState>()
             .init_resource::<panels::experiments::ActivePlot>()
             .register_panel(panels::canvas_diagram::CanvasDiagramPanel)
             .init_resource::<panels::canvas_diagram::CanvasDiagramState>()

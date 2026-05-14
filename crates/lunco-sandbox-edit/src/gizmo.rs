@@ -10,6 +10,7 @@
 
 use bevy::prelude::*;
 use bevy::math::DVec3;
+use bevy::camera::RenderTarget;
 use avian3d::prelude::{LinearVelocity, RigidBody};
 use avian3d::physics_transform::{Position, Rotation};
 use transform_gizmo_bevy::{GizmoCamera, GizmoTarget};
@@ -233,13 +234,23 @@ pub fn restore_gizmo_dynamic(
         .remove::<GizmoPrevPos>();
 }
 
-/// Ensures the camera has GizmoCamera marker.
+/// Ensures the primary window camera carries the GizmoCamera marker.
+///
+/// `transform_gizmo_bevy` only supports one GizmoCamera at a time and
+/// emits a per-frame warn when it sees multiple. We have several
+/// `Camera3d` entities in flight at once — the user's main scene camera
+/// renders to the window, and each USD-preview viewport spawns a
+/// `Camera3d` that targets an offscreen `Image`. Only the window camera
+/// is the one the user can click in, so filter by `RenderTarget::Window`
+/// and skip image / texture-view targets.
 pub fn sync_gizmo_camera(
-    q_cameras: Query<Entity, (With<Camera3d>, Without<GizmoCamera>)>,
+    q_cameras: Query<(Entity, &RenderTarget), (With<Camera3d>, Without<GizmoCamera>)>,
     mut commands: Commands,
 ) {
-    for camera in q_cameras.iter() {
-        commands.entity(camera).insert(GizmoCamera);
+    for (camera, target) in q_cameras.iter() {
+        if matches!(target, RenderTarget::Window(_)) {
+            commands.entity(camera).insert(GizmoCamera);
+        }
     }
 }
 

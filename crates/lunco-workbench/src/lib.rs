@@ -156,14 +156,27 @@ fn on_focus_panel(
             want, ok
         );
     } else {
-        bevy::log::warn!(
-            "FocusPanel: no singleton tab with id {:?} found in dock; available={:?}",
-            want,
-            layout.dock.iter_all_tabs().filter_map(|(_, t)| match t {
-                TabId::Singleton(p) => Some(p.0),
-                _ => None,
-            }).collect::<Vec<_>>()
-        );
+        // Not in dock yet — look up the registered panel and insert
+        // it at its default slot, then focus.
+        let registered: Option<(PanelId, PanelSlot)> = layout
+            .panels
+            .iter()
+            .find(|(pid, _)| pid.0 == want)
+            .map(|(pid, p)| (*pid, p.default_slot()));
+        if let Some((pid, slot)) = registered {
+            let inserted = layout.insert_panel_into_dock(pid, slot);
+            let focused = layout.focus_singleton(pid);
+            bevy::log::info!(
+                "[FocusPanel] id={:?} inserted={} focused={}",
+                want, inserted, focused
+            );
+        } else {
+            bevy::log::warn!(
+                "FocusPanel: no singleton panel registered with id {:?}; available={:?}",
+                want,
+                layout.panels.keys().map(|p| p.0).collect::<Vec<_>>()
+            );
+        }
     }
 }
 

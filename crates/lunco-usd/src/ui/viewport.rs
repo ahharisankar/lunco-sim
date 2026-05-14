@@ -72,11 +72,12 @@ use bevy::camera::{ImageRenderTarget, RenderTarget};
 use bevy::image::Image;
 use bevy::asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
+use bevy::camera::visibility::RenderLayers;
 use bevy_egui::egui;
 use bevy_egui::{EguiTextureHandle, EguiUserTextures};
 use lunco_doc::DocumentId;
 use lunco_doc_bevy::{DocumentChanged, DocumentClosed, DocumentOpened};
-use lunco_usd_bevy::{UsdPrimPath, UsdStageAsset, UsdVisualSynced};
+use lunco_usd_bevy::{UsdPreviewOnly, UsdPrimPath, UsdStageAsset, UsdVisualSynced};
 use lunco_core::{Command, on_command, register_commands};
 use lunco_workbench::{Panel, PanelId, PanelSlot, WorkbenchAppExt};
 use openusd::usda::TextReader;
@@ -94,6 +95,16 @@ pub const USD_VIEWPORT_PANEL_ID: PanelId = PanelId("usd::viewport");
 const VIEWPORT_WIDTH: u32 = 1280;
 const VIEWPORT_HEIGHT: u32 = 800;
 
+/// `RenderLayers` channel used to isolate USD preview rendering from
+/// the main simulation world. Every entity in the preview scene
+/// (camera, light, scene_root, and propagated descendants) lives on
+/// this layer; the live workbench window camera stays on the default
+/// layer 0, so its rendered output never includes preview meshes and
+/// the preview camera never sees the live scene. Layer 0 is Bevy's
+/// default; using layer 1 here keeps us clear of any third-party
+/// systems that might assume layer 0.
+const PREVIEW_RENDER_LAYER: usize = 1;
+
 /// Plugin that wires the viewport pipeline. Must be added together
 /// with `DefaultPlugins` (or any plugin set that ships
 /// `Assets<Image>` + the rendering schedule) — gated checks make the
@@ -108,6 +119,7 @@ impl Plugin for UsdViewportPlugin {
         app.add_observer(on_doc_opened_for_viewport);
         app.add_observer(on_doc_changed_for_viewport);
         app.add_observer(on_doc_closed_for_viewport);
+        app.add_systems(Update, propagate_preview_render_layer);
         register_all_commands(app);
     }
 }
@@ -188,41 +200,27 @@ impl OrbitCamera {
     }
 }
 
-/// Singleton state for the shared viewport. Populated lazily on the
-/// first USD document open so headless test apps that never load USD
-/// pay no cost.
+/// Singleton state for the shared USD preview viewport. One render
+/// target, one camera, one scene_root; retargets to whichever doc is
+/// currently active. Built lazily on first preview request and kept
+/// warm afterwards.
 #[derive(Resource, Default)]
 pub struct UsdViewportState {
-    /// True once [`bootstrap`] has spawned camera + image + scene
-    /// root. Subsequent opens skip rebuild.
     bootstrapped: bool,
-    /// The render-target image fed to egui as a `TextureId`. `None`
-    /// before bootstrap or in headless apps where `Assets<Image>` is
-    /// absent.
     image: Option<Handle<Image>>,
-    /// Egui texture id corresponding to [`Self::image`]. `None` when
-    /// `EguiUserTextures` is absent (headless / non-render builds).
     tex_id: Option<egui::TextureId>,
-    /// Root entity the camera + light + scene root parent under.
-    /// One per app — viewports for different docs share it and just
-    /// swap the `UsdPrimPath` handle.
     scene_root: Option<Entity>,
-    /// The 3D camera rendering into [`Self::image`].
     camera: Option<Entity>,
-    /// The document currently displayed, or `None` when no USD doc
-    /// is open / active.
-    active_doc: Option<DocumentId>,
-    /// The asset handle we're driving. Same id across rebuilds — we
-    /// mutate in place so spawned `UsdPrimPath` children keep
-    /// resolving without re-spawning the whole tree.
+    light: Option<Entity>,
     current_handle: Option<Handle<UsdStageAsset>>,
-    /// Pointer-driven orbit pose. Pushed onto the camera entity each
+    active_doc: Option<DocumentId>,
+    /// Pointer-driven orbit pose. Pushed onto the camera each input
     /// frame the panel receives drag / scroll input.
     pub orbit: OrbitCamera,
 }
 
 impl UsdViewportState {
-    /// The active document being rendered, if any.
+    /// The doc currently surfaced in the viewport, if any.
     pub fn active_doc(&self) -> Option<DocumentId> {
         self.active_doc
     }
@@ -232,78 +230,91 @@ impl UsdViewportState {
 // Bootstrap
 // ─────────────────────────────────────────────────────────────────────
 
-/// First-time setup of the render scaffolding. Idempotent: returns
-/// early when `state.bootstrapped` is already true. Skips silently
-/// when running in a context without `Assets<Image>` /
-/// `EguiUserTextures` (headless tests, server bins) — the lifecycle
-/// observers gracefully no-op afterwards.
+/// First-time setup of the shared render scaffolding. Idempotent;
+/// no-ops when `Assets<Image>` is absent (headless tests / server
+/// bins).
+///
+/// The preview camera is spawned with `Camera::order = 1` so it never
+/// collides with the main window camera (`order = 0`); they target
+/// different surfaces anyway (window vs. image), but explicit ordering
+/// silences Bevy's order-ambiguity warning that compares all active
+/// cameras regardless of target.
 fn bootstrap(world: &mut World) {
     if world.resource::<UsdViewportState>().bootstrapped {
         return;
     }
-    // Headless guard — no `Assets<Image>` resource means rendering
-    // hasn't been added to the app. Skip rather than panic.
     if !world.contains_resource::<Assets<Image>>() {
         return;
     }
 
-    // Build the offscreen render target.
     let image_handle = {
         let image = make_target_image(VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
         world.resource_mut::<Assets<Image>>().add(image)
     };
 
-    // Register with egui so the panel can address it via TextureId.
-    // The resource may be absent in non-render apps; in that case we
-    // still keep the image handle (the camera will render but nothing
-    // will display it) and skip the registration.
     let tex_id = world
         .get_resource_mut::<EguiUserTextures>()
         .map(|mut tex| tex.add_image(EguiTextureHandle::Strong(image_handle.clone())));
 
-    // Camera looking down the -Z axis at the origin from a sensible
-    // pose for "show me what I'm building." Sized for a single rover
-    // (a few metres across) — Phase 7+ will make this orbit-controlled.
+    let preview_layers = RenderLayers::layer(PREVIEW_RENDER_LAYER);
+
     let mut commands = world.commands();
     let camera = commands
         .spawn((
             Camera3d::default(),
             Camera {
                 clear_color: ClearColorConfig::Custom(Color::srgb(0.10, 0.10, 0.12)),
+                // Explicit non-zero order so Bevy's camera-order-
+                // ambiguity check ignores us. The main window camera
+                // ships at order 0; we sit at 1.
+                order: 1,
                 ..default()
             },
-            // In Bevy 0.18 `RenderTarget` is a separate required
-            // component on the camera entity rather than a field of
-            // `Camera`. Spawn-bundled here so the camera renders
-            // straight to our offscreen image.
+            // `RenderTarget::Image` keeps `sync_gizmo_camera` from
+            // tagging this camera (it filters on `RenderTarget::Window`).
             RenderTarget::Image(ImageRenderTarget::from(image_handle.clone())),
-            // Initial pose comes from the default orbit parameters so
-            // the very first frame matches what the panel will push
-            // after the user interacts.
             OrbitCamera::default().transform(),
+            // Preview-only render layer: this camera will render
+            // *only* entities tagged with `PREVIEW_RENDER_LAYER`, so
+            // the live sim scene (default layer 0) stays invisible to
+            // it. Propagated to every USD prim descendant of
+            // `scene_root` by `propagate_preview_render_layer`.
+            preview_layers.clone(),
             Name::new("UsdViewportCamera"),
         ))
         .id();
 
-    // A directional light so meshes aren't black. Shared with the
-    // scene_root parent so it lights everything the camera sees.
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 8_000.0,
-            shadows_enabled: false,
-            ..default()
-        },
-        Transform::from_xyz(5.0, 10.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
-        Name::new("UsdViewportSun"),
-    ));
+    let light = commands
+        .spawn((
+            DirectionalLight {
+                illuminance: 8_000.0,
+                shadows_enabled: false,
+                ..default()
+            },
+            Transform::from_xyz(5.0, 10.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+            preview_layers.clone(),
+            Name::new("UsdViewportSun"),
+        ))
+        .id();
 
-    // Scene root — receives `UsdPrimPath { ..., path: "/" }` once a
-    // document is active. Until then it's a bare empty Transform.
     let scene_root = commands
         .spawn((
             Transform::default(),
             Visibility::default(),
             Name::new("UsdViewportSceneRoot"),
+            // Preview-only: usd-sim/usd-avian walk ChildOf up from each
+            // candidate prim and bail when they reach this marker, so
+            // the preview stage never spawns an Avatar Camera3d into
+            // the workbench window (which would cause camera-order
+            // ambiguity + gizmo warnings every frame) or activate
+            // wheel physics / FSW.
+            UsdPreviewOnly,
+            // Render-layer seed — `propagate_preview_render_layer`
+            // copies it down to every descendant each frame so newly
+            // spawned USD prims (meshes inherited from
+            // `sync_usd_visuals`) automatically join the preview-only
+            // render layer.
+            preview_layers,
         ))
         .id();
 
@@ -313,8 +324,52 @@ fn bootstrap(world: &mut World) {
     state.bootstrapped = true;
     state.image = Some(image_handle);
     state.tex_id = tex_id;
-    state.scene_root = Some(scene_root);
     state.camera = Some(camera);
+    state.light = Some(light);
+    state.scene_root = Some(scene_root);
+}
+
+/// Push `PREVIEW_RENDER_LAYER` onto every descendant of the preview
+/// `scene_root` that doesn't yet have a `RenderLayers` component.
+///
+/// `sync_usd_visuals` (in `lunco-usd-bevy`) spawns child prim entities
+/// without `RenderLayers`, which means they default to layer 0 and
+/// would otherwise show up in the live workbench window. Walking from
+/// `scene_root` each frame and inserting the preview layer on
+/// missing-RenderLayers descendants gives us hierarchical scoping
+/// without modifying the USD layer.
+///
+/// Entities that already have a `RenderLayers` (e.g. the camera, the
+/// light, anything explicitly tagged elsewhere) are left alone — we
+/// only seed the default-layer ones to prevent leakage.
+fn propagate_preview_render_layer(
+    state: Res<UsdViewportState>,
+    q_children: Query<&Children>,
+    q_has_layers: Query<(), With<RenderLayers>>,
+    mut commands: Commands,
+) {
+    let Some(root) = state.scene_root else { return };
+    let preview_layers = RenderLayers::layer(PREVIEW_RENDER_LAYER);
+
+    // Iterative DFS over the subtree rooted at scene_root. USD scenes
+    // are shallow (tens-hundreds of prims) so allocation-free
+    // traversal isn't worth the complexity.
+    let mut stack: Vec<Entity> = Vec::with_capacity(32);
+    if let Ok(children) = q_children.get(root) {
+        for child in children.iter() {
+            stack.push(child);
+        }
+    }
+    while let Some(entity) = stack.pop() {
+        if q_has_layers.get(entity).is_err() {
+            commands.entity(entity).insert(preview_layers.clone());
+        }
+        if let Ok(children) = q_children.get(entity) {
+            for child in children.iter() {
+                stack.push(child);
+            }
+        }
+    }
 }
 
 /// Construct a render-target image with sensible defaults
@@ -365,10 +420,9 @@ impl ImageExt for Image {
 // SetActiveUsdViewport — typed command for "show this stage"
 // ─────────────────────────────────────────────────────────────────────
 
-/// Make `doc` the active stage in the singleton viewport. Browser
-/// row clicks fire this; HTTP API / MCP / scripts can fire it
-/// directly. Idempotent — calling with the already-active doc is a
-/// no-op.
+/// Retarget the shared USD viewport at `doc`. Browser row clicks fire
+/// this; HTTP API / MCP / scripts can fire it directly. Idempotent —
+/// calling with the already-active doc is a no-op.
 #[Command(default)]
 pub struct SetActiveUsdViewport {
     /// The USD document to surface in the viewport.
@@ -389,8 +443,9 @@ fn on_set_active_usd_viewport(
             return;
         }
         bootstrap(world);
-        // Detach old before installing new so the asset reference
-        // count drops cleanly.
+        // Detach the prior stage so its asset ref-count drops before
+        // we install the new one. `sync_usd_visuals` will respawn
+        // children once the new `UsdPrimPath` lands.
         if let Some(scene_root) = world.resource::<UsdViewportState>().scene_root {
             if let Ok(mut entity) = world.get_entity_mut(scene_root) {
                 entity.remove::<UsdPrimPath>();
@@ -418,12 +473,11 @@ fn on_doc_opened_for_viewport(
         if !world.resource::<UsdDocumentRegistry>().contains(doc) {
             return;
         }
-        bootstrap(world);
-        // Make this the active doc if nothing else is showing. Phase
-        // 6 has one shared viewport — later opens stay queued; the
-        // user can switch by clicking a row in the browser (which
-        // dispatches a future SetActiveUsdViewport command).
+        // Make this the active doc if nothing else is showing. The
+        // user can switch later by clicking a different row in the
+        // browser (which fires `SetActiveUsdViewport`).
         if world.resource::<UsdViewportState>().active_doc.is_none() {
+            bootstrap(world);
             install_active_doc(world, doc);
         }
     });
@@ -435,8 +489,7 @@ fn on_doc_changed_for_viewport(
 ) {
     let doc = trigger.event().doc;
     commands.queue(move |world: &mut World| {
-        let state = world.resource::<UsdViewportState>();
-        if state.active_doc != Some(doc) {
+        if world.resource::<UsdViewportState>().active_doc != Some(doc) {
             return;
         }
         rebuild_active_asset(world);
@@ -455,8 +508,6 @@ fn on_doc_closed_for_viewport(
         }
         state.active_doc = None;
         state.current_handle = None;
-        // Detach scene_root from the asset; sync_usd_visuals will
-        // skip with no UsdPrimPath.
         let scene_root = state.scene_root;
         drop(state);
         if let Some(root) = scene_root {
@@ -473,9 +524,9 @@ fn on_doc_closed_for_viewport(
 // Asset install / rebuild
 // ─────────────────────────────────────────────────────────────────────
 
-/// Install `doc` as the viewport's active stage. Parses the source,
-/// adds the asset, attaches `UsdPrimPath` to `scene_root`. No-op when
-/// rendering scaffolding hasn't been bootstrapped (headless apps).
+/// Install `doc` as the active stage on the shared scene_root. Parses
+/// + flattens the source, adds the asset, attaches `UsdPrimPath`. No-op
+/// when scaffolding hasn't been bootstrapped (headless).
 fn install_active_doc(world: &mut World, doc: DocumentId) {
     let Some(scene_root) = world.resource::<UsdViewportState>().scene_root else {
         return;
@@ -487,7 +538,8 @@ fn install_active_doc(world: &mut World, doc: DocumentId) {
     else {
         return;
     };
-    let Some(reader) = parse_reader(&source) else {
+    let base = base_dir_for(world, doc);
+    let Some(reader) = parse_reader(&source, base.as_deref()) else {
         bevy::log::warn!("[UsdViewport] could not parse {} for viewport", doc);
         return;
     };
@@ -512,7 +564,6 @@ fn install_active_doc(world: &mut World, doc: DocumentId) {
 
 /// Rebuild the active stage from its document's current source,
 /// mutating the existing asset in place so the `Handle` stays valid.
-/// Called from the `DocumentChanged` observer.
 fn rebuild_active_asset(world: &mut World) {
     let (handle, doc) = {
         let state = world.resource::<UsdViewportState>();
@@ -528,7 +579,8 @@ fn rebuild_active_asset(world: &mut World) {
     else {
         return;
     };
-    let Some(reader) = parse_reader(&source) else {
+    let base = base_dir_for(world, doc);
+    let Some(reader) = parse_reader(&source, base.as_deref()) else {
         bevy::log::warn!("[UsdViewport] re-parse failed for {}", doc);
         return;
     };
@@ -538,8 +590,6 @@ fn rebuild_active_asset(world: &mut World) {
     {
         asset.reader = std::sync::Arc::new(reader);
     }
-    // Invalidate sync_usd_visuals output so the system re-walks the
-    // (now-updated) asset and respawns the prim entity tree.
     if let Some(scene_root) = world.resource::<UsdViewportState>().scene_root {
         if let Ok(mut entity) = world.get_entity_mut(scene_root) {
             entity.remove::<UsdVisualSynced>();
@@ -548,19 +598,41 @@ fn rebuild_active_asset(world: &mut World) {
     }
 }
 
-/// Parse a `.usda` source string into a `TextReader`. Returns `None`
-/// on parse error; callers log and bail.
-///
-/// Composition (`UsdComposer::flatten`) is intentionally **not**
-/// applied here — workbench-driven docs walk only their root layer
-/// until the composer is wired into the in-place rebuild path. The
-/// canonical asset loader (used by drag-drop / `asset_server.load`)
-/// keeps full composition behaviour.
-fn parse_reader(source: &str) -> Option<TextReader> {
+/// Parse a `.usda` source string into a `TextReader`. When `base_dir`
+/// is provided, composition arcs (sublayers, references, payloads)
+/// are flattened via [`lunco_usd_composer::UsdComposer::flatten`] so
+/// referenced stages (`artemis_2.usda → orion.usda`) actually
+/// surface their geometry in the preview. Without a base dir
+/// (Untitled drafts, in-memory mem://), flatten can't resolve paths
+/// so we fall back to the raw root layer.
+fn parse_reader(source: &str, base_dir: Option<&std::path::Path>) -> Option<TextReader> {
     let mut parser = openusd::usda::parser::Parser::new(source);
-    match parser.parse() {
-        Ok(data) => Some(TextReader::from_data(data)),
-        Err(_) => None,
+    let data = parser.parse().ok()?;
+    let raw = TextReader::from_data(data);
+    match base_dir {
+        Some(dir) => match lunco_usd_composer::UsdComposer::flatten(&raw, dir) {
+            Ok(flat) => Some(flat),
+            Err(e) => {
+                bevy::log::warn!(
+                    "[UsdViewport] flatten failed for {:?}: {e} — falling back to raw layer",
+                    dir
+                );
+                Some(raw)
+            }
+        },
+        None => Some(raw),
+    }
+}
+
+/// Resolve the directory that composition arcs resolve relative to —
+/// the parent of the doc's on-disk path, or `None` for Untitled /
+/// in-memory docs.
+fn base_dir_for(world: &World, doc: DocumentId) -> Option<std::path::PathBuf> {
+    use lunco_doc::DocumentOrigin;
+    let host = world.resource::<UsdDocumentRegistry>().host(doc)?;
+    match host.document().origin() {
+        DocumentOrigin::File { path, .. } => path.parent().map(|p| p.to_path_buf()),
+        _ => None,
     }
 }
 
@@ -568,7 +640,8 @@ fn parse_reader(source: &str) -> Option<TextReader> {
 // UsdViewportPanel
 // ─────────────────────────────────────────────────────────────────────
 
-/// Singleton workbench panel that displays the active USD viewport.
+/// Singleton workbench panel displaying the shared USD preview.
+/// Retargets on `SetActiveUsdViewport`; one camera, one scene_root.
 pub struct UsdViewportPanel;
 
 impl Panel for UsdViewportPanel {
@@ -577,7 +650,7 @@ impl Panel for UsdViewportPanel {
     }
 
     fn title(&self) -> String {
-        "USD Viewport".to_string()
+        "USD Preview".to_string()
     }
 
     fn default_slot(&self) -> PanelSlot {
@@ -613,8 +686,8 @@ impl Panel for UsdViewportPanel {
             ui.centered_and_justified(|ui| {
                 ui.label(
                     egui::RichText::new(
-                        "Open a USD stage to see it here. \
-                         Render scaffolding boots on first open.",
+                        "Click a stage in the USD section of the Twin browser \
+                         to preview it here.",
                     )
                     .weak()
                     .italics(),
@@ -623,24 +696,16 @@ impl Panel for UsdViewportPanel {
             return;
         };
 
-        // Fill the panel rect, preserving the image's aspect ratio.
-        let avail = ui.available_size();
-        let aspect = VIEWPORT_WIDTH as f32 / VIEWPORT_HEIGHT as f32;
-        let mut size = avail;
-        if size.x / size.y > aspect {
-            size.x = size.y * aspect;
-        } else {
-            size.y = size.x / aspect;
-        }
+        // Stretch to fill the panel rect. Aspect mismatch with the
+        // 1280×800 render target is acceptable; recreating the Image
+        // on resize is a future polish.
+        let size = ui.available_size();
         let response = ui.add(
             egui::Image::new(egui::load::SizedTexture::new(tex_id, size))
                 .sense(egui::Sense::click_and_drag()),
         );
 
-        // Orbit (Blender-style preview): left-drag spins yaw/pitch,
-        // scroll wheel zooms. Pan is a follow-up; today the target
-        // sticks at the scene origin until the user explicitly
-        // recenters it via a future double-click handler.
+        // Orbit: drag spins yaw/pitch, scroll zooms.
         let drag = response.drag_delta();
         let hovered = response.hovered();
         let scroll_y = if hovered {
@@ -700,13 +765,11 @@ mod tests {
         app.update();
 
         let state = app.world().resource::<UsdViewportState>();
-        // No render scaffolding in MinimalPlugins → bootstrap bailed.
+        // No render scaffolding in MinimalPlugins → bootstrap bails.
         assert!(!state.bootstrapped);
         assert!(state.image.is_none());
         assert!(state.tex_id.is_none());
         // active_doc gates on bootstrap so we don't half-attach.
-        // The current code sets active_doc *after* bootstrap (which
-        // bailed), so it should still be None.
         assert!(state.active_doc.is_none());
     }
 }

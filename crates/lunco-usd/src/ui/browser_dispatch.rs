@@ -25,11 +25,10 @@ use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 use lunco_core::on_command;
 use lunco_doc::DocumentOrigin;
-use lunco_workbench::{BrowserAction, BrowserActions, OpenTab, WorkspaceResource};
+use lunco_workbench::{BrowserAction, BrowserActions, WorkspaceResource};
 use lunco_workbench::file_ops::OpenFile;
 
 use crate::registry::UsdDocumentRegistry;
-use crate::ui::viewport::USD_VIEWPORT_PANEL_ID;
 
 /// Lower-cased extensions this dispatch recognises as USD files.
 /// `.usdc` (binary) is included so users get a *parser failure*
@@ -185,24 +184,16 @@ pub fn drain_pending_usd_file_loads(world: &mut World) {
                             .unwrap_or(false)
                     })
                 };
-                let doc_id = match existing {
+                let _doc_id = match existing {
                     Some(id) => id,
                     None => world
                         .resource_mut::<UsdDocumentRegistry>()
                         .allocate(source, DocumentOrigin::writable_file(load.path.clone())),
                 };
-                // Surface the viewport in the dock (idempotent — the
-                // singleton panel reuses its slot) and activate the
-                // newly-opened stage. Mirrors the `OpenTab` +
-                // `SetActiveUsdViewport` pair the browser section
-                // fires when a loaded stage row is clicked.
-                world.commands().trigger(OpenTab {
-                    kind: USD_VIEWPORT_PANEL_ID,
-                    instance: doc_id.raw(),
-                });
-                world
-                    .commands()
-                    .trigger(crate::ui::viewport::SetActiveUsdViewport { doc: doc_id });
+                // Only register the document — don't auto-open a
+                // viewport tab. The user surfaces a preview explicitly
+                // by clicking the stage's row in the USD browser
+                // section.
             }
         }
     }

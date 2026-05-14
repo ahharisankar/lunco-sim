@@ -52,7 +52,7 @@ use bevy::prelude::*;
 use bevy::math::DVec3;
 use avian3d::prelude::*;
 use big_space::prelude::{CellCoord, FloatingOrigin, Grid};
-pub use lunco_usd_bevy::{UsdPrimPath, UsdStageAsset};
+pub use lunco_usd_bevy::{UsdPreviewOnly, UsdPrimPath, UsdStageAsset};
 use openusd::sdf::{Path as SdfPath, AbstractData, Value};
 use openusd::usda::TextReader;
 use lunco_mobility::{WheelRaycast, DifferentialDrive, AckermannSteer};
@@ -209,6 +209,9 @@ fn process_usd_sim_prims(
     query: Query<(Entity, &UsdPrimPath, Option<&Transform>, Option<&Mesh3d>, Option<&MeshMaterial3d<StandardMaterial>>, Option<&ChildOf>), Without<UsdSimProcessed>>,
     q_all_prims: Query<&UsdPrimPath>,
     q_grids: Query<Entity, With<Grid>>,
+    q_existing_floating_origins: Query<Entity, With<FloatingOrigin>>,
+    q_child_of: Query<&ChildOf>,
+    q_preview_only: Query<(), With<UsdPreviewOnly>>,
     stages: Res<Assets<UsdStageAsset>>,
 ) {
     // --- Pass 1: collect authored revolute joints by their `body1` target ---
@@ -256,12 +259,38 @@ fn process_usd_sim_prims(
         let Some(stage) = stages.get(&prim_path.stage_handle) else { continue; };
         let Ok(sdf_path) = SdfPath::new(&prim_path.path) else { continue; };
 
+        // Bail when this prim lives under a `UsdPreviewOnly` scene
+        // root. Preview viewports render geometry only — they must
+        // not spawn Avatar Camera3d, FlightSoftware, or wheel raycasts
+        // into the main world. Walking up the `ChildOf` chain catches
+        // every prim because `sync_usd_visuals` parents each spawned
+        // prim entity to its USD-parent entity, which itself chains
+        // back to the workbench-owned scene_root.
+        if is_preview_only(entity, &q_child_of, &q_preview_only) {
+            commands.entity(entity).insert(UsdSimProcessed);
+            continue;
+        }
+
         let mut reader = (*stage.reader).clone();
         let existing_tf = maybe_tf.cloned().unwrap_or_default();
 
         // 0. Detect Avatar prim
         if reader.prim_attribute_value::<String>(&sdf_path, "lunco:avatar").is_some() {
             info!("Detected Avatar prim at {}, setting up camera", prim_path.path);
+            // `big_space` enforces "exactly one `FloatingOrigin` per
+            // `BigSpace`". Other crates (e.g. `lunco-celestial`'s
+            // Observer Camera) may have already spawned one at startup.
+            // The USD Avatar is the user's intended perspective, so it
+            // takes over: remove `FloatingOrigin` from every prior
+            // holder before we add it to this entity. Without this we
+            // get a per-frame `multiple floating origins → resetting
+            // this big space` error from big_space and broken
+            // transform propagation.
+            for prior in q_existing_floating_origins.iter() {
+                if prior != entity {
+                    commands.entity(prior).remove::<FloatingOrigin>();
+                }
+            }
             let camera_mode = reader.prim_attribute_value::<String>(&sdf_path, "lunco:cameraMode")
                 .unwrap_or_else(|| "freeflight".to_string());
             let yaw = reader.prim_attribute_value::<f32>(&sdf_path, "lunco:cameraYaw")
@@ -716,6 +745,26 @@ fn setup_physical_wheel(
 /// Marker to indicate a prim has been processed by the sim system.
 #[derive(Component)]
 struct UsdSimProcessed;
+
+/// Walks `entity`'s `ChildOf` ancestry looking for a `UsdPreviewOnly`
+/// marker. Stops at the first ancestor that has the marker or when the
+/// chain runs out. Bounded by USD scene depth, which is small.
+fn is_preview_only(
+    entity: Entity,
+    q_child_of: &Query<&ChildOf>,
+    q_preview_only: &Query<(), With<UsdPreviewOnly>>,
+) -> bool {
+    let mut cursor = entity;
+    loop {
+        if q_preview_only.get(cursor).is_ok() {
+            return true;
+        }
+        match q_child_of.get(cursor) {
+            Ok(parent) => cursor = parent.parent(),
+            Err(_) => return false,
+        }
+    }
+}
 
 /// Observer that fires when a USD prim entity is added.
 ///

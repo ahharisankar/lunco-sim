@@ -28,7 +28,7 @@ use openusd::sdf;
 use openusd::usda::TextReader;
 
 use crate::commands::ApplyUsdOp;
-use crate::document::{LayerId, UsdOp};
+use crate::document::UsdOp;
 use crate::registry::UsdDocumentRegistry;
 
 /// A top-level USD stage loaded into the current session.
@@ -256,39 +256,36 @@ impl LoadedStage for WorkspaceStage {
                 return;
             }
         };
-        let children = parsed.reader.prim_children(&root);
-
-        // Toolbar at the stage root: add child Xform / Cube / Sphere.
-        // Lets the user start a fresh design even when the file is
-        // empty. Generates collision-free names by suffixing the next
-        // available integer.
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Add to root:").weak());
-            for (label, ty) in [("Xform", "Xform"), ("Cube", "Cube"), ("Sphere", "Sphere")] {
-                if ui.small_button(format!("+ {}", label)).clicked() {
-                    let name = unique_child_name(&parsed.reader, &root, ty);
-                    pending_ops.push(UsdOp::AddPrim {
-                        edit_target: LayerId::root(),
-                        parent_path: "/".into(),
-                        name,
-                        type_name: Some(ty.into()),
-                    });
-                }
+        // Collapse a redundant single-root-prim wrapper whose name
+        // matches the doc filename (case-insensitive). e.g. a stage
+        // `artemis_2.usda` with a single `def Xform "Artemis2"` is
+        // surfaced as `artemis_2 → Orion` instead of the confusing
+        // `artemis_2 → Artemis2 (Xform) → Orion`. Single-root prims
+        // with no children are kept (they ARE the content).
+        let mut top_paths: Vec<sdf::Path> = parsed.reader.prim_children(&root);
+        if top_paths.len() == 1 {
+            let only = &top_paths[0];
+            let grand = parsed.reader.prim_children(only);
+            if !grand.is_empty() {
+                top_paths = grand;
             }
-        });
+        }
 
-        if children.is_empty() {
+        let mut clicked_prim = false;
+
+        if top_paths.is_empty() {
             ui.label(
                 egui::RichText::new("(no prims)").weak().italics(),
             );
         } else {
-            for path in children {
+            for path in top_paths {
                 render_prim(
                     ui,
                     &parsed.reader,
                     &path,
                     &self.cached_id,
                     &mut pending_ops,
+                    &mut clicked_prim,
                 );
             }
         }
@@ -301,6 +298,19 @@ impl LoadedStage for WorkspaceStage {
             for op in pending_ops {
                 ctx.world.commands().trigger(ApplyUsdOp { doc: doc_id, op });
             }
+        }
+
+        // Clicking any internal prim row retargets the shared USD
+        // viewport at this doc. Same route as clicking the top-level
+        // stage row in browser_section.rs.
+        if clicked_prim {
+            let doc_id = self.doc_id;
+            ctx.world
+                .commands()
+                .trigger(crate::ui::viewport::SetActiveUsdViewport { doc: doc_id });
+            ctx.world.commands().trigger(lunco_workbench::FocusPanel {
+                id: crate::ui::viewport::USD_VIEWPORT_PANEL_ID.0.to_string(),
+            });
         }
     }
 }
@@ -321,6 +331,7 @@ fn render_prim(
     path: &sdf::Path,
     salt: &str,
     pending_ops: &mut Vec<UsdOp>,
+    clicked: &mut bool,
 ) {
     let name = path.name().unwrap_or("(root)").to_string();
     let type_name = prim_type_name(reader, path);
@@ -331,88 +342,36 @@ fn render_prim(
     let children = reader.prim_children(path);
     let header_id = ui.make_persistent_id((salt, path.to_string()));
 
-    let path_str = path.to_string();
-    let row = |ui: &mut egui::Ui, pending: &mut Vec<UsdOp>| {
-        ui.horizontal(|ui| {
-            ui.label(&label);
-            // Right-aligned toolbar.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .small_button("×")
-                    .on_hover_text("Remove this prim")
-                    .clicked()
-                {
-                    pending.push(UsdOp::RemovePrim {
-                        edit_target: LayerId::root(),
-                        path: path_str.clone(),
-                    });
-                }
-                for (lbl, ty) in [
-                    ("+S", "Sphere"),
-                    ("+C", "Cube"),
-                    ("+X", "Xform"),
-                ] {
-                    if ui
-                        .small_button(lbl)
-                        .on_hover_text(format!("Add child {}", ty))
-                        .clicked()
-                    {
-                        let child_name = unique_child_name(reader, path, ty);
-                        pending.push(UsdOp::AddPrim {
-                            edit_target: LayerId::root(),
-                            parent_path: path_str.clone(),
-                            name: child_name,
-                            type_name: Some(ty.into()),
-                        });
-                    }
-                }
-            });
-        });
+    let row = |ui: &mut egui::Ui, clicked: &mut bool| {
+        let resp = ui
+            .add(egui::Label::new(&label).sense(egui::Sense::click()))
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if resp.clicked() {
+            *clicked = true;
+        }
     };
 
     if children.is_empty() {
-        // Leaf — render as an indented row so siblings line up with
-        // collapsing-header bodies.
         ui.indent(header_id, |ui| {
-            row(ui, pending_ops);
+            row(ui, clicked);
         });
-        return;
+    } else {
+        egui::collapsing_header::CollapsingState::load_with_default_open(
+            ui.ctx(),
+            header_id,
+            false,
+        )
+        .show_header(ui, |ui| {
+            row(ui, clicked);
+        })
+        .body(|ui| {
+            for child in children {
+                render_prim(ui, reader, &child, salt, pending_ops, clicked);
+            }
+        });
     }
-    egui::collapsing_header::CollapsingState::load_with_default_open(
-        ui.ctx(),
-        header_id,
-        false,
-    )
-    .show_header(ui, |ui| {
-        row(ui, pending_ops);
-    })
-    .body(|ui| {
-        for child in children {
-            render_prim(ui, reader, &child, salt, pending_ops);
-        }
-    });
-}
 
-/// Generate a non-colliding child name `"<TypeName>"` /
-/// `"<TypeName>1"` / `"<TypeName>2"` … under `parent`. USD requires
-/// unique names within a parent prim; this lets the toolbar buttons
-/// be one-click without prompting.
-fn unique_child_name(reader: &TextReader, parent: &sdf::Path, type_name: &str) -> String {
-    let existing: std::collections::HashSet<String> = reader
-        .prim_children(parent)
-        .into_iter()
-        .filter_map(|p| p.name().map(|s| s.to_string()))
-        .collect();
-    if !existing.contains(type_name) {
-        return type_name.to_string();
-    }
-    for n in 1u32.. {
-        let candidate = format!("{}{}", type_name, n);
-        if !existing.contains(&candidate) {
-            return candidate;
-        }
-    }
-    unreachable!()
+    let _ = pending_ops;
 }
 
 /// Read the `typeName` field on a prim spec (e.g. `"Xform"`,
