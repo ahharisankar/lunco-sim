@@ -112,6 +112,82 @@ impl Plugin for UsdViewportPlugin {
     }
 }
 
+/// Pointer-driven orbit camera (Blender-style preview). Anchored on a
+/// `target` point in scene space; left-drag spins yaw/pitch, scroll
+/// zooms by adjusting `distance`. All thresholds are tunable per
+/// AGENTS.md §3 — no hardcoded magic numbers below the constructor.
+#[derive(Debug, Clone)]
+pub struct OrbitCamera {
+    /// Yaw rotation around +Y (radians).
+    pub yaw: f32,
+    /// Pitch rotation up/down (radians); clamped to avoid gimbal flip.
+    pub pitch: f32,
+    /// Distance from target. Scroll wheel scales it geometrically.
+    pub distance: f32,
+    /// Point the camera orbits around. Pannable in a follow-up.
+    pub target: Vec3,
+    /// Radians per drag-pixel for yaw + pitch.
+    pub drag_sensitivity: f32,
+    /// Fractional distance change per scroll unit (0.001 ≈ 0.1% per px).
+    pub zoom_sensitivity: f32,
+    /// Lower/upper clamps on `distance` so the user can't fly into
+    /// the target or out to infinity.
+    pub min_distance: f32,
+    pub max_distance: f32,
+    /// `pitch.abs()` is clamped below this so we never look exactly
+    /// straight up/down (LookAt with Vec3::Y is undefined there).
+    pub pitch_clamp: f32,
+}
+
+impl Default for OrbitCamera {
+    fn default() -> Self {
+        // Defaults derived from the previous fixed camera pose
+        // (4, 3, 5) looking at the origin — same framing, now movable.
+        Self {
+            yaw: 0.6747,
+            pitch: 0.4435,
+            distance: 7.07,
+            target: Vec3::ZERO,
+            drag_sensitivity: 0.008,
+            zoom_sensitivity: 0.0015,
+            min_distance: 0.5,
+            max_distance: 5_000.0,
+            pitch_clamp: std::f32::consts::FRAC_PI_2 - 0.05,
+        }
+    }
+}
+
+impl OrbitCamera {
+    /// Camera world-space position derived from the orbit parameters.
+    pub fn position(&self) -> Vec3 {
+        let cp = self.pitch.cos();
+        let sp = self.pitch.sin();
+        let cy = self.yaw.cos();
+        let sy = self.yaw.sin();
+        self.target + Vec3::new(sy * cp, sp, cy * cp) * self.distance
+    }
+
+    /// Apply a drag delta (pixels) from the egui image response.
+    /// Inverted-Y so dragging down tilts the camera down (Blender
+    /// convention).
+    pub fn apply_drag(&mut self, delta: egui::Vec2) {
+        self.yaw -= delta.x * self.drag_sensitivity;
+        self.pitch =
+            (self.pitch + delta.y * self.drag_sensitivity).clamp(-self.pitch_clamp, self.pitch_clamp);
+    }
+
+    /// Apply a scroll delta (vertical scroll wheel, pixels).
+    pub fn apply_zoom(&mut self, scroll_y: f32) {
+        let factor = (1.0 - scroll_y * self.zoom_sensitivity).clamp(0.1, 10.0);
+        self.distance = (self.distance * factor).clamp(self.min_distance, self.max_distance);
+    }
+
+    /// Build the transform the camera entity should carry this frame.
+    pub fn transform(&self) -> Transform {
+        Transform::from_translation(self.position()).looking_at(self.target, Vec3::Y)
+    }
+}
+
 /// Singleton state for the shared viewport. Populated lazily on the
 /// first USD document open so headless test apps that never load USD
 /// pay no cost.
@@ -140,6 +216,9 @@ pub struct UsdViewportState {
     /// mutate in place so spawned `UsdPrimPath` children keep
     /// resolving without re-spawning the whole tree.
     current_handle: Option<Handle<UsdStageAsset>>,
+    /// Pointer-driven orbit pose. Pushed onto the camera entity each
+    /// frame the panel receives drag / scroll input.
+    pub orbit: OrbitCamera,
 }
 
 impl UsdViewportState {
@@ -198,7 +277,10 @@ fn bootstrap(world: &mut World) {
             // `Camera`. Spawn-bundled here so the camera renders
             // straight to our offscreen image.
             RenderTarget::Image(ImageRenderTarget::from(image_handle.clone())),
-            Transform::from_xyz(4.0, 3.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+            // Initial pose comes from the default orbit parameters so
+            // the very first frame matches what the panel will push
+            // after the user interacts.
+            OrbitCamera::default().transform(),
             Name::new("UsdViewportCamera"),
         ))
         .id();
@@ -550,7 +632,41 @@ impl Panel for UsdViewportPanel {
         } else {
             size.y = size.x / aspect;
         }
-        ui.add(egui::Image::new(egui::load::SizedTexture::new(tex_id, size)));
+        let response = ui.add(
+            egui::Image::new(egui::load::SizedTexture::new(tex_id, size))
+                .sense(egui::Sense::click_and_drag()),
+        );
+
+        // Orbit (Blender-style preview): left-drag spins yaw/pitch,
+        // scroll wheel zooms. Pan is a follow-up; today the target
+        // sticks at the scene origin until the user explicitly
+        // recenters it via a future double-click handler.
+        let drag = response.drag_delta();
+        let hovered = response.hovered();
+        let scroll_y = if hovered {
+            ui.ctx().input(|i| i.smooth_scroll_delta.y)
+        } else {
+            0.0
+        };
+        if drag != egui::Vec2::ZERO || scroll_y != 0.0 {
+            let (camera_entity, transform) = {
+                let mut state = world.resource_mut::<UsdViewportState>();
+                if drag != egui::Vec2::ZERO {
+                    state.orbit.apply_drag(drag);
+                }
+                if scroll_y != 0.0 {
+                    state.orbit.apply_zoom(scroll_y);
+                }
+                (state.camera, state.orbit.transform())
+            };
+            if let Some(cam) = camera_entity {
+                if let Ok(mut entity) = world.get_entity_mut(cam) {
+                    if let Some(mut tf) = entity.get_mut::<Transform>() {
+                        *tf = transform;
+                    }
+                }
+            }
+        }
     }
 }
 

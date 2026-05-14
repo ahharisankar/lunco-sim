@@ -20,9 +20,21 @@ use lunco_workbench::{BrowserAction, BrowserActions};
 pub fn drain_browser_actions(world: &mut World) {
     // Pull actions out of the world so we can mutate other resources
     // (DocumentRegistry, WorkbenchState, …) freely while iterating.
+    // Take only actions this crate owns. `OpenFile` is partitioned by
+    // file extension so domain crates (USD, future SysML, …) can
+    // dispatch their own filetypes via sibling systems without each
+    // one having to know about every other domain's extensions.
     let actions: Vec<BrowserAction> = {
         let mut outbox = world.resource_mut::<BrowserActions>();
-        outbox.drain()
+        outbox.take_where(|a| match a {
+            BrowserAction::OpenFile { relative_path } => relative_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("mo"))
+                .unwrap_or(false),
+            BrowserAction::OpenModelicaClass { .. } | BrowserAction::OpenLoadedClass { .. } => true,
+            _ => false,
+        })
     };
     if actions.is_empty() {
         return;

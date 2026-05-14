@@ -24,7 +24,7 @@ use leafwing_input_manager::prelude::*;
 
 use lunco_mobility::LunCoMobilityPlugin;
 use lunco_hardware::LunCoHardwarePlugin;
-use lunco_usd::{ui::UsdUiPlugin, UsdPlugins, UsdPrimPath};
+use lunco_usd::{ui::{UsdUiPlugin, UsdViewportPlugin}, UsdPlugins, UsdPrimPath};
 use lunco_terrain::TerrainPlugin;
 use lunco_sandbox_edit::SandboxEditPlugin;
 use lunco_controller::LunCoControllerPlugin;
@@ -179,13 +179,14 @@ fn main() {
         .add_plugins(LunCoHardwarePlugin)
         .add_plugins(LunCoMobilityPlugin)
         .add_plugins(UsdPlugins)
-        // Phase 3+: surface USD documents in the Twin browser. Browser
-        // entry only — viewport (Phase 6) is intentionally NOT added
-        // here because the sandbox already runs its own primary
-        // camera and a render-to-texture viewport would compete for
-        // the swap-chain. Other workbench bins can opt into the
-        // viewport by adding `UsdViewportPlugin` alongside this.
+        // Phase 3+: surface USD documents in the Twin browser, plus
+        // the singleton render-to-texture viewport so clicking a
+        // `.usda` row in the file browser previews it in a workbench
+        // tab (Blender-style orbit: left-drag rotates, scroll zooms).
+        // The viewport draws to its own offscreen `Image`, so the
+        // primary 3D scene camera is unaffected.
         .add_plugins(UsdUiPlugin)
+        .add_plugins(UsdViewportPlugin)
         .add_plugins(SandboxEditPlugin)
         .add_plugins(lunco_sandbox_edit::ui::SandboxEditUiPlugin)
         .add_plugins(LunCoControllerPlugin)

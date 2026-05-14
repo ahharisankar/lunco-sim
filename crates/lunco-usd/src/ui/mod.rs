@@ -25,6 +25,7 @@ use lunco_workbench::BrowserSectionRegistry;
 
 use crate::registry::UsdDocumentRegistry;
 
+pub mod browser_dispatch;
 pub mod browser_section;
 pub mod loaded_stages;
 pub mod viewport;
@@ -56,6 +57,26 @@ impl Plugin for UsdUiPlugin {
 
         app.add_observer(register_workspace_stage_on_doc_opened);
         app.add_observer(drop_workspace_stage_on_doc_closed);
+
+        // Click-to-open: `.usda` / `.usdc` rows in the Twin browser
+        // become USD documents (async file read, then registry
+        // allocate + viewport activate). Modelica owns `.mo`; the
+        // shared `BrowserActions` outbox is partitioned by extension
+        // so the two drains coexist without ordering coupling.
+        app.init_resource::<browser_dispatch::PendingUsdLoads>();
+        app.add_systems(
+            Update,
+            (
+                browser_dispatch::drain_browser_actions_for_usd,
+                browser_dispatch::drain_pending_usd_file_loads,
+            ),
+        );
+        // Typed-command parity: `OpenFile { path }` from HTTP / MCP /
+        // the unified `Open` URI router also routes USD paths into the
+        // same load pipeline. Modelica registers its own
+        // `on_open_file` observer for `.mo`; the two coexist.
+        browser_dispatch::__register_on_open_file_for_usd(app);
+        bevy::log::info!("[UsdUiPlugin] registered on_open_file_for_usd observer");
     }
 }
 
