@@ -72,12 +72,20 @@ impl InstancePanel for ModelicaPlotPanel {
 /// then dispatches to the experiments overlay + LinePlot kind.
 fn render_modelica_plot(ui: &mut egui::Ui, world: &mut World, viz_id: VizId) {
     // Mark this plot as the active one for global readers (canvas
-    // overlay, telemetry, runner auto-pick). Most-recently-rendered
-    // wins; acceptable until per-plot focus tracking lands.
+    // overlay, telemetry, runner auto-pick). Hover wins over
+    // render-order: with two plot panels visible side-by-side, the
+    // pointer's panel is the "active" one, not whichever rendered
+    // last. Falls back to render-order when there's no pointer
+    // (boot, headless, key-only navigation) so a fresh tab gets
+    // promoted on first frame.
+    let panel_rect = ui.max_rect();
+    let hovered_here = ui.rect_contains_pointer(panel_rect);
     if let Some(mut active) =
         world.get_resource_mut::<crate::ui::panels::experiments::ActivePlot>()
     {
-        active.0 = Some(viz_id);
+        if active.0.is_none() || hovered_here {
+            active.0 = Some(viz_id);
+        }
     }
     let muted = world
         .get_resource::<lunco_theme::Theme>()

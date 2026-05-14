@@ -128,17 +128,32 @@ pub fn render_pin_header(
             "Following the active tab. Click to pin to the current model.",
         ),
     };
+    // Visual accent when pinned — the 📍 / 📌 distinction alone is
+    // too subtle in some fonts. A coloured PIN badge reads at a
+    // glance and matches Dymola's "Current model" indicator.
+    let accent = world
+        .get_resource::<lunco_theme::Theme>()
+        .map(|t| t.tokens.accent)
+        .unwrap_or(egui::Color32::from_rgb(110, 170, 230));
 
     let mut toggle = false;
     ui.horizontal(|ui| {
         if ui.small_button(icon).on_hover_text(hover).clicked() {
             toggle = true;
         }
-        ui.label(
-            egui::RichText::new(label)
-                .color(muted)
-                .small(),
-        );
+        let mut text = egui::RichText::new(label).small();
+        if current_pin.is_some() {
+            text = text.color(accent).strong();
+            ui.label(
+                egui::RichText::new("PIN")
+                    .color(accent)
+                    .strong()
+                    .small(),
+            );
+        } else {
+            text = text.color(muted);
+        }
+        ui.label(text);
     });
     if toggle {
         if let Some(mut state) = world.get_resource_mut::<DocPinState>() {

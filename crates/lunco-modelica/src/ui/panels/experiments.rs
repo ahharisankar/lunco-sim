@@ -1558,7 +1558,7 @@ pub fn render_experiments_plot(
                     .small(),
             );
             if ui
-                .small_button("📌 Show latest run")
+                .small_button("👁 Show latest run")
                 .on_hover_text(
                     "Mark the most recent completed run visible in this plot \
                      and auto-pick the top dynamic variables.",
