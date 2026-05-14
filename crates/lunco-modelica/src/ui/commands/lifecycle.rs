@@ -884,6 +884,8 @@ pub fn on_document_closed_cleanup(
     mut workbench: ResMut<WorkbenchState>,
     mut workspace: ResMut<lunco_workbench::WorkspaceResource>,
     mut doc_pins: Option<ResMut<crate::ui::doc_pin::DocPinState>>,
+    mut experiments: Option<ResMut<lunco_experiments::ExperimentRegistry>>,
+    mut drafts: Option<ResMut<crate::experiments_runner::ExperimentDrafts>>,
 ) {
     let doc = trigger.event().doc;
     model_tabs.close(doc);
@@ -895,6 +897,17 @@ pub fn on_document_closed_cleanup(
     }
     if let Some(pins) = doc_pins.as_mut() {
         pins.forget(doc);
+    }
+    // Drop this doc's experiment history + setup drafts on close.
+    // Re-opening the same file path allocates a new DocumentId, so
+    // retaining records keyed by the old id would be permanent
+    // leakage (no UI path back to them).
+    if let Some(reg) = experiments.as_mut() {
+        let twin = crate::ui::doc_pin::twin_id_for_doc(doc);
+        reg.delete_for_twin(&twin);
+    }
+    if let Some(d) = drafts.as_mut() {
+        d.forget_doc(doc);
     }
 }
 

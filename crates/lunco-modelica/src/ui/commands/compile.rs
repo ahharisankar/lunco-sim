@@ -296,7 +296,7 @@ pub(crate) fn render_fast_run_setup(
         };
         // Persist edited bounds + inputs into the draft so
         // FastRunActiveModel picks them up. Overrides untouched.
-        let draft = drafts.entry(entry.model_ref.clone());
+        let draft = drafts.entry(entry.doc, entry.model_ref.clone());
         draft.bounds_override = Some(entry.bounds);
         // Parse input text → ParamValue. Empty fields are dropped
         // (= leave as Modelica `input`, default 0).
@@ -1004,7 +1004,7 @@ pub fn on_fast_run_active_model(trigger: On<FastRunActiveModel>, mut commands: C
         // Pull the override + inputs + bounds draft for this model.
         let (overrides, inputs, bounds) = {
             let drafts = world.resource::<crate::experiments_runner::ExperimentDrafts>();
-            match drafts.get(&model_ref) {
+            match drafts.get(doc, &model_ref) {
                 Some(d) => (
                     d.overrides.clone(),
                     d.inputs.clone(),

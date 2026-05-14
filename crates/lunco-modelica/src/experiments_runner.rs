@@ -801,14 +801,16 @@ fn replace_param_literal(
     Ok(out)
 }
 
-/// Per-model parameter override + bounds draft state. Edited by the
-/// override editor UI; read by `FastRunActiveModel` when constructing
-/// the experiment record. v1: keyed by `ModelRef`; v2 should key by
-/// (DocumentId, class) so two open tabs of different copies of the
-/// same class don't clobber each other.
+/// Per-(document, model) parameter override + bounds draft state.
+/// Edited by the override editor UI; read by `FastRunActiveModel`
+/// when constructing the experiment record. Keyed by
+/// `(DocumentId, ModelRef)` so two open tabs of different copies of
+/// the same class don't clobber each other's setup.
+///
+/// Cleared per-doc on `CloseDocument` (lifecycle.rs cleanup).
 #[derive(Resource, Default, Debug)]
 pub struct ExperimentDrafts {
-    drafts: std::collections::HashMap<ModelRef, ExperimentDraft>,
+    drafts: std::collections::HashMap<(lunco_doc::DocumentId, ModelRef), ExperimentDraft>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -822,14 +824,19 @@ pub struct ExperimentDraft {
 }
 
 impl ExperimentDrafts {
-    pub fn get(&self, model: &ModelRef) -> Option<&ExperimentDraft> {
-        self.drafts.get(model)
+    pub fn get(&self, doc: lunco_doc::DocumentId, model: &ModelRef) -> Option<&ExperimentDraft> {
+        self.drafts.get(&(doc, model.clone()))
     }
-    pub fn entry(&mut self, model: ModelRef) -> &mut ExperimentDraft {
-        self.drafts.entry(model).or_default()
+    pub fn entry(&mut self, doc: lunco_doc::DocumentId, model: ModelRef) -> &mut ExperimentDraft {
+        self.drafts.entry((doc, model)).or_default()
     }
-    pub fn clear(&mut self, model: &ModelRef) {
-        self.drafts.remove(model);
+    pub fn clear(&mut self, doc: lunco_doc::DocumentId, model: &ModelRef) {
+        self.drafts.remove(&(doc, model.clone()));
+    }
+    /// Drop every draft attached to `doc`. Called from the
+    /// document-close cleanup observer.
+    pub fn forget_doc(&mut self, doc: lunco_doc::DocumentId) {
+        self.drafts.retain(|(d, _), _| *d != doc);
     }
 }
 

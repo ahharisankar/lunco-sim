@@ -117,16 +117,24 @@ impl Panel for TelemetryPanel {
         // stranding the user looking at whichever model was compiled
         // last regardless of which tab they had focused.
         let (entity, has_data) = {
+            // Resolution order, strongest signal first:
+            //   1. Explicit doc-pin (user clicked 📌 on this panel)
+            //   2. Entity-level pin (`WorkbenchState.selected_entity`,
+            //      set implicitly by compile / click flows)
+            //   3. Follow the active document tab
+            // Without (1) above (2), pinning Telemetry to Model B
+            // is silently ignored when `selected_entity` still
+            // references Model A's stepper from an earlier compile.
+            let explicit_doc_pin = world
+                .get_resource::<crate::ui::doc_pin::DocPinState>()
+                .and_then(|p| p.telemetry);
             let pinned_entity = world
                 .get_resource::<WorkbenchState>()
                 .and_then(|s| s.selected_entity);
-            // Doc-level pin (`DocPinState.telemetry`) overrides the
-            // active tab for runtime telemetry; the entity-level
-            // `selected_entity` still wins when present so an
-            // explicit pick keeps working post-Compile.
-            let by_doc = crate::ui::doc_pin::resolved_telemetry_doc(world)
-                .and_then(|doc| crate::ui::state::simulator_for(world, doc));
-            let resolved = pinned_entity.or(by_doc);
+            let resolved = explicit_doc_pin
+                .and_then(|doc| crate::ui::state::simulator_for(world, doc))
+                .or(pinned_entity)
+                .or_else(|| crate::ui::state::active_simulator(world));
             let has = resolved
                 .map(|e| world.get::<ModelicaModel>(e).is_some())
                 .unwrap_or(false);
@@ -164,9 +172,9 @@ impl Panel for TelemetryPanel {
         // Read model snapshot for display. Parameter editing lives in
         // `render_selected_components_inspector` (op-pipeline based);
         // the panel only reads runtime values here.
-        let (model_name, is_paused, current_time, inputs, doc_id) = {
+        let (is_paused, current_time, inputs, doc_id) = {
             if let Some(model) = world.get::<ModelicaModel>(entity) {
-                (model.model_name.clone(), model.paused, model.current_time,
+                (model.paused, model.current_time,
                  model.inputs.clone(), model.document)
             } else {
                 ui.label("Model not found.");
@@ -204,11 +212,9 @@ impl Panel for TelemetryPanel {
                 .collect()
         };
 
-        let display_name = world.query::<Option<&Name>>().get(world, entity).ok().flatten()
-            .map(|n| n.as_str().to_string())
-            .unwrap_or_else(|| "Unnamed Model".to_string());
-
-        ui.heading(format!("{display_name} ({model_name})"));
+        // Entity / model heading suppressed — the pin header at the
+        // top of the panel already shows the doc identity, and
+        // `model_name` here is almost always a duplicate of that.
 
         // Play/Pause
         ui.horizontal(|ui| {

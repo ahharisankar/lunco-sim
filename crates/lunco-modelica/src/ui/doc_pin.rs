@@ -155,7 +155,7 @@ pub fn render_pin_header(
     }
 }
 
-fn doc_display_name(world: &World, doc: DocumentId) -> String {
+pub fn doc_display_name(world: &World, doc: DocumentId) -> String {
     world
         .get_resource::<crate::ui::ModelicaDocumentRegistry>()
         .and_then(|reg| reg.host(doc))

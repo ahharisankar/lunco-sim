@@ -257,17 +257,17 @@ fn render_unified_toolbar(
                 world.get_resource::<ModelicaDocumentRegistry>().and_then(|r| r.host(doc)).and_then(|h| h.document().index().classes.values().find(|c| !matches!(c.kind, crate::index::ClassKind::Package)).map(|c| c.name.clone()))
             }).map(lunco_experiments::ModelRef);
         if let Some(model_ref) = model_ref {
-            let drafted_bounds = world.get_resource::<crate::experiments_runner::ExperimentDrafts>().and_then(|d| d.get(&model_ref).and_then(|dr| dr.bounds_override.clone()));
+            let drafted_bounds = world.get_resource::<crate::experiments_runner::ExperimentDrafts>().and_then(|d| d.get(doc, &model_ref).and_then(|dr| dr.bounds_override.clone()));
             let bounds = drafted_bounds.unwrap_or_else(|| {
                 world.get_resource::<crate::ModelicaRunnerResource>().and_then(|r| {
                         use lunco_experiments::ExperimentRunner;
                         r.0.default_bounds(&model_ref)
                     }).unwrap_or(lunco_experiments::RunBounds { t_start: 0.0, t_end: 10.0, dt: None, tolerance: None, solver: None })
             });
-            let overrides_count = world.get_resource::<crate::experiments_runner::ExperimentDrafts>().and_then(|d| d.get(&model_ref).map(|dr| dr.overrides.len())).unwrap_or(0);
+            let overrides_count = world.get_resource::<crate::experiments_runner::ExperimentDrafts>().and_then(|d| d.get(doc, &model_ref).map(|dr| dr.overrides.len())).unwrap_or(0);
             let source_text = world.get_resource::<ModelicaDocumentRegistry>().and_then(|r| r.host(doc)).map(|h| h.document().source().to_string()).unwrap_or_default();
             let detected = crate::experiments_runner::detect_top_level_inputs(&source_text);
-            let prefilled = world.get_resource::<crate::experiments_runner::ExperimentDrafts>().and_then(|d| d.get(&model_ref).map(|dr| dr.inputs.clone())).unwrap_or_default();
+            let prefilled = world.get_resource::<crate::experiments_runner::ExperimentDrafts>().and_then(|d| d.get(doc, &model_ref).map(|dr| dr.inputs.clone())).unwrap_or_default();
             let inputs: Vec<crate::ui::commands::FastRunInput> = detected.into_iter().map(|d| {
                     let value_text = prefilled.get(&lunco_experiments::ParamPath(d.name.clone())).map(|v| match v {
                             lunco_experiments::ParamValue::Real(x) => format!("{x}"),

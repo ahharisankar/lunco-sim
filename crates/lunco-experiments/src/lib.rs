@@ -274,6 +274,21 @@ impl ExperimentRegistry {
             .unwrap_or(&[])
     }
 
+    /// Evict every experiment under `twin`, regardless of status.
+    /// Returns the number of records removed. Callers should ensure
+    /// no in-flight handles still reference the cleared ids (the
+    /// drain system will silently drop updates for missing rows).
+    pub fn delete_for_twin(&mut self, twin: &TwinId) -> usize {
+        let removed = self
+            .by_twin
+            .remove(twin)
+            .map(|v| v.len())
+            .unwrap_or(0);
+        self.name_counter.retain(|(t, _), _| t != twin);
+        self.color_counter.remove(twin);
+        removed
+    }
+
     pub fn delete(&mut self, id: ExperimentId) -> bool {
         for bucket in self.by_twin.values_mut() {
             if let Some(pos) = bucket.iter().position(|e| e.id == id) {
