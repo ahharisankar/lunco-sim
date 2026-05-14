@@ -94,6 +94,206 @@ impl PendingCloseAfterSave {
     pub fn take(&mut self, doc: DocumentId) -> Vec<u64> {
         self.docs.remove(&doc).unwrap_or_default()
     }
+    pub fn is_empty(&self) -> bool {
+        self.docs.is_empty()
+    }
+}
+
+/// State for the Dymola-style app-close save flow. When the user
+/// requests exit (via API `Exit`, menu, window-X), [`request_app_close`]
+/// arms this and pushes every dirty doc's tab into the existing
+/// [`lunco_workbench::PendingTabCloses`] queue. The per-tab Save/Don't
+/// save/Cancel modal infrastructure (`render_close_dialogs`) walks one
+/// prompt at a time. The [`finalize_app_close`] system polls the
+/// close pipeline and fires `AppExit` once all prompts resolve cleanly,
+/// or disarms when the user picks Cancel anywhere.
+#[derive(Resource, Default)]
+pub struct AppCloseFlow {
+    pub armed: bool,
+    /// Frames to wait after arming before the finalizer may fire.
+    /// Bridges the gap between `request_app_close` pushing tabs into
+    /// `PendingTabCloses` and `render_close_dialogs` actually
+    /// enqueueing the per-tab modals (which only happens in the egui
+    /// pass after the Update schedule). Without this the finalizer
+    /// sees "no pending modals" before any modal exists and concludes
+    /// "user cancelled" prematurely.
+    pub cooldown_frames: u8,
+}
+
+/// Entry point invoked by the `Exit` command and by the window-X
+/// interceptor. If no Modelica docs are dirty, fires `AppExit`
+/// immediately. Otherwise, arms the close flow and pushes every dirty
+/// doc's open tabs into the existing per-tab close pipeline — the
+/// `render_close_dialogs` system pops one Save / Don't save / Cancel
+/// modal per tab, just like Dymola.
+pub fn request_app_close(world: &mut World) {
+    if world.get_resource::<AppCloseFlow>().map(|f| f.armed).unwrap_or(false) {
+        // Already in progress — re-clicking X just lets the existing
+        // sequential prompt continue. Avoid re-queueing tabs.
+        return;
+    }
+    // Cross-domain dirty list — `UnsavedDocs` is the shared bus every
+    // domain registry pushes into (Modelica today; USD/Python/etc.
+    // when they land). Reading from it instead of
+    // `ModelicaDocumentRegistry` directly means future domains' dirty
+    // docs are automatically picked up by the close prompt with no
+    // change here.
+    let dirty_tabs: Vec<(DocumentId, u64)> = {
+        let Some(unsaved) = world.get_resource::<lunco_workbench::UnsavedDocs>()
+        else {
+            fire_app_exit(world);
+            return;
+        };
+        let dirty_ids: Vec<DocumentId> = unsaved
+            .entries
+            .iter()
+            .filter(|e| e.is_unsaved)
+            .map(|e| e.id)
+            .collect();
+        if dirty_ids.is_empty() {
+            fire_app_exit(world);
+            return;
+        }
+        // Find each dirty doc's open tab(s). ModelTabs is Modelica's
+        // tab table — when other domains add their own InstancePanel
+        // tab tables, extend this to consult them too (or generalise
+        // to a workbench-level "find tab(s) for doc id" registry).
+        // Synthetic instance=0 is the fallback when no tab is open
+        // for the dirty doc (registry-only edits).
+        let tabs = world.get_resource::<crate::ui::panels::model_view::ModelTabs>();
+        let mut out = Vec::new();
+        for doc_id in dirty_ids {
+            let mut any = false;
+            if let Some(tabs) = tabs {
+                for (tab_id, state) in tabs.iter() {
+                    if state.doc == doc_id {
+                        out.push((state.doc, tab_id));
+                        any = true;
+                    }
+                }
+            }
+            if !any {
+                out.push((doc_id, 0));
+            }
+        }
+        out
+    };
+    if dirty_tabs.is_empty() {
+        fire_app_exit(world);
+        return;
+    }
+    bevy::log::info!(
+        "[AppClose] {} dirty tab(s) — prompting before exit",
+        dirty_tabs.len()
+    );
+    if let Some(mut flow) = world.get_resource_mut::<AppCloseFlow>() {
+        flow.armed = true;
+        flow.cooldown_frames = 4;
+    }
+    // Push tabs into the workbench's per-tab close queue. The existing
+    // `drain_pending_tab_closes` system will detect dirty docs and
+    // enqueue Save/Don't save/Cancel modals through `render_close_dialogs`.
+    if let Some(mut pending) =
+        world.get_resource_mut::<lunco_workbench::PendingTabCloses>()
+    {
+        for (_doc, tab) in dirty_tabs {
+            pending.push(lunco_workbench::TabId::Instance {
+                kind: MODEL_VIEW_KIND,
+                instance: tab,
+            });
+        }
+    }
+}
+
+fn fire_app_exit(world: &mut World) {
+    if let Some(mut messages) =
+        world.get_resource_mut::<bevy::ecs::message::Messages<bevy::app::AppExit>>()
+    {
+        bevy::log::info!("[AppClose] no dirty docs — exiting");
+        messages.write(bevy::app::AppExit::Success);
+    }
+}
+
+/// Intercept the window's X-button close request. Bevy's default
+/// behaviour is "close immediately" when `Window::close_when_requested`
+/// is true; we set that to `false` (in `bin/lunica.rs`) so this system
+/// runs first and can route through the save-prompt flow.
+pub fn on_window_close_requested(
+    mut events: bevy::ecs::message::MessageReader<bevy::window::WindowCloseRequested>,
+    mut commands: Commands,
+) {
+    if events.is_empty() {
+        return;
+    }
+    // Drain — we don't need per-window info; one request triggers the
+    // app-wide close flow.
+    let _ = events.read().count();
+    commands.queue(|world: &mut World| {
+        request_app_close(world);
+    });
+}
+
+/// Finalizer: when the close flow is armed and every per-tab modal
+/// has resolved (either Save completed or Don't-save closed the tab),
+/// fires `AppExit`. If the user picked Cancel anywhere (dirty docs
+/// still exist after all modals settle), disarms and stays open.
+pub fn finalize_app_close(
+    flow: Option<ResMut<AppCloseFlow>>,
+    close_dialogs: Option<Res<CloseDialogState>>,
+    pending_save_close: Option<Res<PendingCloseAfterSave>>,
+    pending_tab_closes: Option<Res<lunco_workbench::PendingTabCloses>>,
+    registry: Option<Res<ModelicaDocumentRegistry>>,
+    mut exit_events: bevy::ecs::message::MessageWriter<bevy::app::AppExit>,
+) {
+    let Some(mut flow) = flow else { return };
+    if !flow.armed {
+        return;
+    }
+    // Cooldown: the modals don't exist yet on the frame the flow is
+    // armed (request_app_close → PendingTabCloses → drained next frame
+    // → render_close_dialogs enqueues modal in egui pass). Decrement
+    // and skip until expired so we don't conclude "no pending modals
+    // ⇒ user cancelled" before any modal renders.
+    if flow.cooldown_frames > 0 {
+        flow.cooldown_frames -= 1;
+        return;
+    }
+    // Wait for the full pipeline to drain:
+    //   PendingTabCloses → CloseDialogState.pending → .requested → outcome.
+    let tabs_pending = pending_tab_closes
+        .as_ref()
+        .map(|p| !p.is_empty())
+        .unwrap_or(false);
+    let modals_settled = close_dialogs
+        .as_ref()
+        .map(|d| d.pending.is_empty() && d.requested.is_empty())
+        .unwrap_or(true);
+    let saves_done = pending_save_close
+        .as_ref()
+        .map(|p| p.is_empty())
+        .unwrap_or(true);
+    if tabs_pending || !modals_settled || !saves_done {
+        return;
+    }
+    // All prompts processed. Anything still dirty means the user
+    // cancelled at least one — abort the close.
+    let any_dirty = registry
+        .as_ref()
+        .map(|r| {
+            r.iter().any(|(_, host)| {
+                let d = host.document();
+                d.is_dirty() && !d.is_read_only()
+            })
+        })
+        .unwrap_or(false);
+    if any_dirty {
+        bevy::log::info!("[AppClose] cancelled — staying open");
+        flow.armed = false;
+        return;
+    }
+    bevy::log::info!("[AppClose] all prompts resolved — exiting");
+    flow.armed = false;
+    exit_events.write(bevy::app::AppExit::Success);
 }
 
 // ─── Observers ───────────────────────────────────────────────────────────────

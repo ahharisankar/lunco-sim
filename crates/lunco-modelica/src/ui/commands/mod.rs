@@ -45,6 +45,7 @@ impl Plugin for ModelicaCommandsPlugin {
         app.add_plugins(compile::CompilePlugin)
             .init_resource::<CloseDialogState>()
             .init_resource::<PendingCloseAfterSave>()
+            .init_resource::<lifecycle::AppCloseFlow>()
             .add_observer(doc::on_undo_document)
             .add_observer(doc::on_redo_document)
             .add_observer(doc::on_save_document)
@@ -67,6 +68,8 @@ impl Plugin for ModelicaCommandsPlugin {
                     lifecycle::drain_pending_tab_closes,
                     status::update_status_bar,
                     status::publish_unsaved_modelica_docs,
+                    lifecycle::on_window_close_requested,
+                    lifecycle::finalize_app_close,
                 ),
             )
             .add_systems(

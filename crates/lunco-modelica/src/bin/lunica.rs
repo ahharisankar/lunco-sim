@@ -74,6 +74,11 @@ fn main() {
                 position: WindowPosition::Centered(MonitorSelection::Primary),
                 ..lunco_workbench::merged_titlebar_window(window_title)
             }),
+            // Route the OS X-button through the in-app save-prompt
+            // flow (`lifecycle::on_window_close_requested`). Default
+            // `true` would close the window immediately on X click,
+            // skipping the dirty-doc Save dialogs.
+            close_when_requested: false,
             ..default()
         }))
         .add_plugins(EguiPlugin::default())

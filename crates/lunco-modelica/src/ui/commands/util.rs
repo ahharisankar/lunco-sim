@@ -22,12 +22,8 @@ pub fn on_ping(_cmd: Ping) {
 
 #[on_command(Exit)]
 pub fn on_exit(_trigger: On<Exit>, mut commands: Commands) {
-    bevy::log::info!("[Exit] AppExit triggered via API");
+    bevy::log::info!("[Exit] requested — routing through app-close flow");
     commands.queue(|world: &mut World| {
-        if let Some(mut messages) =
-            world.get_resource_mut::<bevy::ecs::message::Messages<bevy::app::AppExit>>()
-        {
-            messages.write(bevy::app::AppExit::Success);
-        }
+        crate::ui::commands::lifecycle::request_app_close(world);
     });
 }

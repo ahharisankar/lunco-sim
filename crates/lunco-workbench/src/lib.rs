@@ -359,6 +359,12 @@ impl PendingTabCloses {
     pub fn push(&mut self, tab: TabId) {
         self.pending.push(tab);
     }
+
+    /// `true` when nothing is queued. Used by close-flow finalizers
+    /// to detect whether the per-tab close pipeline has fully drained.
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
 }
 
 impl Default for WorkbenchLayout {
@@ -1996,11 +2002,14 @@ fn render_msl_chip(
             };
             (theme.tokens.warning, phase_label.to_string(), pct)
         }
-        MslLoadState::Ready { file_count, .. } => (
-            theme.tokens.success,
-            format!("MSL · {file_count} files"),
-            None,
-        ),
+        MslLoadState::Ready { .. } => {
+            // Ready state is already announced by the StatusBus mirror
+            // ("MSL ready — N files") on the left of the status bar.
+            // Hiding the chip avoids the duplicate label the user sees
+            // once MSL finishes loading. The chip stays visible during
+            // Loading (progress bar) and Failed (error hover).
+            return;
+        }
         MslLoadState::Failed(_) => (theme.tokens.error, "MSL · failed".to_string(), None),
     };
     let (rect, _) =
