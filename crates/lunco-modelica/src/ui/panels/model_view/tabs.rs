@@ -84,6 +84,15 @@ impl ModelTabs {
         id
     }
 
+    /// Force a tab's view mode. Used at open-time to default
+    /// non-Modelica files to [`ModelViewMode::Text`] (no point rendering
+    /// an empty Canvas for content that has no classes / connectors).
+    pub fn set_view_mode(&mut self, tab_id: TabId, mode: ModelViewMode) {
+        if let Some(state) = self.tabs.get_mut(&tab_id) {
+            state.view_mode = mode;
+        }
+    }
+
     pub fn pin(&mut self, tab_id: TabId) {
         if let Some(state) = self.tabs.get_mut(&tab_id) {
             state.pinned = true;

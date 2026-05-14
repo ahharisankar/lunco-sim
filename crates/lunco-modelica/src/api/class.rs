@@ -197,6 +197,7 @@ pub fn on_rename_open_document_chain_to_modelica(
 pub fn on_file_renamed_chain_to_modelica(
     trigger: On<lunco_workbench::FileRenamed>,
     workspace: Res<lunco_workbench::WorkspaceResource>,
+    mut registry: ResMut<crate::ui::state::ModelicaDocumentRegistry>,
     mut commands: Commands,
 ) {
     use lunco_doc::DocumentOrigin;
@@ -207,6 +208,44 @@ pub fn on_file_renamed_chain_to_modelica(
         ev.new_abs.display(),
         ev.is_dir
     );
+    // Patch every Modelica doc whose origin lay under the renamed
+    // path. The workbench observer already patched `Workspace.documents`
+    // but the per-domain registry (where `SaveDocument` reads the
+    // path) is separate — without this, Save would write to the
+    // stale pre-rename path, resurrecting the old file on disk and
+    // leaving the renamed file with stale content.
+    let doc_ids: Vec<lunco_doc::DocumentId> = registry
+        .iter()
+        .filter_map(|(id, host)| match host.document().origin() {
+            DocumentOrigin::File { path, .. } if path.starts_with(&ev.old_abs) => {
+                Some(id)
+            }
+            _ => None,
+        })
+        .collect();
+    for id in doc_ids {
+        if let Some(host) = registry.host_mut(id) {
+            let doc = host.document_mut();
+            let (new_path, writable) = match doc.origin() {
+                DocumentOrigin::File { path, writable } => {
+                    let suffix = path
+                        .strip_prefix(&ev.old_abs)
+                        .expect("starts_with implies strip_prefix");
+                    let new = if suffix.as_os_str().is_empty() {
+                        ev.new_abs.clone()
+                    } else {
+                        ev.new_abs.join(suffix)
+                    };
+                    (new, *writable)
+                }
+                _ => continue,
+            };
+            doc.set_origin(DocumentOrigin::File {
+                path: new_path,
+                writable,
+            });
+        }
+    }
     if ev.is_dir {
         return;
     }
