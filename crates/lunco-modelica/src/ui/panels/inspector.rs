@@ -54,10 +54,15 @@ impl Panel for InspectorPanel {
             .map(|t| (t.tokens.warning, t.tokens.text_subdued))
             .unwrap_or((egui::Color32::from_rgb(180, 150, 90), egui::Color32::GRAY));
         // ── Resolve target doc ───────────────────────────────────
-        let active_doc = world
-            .get_resource::<lunco_workbench::WorkspaceResource>()
-            .and_then(|ws| ws.active_document);
-        let Some(doc_id) = active_doc else {
+        // Follow-active by default; honor the panel's pin if set
+        // (see `doc_pin::DocPinState`). Pin header below lets the
+        // user toggle.
+        crate::ui::doc_pin::render_pin_header(
+            ui,
+            world,
+            crate::ui::doc_pin::PinKind::Inspector,
+        );
+        let Some(doc_id) = crate::ui::doc_pin::resolved_inspector_doc(world) else {
             placeholder(ui, "No active document.");
             return;
         };

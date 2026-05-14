@@ -99,6 +99,9 @@ pub mod browser_section;
 /// existing document-load and drill-in pipelines.
 pub mod browser_dispatch;
 
+/// Per-panel "pin to model" overrides for singleton inspector panels.
+pub mod doc_pin;
+
 use crate::ModelicaModel;
 
 /// Fan queued document lifecycle notifications out as observer triggers.
@@ -721,6 +724,7 @@ impl Plugin for ModelicaUiPlugin {
             .register_panel(panels::experiments::ExperimentsPanel)
             .init_resource::<panels::experiments::ExperimentVisibility>()
             .init_resource::<panels::experiments::PlotPanelStates>()
+            .init_resource::<doc_pin::DocPinState>()
             .init_resource::<panels::experiments::ActivePlot>()
             .register_panel(panels::canvas_diagram::CanvasDiagramPanel)
             .init_resource::<panels::canvas_diagram::CanvasDiagramState>()

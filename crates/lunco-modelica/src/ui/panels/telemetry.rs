@@ -92,6 +92,15 @@ impl Panel for TelemetryPanel {
             .map(|t| t.tokens.text_subdued)
             .unwrap_or(egui::Color32::from_rgb(140, 140, 160));
 
+        // Pin header — follow active tab by default; click 📍 to
+        // pin this panel to the currently active model so it stays
+        // put while the user edits another tab.
+        crate::ui::doc_pin::render_pin_header(
+            ui,
+            world,
+            crate::ui::doc_pin::PinKind::Telemetry,
+        );
+
         // Component inspector — when one or more nodes are selected
         // on the active diagram, show their parameters and let the
         // user edit them. Works pre- and post-compile; edits go
@@ -108,10 +117,16 @@ impl Panel for TelemetryPanel {
         // stranding the user looking at whichever model was compiled
         // last regardless of which tab they had focused.
         let (entity, has_data) = {
-            let pinned = world
+            let pinned_entity = world
                 .get_resource::<WorkbenchState>()
                 .and_then(|s| s.selected_entity);
-            let resolved = pinned.or_else(|| crate::ui::state::active_simulator(world));
+            // Doc-level pin (`DocPinState.telemetry`) overrides the
+            // active tab for runtime telemetry; the entity-level
+            // `selected_entity` still wins when present so an
+            // explicit pick keeps working post-Compile.
+            let by_doc = crate::ui::doc_pin::resolved_telemetry_doc(world)
+                .and_then(|doc| crate::ui::state::simulator_for(world, doc));
+            let resolved = pinned_entity.or(by_doc);
             let has = resolved
                 .map(|e| world.get::<ModelicaModel>(e).is_some())
                 .unwrap_or(false);

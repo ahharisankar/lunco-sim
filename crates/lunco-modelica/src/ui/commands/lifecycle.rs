@@ -883,6 +883,7 @@ pub fn on_document_closed_cleanup(
     mut compile_states: ResMut<CompileStates>,
     mut workbench: ResMut<WorkbenchState>,
     mut workspace: ResMut<lunco_workbench::WorkspaceResource>,
+    mut doc_pins: Option<ResMut<crate::ui::doc_pin::DocPinState>>,
 ) {
     let doc = trigger.event().doc;
     model_tabs.close(doc);
@@ -891,6 +892,9 @@ pub fn on_document_closed_cleanup(
     if workspace.active_document == Some(doc) {
         workspace.active_document = None;
         workbench.editor_buffer.clear();
+    }
+    if let Some(pins) = doc_pins.as_mut() {
+        pins.forget(doc);
     }
 }
 
