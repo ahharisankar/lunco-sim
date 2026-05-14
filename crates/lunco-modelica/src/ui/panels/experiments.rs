@@ -1228,6 +1228,14 @@ impl ExperimentsPanel {
                                         .unwrap_or_else(|| "unsupported".into()),
                                 );
                             } else {
+                                // No-override state shows an *empty*
+                                // editable cell with the default as
+                                // hint text. Previously the field was
+                                // pre-filled with the default literal,
+                                // which made it indistinguishable from
+                                // a disabled/read-only cell and users
+                                // didn't realize they could click and
+                                // type to override.
                                 let existing = current_overrides.get(&path).cloned();
                                 let mut text = match &existing {
                                     Some(ParamValue::Real(x)) => format!("{x}"),
@@ -1238,10 +1246,14 @@ impl ExperimentsPanel {
                                     Some(ParamValue::String(s)) => s.clone(),
                                     Some(ParamValue::Enum(s)) => s.clone(),
                                     Some(ParamValue::RealArray(_)) => "(array)".into(),
-                                    None => p.default_literal.clone().unwrap_or_default(),
+                                    None => String::new(),
                                 };
+                                let hint =
+                                    p.default_literal.clone().unwrap_or_default();
                                 let resp = ui.add(
-                                    egui::TextEdit::singleline(&mut text).desired_width(80.0),
+                                    egui::TextEdit::singleline(&mut text)
+                                        .desired_width(80.0)
+                                        .hint_text(hint),
                                 );
                                 if resp.lost_focus()
                                     || resp.ctx.input(|i| i.key_pressed(egui::Key::Enter))
@@ -1341,15 +1353,65 @@ struct PlotSeries {
 /// - Y-axis label: shows the unit when every visible variable shares
 ///   one; otherwise blank (mixed-unit plots happen often when users
 ///   tick variables across components).
+/// Extra line injected into the experiments plot — used by
+/// [`crate::ui::panels::graphs`] to overlay live `SignalRegistry`
+/// histories on top of the completed-run curves so users see a
+/// single merged plot instead of two stacked widgets.
+pub struct PlotExtraLine {
+    pub label: String,
+    pub color: (u8, u8, u8),
+    pub points: Vec<[f64; 2]>,
+}
+
+/// Render a bare plot frame plus any live overlays. Used when no
+/// active doc is resolved so the Graphs tab still shows a plot
+/// widget instead of disappearing.
+fn render_empty_plot_frame(ui: &mut egui::Ui, extras: &[PlotExtraLine]) {
+    Plot::new("graphs_experiments_plot_empty")
+        .legend(Legend::default())
+        .allow_drag(false)
+        .show(ui, |plot_ui| {
+            for ex in extras {
+                let (r, g, b) = ex.color;
+                let line =
+                    Line::new(ex.label.clone(), PlotPoints::from(ex.points.clone()))
+                        .color(egui::Color32::from_rgb(r, g, b));
+                plot_ui.line(line);
+            }
+        });
+}
+
 pub fn render_experiments_plot(
     ui: &mut egui::Ui,
     world: &mut World,
     viz_id: VizId,
 ) -> ExpPlotSummary {
+    render_experiments_plot_inner(ui, world, viz_id, &[])
+}
+
+pub fn render_experiments_plot_with_extras(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    viz_id: VizId,
+    extras: &[PlotExtraLine],
+) -> ExpPlotSummary {
+    render_experiments_plot_inner(ui, world, viz_id, extras)
+}
+
+fn render_experiments_plot_inner(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    viz_id: VizId,
+    extras: &[PlotExtraLine],
+) -> ExpPlotSummary {
     // Scope to the experiments-pinned (or active) doc — same
-    // semantics as the Experiments table above.
+    // semantics as the Experiments table above. When no doc is
+    // resolved yet (boot, welcome screen, no model open) we still
+    // render an empty plot widget plus any live overlays so the
+    // Graphs tab never collapses to a blank panel.
     let Some(doc_id) = crate::ui::doc_pin::resolved_experiments_doc(world)
     else {
+        render_empty_plot_frame(ui, extras);
         return ExpPlotSummary::default();
     };
     let twin = crate::ui::doc_pin::twin_id_for_doc(doc_id);
@@ -1373,18 +1435,23 @@ pub fn render_experiments_plot(
         .get_resource::<ExperimentRegistry>()
         .map(|r| r.list_for_twin(&twin).len())
         .unwrap_or(0);
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(format!("📈 {doc_label}  ·  {run_count} run{}", if run_count == 1 { "" } else { "s" }))
-                .color(col_muted)
-                .small(),
-        );
-    });
 
     let (visible, picked_vars) = world
         .get_resource::<PlotPanelStates>()
         .map(|s| (s.visible(viz_id), s.picked(viz_id)))
         .unwrap_or_default();
+
+    let var_count = picked_vars.len();
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!(
+                "📈 {doc_label}  ·  {var_count} var{}",
+                if var_count == 1 { "" } else { "s" }
+            ))
+            .color(col_muted)
+            .small(),
+        );
+    });
 
     // Build var -> unit map from the active doc index.
     let units: std::collections::HashMap<String, String> = active_doc_units(world, viz_id);
@@ -1641,6 +1708,16 @@ pub fn render_experiments_plot(
                     .style(style);
                 plot_ui.line(line);
             }
+            // Live `SignalRegistry` curves overlaid on top of the
+            // run curves so users get a single merged plot instead
+            // of separate "experiment" and "live" widgets.
+            for ex in extras {
+                let (r, g, b) = ex.color;
+                let line =
+                    Line::new(ex.label.clone(), PlotPoints::from(ex.points.clone()))
+                        .color(egui::Color32::from_rgb(r, g, b));
+                plot_ui.line(line);
+            }
             if let Some(t) = scrub_time {
                 plot_ui.vline(
                     VLine::new("scrub", t)
@@ -1685,6 +1762,7 @@ pub fn render_experiments_plot(
             if let Some(mut states) = world.get_resource_mut::<PlotPanelStates>() {
                 let entry = states.entry(viz_id);
                 entry.visible_experiments.insert(exp.id);
+                entry.auto_show_attempted = true;
                 if entry.picked_vars.is_empty() {
                     if let Some(result) = &exp.result {
                         let mut by_var: Vec<(&String, f64)> = result

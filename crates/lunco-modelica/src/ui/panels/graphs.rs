@@ -142,47 +142,21 @@ fn render_modelica_plot(ui: &mut egui::Ui, world: &mut World, viz_id: VizId) {
     let has_live = bound_count > 0;
     let has_exp = exp_summary.total_runs > 0;
 
-    let show_top_header = has_live || (!has_live && !has_exp);
-    if show_top_header {
+    // Top action row — same shape regardless of state so the no-run
+    // and run views align visually. Per-state captions (live sample
+    // range, "0 vars" etc.) live on the experiments plot's own
+    // header row, which is always rendered below.
+    {
         ui.horizontal(|ui| {
-            if has_live {
+            if has_live && time_min.is_finite() && time_max.is_finite() {
                 ui.label(
-                    egui::RichText::new(format!("Live: {bound_count} var"))
-                        .size(11.0)
-                        .color(muted),
-                );
-                if time_min.is_finite() && time_max.is_finite() {
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "t: {time_min:.2}→{time_max:.2}s  ({sample_total} samples)"
-                        ))
-                        .size(11.0)
-                        .color(muted),
-                    );
-                }
-            } else {
-                ui.label(
-                    egui::RichText::new("No data yet — pick variables in")
-                        .size(11.0)
-                        .color(muted),
-                );
-                if ui
-                    .small_button("Telemetry")
-                    .on_hover_text("Focus the Telemetry panel.")
-                    .clicked()
-                {
-                    world.commands().trigger(lunco_workbench::FocusPanel {
-                        id: "modelica_inspector".into(),
-                    });
-                }
-                ui.label(
-                    egui::RichText::new("and run a model.")
-                        .size(11.0)
-                        .color(muted),
+                    egui::RichText::new(format!(
+                        "t: {time_min:.2}→{time_max:.2}s  ({sample_total} samples)"
+                    ))
+                    .size(11.0)
+                    .color(muted),
                 );
             }
-
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let new_plot = ui
                     .small_button("➕")
@@ -231,18 +205,66 @@ fn render_modelica_plot(ui: &mut egui::Ui, world: &mut World, viz_id: VizId) {
         export_graph_to_csv(world, viz_id);
     }
 
-    if has_exp && has_live {
-        let avail = ui.available_height();
-        ui.allocate_ui(egui::vec2(ui.available_width(), avail * 0.5), |ui| {
-            crate::ui::panels::experiments::render_experiments_plot(ui, world, viz_id);
-        });
-        ui.separator();
+    // Plot frame is always rendered — even with no runs and no live
+    // bindings the user gets an empty grid so the panel never looks
+    // broken or absent. `render_experiments_plot_with_extras` draws
+    // the plot widget unconditionally; we just feed it whatever live
+    // overlays exist (none, when there are no bindings yet).
+    if has_live && !has_exp {
+        // Pure live mode keeps the dedicated LinePlot rendering so
+        // the X/Y/+add binding picker stays accessible.
         render_line_plot(ui, world, viz_id);
-    } else if has_exp {
-        crate::ui::panels::experiments::render_experiments_plot(ui, world, viz_id);
-    } else if has_live {
-        render_line_plot(ui, world, viz_id);
+    } else {
+        let extras = if has_live {
+            collect_live_extras(world, viz_id)
+        } else {
+            Vec::new()
+        };
+        crate::ui::panels::experiments::render_experiments_plot_with_extras(
+            ui, world, viz_id, &extras,
+        );
     }
+}
+
+/// Build the live-signal overlay used when the Graphs panel has
+/// both completed runs *and* live-signal bindings. Reads the same
+/// per-VizId `VisualizationConfig` that the LinePlot kind reads, so
+/// the curves match what the dedicated live plot would draw (color,
+/// label, visibility — minus the X/Y picker UI, which only the
+/// LinePlot toolbar exposes).
+fn collect_live_extras(
+    world: &World,
+    viz_id: VizId,
+) -> Vec<crate::ui::panels::experiments::PlotExtraLine> {
+    let Some(reg) = world.get_resource::<VisualizationRegistry>() else {
+        return Vec::new();
+    };
+    let Some(cfg) = reg.get(viz_id) else {
+        return Vec::new();
+    };
+    let Some(sigs) = world.get_resource::<SignalRegistry>() else {
+        return Vec::new();
+    };
+    cfg.inputs
+        .iter()
+        .filter(|b| b.role == "y" && b.visible)
+        .filter_map(|b| {
+            let hist = sigs.scalar_history(&b.source)?;
+            if hist.is_empty() {
+                return None;
+            }
+            let points: Vec<[f64; 2]> = hist.iter().map(|s| [s.time, s.value]).collect();
+            let color = b
+                .color
+                .unwrap_or_else(|| lunco_viz::signal::color_for_signal(&b.source.path));
+            let label = b.label.clone().unwrap_or_else(|| b.source.path.clone());
+            Some(crate::ui::panels::experiments::PlotExtraLine {
+                label,
+                color: (color.r(), color.g(), color.b()),
+                points,
+            })
+        })
+        .collect()
 }
 
 fn render_line_plot(ui: &mut egui::Ui, world: &mut World, viz_id: VizId) {
