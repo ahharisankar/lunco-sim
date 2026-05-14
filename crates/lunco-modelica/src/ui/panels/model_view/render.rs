@@ -200,10 +200,18 @@ fn render_unified_toolbar(
         if ui.selectable_label(view_mode == ModelViewMode::Docs, "📖").clicked() { new_view_mode = ModelViewMode::Docs; }
         ui.separator();
 
+        // Status pill — single compact icon for every run/compile
+        // state. Realtime stepping (sim_state.paused == false) and
+        // background Fast Run (`runner_busy`) both surface as the
+        // same `⏩` glyph so the toolbar doesn't shout "Running…" in
+        // one mode while staying silent in the other.
+        let realtime_active = sim_state.map(|(p, _)| !p).unwrap_or(false);
         if let Some(ref err) = compilation_error {
             if ui.colored_label(tokens.error, "⚠ Error").on_hover_text(format!("{err}\n(click to dismiss)")).clicked() { dismiss_error = true; }
         } else if runner_busy {
             ui.colored_label(tokens.warning, "⏩ Running…").on_hover_text("Fast Run in progress — background simulation");
+        } else if realtime_active {
+            ui.colored_label(tokens.warning, "⏩ Running…").on_hover_text("Realtime simulation stepping");
         } else {
             match compile_state {
                 CompileState::Compiling => { ui.colored_label(tokens.warning, "⏳"); }

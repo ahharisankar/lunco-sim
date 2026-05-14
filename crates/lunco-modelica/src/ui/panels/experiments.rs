@@ -66,11 +66,27 @@ pub struct PlotPanelState {
     pub scrub_time: Option<f64>,
     pub visible_experiments: std::collections::HashSet<ExperimentId>,
     pub last_twin: Option<lunco_experiments::TwinId>,
+    /// True once the plot has auto-promoted the latest run for this
+    /// twin (mark-visible + pick top dynamic vars). Prevents the
+    /// auto-show from fighting the user after they explicitly empty
+    /// the plot. Reset on twin switch by `sync_twin`'s restore path
+    /// (a fresh state for a new twin starts at `false`).
+    pub auto_show_attempted: bool,
 }
 
 #[derive(Resource, Default, Debug)]
 pub struct PlotPanelStates {
     pub by_viz: std::collections::HashMap<VizId, PlotPanelState>,
+    /// Archived per-(viz, twin) state. When a plot's resolved twin
+    /// changes (user switches to a tab backed by a different model),
+    /// the live entry's prior state is stashed here keyed by the
+    /// previous twin; returning to that twin restores the picks /
+    /// run-visibility / scrub. Without this archive, switching tabs
+    /// would discard the prior plot's curve selections entirely.
+    archived: std::collections::HashMap<
+        (VizId, lunco_experiments::TwinId),
+        PlotPanelState,
+    >,
 }
 
 impl PlotPanelStates {
@@ -138,6 +154,40 @@ impl PlotPanelStates {
         for s in self.by_viz.values_mut() {
             s.visible_experiments.remove(&id);
         }
+        for s in self.archived.values_mut() {
+            s.visible_experiments.remove(&id);
+        }
+    }
+
+    /// Swap the live entry for `viz` to match `twin`, archiving any
+    /// non-empty state from the previous twin and restoring a prior
+    /// stash for `twin` if one exists. Idempotent when the twin is
+    /// already current. Called at the top of `render_experiments_plot`
+    /// each frame.
+    pub fn sync_twin(&mut self, viz: VizId, twin: &lunco_experiments::TwinId) {
+        let needs_swap = match self.by_viz.get(&viz) {
+            Some(s) => s.last_twin.as_ref() != Some(twin),
+            None => true,
+        };
+        if !needs_swap {
+            return;
+        }
+        if let Some(prev) = self.by_viz.remove(&viz) {
+            if let Some(prev_twin) = prev.last_twin.clone() {
+                let worth_keeping = !prev.picked_vars.is_empty()
+                    || !prev.visible_experiments.is_empty()
+                    || prev.scrub_time.is_some();
+                if worth_keeping {
+                    self.archived.insert((viz, prev_twin), prev);
+                }
+            }
+        }
+        let mut restored = self
+            .archived
+            .remove(&(viz, twin.clone()))
+            .unwrap_or_default();
+        restored.last_twin = Some(twin.clone());
+        self.by_viz.insert(viz, restored);
     }
 }
 
@@ -1308,16 +1358,11 @@ pub fn render_experiments_plot(
         (t.tokens.warning, t.tokens.accent, t.tokens.text_subdued)
     };
 
-    // Doc switch → drop stale picks / visibility ids that belonged
-    // to the previous doc's namespace.
+    // Doc switch → archive the previous twin's picks / visibility
+    // and restore any prior stash for the new twin, so returning to
+    // a tab brings back its plot selections instead of dropping them.
     if let Some(mut states) = world.get_resource_mut::<PlotPanelStates>() {
-        let entry = states.entry(viz_id);
-        if entry.last_twin.as_ref() != Some(&twin) {
-            entry.picked_vars.clear();
-            entry.visible_experiments.clear();
-            entry.scrub_time = None;
-            entry.last_twin = Some(twin.clone());
-        }
+        states.sync_twin(viz_id, &twin);
     }
 
     // Doc badge so the user can tell which model's runs are
@@ -1545,30 +1590,25 @@ pub fn render_experiments_plot(
             .trigger(crate::ui::commands::NewPlotPanel::default());
     }
 
-    // Empty-state CTA — if this plot tab has no visible runs but
-    // the doc *has* completed runs, offer a one-click "Show latest
-    // run" so the user doesn't need to scroll the Experiments
-    // table and tick the row.
-    let mut show_latest_clicked = false;
-    if series.is_empty() && run_count > 0 {
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("This plot is empty.")
-                    .color(col_muted)
-                    .small(),
-            );
-            if ui
-                .small_button("👁 Show latest run")
-                .on_hover_text(
-                    "Mark the most recent completed run visible in this plot \
-                     and auto-pick the top dynamic variables.",
-                )
-                .clicked()
-            {
-                show_latest_clicked = true;
-            }
-        });
-    }
+    // Empty-state auto-promote — when this plot tab has no visible
+    // runs but the doc *has* completed runs, automatically mark the
+    // latest run visible and auto-pick top dynamic vars. Gated by
+    // `auto_show_attempted` so clearing curves later doesn't re-fire
+    // the promote on the next frame. The flag is reset on twin
+    // switch (sync_twin restores a fresh state for new twins).
+    let auto_show_pending = {
+        let needs_auto = series.is_empty() && run_count > 0;
+        if needs_auto {
+            world
+                .get_resource::<PlotPanelStates>()
+                .and_then(|s| s.by_viz.get(&viz_id))
+                .map(|st| !st.auto_show_attempted)
+                .unwrap_or(true)
+        } else {
+            false
+        }
+    };
+    let show_latest_clicked = auto_show_pending;
 
     // Plot frame always renders. x-axis label dropped: time is
     // implicit in this panel and the label was burning a row of

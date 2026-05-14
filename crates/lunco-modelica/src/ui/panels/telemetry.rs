@@ -1040,8 +1040,18 @@ fn render_active_class_parameters(
                         // loss we drop the draft so the next frame
                         // syncs to whatever the AST now says.
                         let edit_id = egui::Id::new(("telem_flat_param", path.as_str()));
-                        let mut buf = ui
-                            .data_mut(|d| d.get_temp::<String>(edit_id))
+                        // Latched buffer: persists the committed value
+                        // until `display_value` (rumoca-session cache,
+                        // ~1.5s lag) catches up. Without this, the field
+                        // visually reverts to the stale pre-edit value
+                        // on focus loss, and a subsequent click+blur
+                        // re-fires the commit against a now-stale
+                        // ast_mut text range, producing
+                        // "text range out of bounds" failures.
+                        let latched: Option<String> =
+                            ui.data_mut(|d| d.get_temp::<String>(edit_id));
+                        let mut buf = latched
+                            .clone()
                             .unwrap_or_else(|| display_value.clone());
                         let resp = ui.add(
                             egui::TextEdit::singleline(&mut buf)
@@ -1051,13 +1061,17 @@ fn render_active_class_parameters(
                         if resp.has_focus() {
                             ui.data_mut(|d| d.insert_temp(edit_id, buf.clone()));
                         }
+                        // Change detection compares against the latched
+                        // committed value (or display_value if nothing
+                        // is latched yet) — never against the lagging
+                        // display_value alone.
+                        let baseline = latched
+                            .clone()
+                            .unwrap_or_else(|| display_value.clone());
                         let commit = resp.lost_focus()
                             && (ui.input(|i| i.key_pressed(egui::Key::Enter))
-                                || buf != display_value);
-                        if resp.lost_focus() {
-                            ui.data_mut(|d| d.remove::<String>(edit_id));
-                        }
-                        if commit && buf != display_value {
+                                || buf != baseline);
+                        if commit && buf != baseline {
                             let (component, param) = if row.depth() == 0 {
                                 (row.leaf.clone(), String::new())
                             } else {
@@ -1068,6 +1082,18 @@ fn render_active_class_parameters(
                                 active, component, param, buf, row.value
                             );
                             edits.push((component, param, buf.clone()));
+                            // Latch the committed value so the field
+                            // keeps showing it until the AST/cache
+                            // reflects the change.
+                            ui.data_mut(|d| d.insert_temp(edit_id, buf.clone()));
+                        } else if !resp.has_focus() {
+                            // Drop the latch once display_value reflects
+                            // it; otherwise leave it in place.
+                            if let Some(l) = &latched {
+                                if l == &display_value {
+                                    ui.data_mut(|d| d.remove::<String>(edit_id));
+                                }
+                            }
                         }
                     } else {
                         // Deeper than one level — read-only label. Edit
