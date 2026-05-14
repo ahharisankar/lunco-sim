@@ -363,19 +363,37 @@ impl ModelicaDocument {
     }
 
     fn rebuild_index(&mut self) {
-        // Snapshot the prior class-name set so we can diff after the
-        // rebuild and emit `ClassAdded` / `ClassRemoved` /
-        // `ClassRenamed` changes. Without this, structural edits
-        // made through the text editor (re-typing a class header,
-        // pasting a new class…) silently mutate the index — and
-        // every downstream consumer that keys by class name (open
-        // tabs, experiment records, parameter drafts) goes stale.
+        // Snapshot the prior class-name set + per-class shape
+        // signatures so we can diff after the rebuild and emit
+        // `ClassAdded` / `ClassRemoved` / `ClassRenamed` changes.
+        // Without this, structural edits made through the text
+        // editor (re-typing a class header, pasting a new class…)
+        // silently mutate the index — and every downstream consumer
+        // that keys by class name (open tabs, experiment records,
+        // parameter drafts) goes stale.
         let prior: std::collections::HashSet<String> =
             self.index.classes.keys().cloned().collect();
+        let prior_signatures: std::collections::HashMap<String, (usize, usize)> =
+            prior
+                .iter()
+                .map(|name| (name.clone(), class_shape_signature(&self.index, name)))
+                .collect();
+        let has_errors = self.syntax.has_errors();
+        if has_errors && !prior.is_empty() {
+            // Transient parse failure mid-edit (user typing through
+            // an intermediate broken state). Keep the existing index
+            // and emit no diffs — the next clean reparse will diff
+            // against the same baseline and produce the correct
+            // rename / add / remove changes. Without this, every
+            // half-typed keystroke would wipe `classes` and the R4
+            // observer would close drilled tabs that the user
+            // immediately wants back.
+            return;
+        }
         self.index.rebuild_with_errors(
             &self.syntax.ast,
             &self.source,
-            self.syntax.has_errors(),
+            has_errors,
         );
         let now: std::collections::HashSet<String> =
             self.index.classes.keys().cloned().collect();
@@ -390,32 +408,76 @@ impl ModelicaDocument {
         // `TextReplaced`. Generation continues to identify source
         // versions only.
         //
-        // Heuristic: exactly one added + one removed = rename. The
-        // alternative — emitting separate Removed+Added — would
-        // make every consumer drop state and force the user to
-        // rebuild it. A false-positive here (two unrelated edits
-        // collapsed into a "rename") is recoverable; a missed
-        // rename causes the duplicate-tab / lost-experiment bug.
-        if added.len() == 1 && removed.len() == 1 {
-            self.push_change(ModelicaChange::ClassRenamed {
-                old: removed.into_iter().next().unwrap(),
-                new: added.into_iter().next().unwrap(),
+        // Pair removed ↔ added by shape signature (component count,
+        // connection count). Each successful pair becomes a single
+        // `ClassRenamed`; leftovers fall through to per-class
+        // `ClassRemoved` / `ClassAdded`. Lets a "rename Foo→Bar +
+        // add Baz" edit cycle preserve the Foo→Bar tab/experiment
+        // bindings instead of treating Foo as deleted.
+        let new_signatures: std::collections::HashMap<String, (usize, usize)> =
+            added
+                .iter()
+                .map(|name| (name.clone(), class_shape_signature(&self.index, name)))
+                .collect();
+        let mut unmatched_added: Vec<String> = added;
+        let mut unmatched_removed: Vec<String> = Vec::new();
+        for old in removed {
+            let want = prior_signatures.get(&old).copied();
+            let pair_idx = want.and_then(|sig| {
+                unmatched_added
+                    .iter()
+                    .position(|name| new_signatures.get(name).copied() == Some(sig))
             });
-        } else {
-            for qualified in removed {
-                self.push_change(ModelicaChange::ClassRemoved { qualified });
-            }
-            for qualified in added {
-                let kind = self
-                    .index
-                    .classes
-                    .get(&qualified)
-                    .map(|c| super::apply::index_kind_to_class_kind_spec(c.kind))
-                    .unwrap_or(crate::pretty::ClassKindSpec::Model);
-                self.push_change(ModelicaChange::ClassAdded { qualified, kind });
+            match pair_idx {
+                Some(i) => {
+                    let new = unmatched_added.remove(i);
+                    self.push_change(ModelicaChange::ClassRenamed {
+                        old,
+                        new,
+                    });
+                }
+                None => unmatched_removed.push(old),
             }
         }
+        for qualified in unmatched_removed {
+            self.push_change(ModelicaChange::ClassRemoved { qualified });
+        }
+        for qualified in unmatched_added {
+            let kind = self
+                .index
+                .classes
+                .get(&qualified)
+                .map(|c| super::apply::index_kind_to_class_kind_spec(c.kind))
+                .unwrap_or(crate::pretty::ClassKindSpec::Model);
+            self.push_change(ModelicaChange::ClassAdded { qualified, kind });
+        }
     }
+}
+
+/// Cheap shape signature for the class identified by `qualified`,
+/// used to pair removed/added entries as renames when more than one
+/// class changes in the same parse cycle. Hashing the component +
+/// connection counts is robust to the dominant rename case (header
+/// edited, body untouched) and lets false-positives degrade
+/// gracefully into separate add/remove changes.
+fn class_shape_signature(
+    index: &crate::index::ModelicaIndex,
+    qualified: &str,
+) -> (usize, usize) {
+    let comps = index
+        .components_by_class
+        .get(qualified)
+        .map(|v| v.len())
+        .unwrap_or(0);
+    let conns = index
+        .connections_by_class
+        .get(qualified)
+        .map(|v| v.len())
+        .unwrap_or(0);
+    (comps, conns)
+}
+
+impl ModelicaDocument {
 
     pub fn source_snapshot(&self) -> String { self.source.clone() }
 

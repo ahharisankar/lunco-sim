@@ -253,18 +253,41 @@ fn render_workspace_doc_row(
                 id,
                 true,
             );
+        // Icon prefix: 📝 untitled draft, 📄 saved on disk. Read
+        // the origin once before show_header so we don't re-borrow
+        // the registry inside the closure.
+        let icon: &'static str = ctx
+            .world
+            .get_resource::<ModelicaDocumentRegistry>()
+            .and_then(|r| r.host(doc_id))
+            .map(|h| {
+                if h.document().origin().is_untitled() {
+                    "📝"
+                } else {
+                    "📄"
+                }
+            })
+            .unwrap_or("📄");
         let header = state.show_header(ui, |ui| {
             let resp = ui
                 .add(
-                    egui::Label::new(doc_name)
+                    egui::Label::new(format!("{icon}  {doc_name}"))
                         .sense(egui::Sense::click()),
                 )
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .on_hover_text(
-                    "Double-click to rename — for an Untitled doc \
-                     this renames its top-level class and the file label.",
+                    "Double-click (or F2 while focused) to rename. \
+                     Untitled drafts → renames the top-level class. \
+                     Saved files → renames the file on disk.",
                 );
             if resp.double_clicked() {
+                start_rename = Some(doc_name.to_string());
+            }
+            // F2 while the label has keyboard focus also starts a
+            // rename — mirrors the VS Code / OMEdit shortcut.
+            if resp.has_focus()
+                && resp.ctx.input(|i| i.key_pressed(egui::Key::F2))
+            {
                 start_rename = Some(doc_name.to_string());
             }
             resp.context_menu(|ui| {
@@ -279,31 +302,100 @@ fn render_workspace_doc_row(
 
     // State transitions, priority: commit > cancel > start > update.
     if let Some(new_name) = commit_rename {
-        // Need the *current* default class name to drive the API.
-        let old_name: Option<String> = ctx
-            .world
-            .get_resource::<ModelicaDocumentRegistry>()
-            .and_then(|r| r.host(doc_id))
-            .and_then(|h| {
-                h.document()
-                    .index()
-                    .classes
-                    .values()
-                    .find(|c| {
-                        !matches!(c.kind, crate::index::ClassKind::Package)
-                    })
-                    .map(|c| c.name.clone())
-            });
-        if let Some(old) = old_name {
-            if old != new_name {
+        // Branch on origin: writable on-disk file → rename the file
+        // via `RenameTwinEntry` (which also chains a class rename
+        // for `.mo` files); Untitled draft → rename just the class
+        // via `RenameModelicaClass` (which also updates the
+        // Untitled origin slug). Both paths converge on the same
+        // observer that re-binds tabs / experiments / drafts.
+        enum RenameTarget {
+            File { twin_root: String, relative_path: String },
+            Class { old_name: String },
+            None,
+        }
+        let target = {
+            let registry = ctx.world.resource::<ModelicaDocumentRegistry>();
+            let host = registry.host(doc_id);
+            let origin = host.map(|h| h.document().origin().clone());
+            match origin {
+                Some(lunco_doc::DocumentOrigin::File { path, writable: true }) => {
+                    // Resolve the doc's twin root so we can express
+                    // the file as a (twin_root, relative_path) pair
+                    // that RenameTwinEntry understands.
+                    let ws = ctx.world.resource::<lunco_workbench::WorkspaceResource>();
+                    let twin_root = ws
+                        .active_twin
+                        .and_then(|id| ws.twin(id))
+                        .map(|t| t.root.clone());
+                    if let Some(root) = twin_root {
+                        if let Ok(rel) = path.strip_prefix(&root) {
+                            RenameTarget::File {
+                                twin_root: root.to_string_lossy().into_owned(),
+                                relative_path: rel.to_string_lossy().into_owned(),
+                            }
+                        } else {
+                            RenameTarget::None
+                        }
+                    } else {
+                        RenameTarget::None
+                    }
+                }
+                _ => {
+                    let old = host.and_then(|h| {
+                        h.document()
+                            .index()
+                            .classes
+                            .values()
+                            .find(|c| {
+                                !matches!(c.kind, crate::index::ClassKind::Package)
+                            })
+                            .map(|c| c.name.clone())
+                    });
+                    match old {
+                        Some(o) => RenameTarget::Class { old_name: o },
+                        None => RenameTarget::None,
+                    }
+                }
+            }
+        };
+        match target {
+            RenameTarget::File { twin_root, relative_path } => {
+                // Preserve the original extension if the user typed
+                // just the stem; otherwise pass through.
+                let new_file_name = {
+                    use std::path::Path;
+                    let typed = Path::new(&new_name);
+                    if typed.extension().is_some() {
+                        new_name.clone()
+                    } else if let Some(ext) = Path::new(&relative_path)
+                        .extension()
+                        .and_then(|s| s.to_str())
+                    {
+                        format!("{new_name}.{ext}")
+                    } else {
+                        new_name.clone()
+                    }
+                };
                 ctx.world
                     .commands()
-                    .trigger(crate::api::class::RenameModelicaClass {
-                        doc: doc_id,
-                        old_name: old,
-                        new_name,
+                    .trigger(lunco_workbench::file_ops::RenameTwinEntry {
+                        twin_root,
+                        relative_path,
+                        new_name: new_file_name,
                     });
             }
+            RenameTarget::Class { old_name } => {
+                if old_name != new_name {
+                    ctx.world
+                        .commands()
+                        .trigger(crate::api::class::RenameModelicaClass {
+                            doc: doc_id,
+                            old_name,
+                            new_name,
+                        });
+                }
+            }
+            RenameTarget::None => {}
         }
         if let Some(mut s) = ctx.world.get_resource_mut::<DocRenameState>() {
             s.editing = None;

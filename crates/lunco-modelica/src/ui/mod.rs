@@ -174,6 +174,7 @@ fn close_drilled_tabs_on_class_removed(
     mut watermark: ResMut<ClassRemovedWatermark>,
     mut experiments: Option<ResMut<lunco_experiments::ExperimentRegistry>>,
     mut drafts: Option<ResMut<crate::experiments_runner::ExperimentDrafts>>,
+    mut steppers: Query<&mut crate::ModelicaModel>,
 ) {
     use lunco_doc::Document as _;
     let doc = trigger.event().doc;
@@ -212,10 +213,11 @@ fn close_drilled_tabs_on_class_removed(
             );
         }
     }
-    // Identity-preserving rename: tabs / experiments / drafts that
-    // referenced the old class name re-bind to the new one. Keeps
-    // the user's open canvas / run history / setup intact when they
-    // retype a class header in the text editor.
+    // Identity-preserving rename: tabs / experiments / drafts /
+    // running stepper entities that referenced the old class name
+    // re-bind to the new one. Keeps the user's open canvas / run
+    // history / setup / live simulator intact when they retype a
+    // class header in the text editor.
     for (old, new) in to_rename {
         let touched_tabs = tabs.rename_drilled_class(doc, &old, &new);
         let touched_experiments = experiments
@@ -238,9 +240,27 @@ fn close_drilled_tabs_on_class_removed(
                 )
             })
             .unwrap_or(false);
+        // Update any compiled stepper entities linked to this doc
+        // so subsequent telemetry / model-name queries see the new
+        // identity without forcing a recompile. The actual rumoca
+        // session keys off the AST class definition, not this
+        // string, so the running simulation continues uninterrupted.
+        let mut touched_steppers = 0usize;
+        for (e, d) in registry.iter_doc_for_entity() {
+            if d != doc {
+                continue;
+            }
+            if let Ok(mut model) = steppers.get_mut(e) {
+                if model.model_name == old {
+                    model.model_name = new.clone();
+                    touched_steppers += 1;
+                }
+            }
+        }
         bevy::log::info!(
             "[R4] ClassRenamed({old} → {new}): {touched_tabs} tab(s), \
-             {touched_experiments} experiment(s), drafts={touched_drafts}"
+             {touched_experiments} experiment(s), drafts={touched_drafts}, \
+             {touched_steppers} stepper(s)"
         );
     }
     watermark.0.insert(doc, highest_gen);
