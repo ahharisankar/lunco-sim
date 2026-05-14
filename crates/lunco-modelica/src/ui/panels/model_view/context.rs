@@ -44,6 +44,29 @@ pub fn resolve_tab_title(
         let base = drilled_class
             .and_then(|qualified| qualified.rsplit('.').next().map(str::to_string))
             .unwrap_or_else(|| {
+                // No explicit drill — pick a title that reflects
+                // the current source. For Untitled docs that means
+                // the doc's first non-package class name (so a
+                // rename in the editor updates the tab); for
+                // saved-on-disk docs we keep the filename so the
+                // tab stays stable across class renames.
+                let prefer_class_name = matches!(
+                    document.origin(),
+                    lunco_doc::DocumentOrigin::Untitled { .. }
+                );
+                if prefer_class_name {
+                    let first = document
+                        .index()
+                        .classes
+                        .values()
+                        .find(|c| {
+                            !matches!(c.kind, crate::index::ClassKind::Package)
+                        })
+                        .map(|c| c.name.clone());
+                    if let Some(name) = first {
+                        return name;
+                    }
+                }
                 let raw = document.origin().display_name();
                 if raw == "package" {
                     if let lunco_doc::DocumentOrigin::File { path, .. } =

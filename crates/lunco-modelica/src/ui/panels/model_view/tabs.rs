@@ -67,8 +67,44 @@ impl ModelTabs {
         doc: DocumentId,
         drilled_class: Option<String>,
     ) -> (TabId, Option<TabId>) {
+        self.ensure_preview_for_with_default(doc, drilled_class, None)
+    }
+
+    /// Variant of [`Self::ensure_preview_for`] that accepts the doc's
+    /// *default class* (the first non-package top-level class).
+    /// Treats `drilled_class = None` and `drilled_class =
+    /// Some(default)` as the same view, so a Twin Browser click on
+    /// the default class focuses the existing file tab (which was
+    /// allocated with `None`) and vice-versa. Multi-class files
+    /// keep distinct drill semantics for any non-default class.
+    pub fn ensure_preview_for_with_default(
+        &mut self,
+        doc: DocumentId,
+        drilled_class: Option<String>,
+        default_class: Option<&str>,
+    ) -> (TabId, Option<TabId>) {
+        let target_is_default = match (drilled_class.as_deref(), default_class) {
+            (None, _) => true,
+            (Some(d), Some(def)) => d == def,
+            _ => false,
+        };
         if let Some((id, _)) = self.tabs.iter().find(|(_, s)| {
-            s.doc == doc && s.drilled_class.as_deref() == drilled_class.as_deref()
+            if s.doc != doc {
+                return false;
+            }
+            if s.drilled_class.as_deref() == drilled_class.as_deref() {
+                return true;
+            }
+            if !target_is_default {
+                return false;
+            }
+            // Either side of the (None, Some(default)) pair matches
+            // the file-tab view.
+            match s.drilled_class.as_deref() {
+                None => true,
+                Some(s_class) => default_class
+                    .is_some_and(|def| s_class == def),
+            }
         }) {
             return (*id, None);
         }

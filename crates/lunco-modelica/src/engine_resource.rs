@@ -209,7 +209,27 @@ pub struct EngineSyncCursor {
 /// previously parsed. New docs (never parsed) spawn immediately —
 /// only the edit path is debounced. Mirrors the prior `ast_refresh`
 /// gate now that `drive_engine_sync` is the single parse driver.
+///
+/// The window is *size-adaptive*: small docs reparse near-instantly
+/// (rename feedback in tabs / browser / experiments lags otherwise),
+/// large docs keep the long coalesce window so a rapid typing burst
+/// doesn't queue redundant multi-second parses.
 pub const AST_DEBOUNCE_MS: u128 = 2500;
+pub const AST_DEBOUNCE_MS_SMALL: u128 = 200;
+/// Source-size cut-off (bytes) below which the short debounce
+/// applies. ~4 KB ≈ a single hand-edited model with a few connectors;
+/// anything larger is plausibly a package / library file where the
+/// parse itself is non-trivial.
+pub const AST_DEBOUNCE_SIZE_THRESHOLD: usize = 4 * 1024;
+
+#[inline]
+pub fn ast_debounce_for_size(src_len: usize) -> u128 {
+    if src_len <= AST_DEBOUNCE_SIZE_THRESHOLD {
+        AST_DEBOUNCE_MS_SMALL
+    } else {
+        AST_DEBOUNCE_MS
+    }
+}
 
 pub fn drive_engine_sync(
     handle: Res<ModelicaEngineHandle>,
@@ -289,6 +309,16 @@ pub fn drive_engine_sync(
                 // Doc was closed mid-parse; engine still got the AST.
             }
         }
+        // install_parse_results rebuilds the index, which emits
+        // structured `ClassAdded` / `ClassRemoved` / `ClassRenamed`
+        // changes into the doc's change ring. Those need a
+        // DocumentChanged trigger to wake the watermark observer —
+        // otherwise the rename detection runs but never reaches the
+        // tab / experiment / draft re-bind observers, and the
+        // generation gets advanced past it on the next unrelated
+        // edit. Mark the doc changed so the next drain fans the
+        // notification out.
+        registry.mark_changed(doc_id);
         let current = cursor.last_synced.get(&doc_id).copied().unwrap_or(0);
         if parse_gen > current {
             cursor.last_synced.insert(doc_id, parse_gen);
@@ -446,8 +476,9 @@ pub fn drive_engine_sync(
             None => (false, None),
         };
         if was_parsed {
+            let debounce_ms = ast_debounce_for_size(source.len());
             let elapsed_ok = match last_edit {
-                Some(t) => now.duration_since(t).as_millis() >= AST_DEBOUNCE_MS,
+                Some(t) => now.duration_since(t).as_millis() >= debounce_ms,
                 None => true,
             };
             if !elapsed_ok || activity.is_active() {
@@ -517,6 +548,9 @@ pub fn drive_engine_sync(
                         };
                         host.document_mut().install_parse_results(syntax);
                     }
+                    // See sibling site above: rebuild_index emits
+                    // class-diff changes; wake the watermark observer.
+                    registry.mark_changed(doc_id);
                     let t_doc = t1.elapsed().as_secs_f64() * 1000.0;
                     bevy::log::info!(
                         "[EngineSync] reuse pre-parsed MSL AST doc={} gen={} \
@@ -598,6 +632,9 @@ pub fn drain_worker_parse_results(
                 };
                 host.document_mut().install_parse_results(syntax);
             }
+            // Wake the watermark observer for the class-diff
+            // changes the rebuild may have just pushed.
+            registry.mark_changed(env.doc_id);
             if env.errors.is_empty() {
                 bevy::log::info!(
                     "[EngineSync] worker-parsed install doc={} gen={}",

@@ -127,17 +127,39 @@ impl BrowserSection for ModelicaSection {
         }
 
         // ── Writable / untitled workspace documents ──────────────
+        // For Untitled docs prefer the first non-package class name
+        // over the origin slug (`Untitled-1`) — the class name is
+        // the identity the user sees in the canvas / tab title, so
+        // showing a different label in the browser is just confusing.
+        // Falls back to the origin slug while no class exists yet
+        // (mid-parse, empty draft).
         let workspace_docs: Vec<(DocumentId, String)> = {
             let registry = ctx.world.resource::<ModelicaDocumentRegistry>();
             registry
                 .iter()
                 .filter_map(|(doc_id, host)| {
-                    let origin = host.document().origin();
-                    if origin.is_writable() || origin.is_untitled() {
-                        Some((doc_id, origin.display_name()))
-                    } else {
-                        None
+                    let document = host.document();
+                    let origin = document.origin();
+                    if !(origin.is_writable() || origin.is_untitled()) {
+                        return None;
                     }
+                    let label = if origin.is_untitled() {
+                        document
+                            .index()
+                            .classes
+                            .values()
+                            .find(|c| {
+                                !matches!(
+                                    c.kind,
+                                    crate::index::ClassKind::Package
+                                )
+                            })
+                            .map(|c| c.name.clone())
+                            .unwrap_or_else(|| origin.display_name())
+                    } else {
+                        origin.display_name()
+                    };
+                    Some((doc_id, label))
                 })
                 .collect()
         };
@@ -151,12 +173,152 @@ impl BrowserSection for ModelicaSection {
         }
 
         for (doc_id, doc_name) in workspace_docs {
-            let resp = egui::CollapsingHeader::new(doc_name)
-                .id_salt(("twin.modelica.workspace_doc", doc_id.raw()))
-                .default_open(true)
-                .show(ui, |ui| render_workspace_doc(ui, ctx, doc_id));
-            resp.header_response
-                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            render_workspace_doc_row(ui, ctx, doc_id, &doc_name);
+        }
+    }
+}
+
+/// Inline-rename state for Twin Browser doc rows. `Some((doc, draft))`
+/// → the row for `doc` renders a `TextEdit` instead of a header label;
+/// `None` → all rows show their normal collapsing-header. Committed
+/// on Enter or focus-loss, cancelled on Escape.
+#[derive(bevy::prelude::Resource, Default, Debug)]
+pub struct DocRenameState {
+    pub editing: Option<(DocumentId, String)>,
+}
+
+/// Renders one writable / Untitled workspace doc row. The header is a
+/// `CollapsingHeader` by default; double-click the header label
+/// switches to an inline `TextEdit` whose commit dispatches
+/// `RenameModelicaClass` on the doc's default class (and that
+/// command also updates Untitled origins, so the row label flips
+/// alongside the class rename).
+fn render_workspace_doc_row(
+    ui: &mut egui::Ui,
+    ctx: &mut BrowserCtx<'_>,
+    doc_id: DocumentId,
+    doc_name: &str,
+) {
+    let editing = ctx
+        .world
+        .get_resource::<DocRenameState>()
+        .and_then(|s| s.editing.clone())
+        .filter(|(d, _)| *d == doc_id);
+
+    let mut start_rename: Option<String> = None;
+    let mut commit_rename: Option<String> = None;
+    let mut cancel_rename = false;
+    let mut update_draft: Option<String> = None;
+
+    if let Some((_, draft)) = editing {
+        // Inline edit mode — replaces the CollapsingHeader header
+        // with a TextEdit so the doc's child class tree disappears
+        // for the moment (consistent with VS Code rename UX in the
+        // file explorer).
+        let mut buf = draft;
+        ui.horizontal(|ui| {
+            ui.label("📝");
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut buf).desired_width(180.0),
+            );
+            resp.request_focus();
+            let enter = resp.lost_focus()
+                && resp.ctx.input(|i| i.key_pressed(egui::Key::Enter));
+            let escape = resp.ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            if enter || (resp.lost_focus() && !escape) {
+                let trimmed = buf.trim().to_string();
+                if trimmed.is_empty() {
+                    cancel_rename = true;
+                } else {
+                    commit_rename = Some(trimmed);
+                }
+            } else if escape {
+                cancel_rename = true;
+            } else {
+                update_draft = Some(buf);
+            }
+        });
+    } else {
+        // Manual CollapsingState so the header *label* gets its own
+        // Response — `CollapsingHeader::show` returns a header
+        // response whose click is consumed by the toggle, so
+        // double-click on the bare API never fires reliably.
+        let id = ui.make_persistent_id((
+            "twin.modelica.workspace_doc",
+            doc_id.raw(),
+        ));
+        let state =
+            egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(),
+                id,
+                true,
+            );
+        let header = state.show_header(ui, |ui| {
+            let resp = ui
+                .add(
+                    egui::Label::new(doc_name)
+                        .sense(egui::Sense::click()),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(
+                    "Double-click to rename — for an Untitled doc \
+                     this renames its top-level class and the file label.",
+                );
+            if resp.double_clicked() {
+                start_rename = Some(doc_name.to_string());
+            }
+            resp.context_menu(|ui| {
+                if ui.button("✏ Rename").clicked() {
+                    start_rename = Some(doc_name.to_string());
+                    ui.close();
+                }
+            });
+        });
+        header.body(|ui| render_workspace_doc(ui, ctx, doc_id));
+    }
+
+    // State transitions, priority: commit > cancel > start > update.
+    if let Some(new_name) = commit_rename {
+        // Need the *current* default class name to drive the API.
+        let old_name: Option<String> = ctx
+            .world
+            .get_resource::<ModelicaDocumentRegistry>()
+            .and_then(|r| r.host(doc_id))
+            .and_then(|h| {
+                h.document()
+                    .index()
+                    .classes
+                    .values()
+                    .find(|c| {
+                        !matches!(c.kind, crate::index::ClassKind::Package)
+                    })
+                    .map(|c| c.name.clone())
+            });
+        if let Some(old) = old_name {
+            if old != new_name {
+                ctx.world
+                    .commands()
+                    .trigger(crate::api::class::RenameModelicaClass {
+                        doc: doc_id,
+                        old_name: old,
+                        new_name,
+                    });
+            }
+        }
+        if let Some(mut s) = ctx.world.get_resource_mut::<DocRenameState>() {
+            s.editing = None;
+        }
+    } else if cancel_rename {
+        if let Some(mut s) = ctx.world.get_resource_mut::<DocRenameState>() {
+            s.editing = None;
+        }
+    } else if let Some(initial) = start_rename {
+        if let Some(mut s) = ctx.world.get_resource_mut::<DocRenameState>() {
+            s.editing = Some((doc_id, initial));
+        }
+    } else if let Some(draft) = update_draft {
+        if let Some(mut s) = ctx.world.get_resource_mut::<DocRenameState>() {
+            s.editing = Some((doc_id, draft));
         }
     }
 }

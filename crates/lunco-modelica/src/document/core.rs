@@ -106,7 +106,19 @@ pub struct ModelicaDocument {
     generation: u64,
     origin: DocumentOrigin,
     last_saved_generation: Option<u64>,
+    /// Ring buffer of structured changes. The leading u64 is a
+    /// monotonic *change index* (not source generation): every
+    /// `push_change` consumes a fresh value from
+    /// [`Self::next_change_idx`]. Decoupling the change-ordering
+    /// key from `generation` lets the index rebuild emit follow-up
+    /// changes at the same source generation as the text edit that
+    /// triggered the parse, without colliding with the watermark
+    /// that already advanced past that generation.
     changes: VecDeque<(u64, ModelicaChange)>,
+    /// Next value to assign to a change-ring entry. Incremented
+    /// after each `push_change` so consumers can filter strictly by
+    /// `> last_seen_idx` and never miss or double-process an entry.
+    next_change_idx: u64,
     last_source_edit_at: Option<web_time::Instant>,
 }
 
@@ -286,6 +298,7 @@ impl ModelicaDocument {
             origin,
             last_saved_generation,
             changes: VecDeque::with_capacity(CHANGE_HISTORY_CAPACITY),
+            next_change_idx: 0,
             last_source_edit_at: None,
         }
     }
@@ -368,6 +381,15 @@ impl ModelicaDocument {
             self.index.classes.keys().cloned().collect();
         let added: Vec<String> = now.difference(&prior).cloned().collect();
         let removed: Vec<String> = prior.difference(&now).cloned().collect();
+        if added.is_empty() && removed.is_empty() {
+            return;
+        }
+        // No generation bump needed: change ordering is keyed off
+        // [`Self::next_change_idx`], which already gives the new
+        // entries a strictly-higher key than the text edit's
+        // `TextReplaced`. Generation continues to identify source
+        // versions only.
+        //
         // Heuristic: exactly one added + one removed = rename. The
         // alternative — emitting separate Removed+Added — would
         // make every consumer drop state and force the user to
@@ -468,18 +490,23 @@ impl ModelicaDocument {
         Some(self.changes.iter().filter(move |(g, _)| *g > last_seen))
     }
 
+    /// Lowest change index still resident in the ring. Consumers
+    /// compare their watermark against this — `last_seen + 1 <
+    /// earliest` means the ring rolled past them and they must
+    /// re-anchor instead of trusting `changes_since`.
     pub fn earliest_retained_generation(&self) -> u64 {
         self.changes
             .front()
-            .map(|(g, _)| *g)
-            .unwrap_or(self.generation)
+            .map(|(idx, _)| *idx)
+            .unwrap_or(self.next_change_idx)
     }
 
     fn push_change(&mut self, change: ModelicaChange) {
         if self.changes.len() >= CHANGE_HISTORY_CAPACITY {
             self.changes.pop_front();
         }
-        self.changes.push_back((self.generation, change));
+        self.next_change_idx = self.next_change_idx.saturating_add(1);
+        self.changes.push_back((self.next_change_idx, change));
     }
 
     pub fn len(&self) -> usize { self.source.len() }

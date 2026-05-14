@@ -99,14 +99,36 @@ pub fn drain_browser_actions(world: &mut World) {
                 qualified_path,
             } => {
                 let doc = lunco_doc::DocumentId::new(doc_id);
-                // B.3 phase 3: `ensure_preview_for(doc,
-                // Some(qualified_path))` writes the drilled scope
-                // onto the tab — the tab table is now authoritative,
-                // legacy `DrilledInClassNames` cache mirror removed.
+                // Resolve the doc's "default class" (first
+                // non-package top-level class). A click on that
+                // class is conceptually the same view as the file
+                // tab allocated with `drilled_class = None` by the
+                // OpenFile / new-doc paths. `ensure_preview_for_with_default`
+                // dedups them so both paths converge on one tab.
+                let default_class: Option<String> = world
+                    .get_resource::<crate::ui::state::ModelicaDocumentRegistry>()
+                    .and_then(|r| r.host(doc))
+                    .and_then(|h| {
+                        h.document()
+                            .index()
+                            .classes
+                            .values()
+                            .find(|c| {
+                                !matches!(
+                                    c.kind,
+                                    crate::index::ClassKind::Package
+                                )
+                            })
+                            .map(|c| c.name.clone())
+                    });
                 let (tab_id, evict) = {
                     let mut model_tabs = world
                         .resource_mut::<crate::ui::panels::model_view::ModelTabs>();
-                    model_tabs.ensure_preview_for(doc, Some(qualified_path))
+                    model_tabs.ensure_preview_for_with_default(
+                        doc,
+                        Some(qualified_path),
+                        default_class.as_deref(),
+                    )
                 };
                 // ensure_preview_for never rebinds TabIds; an evicted
                 // previous preview is closed here. Layout mutation goes
