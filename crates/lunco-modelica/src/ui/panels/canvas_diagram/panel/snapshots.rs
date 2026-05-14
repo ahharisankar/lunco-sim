@@ -102,13 +102,17 @@ fn seed_state_from_latest_experiment(
 ) {
     use lunco_experiments::{ExperimentRegistry, TwinId};
     let twin = TwinId("default".into());
-    let visibility = world.get_resource::<crate::ui::panels::experiments::ExperimentVisibility>();
     let active_plot = world.get_resource::<crate::ui::panels::experiments::ActivePlot>().copied().unwrap_or_default().or_default();
     let plot_states = world.get_resource::<crate::ui::panels::experiments::PlotPanelStates>();
+    let visible_in_active = plot_states.map(|s| s.visible(active_plot));
     let Some(registry) = world.get_resource::<ExperimentRegistry>() else { return; };
     let exps = registry.list_for_twin(&twin);
     let chosen = exps.iter().rev().find(|e| {
-        e.result.is_some() && visibility.map(|v| v.visible.contains(&e.id)).unwrap_or(true)
+        e.result.is_some()
+            && visible_in_active
+                .as_ref()
+                .map(|v| v.contains(&e.id))
+                .unwrap_or(true)
     });
     let Some(exp) = chosen else { return };
     let Some(result) = &exp.result else { return };

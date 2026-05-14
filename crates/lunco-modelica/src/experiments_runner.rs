@@ -862,7 +862,6 @@ pub fn drain_pending_handles(
     mut sources: ResMut<ExperimentSources>,
     mut compile_states: Option<ResMut<crate::ui::CompileStates>>,
     mut console: Option<ResMut<crate::ui::panels::console::ConsoleLog>>,
-    mut visibility: Option<ResMut<crate::ui::panels::experiments::ExperimentVisibility>>,
     mut plot_states: Option<ResMut<crate::ui::panels::experiments::PlotPanelStates>>,
     active_plot: Option<Res<crate::ui::panels::experiments::ActivePlot>>,
 ) {
@@ -890,19 +889,15 @@ pub fn drain_pending_handles(
                         wall
                     );
                     // Auto-visible: a run that just completed is what
-                    // the user is looking at, no checkbox needed.
+                    // the user is looking at, no checkbox needed. Mark
+                    // it visible on the active plot tab only (per-plot
+                    // visibility — other plot windows stay untouched,
+                    // matching Dymola's per-window curve set).
                     // Also auto-pick a few variables on the very first
                     // completion so the plot has content without
                     // hunting through Telemetry. Skip parameters
                     // (constant series) — pick the first 3 dynamic
                     // signals by series-variance heuristic.
-                    if let Some(vis) = visibility.as_mut() {
-                        vis.visible.insert(handle.run_id);
-                    }
-                    // Auto-pick top-3 dynamic variables — but only on
-                    // the active plot panel (per-plot picked-vars now).
-                    // Falls back to the default `📈 Graphs` VizId if
-                    // no plot has rendered yet.
                     if let Some(states) = plot_states.as_mut() {
                         let viz = active_plot
                             .as_deref()
@@ -910,6 +905,7 @@ pub fn drain_pending_handles(
                             .unwrap_or_default()
                             .or_default();
                         let entry = states.entry(viz);
+                        entry.visible_experiments.insert(handle.run_id);
                         if entry.picked_vars.is_empty() {
                             let mut by_var: Vec<(&String, f64)> = result
                                 .series

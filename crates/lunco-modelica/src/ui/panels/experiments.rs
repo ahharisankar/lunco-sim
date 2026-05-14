@@ -23,12 +23,16 @@ use lunco_workbench::{Panel, PanelId, PanelSlot};
 
 pub const EXPERIMENTS_PANEL_ID: PanelId = PanelId("modelica_experiments");
 
-/// Per-experiment plot visibility + selected variables. Decoupled
-/// from the [`lunco_experiments::Experiment`] data so visibility is
-/// a UI concern only and doesn't pollute the backend-agnostic crate.
+/// UI-only state attached to the experiments panel that has no
+/// natural home on a per-plot basis: the variable-picker filter,
+/// inline-rename buffer, and the Telemetry "Plot in" router target.
+///
+/// Per-plot experiment visibility lives on [`PlotPanelState`] —
+/// each plot tab toggles its own checked runs, so switching tabs
+/// shows a different set of curves (OMEdit / Dymola-style "Plot
+/// Window" semantics).
 #[derive(Resource, Default, Debug)]
 pub struct ExperimentVisibility {
-    pub visible: std::collections::HashSet<ExperimentId>,
     /// Free-text filter for the variable picker. Case-insensitive
     /// substring match against the dotted variable path.
     pub var_filter: String,
@@ -45,23 +49,16 @@ pub struct ExperimentVisibility {
     pub target_plot: Option<VizId>,
 }
 
-impl ExperimentVisibility {
-    pub fn is_visible(&self, id: ExperimentId) -> bool {
-        self.visible.contains(&id)
-    }
-    pub fn toggle(&mut self, id: ExperimentId) {
-        if !self.visible.insert(id) {
-            self.visible.remove(&id);
-        }
-    }
-}
-
-/// Per-plot-panel state — picked variables and scrub cursor. Keyed
-/// by `VizId` so each plot tab maintains independent picks.
+/// Per-plot-panel state — picked variables, scrub cursor, and the
+/// set of experiments visible *in this plot*. Keyed by `VizId` so
+/// each plot tab maintains independent picks and run-visibility
+/// (OMEdit / Dymola treat each Plot Window as an independent view
+/// over the same result store).
 #[derive(Default, Debug, Clone)]
 pub struct PlotPanelState {
     pub picked_vars: std::collections::BTreeSet<String>,
     pub scrub_time: Option<f64>,
+    pub visible_experiments: std::collections::HashSet<ExperimentId>,
 }
 
 #[derive(Resource, Default, Debug)]
@@ -101,6 +98,39 @@ impl PlotPanelStates {
     }
     pub fn set_scrub(&mut self, viz: VizId, t: Option<f64>) {
         self.entry(viz).scrub_time = t;
+    }
+    pub fn visible(&self, viz: VizId) -> std::collections::HashSet<ExperimentId> {
+        self.by_viz
+            .get(&viz)
+            .map(|s| s.visible_experiments.clone())
+            .unwrap_or_default()
+    }
+    pub fn is_visible(&self, viz: VizId, id: ExperimentId) -> bool {
+        self.by_viz
+            .get(&viz)
+            .is_some_and(|s| s.visible_experiments.contains(&id))
+    }
+    pub fn toggle_visible(&mut self, viz: VizId, id: ExperimentId) {
+        let s = self.entry(viz);
+        if !s.visible_experiments.insert(id) {
+            s.visible_experiments.remove(&id);
+        }
+    }
+    pub fn set_visible(&mut self, viz: VizId, id: ExperimentId, on: bool) {
+        let s = self.entry(viz);
+        if on {
+            s.visible_experiments.insert(id);
+        } else {
+            s.visible_experiments.remove(&id);
+        }
+    }
+    /// Remove this experiment id from every plot's visibility set.
+    /// Called when a run is deleted from the registry so stale ids
+    /// don't linger.
+    pub fn forget_experiment(&mut self, id: ExperimentId) {
+        for s in self.by_viz.values_mut() {
+            s.visible_experiments.remove(&id);
+        }
     }
 }
 
@@ -340,9 +370,26 @@ impl Panel for ExperimentsPanel {
                     ui.weak("");
                     ui.end_row();
 
+                    // The checkbox column toggles visibility *in the
+                    // user's current plot* (target_plot pin if set,
+                    // else the most-recently-rendered plot). Per-plot
+                    // visibility lets each Plot Window show a
+                    // different subset of runs — OMEdit / Dymola style.
+                    let target_viz = {
+                        let pinned = world
+                            .get_resource::<ExperimentVisibility>()
+                            .and_then(|v| v.target_plot);
+                        pinned.unwrap_or_else(|| {
+                            world
+                                .get_resource::<ActivePlot>()
+                                .copied()
+                                .unwrap_or_default()
+                                .or_default()
+                        })
+                    };
                     let visibility_snapshot: std::collections::HashSet<ExperimentId> = world
-                        .get_resource::<ExperimentVisibility>()
-                        .map(|v| v.visible.clone())
+                        .get_resource::<PlotPanelStates>()
+                        .map(|s| s.visible(target_viz))
                         .unwrap_or_default();
 
                     for row in &rows {
@@ -518,16 +565,30 @@ impl Panel for ExperimentsPanel {
         }
 
         if let Some(id) = toggle {
-            if let Some(mut v) = world.get_resource_mut::<ExperimentVisibility>() {
-                v.toggle(id);
+            // Toggle visibility on whichever plot is currently active /
+            // pinned. Each plot tab keeps its own visible set.
+            let target_viz = {
+                let pinned = world
+                    .get_resource::<ExperimentVisibility>()
+                    .and_then(|v| v.target_plot);
+                pinned.unwrap_or_else(|| {
+                    world
+                        .get_resource::<ActivePlot>()
+                        .copied()
+                        .unwrap_or_default()
+                        .or_default()
+                })
+            };
+            if let Some(mut s) = world.get_resource_mut::<PlotPanelStates>() {
+                s.toggle_visible(target_viz, id);
             }
         }
         if let Some(id) = delete {
             if let Some(mut reg) = world.get_resource_mut::<ExperimentRegistry>() {
                 reg.delete(id);
             }
-            if let Some(mut v) = world.get_resource_mut::<ExperimentVisibility>() {
-                v.visible.remove(&id);
+            if let Some(mut s) = world.get_resource_mut::<PlotPanelStates>() {
+                s.forget_experiment(id);
             }
         }
         if let Some(id) = cancel {
@@ -1218,13 +1279,9 @@ pub fn render_experiments_plot(
         (t.tokens.warning, t.tokens.accent)
     };
 
-    let visible = world
-        .get_resource::<ExperimentVisibility>()
-        .map(|v| v.visible.clone())
-        .unwrap_or_default();
-    let picked_vars = world
+    let (visible, picked_vars) = world
         .get_resource::<PlotPanelStates>()
-        .map(|s| s.picked(viz_id))
+        .map(|s| (s.visible(viz_id), s.picked(viz_id)))
         .unwrap_or_default();
 
     // Build var -> unit map from the active doc index.
@@ -1707,13 +1764,9 @@ pub struct ExpPlotSummary {
 /// panel show counts in its top header row before drawing the plot.
 pub fn experiments_plot_summary(world: &World, viz_id: VizId) -> ExpPlotSummary {
     let twin = TwinId("default".into());
-    let visible = world
-        .get_resource::<ExperimentVisibility>()
-        .map(|v| v.visible.clone())
-        .unwrap_or_default();
-    let picked_vars = world
+    let (visible, picked_vars) = world
         .get_resource::<PlotPanelStates>()
-        .map(|s| s.picked(viz_id))
+        .map(|s| (s.visible(viz_id), s.picked(viz_id)))
         .unwrap_or_default();
     let mut total_runs = 0usize;
     let mut visible_runs = 0usize;
